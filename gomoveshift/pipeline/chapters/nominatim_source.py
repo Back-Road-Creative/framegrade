@@ -113,6 +113,10 @@ def _nominatim_search(location_str: str) -> Optional[tuple[float, float]]:
 
 # Nominatim result classes that are settlements (village/town/hamlet/locality).
 _SETTLEMENT_CLASSES = frozenset({"place"})
+# A settlement Nominatim models only as an administrative boundary (a US
+# census-designated town) carries its settlement kind in ``addresstype``; a
+# district or county boundary of the same name does not.
+_SETTLEMENT_ADDRESSTYPES = frozenset({"city", "town", "village", "hamlet"})
 
 
 def _nominatim_places(location_str: str, limit: int = 5) -> list[tuple[str, float, float]]:
@@ -121,13 +125,19 @@ def _nominatim_places(location_str: str, limit: int = 5) -> list[tuple[str, floa
     The top search hit is not always the settlement: for "Goleen, County Cork"
     it is the electoral-division boundary, whose centroid sits 2.7 km from the
     village. Callers that need *the town* get every settlement-class hit and
-    pick by their own evidence (e.g. distance to a GPS trace). ``[]`` on no
+    pick by their own evidence (e.g. distance to a GPS trace). A ``boundary``
+    hit counts only when its ``addresstype`` is a settlement kind; no other
+    class does, whatever its ``addresstype``. ``[]`` on no
     hits or network failure; a hit with a blank ``name`` falls back to the
     first ``display_name`` component.
     """
     out: list[tuple[str, float, float]] = []
     for hit in _nominatim_results(location_str, limit) or []:
-        if hit.get("class") not in _SETTLEMENT_CLASSES:
+        is_place = hit.get("class") in _SETTLEMENT_CLASSES
+        is_boundary_town = (
+            hit.get("class") == "boundary" and hit.get("addresstype") in _SETTLEMENT_ADDRESSTYPES
+        )
+        if not (is_place or is_boundary_town):
             continue
         name = (hit.get("name") or str(hit.get("display_name") or "").split(",")[0]).strip()
         if not name:
@@ -233,7 +243,8 @@ class NominatimChapterSource:
     ) -> list:
         """Capped Nominatim geocoding fallback when Overpass yields too few results.
 
-        Samples one waypoint per 30s mark of GPS time — picking the waypoint
+        Samples waypoints at evenly spaced marks of GPS time (at most one per
+        30 s, at most half the remaining session budget) — picking the waypoint
         whose REAL timestamp is nearest each mark and carrying that waypoint's
         actual elapsed time (from the journey start) rather than a proportional
         index, so a variable sample rate or a dropout can't map a place name to
@@ -244,9 +255,14 @@ class NominatimChapterSource:
         """
         from gps_journey.core.models import Location
 
-        sample_interval = 30
-        num_samples = int(gps_duration / sample_interval)
-        num_samples = min(num_samples, MAX_GEOCODE_FALLBACK)
+        # At most one sample per 30 s, and never more than half the requests the
+        # session has left: the gate-floor top-up geocodes road labels from the
+        # same budget, and an LF whose samples spent it all ships short of the
+        # chapter floor. The samples spread across the whole drive, so a long LF
+        # still gets names in its back half.
+        sample_budget = max(0, self.MAX_SESSION_REQUESTS - self._session_request_count) // 2
+        num_samples = min(int(gps_duration / 30), MAX_GEOCODE_FALLBACK, sample_budget)
+        sample_interval = gps_duration / num_samples if num_samples else 0.0
 
         logger.info(f"Geocoding {num_samples} waypoints from {len(journey.waypoints)} total")
 

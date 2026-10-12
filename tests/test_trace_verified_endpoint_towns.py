@@ -465,6 +465,48 @@ class TestNominatimPlaces:
         query = captured["url"].split("?", 1)[1]
         assert "limit=5" in query and query.count("&") == 2
 
+    def test_town_modelled_only_as_a_boundary_is_a_candidate(self):
+        """A US census-designated town Nominatim returns only as an
+        administrative boundary whose ``addresstype`` is ``town`` is still the
+        settlement; dropping it left a GPS-true "Exampleville, TN to ..." label
+        with no candidate at all ("nearest: none") and the pre-encode invariant
+        failed. The 2 km trace check still
+        decides; a non-settlement boundary (a county) and a non-boundary hit
+        that merely carries a town addresstype (an amenity) stay out."""
+        payload = [
+            {
+                "lat": "40.10000",
+                "lon": "-80.20000",
+                "class": "boundary",
+                "type": "administrative",
+                "addresstype": "town",
+                "name": "Exampleville",
+                "display_name": "Exampleville, Sample County, Tennessee, United States",
+            },
+            {
+                "lat": "40.30000",
+                "lon": "-80.40000",
+                "class": "boundary",
+                "type": "administrative",
+                "addresstype": "county",
+                "name": "Exampleville",
+                "display_name": "Exampleville, Tennessee, United States",
+            },
+            {
+                "lat": "40.10100",
+                "lon": "-80.20100",
+                "class": "amenity",
+                "type": "townhall",
+                "addresstype": "town",
+                "name": "Exampleville",
+                "display_name": "Exampleville, Sample County, Tennessee, United States",
+            },
+        ]
+        with patch("urllib.request.urlopen", _urlopen_returning(payload, {})):
+            with patch("time.sleep"):
+                out = _real_nominatim_places("Exampleville, Sample County, Tennessee")
+        assert out == [("Exampleville", 40.1, -80.2)]
+
     def test_no_hits_is_empty(self):
         with patch("urllib.request.urlopen", _urlopen_returning([], {})):
             with patch("time.sleep"):
