@@ -17,7 +17,9 @@ parent/
 
 ## Local install (command line, tests)
 
-Needs Python 3.12, `ffmpeg` and `uv`.
+Needs Python 3.12, `ffmpeg` 8.1 or newer, and `uv`. CI runs a pinned 8.1 static
+build (`.github/workflows/ci.yml`). Older releases such as Ubuntu 24.04's 6.1 make
+the blur composite's empty-mask pass inexact (`tests/test_blur_composite_depth.py`).
 
 ```bash
 git clone <this repo> framegrade

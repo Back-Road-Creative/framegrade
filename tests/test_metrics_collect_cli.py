@@ -206,7 +206,12 @@ def test_collect_folds_collected_metrics_into_slot_performance(tmp_path, capsys)
         (slot,) = slots_ranked(conn, min_n=1)
     finally:
         conn.close()
-    assert (slot.region, slot.platform, slot.weekday, slot.hour_local) == ("Portfable", "youtube", 1, 14)
+    assert (slot.region, slot.platform, slot.weekday, slot.hour_local) == (
+        "Portfable",
+        "youtube",
+        1,
+        14,
+    )
     assert (slot.n, slot.mean_views) == (1, 100.0)
 
 

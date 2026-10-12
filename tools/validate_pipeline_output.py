@@ -46,6 +46,7 @@ import hashlib
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -53,7 +54,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-FFPROBE_BIN = "/usr/local/bin/ffprobe"
+# PATH first so stock installs (/usr/bin) work; the host build is the fallback.
+FFPROBE_BIN = shutil.which("ffprobe") or "/usr/local/bin/ffprobe"
 
 # LF filename is ``lf_NN.mp4`` (two digits by convention, but we accept any
 # number of digits so a future run with 100+ LFs still sorts correctly).

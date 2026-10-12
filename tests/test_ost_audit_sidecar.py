@@ -29,7 +29,9 @@ from _state_helpers import make_state
 def test_format_ost_audit_full_data_single_lf():
     state = make_state(
         per_lf_ost_text={1: "Glenfable Peninsula toward Gortmore, County Kerry"},
-        per_lf_titles={1: "Highlights from 30min — Glenfable Peninsula toward Gortmore, County Kerry"},
+        per_lf_titles={
+            1: "Highlights from 30min — Glenfable Peninsula toward Gortmore, County Kerry"
+        },
         per_lf_recording_date={1: "2025-09-14"},
         per_lf_locations={1: "County Kerry"},
     )

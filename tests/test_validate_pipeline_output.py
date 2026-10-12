@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tools import validate_pipeline_output as v  # noqa: E402
 
-FFMPEG = "/usr/local/bin/ffmpeg"
+FFMPEG = shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
 
 # Shared CLI arguments so every test probes real synthetic 30 s files.
 DEFAULT_FLAGS = [
