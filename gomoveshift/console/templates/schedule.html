@@ -1,0 +1,94 @@
+{% extends "_base.html" %}
+{% block title %}Schedule - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Schedule</h1>
+  {% if report.hint %}
+  <p><em>{{ report.hint }}</em></p>
+  {% endif %}
+  {% if report.journey %}
+  {# Filtered by the region config.drive.active_journey_by_region
+     currently maps to this journey -- an unmatched journey filters to
+     NOTHING below, not to every region, and says so here rather than
+     rendering a full queue that looks filtered. #}
+  {% if report.journey_region %}
+  <p>Filtered to journey <strong>{{ report.journey }}</strong> (region: {{ report.journey_region }}).
+  <a href="/schedule">Clear journey filter</a></p>
+  {% else %}
+  <p>No region is currently configured as the active journey for
+  <strong>{{ report.journey }}</strong>, so nothing below can be matched to it.
+  <a href="/schedule">Clear journey filter</a></p>
+  {% endif %}
+  {% endif %}
+  <p>As of {{ report.as_of or "-" }}. Weekly long-form capacity: {{ report.weekly_longform_capacity }}
+  ({{ report.designed_days|join(", ") }}). Queue ends: {{ report.queue_ends or "(nothing booked)" }}.
+  Scheduled shorts: {{ report.scheduled_shorts_count }}.
+  {%- if not report.journey and report.scheduled_shorts_by_region and
+        report.scheduled_shorts_by_region.get("unassigned") %}
+  {#- The per-region buckets exclude shorts whose region was never recorded, so
+      without this the visible regions would not add up to the total shown and a
+      reader would conclude they did. Silent when there are none. #}
+  Of those, {{ report.scheduled_shorts_by_region["unassigned"] }} are unassigned
+  (no region recorded) and so appear under no region filter.
+  {%- endif %}</p>
+
+  <h2>Booked long-forms</h2>
+  {% if report.scheduled_longforms %}
+  <table border="1">
+    <thead><tr><th>Date</th><th>Time</th><th>Region</th><th>Title</th><th>Kind</th></tr></thead>
+    <tbody>
+      {% for e in report.scheduled_longforms %}
+      <tr>
+        <td>{{ e.date }}</td>
+        <td>{{ e.time }}</td>
+        <td>{{ e.region or "-" }}</td>
+        <td>{{ e.title }}</td>
+        <td>{{ e.kind }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>(nothing booked)</p>
+  {% endif %}
+
+  <h2>Next available long form</h2>
+  {% if report.next_available %}
+  <table border="1">
+    <thead><tr><th>Region</th><th>Day</th><th>Slot</th><th>Shorts</th><th>Windows</th><th>Soonest</th></tr></thead>
+    <tbody>
+      {% for row in report.next_available %}
+      <tr>
+        <td>{{ row.region }}</td>
+        <td>{{ row.day }}</td>
+        <td>{{ row.slot }}</td>
+        <td>{{ row.shorts_required }}</td>
+        <td>{{ row.shorts_windows|join(", ") }}</td>
+        <td>{{ "*" if row.earliest_for_region else "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>(no free slot inside the search horizon)</p>
+  {% endif %}
+
+  <h2>Next available superlong part</h2>
+  {% if report.next_available_superlong %}
+  <table border="1">
+    <thead><tr><th>Region</th><th>Day</th><th>Slot</th></tr></thead>
+    <tbody>
+      {% for row in report.next_available_superlong %}
+      <tr>
+        <td>{{ row.region }}</td>
+        <td>{{ row.day }}</td>
+        <td>{{ row.slot }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>(no free superlong slot inside the search horizon)</p>
+  {% endif %}
+
+  <p><a href="/">Back</a></p>
+{% endblock %}

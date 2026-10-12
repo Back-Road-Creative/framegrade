@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GoMoveShift Console{% endblock %}</title>
+  <style>
+    :root { --gap: 1rem; --max: 60rem; }
+    body {
+      margin: 0 auto; padding: var(--gap); max-width: var(--max);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.5;
+      /* Catalog ids and absolute paths have no space to wrap at, so one of them
+         in a <td> or <p> widens the whole page however fluid its parents are.
+         Declared once on the body because overflow-wrap inherits; break-word
+         over anywhere, so ordinary prose still breaks between words. */
+      overflow-wrap: break-word;
+    }
+    /* Every page here is a table or a form; on a phone the table is what overflows.
+       This is the no-JS fallback: the bare <table> scrolls sideways so the page
+       stays readable. With JS, the script below wraps each table in a
+       [data-table-scroll] div instead -- role="region" and tabindex go on that
+       wrapper, never on <table> itself, because an explicit role overrides an
+       element's implicit one: <table role="region"> reads to a screen reader as
+       a generic region, not a table, and its <tr>/<th>/<td> lose their owning
+       context (row/column nav, header association, "table with N rows"). */
+    table { border-collapse: collapse; }
+    .table-scroll, table { display: block; max-width: 100%; overflow-x: auto; }
+    [data-table-scroll] table { display: table; max-width: none; overflow: visible; }
+    th, td { padding: 0.25rem 0.5rem; text-align: left; vertical-align: top; }
+    label { display: inline-block; margin: 0.25rem 0.5rem 0.25rem 0; }
+    input, select, button, textarea { font: inherit; max-width: 100%; }
+    /* The job log tail is up to 100 raw lines, and a raw <pre> neither wraps nor
+       scrolls -- on the console's most-visited phone page it pushed the viewport
+       sideways. It wraps AND keeps a scroll box: wrapping alone still overflows
+       on a single unbreakable token (a long path with no space in it), and
+       scrolling alone hides every line behind a gesture nothing announces. */
+    pre { white-space: pre-wrap; overflow-x: auto; max-width: 100%; }
+    /* Media is contained in the shell, not per page: the asset page carried its
+       own inline style="max-width:100%", which is the per-page copy the base
+       exists to delete -- the next page to render an image inherits nothing from
+       another template's attribute. height:auto keeps the aspect ratio once the
+       width is clamped below an intrinsic or attribute width (the gate page's
+       320px video element). The tag name is deliberately not spelled out here:
+       a page test asserts the literal open-tag is ABSENT when a video is
+       unreadable, and a comment in the shell counts. No media query: the
+       shell is already fluid, so a
+       breakpoint here would decorate rather than contain. */
+    img, video, iframe, canvas, svg { max-width: 100%; height: auto; }
+    .job-failed { font-weight: 600; }
+    .skip-link {
+      position: absolute; left: -999px; top: 0; padding: 0.5rem 1rem;
+      background: #fff; color: #000; z-index: 10;
+    }
+    .skip-link:focus { left: 0.5rem; top: 0.5rem; }
+    [data-table-scroll]:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
+    /* The nav wraps rather than scrolling: ten tab names at 390px are three
+       rows of links, which is fine, where a sideways-scrolling bar would hide
+       half of them behind a gesture nothing announces. */
+    .console-nav ul {
+      list-style: none; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem;
+      margin: 0 0 var(--gap); padding: 0 0 0.5rem; border-bottom: 1px solid #ddd;
+    }
+    .console-nav [aria-current="page"] { font-weight: 600; text-decoration: none; }
+    /* Phone delivery card: at 390px the eleven-column Publishing table would
+       scroll sideways, so each row becomes a card (schedule, platform, title,
+       state, next action) with the header text repeated from data-label. The
+       table stays a real <table> above the breakpoint and for assistive tech
+       that ignores CSS display; detail columns remain in the card. */
+    @media (max-width: 40rem) {
+      [data-table-scroll] .delivery-table, .delivery-table { display: block; overflow: visible; }
+      .delivery-table tbody, .delivery-table tr, .delivery-table td { display: block; }
+      .delivery-table tr:first-child:has(th) {
+        position: absolute; left: -999px; width: 1px; height: 1px; overflow: hidden;
+      }
+      .delivery-table tr + tr { border: 1px solid #ccc; border-radius: 0.5rem; margin: 0 0 var(--gap); padding: 0.25rem 0; }
+      .delivery-table td { padding: 0.15rem 0.75rem; }
+      .delivery-table td::before { content: attr(data-label) ": "; font-weight: 600; }
+      .delivery-table td:empty { display: none; }
+    }
+  </style>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
+{# Every console page used to end in a single "Back" link to `/`, so Publishing
+   to Jobs meant going home first. The nav lives in the base, not in the page
+   templates, for the same reason the table-scroll wrapper does: a per-page copy
+   is a per-page chance to go stale. `nav_entries` is a Jinja global set once in
+   create_app from the SAME brand-filtered list `_require_tab` gates on, so a tab
+   a brand switched off is never offered a link that 404s.
+   `aria-current` matches the FIRST path segment, not the whole path: /jobs/7 and
+   /drives/gates/pending are still the Jobs and Drives tabs, and whole-path
+   matching would mark nothing current on every detail page in the console. #}
+{% set current_tab = request.url.path.split('/')[1] if request else '' %}
+{# The journey an operator picked follows them across every nav link,
+   read directly off the CURRENT request rather than threaded through each
+   view's own context -- so a screen that forgets to pass ``journey`` still
+   carries it forward instead of silently dropping the selection. A tab that
+   does not understand ``?journey=`` (Drives, Shorts, Jobs, ...) just ignores
+   the extra query parameter, same as any unknown query string. #}
+{% set journey_selected = request.query_params.get('journey', '') if request else '' %}
+<nav class="console-nav" aria-label="Console sections">
+  <ul>
+    {% for slug, title in nav_entries %}
+    <li><a href="/{{ slug }}{% if journey_selected %}?journey={{ journey_selected|urlencode }}{% endif %}"{% if slug == current_tab %} aria-current="page"{% endif %}>{{ title }}</a></li>
+    {% endfor %}
+  </ul>
+</nav>
+<main id="main-content">
+{% block content %}{% endblock %}
+</main>
+<script>
+  // Table scroll regions are declared once here, not per page, because the hand-rolled
+  // console templates cannot each be edited to add tabindex/role by hand. A plain <table> gets
+  // WRAPPED in a new div -- the div, never the <table>, gets tabindex/role/aria-label,
+  // so the table keeps its native table semantics. Every table becomes a tab stop
+  // unconditionally rather than only when it actually overflows: measuring overflow
+  // needs a resize listener to stay correct as the viewport changes, and one inert
+  // extra tab stop on a table that already fits costs a keyboard user nothing --
+  // arrow/tab navigation inside the table is unaffected either way.
+  function nearestHeadingLabel(el) {
+    var node = el;
+    while (node) {
+      var sib = node.previousElementSibling;
+      while (sib) {
+        if (/^H[1-3]$/.test(sib.tagName)) return sib.textContent.trim();
+        sib = sib.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+    var fallback = document.querySelector('h1, h2, h3');
+    return fallback ? fallback.textContent.trim() : '';
+  }
+
+  document.querySelectorAll('.table-scroll, table').forEach(function (el) {
+    var target = el;
+    if (el.tagName === 'TABLE') {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'table-scroll';
+      el.parentNode.insertBefore(wrapper, el);
+      wrapper.appendChild(el);
+      target = wrapper;
+    }
+    target.setAttribute('tabindex', '0');
+    target.setAttribute('role', 'region');
+    target.setAttribute('data-table-scroll', '');
+    if (!target.hasAttribute('aria-label') && !target.hasAttribute('aria-labelledby')) {
+      target.setAttribute('aria-label', nearestHeadingLabel(target) + ' scrollable table');
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+{% extends "_base.html" %}
+{% block title %}Jobs - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Jobs</h1>
+  {# No auto-reload here. A `<meta http-equiv="refresh">` fired every 5s while
+     any job ran, which wiped the required schedule-name and interval inputs
+     below mid-entry -- and an auto-updating page a reader cannot pause or stop
+     fails WCAG 2.2.1. Refreshing is an explicit operator action instead. #}
+  <p><a href="/jobs">Refresh</a></p>
+  <form method="post" action="/jobs">
+    <label for="launch-subcommand">Subcommand to launch</label>
+    <select name="subcommand" id="launch-subcommand">
+      {% for name in allowed %}
+      <option value="{{ name }}">{{ name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Launch</button>
+  </form>
+
+  {% if not ticker_enabled %}
+  <div>
+    <span>Schedules are not draining automatically (ticker disabled).</span>
+    <form method="post" action="/jobs/drain" style="display:inline">
+      <button type="submit">Drain due schedules now</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <ul>
+    {% for job in job_rows %}
+    <li{% if job.status == "failed" %} class="job-failed"{% endif %}>
+      <a href="/jobs/{{ job.id }}">#{{ job.id }} {{ job.name }} - {{ job.status }}</a>
+      {% if job.liveness %} - {{ job.liveness }}{% endif %}
+      - brand: {{ job.brand or "unknown" }}
+      - created: {{ job.created_at }}
+      - finished: {{ job.finished_at or "-" }}
+      - rc: {{ job.rc if job.rc is not none else "-" }}
+    </li>
+    {% endfor %}
+  </ul>
+
+  <h2>Schedules</h2>
+  {# `form` is what was submitted, present only on a refusal. #}
+  {% set form = form or {} %}
+  {% if error %}
+  <p role="alert"><strong>Schedule not added:</strong> {{ error }}</p>
+  {% endif %}
+  <form method="post" action="/jobs/schedules">
+    <label for="schedule-name">Schedule name</label>
+    <input type="text" name="name" id="schedule-name" value="{{ form.name or '' }}" required>
+    <label for="schedule-subcommand">Subcommand to schedule</label>
+    <select name="subcommand" id="schedule-subcommand">
+      {% for name in allowed %}
+      <option value="{{ name }}" {% if form.subcommand == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <label for="schedule-interval">Interval (minutes)</label>
+    {# `type="text"`, not `number`: a browser blanks a number input it cannot
+       parse, which is exactly the value the operator needs to see to fix it. #}
+    <input type="text" inputmode="numeric" name="interval_minutes" id="schedule-interval" value="{{ form.interval_minutes or '' }}" required>
+    <button type="submit">Add schedule</button>
+  </form>
+  <ul>
+    {% for schedule in schedule_rows %}
+    <li>
+      #{{ schedule.id }} {{ schedule.name }} ({{ schedule.subcommand }}, every
+      {{ schedule.interval_minutes }}m) - {{ "enabled" if schedule.enabled else "disabled" }}
+      - last run: {{ schedule.last_run_at or "never" }}
+      <form method="post" action="/jobs/schedules/{{ schedule.id }}/toggle" style="display:inline">
+        <button type="submit">{{ "Disable" if schedule.enabled else "Enable" }}</button>
+      </form>
+      <form method="post" action="/jobs/schedules/{{ schedule.id }}/delete" style="display:inline">
+        <button type="submit">Delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+
+  <p><a href="/">Back</a></p>
+{% endblock %}

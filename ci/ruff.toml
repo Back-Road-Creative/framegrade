@@ -1,0 +1,7 @@
+# The files in ci/ are the same in every repository that carries them, so they
+# are linted and formatted by this one config rather than by each project's.
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]

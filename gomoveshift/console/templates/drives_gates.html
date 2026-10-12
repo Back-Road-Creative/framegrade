@@ -1,0 +1,44 @@
+{% extends "_base.html" %}
+{% block title %}Gate {{ date_key }} - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Final content review -- {{ date_key }}</h1>
+  <p><small>Confirm every long-form video and its metadata for this day before anything
+  uploads. (Internal id: gate_cd_{{ date_key }})</small></p>
+  {% if question %}
+  {% if media_items %}
+  <ul>
+    {% for item in media_items %}
+    <li>
+      {% if item.readable %}
+      {# The gate asks whether this was PLAYED. The still frame stays, as
+         the poster shown before playback starts. #}
+      <video controls width="320" preload="metadata"
+             poster="/drives/gates/frame?output_dir={{ output_dir }}&date_key={{ date_key }}&index={{ item.index }}">
+        <source src="/drives/gates/video?output_dir={{ output_dir }}&date_key={{ date_key }}&index={{ item.index }}">
+        <a href="/drives/gates/video?output_dir={{ output_dir }}&date_key={{ date_key }}&index={{ item.index }}">Download {{ item.name }}</a>
+      </video>
+      {% else %}
+      <p><strong>{{ item.name }}</strong> could not be read.</p>
+      {% endif %}
+      {% if item.title %}<p>{{ item.title }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <p>{{ question.question }}</p>
+  <form method="post" action="/drives/gates">
+    {# output_dir/date_key only NAME the run being answered -- the server
+       re-validates both against this console's own job history, they are
+       never trusted as authority (see resolve_allowed_output_dir). #}
+    <input type="hidden" name="output_dir" value="{{ output_dir }}">
+    <input type="hidden" name="date_key" value="{{ date_key }}">
+    <label>Note <input type="text" name="note"></label>
+    {% for choice in question.choices %}
+    <button type="submit" name="decision" value="{{ choice }}">{{ choice }}</button>
+    {% endfor %}
+  </form>
+  {% else %}
+  <p>No pending gate question for {{ date_key }}.</p>
+  {% endif %}
+  <p><a href="/drives">Back to Drives</a></p>
+{% endblock %}

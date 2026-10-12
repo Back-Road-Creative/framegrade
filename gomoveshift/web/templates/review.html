@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review - {{ analysis.video_path | basename }}</title>
+    <!-- SRI N/A: unversioned Tailwind JIT CDN build has no stable hash (127.0.0.1-only dev UI) -->
+    <script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <nav class="bg-gray-800 border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <div>
+                <a href="/" class="text-green-400 hover:text-green-300">&larr; Back</a>
+                <h1 class="text-xl font-bold mt-1">Review Video</h1>
+            </div>
+            <button
+                id="approve-btn"
+                class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-medium transition"
+            >
+                Approve & Process
+            </button>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Video Info -->
+        <section class="mb-8 bg-gray-800 rounded-lg p-6">
+            <h2 class="text-lg font-semibold mb-4">Video Information</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                    <span class="text-gray-400">Duration:</span>
+                    <span class="ml-2">{{ analysis.duration_formatted }}</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Resolution:</span>
+                    <span class="ml-2">{{ analysis.width }}x{{ analysis.height }}</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">FPS:</span>
+                    <span class="ml-2">{{ analysis.fps | round(2) }}</span>
+                </div>
+                <div>
+                    <span class="text-gray-400">Locations Found:</span>
+                    <span class="ml-2">{{ analysis.locations | length }}</span>
+                </div>
+            </div>
+        </section>
+
+        <div class="grid md:grid-cols-2 gap-8">
+            <!-- Detected Locations -->
+            <section>
+                <h2 class="text-lg font-semibold mb-4">Detected Locations</h2>
+                <div class="space-y-3 max-h-96 overflow-y-auto">
+                    {% for loc in analysis.locations %}
+                    <div class="bg-gray-800 rounded p-3 border border-gray-700">
+                        <div class="flex items-start justify-between">
+                            <div>
+                                <span class="font-medium text-green-400">{{ loc.location_name }}</span>
+                                <span class="text-gray-500 text-sm ml-2">({{ loc.location_type }})</span>
+                            </div>
+                            <span class="text-gray-400 text-sm">{{ loc.timestamp_formatted }}</span>
+                        </div>
+                        <p class="text-gray-500 text-sm mt-1">
+                            OCR: "{{ loc.text }}"
+                            <span class="ml-2 px-2 py-0.5 rounded text-xs
+                                {% if loc.confidence == 'high' %}bg-green-900 text-green-300
+                                {% elif loc.confidence == 'medium' %}bg-yellow-900 text-yellow-300
+                                {% else %}bg-red-900 text-red-300{% endif %}
+                            ">{{ loc.confidence }}</span>
+                        </p>
+                    </div>
+                    {% else %}
+                    <p class="text-gray-500">No locations detected</p>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <!-- Dead Spots -->
+            <section>
+                <h2 class="text-lg font-semibold mb-4">Dead Spots (Stopped Vehicle)</h2>
+                <div class="space-y-3 max-h-96 overflow-y-auto">
+                    {% for ds in analysis.dead_spots %}
+                    <div class="bg-gray-800 rounded p-3 border border-gray-700 dead-spot-item"
+                         data-start="{{ ds.start_time }}" data-end="{{ ds.end_time }}">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <span class="text-gray-300">
+                                    {{ ds.start_formatted }} - {{ ds.end_formatted }}
+                                </span>
+                                <span class="text-gray-500 text-sm ml-2">
+                                    ({{ ds.duration | round(1) }}s)
+                                </span>
+                            </div>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" checked
+                                       class="trim-checkbox w-4 h-4 accent-red-500">
+                                <span class="text-sm text-red-400">Trim</span>
+                            </label>
+                        </div>
+                    </div>
+                    {% else %}
+                    <p class="text-gray-500">No dead spots detected</p>
+                    {% endfor %}
+                </div>
+            </section>
+        </div>
+
+        <!-- Suggested Cuts -->
+        <section class="mt-8">
+            <h2 class="text-lg font-semibold mb-4">Suggested Cut Points</h2>
+            <div class="bg-gray-800 rounded-lg p-4">
+                {% if analysis.suggested_cuts %}
+                <div class="space-y-2">
+                    {% for cut in analysis.suggested_cuts %}
+                    <div class="flex items-center justify-between py-2 border-b border-gray-700 cut-point-item"
+                         data-timestamp="{{ cut.timestamp }}">
+                        <div>
+                            <span class="text-gray-300">{{ cut.timestamp_formatted }}</span>
+                            <span class="text-gray-500 text-sm ml-2">- {{ cut.reason }}</span>
+                            {% if cut.location %}
+                            <span class="text-green-400 text-sm ml-2">
+                                ({{ cut.location.location_name }})
+                            </span>
+                            {% endif %}
+                        </div>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox" checked
+                                   class="cut-checkbox w-4 h-4 accent-blue-500">
+                            <span class="text-sm text-blue-400">Cut here</span>
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-gray-500">
+                    Video is short enough - no cuts suggested.
+                </p>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- Timeline Visualization -->
+        <section class="mt-8">
+            <h2 class="text-lg font-semibold mb-4">Timeline</h2>
+            <div class="bg-gray-800 rounded-lg p-4">
+                <div id="timeline" class="h-16 bg-gray-700 rounded relative overflow-hidden">
+                    <!-- Dead spots shown in red -->
+                    {% for ds in analysis.dead_spots %}
+                    <div class="absolute h-full bg-red-900 opacity-50"
+                         style="left: {{ (ds.start_time / analysis.duration * 100) }}%;
+                                width: {{ ((ds.end_time - ds.start_time) / analysis.duration * 100) }}%;">
+                    </div>
+                    {% endfor %}
+
+                    <!-- Locations shown as markers -->
+                    {% for loc in analysis.locations %}
+                    <div class="absolute h-full w-1 bg-green-500"
+                         style="left: {{ (loc.timestamp / analysis.duration * 100) }}%;"
+                         title="{{ loc.location_name }} at {{ loc.timestamp_formatted }}">
+                    </div>
+                    {% endfor %}
+
+                    <!-- Cut points shown as lines -->
+                    {% for cut in analysis.suggested_cuts %}
+                    <div class="absolute h-full w-0.5 bg-blue-400"
+                         style="left: {{ (cut.timestamp / analysis.duration * 100) }}%;">
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="flex justify-between text-gray-500 text-sm mt-2">
+                    <span>0:00</span>
+                    <span>{{ analysis.duration_formatted }}</span>
+                </div>
+                <div class="flex gap-4 mt-2 text-sm">
+                    <span class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-red-900 rounded"></span> Dead spots
+                    </span>
+                    <span class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-green-500 rounded"></span> Locations
+                    </span>
+                    <span class="flex items-center gap-1">
+                        <span class="w-3 h-3 bg-blue-400 rounded"></span> Cut points
+                    </span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const videoPath = {{ video_path | tojson }};
+
+        document.getElementById('approve-btn').addEventListener('click', async () => {
+            // Collect approved trims
+            const trims = [];
+            document.querySelectorAll('.dead-spot-item').forEach(item => {
+                const checkbox = item.querySelector('.trim-checkbox');
+                if (checkbox.checked) {
+                    trims.push([
+                        parseFloat(item.dataset.start),
+                        parseFloat(item.dataset.end)
+                    ]);
+                }
+            });
+
+            // Collect approved cuts
+            const cuts = [];
+            document.querySelectorAll('.cut-point-item').forEach(item => {
+                const checkbox = item.querySelector('.cut-checkbox');
+                if (checkbox.checked) {
+                    cuts.push(parseFloat(item.dataset.timestamp));
+                }
+            });
+
+            try {
+                const response = await fetch('/api/approve', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        video_path: videoPath,
+                        approved_trims: trims,
+                        approved_cuts: cuts
+                    })
+                });
+
+                if (response.ok) {
+                    alert('Processing started! Check the dashboard for progress.');
+                    window.location.href = '/';
+                } else {
+                    const error = await response.json();
+                    alert('Error: ' + error.detail);
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        });
+    </script>
+</body>
+</html>

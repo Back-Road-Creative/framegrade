@@ -1,0 +1,12 @@
+## Dependency-pin drift guard (`tests/test_dependency_pins.py`)
+
+The four extracted libraries (`sun-track`, `pycube-lut`, `keycut`, `redactcam`) are PEP 508 direct references pinned by URL in `pyproject.toml`, and that file is edited often, so a local `.venv` drifts behind the pins silently. When it does, the symptom is a *code* failure somewhere else entirely: for example `tests/test_redactcam_parity.py::TestDetectAndTrackDefaults::test_unpassed_defaults_are_pinned` fails on every local full-suite run with `KeyError: 'checkpoint_path'` when the installed `redactcam` predates the pinned commit, which is easy to write off as a pre-existing failure. CI installs from `pyproject.toml`, so CI stays green.
+
+`parse_vcs_pins` reads the `git+` requirements straight out of `pyproject.toml` (never a hardcoded list) and `classify_pin` compares each against the installed PEP 610 `direct_url.json`, read via `importlib.metadata` — no `pip` subprocess (slow, and pip may be absent) and no network. Four outcomes:
+
+- **Commit pin** (today only `redactcam`, pinned to a SHA because its tag-triggered `release.yml` would publish a Windows installer as a side effect of moving a tag) — verified EXACTLY against `vcs_info.commit_id`. A version string cannot do this job: the stale install reported the same `0.1.1` version as the pinned build.
+- **Tag/branch pin** (the other three, at `v0.1.0`) — verified only against `vcs_info.requested_revision`, the revision *name* requested. Resolving what commit a tag points at needs the remote, so a moved tag is deliberately out of scope.
+- **Editable / local-directory install** — no VCS provenance at all. This is the normal local-development state (sibling libraries install editable before the main project), so it is reported as an intentional local override, never failed.
+- **Not installed** — fails, naming the exact `pip install` command; **no `direct_url.json`** — reported unverifiable, not failed. A false failure here would be the very confusion the guard exists to remove, as is an unlocatable `pyproject.toml` (skip with a reason).
+
+The live comparison lives in a pytest test because that is the only home that runs locally and in CI with no extra wiring and it costs milliseconds, but it is **structurally incapable of failing in CI** — CI installs from `pyproject.toml`, so the installed revision is the pinned one by construction. Its value is entirely local. The surrounding fixture-driven tests feed synthetic metadata and are what keep the logic itself honest in CI.

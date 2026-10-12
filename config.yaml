@@ -1,0 +1,241 @@
+# GoMoveShift Video Processing Configuration
+
+# Paths
+paths:
+  input_folder: ""  # Set via CLI or environment
+  output_folder: ""
+  temp_folder: "/tmp/gomoveshift"
+
+# Frame extraction settings
+extraction:
+  # Sample rate for sign detection (frames per second)
+  # 60fps source / 3 = 20fps effective - catches signs visible for 1+ second
+  sample_divisor: 3
+
+  # For motion analysis, we can sample less frequently
+  motion_sample_fps: 5
+
+# Sign detection settings
+sign_detection:
+  # Region of interest (top portion of frame where signs appear)
+  # For vertical 9:16 video, signs are in upper-middle area
+  roi_top_percent: 0.1
+  roi_bottom_percent: 0.7
+
+  # Minimum sign size (relative to frame)
+  min_sign_area_percent: 0.005
+  max_sign_area_percent: 0.15
+
+# OCR settings
+ocr:
+  # Languages for EasyOCR
+  languages: ["en"]
+
+# Dead spot detection — drives the standalone `analyze` PREVIEW only.
+# Keep motion_threshold / min_duration_seconds equal to the stop_detection block
+# below (the authoritative pipeline knob); a drift is warned at config load.
+dead_spots:
+  # Motion energy threshold (0-1) below which we consider "stopped"
+  # 0.01 = truly stopped (no motion at all)
+  # Typical driving footage has median ~0.02, so this needs to be well below that
+  motion_threshold: 0.008
+
+  # Minimum duration (seconds) to consider a dead spot
+  min_duration_seconds: 5
+
+  # Buffer to keep around dead spots (seconds)
+  trim_buffer_seconds: 2
+
+# Segmentation
+segmentation:
+  # Target segment duration (minutes)
+  target_duration_minutes: 60
+
+  # Acceptable range around target
+  min_duration_minutes: 50
+  max_duration_minutes: 70
+
+# Output encoding — highest quality settings
+# NOTE: crf, preset, profile, pix_fmt are FROZEN to encoding_constants.py
+# canonical values and cannot be overridden here. Only non-frozen fields below.
+output:
+  codec: "libx265"
+  # crf, preset, profile, pix_fmt — locked to encoding_constants.py (LONGFORM_*)
+  audio_codec: "aac"
+  audio_bitrate: "384k"  # High quality audio
+
+  # Audio: attenuate-only (near-silent policy). These
+  # values are FROZEN — force-reverted to encoding_constants.py (LONGFORM_AUDIO_*)
+  # at load, so editing them here has NO effect (the YAML values are inert; a
+  # mismatch just logs a warning). Shown here only to mirror the real policy.
+  audio_target_lufs: -45.0  # attenuate-only near-silent integrated ceiling (never boosted up to)
+  audio_target_tp: -10.0  # true-peak cap after attenuation
+  audio_target_lra: 11.0  # loudness range — kept only for the measurement command shape
+  audio_max_lufs: -43.0  # validation gate: reject only if LOUDER than the near-silent ceiling
+
+  # Chapter markers for location changes
+  embed_chapters: true
+
+# SEO integration (Waypost, the seo_manager package)
+seo:
+  # Waypost storage directory (absolute path; the queue commands refuse a
+  # relative one). Replace the sample value with your own location.
+  storage_path: "/srv/gomoveshift/seo"
+  # Credentials directory
+  credentials_dir: "/srv/gomoveshift/credentials"
+  # Waypost checkout root (for module imports)
+  manager_path: "/srv/gomoveshift/waypost"
+
+# Web UI settings
+web_ui:
+  host: "127.0.0.1"
+  port: 8765
+
+# Stop detection — AUTHORITATIVE knob for the pipeline's actual stop removal
+# (StopProcessor bridges these onto dead_spots for its internal MotionAnalyzer).
+# Keep in lockstep with the dead_spots block above.
+stop_detection:
+  # Minimum stop duration to include in EDL cuts (seconds)
+  # Stops shorter than this are ignored
+  min_stop_duration: 5.0
+
+  # Motion threshold for stop detection (lower = more sensitive)
+  motion_threshold: 0.008
+
+  # Crossfade duration between segments after stop removal (0 = hard cuts)
+  crossfade_duration: 0.5
+
+  # Dual enter/exit thresholds to debounce decel-boundary jitter and brief
+  # sub-threshold creep. Enter "stopped" when energy < motion_threshold; exit
+  # only when energy > motion_threshold * exit_multiplier. Disabled by default;
+  # exit_multiplier 1.0 reproduces the single-threshold behavior exactly.
+  hysteresis:
+    enabled: false
+    exit_multiplier: 1.0
+
+  # GPS-speed corroboration of optical stops.
+  # When enabled and the LF has a GPS trace, an optical "stop" whose GPS speed
+  # over the same source-time span is clearly above stop_speed_kmh is treated as
+  # a false dark/tunnel stop and dropped. On by default in code (a strict
+  # no-op for GPS-absent LFs); this sample turns it off. Remove the
+  # `enabled: false` line below to use the code default.
+  gps_speed_corroboration:
+    enabled: false
+    stop_speed_kmh: 10.0  # GPS speed above this means "still moving"
+
+# Drive pipeline overrides (most defaults live in DriveConfig). The
+# playlist block below documents the YouTube auto-assignment contract:
+# every uploaded LF lands in exactly one playlist,
+# falling back to ``default`` when no rule matches. The code defaults carry
+# the highlights, shorts and region rules; the superlong rules below exist
+# only in this file, so keep them if you publish superlong parts.
+drive:
+  youtube_playlists:
+    rules:
+      # Format-aware routing: highlight-band
+      # LFs (trim_ratio < longform_metadata.HIGHLIGHTS_TRIM_THRESHOLD) route
+      # here instead of the Drives playlists. Must precede the region-only
+      # rules below — first match wins.
+      - match: { region: "ireland", format: "highlights" }
+        playlist_name: "Ireland Highlights"
+      - match: { region: "usa", format: "highlights" }
+        playlist_name: "USA Highlights"
+      # Superlong parts: ``format: "superlong"`` is an
+      # EXPLICIT override (playlist_resolver.resolve_playlist), never
+      # trim-derived — parts carry no trim_ratio, so they'd otherwise
+      # derive no ``format`` key at all and fall through to the
+      # region-only rules below, landing mixed in with 20-minute LFs.
+      # Must also precede the region-only rules — first match wins —
+      # but ordering against the highlights rules above is immaterial:
+      # "highlights" and "superlong" are mutually-exclusive format
+      # values, so the two rule pairs never compete for the same video.
+      - match: { region: "ireland", format: "superlong" }
+        playlist_name: "Ireland Superlong"
+      - match: { region: "usa", format: "superlong" }
+        playlist_name: "USA Superlong"
+      # Shorts: the shorts adapter stamps an explicit
+      # ``format: "shorts"`` plus a country derived from the short's place
+      # label. A short whose country can't be derived is NOT sent to
+      # ``default`` — the adapter skips the playlist insert. Must precede the
+      # region-only rules — first match wins.
+      - match: { region: "ireland", format: "shorts" }
+        playlist_name: "Ireland Shorts"
+      - match: { region: "usa", format: "shorts" }
+        playlist_name: "USA Shorts"
+      - match: { region: "ireland" }
+        playlist_name: "Ireland Drives"
+      - match: { region: "usa" }
+        playlist_name: "USA Drives"
+    default: "Unsorted (fallback)"
+  # LF description footer (playlist link / cadence line / site URL),
+  # keyed by the same derived region as playlist auto-assignment.
+  # All keys default EMPTY = no footer, description unchanged.
+  # Playlist URLs = the same "Ireland Drives"/"USA Drives" playlists the
+  # uploader auto-assigns to (youtube_playlists.rules above).
+  # playlist_url_by_region:  (default empty = no footer; set to your own
+  # channel's playlist URLs)
+  # Cadence lines are left empty: a static line such as "New drive every
+  # Sunday" has no tie to the real publish schedule
+  # (config.drive.long_form_publish_days / --publish), and a schedule change
+  # would leave every already-published description making a false claim.
+  # Empty ⇒ the footer omits the cadence line (longform_metadata `if _cadence`).
+  # Populate it only from the live schedule, never as a hand-edited static
+  # promise.
+  cadence_line_by_region: {}
+  site_url: "https://gomoveshift.com"
+  # End-screen operator sidecar.
+  # No API path exists for end screens (Data API v3, Partner API, and
+  # Studio API all lack the resource). Phase D
+  # writes a per-batch <output_base>/operator_checklist.txt with one
+  # Studio-Editor link per uploaded LF; the operator clicks once per
+  # video. ``reference_video_id`` (optional) is the video whose end
+  # screen the operator wants to copy via Studio's "Import from video"
+  # action — leave commented-out to fall back to "Apply template".
+  # endscreen:
+  #   reference_video_id: ""
+  # Generic video ingest (Insta360 / drone / phone): source ingest layout +
+  # accepted extension list. ``ingest_mode = "gopro"`` (default) groups
+  # GH/GX chaptered clips by recording number/session. ``"generic"``
+  # treats every accepted-extension file as a singleton episode — the
+  # Insta360 / drone / phone-export path. Mixed-mode (one GoPro-named
+  # file + one generic file in the same source dir) is refused at scan
+  # time. CLI override: ``--ingest-mode {gopro,generic}``.
+  # ``video_extensions`` is the single source of truth for accepted
+  # file extensions — read by both preflight and the ingest scanner.
+  # ingest_mode: "gopro"
+  # video_extensions: [".mp4", ".mov", ".mkv", ".m4v", ".mxf"]
+  # Full-drive LF (Insta360): LF selection mode.
+  # "best_moments" (default) = legacy sliding-window planner.
+  # "full_drive"             = one LF spanning the full post-stop-removal
+  #                            timeline (Insta360 / single-file source).
+  # CLI override: ``--lf-mode {best_moments,full_drive}``.
+  # full_drive_max_duration_sec is the hard ceiling for the single
+  # full-drive LF — planner raises rather than silently truncate.
+  # lf_selection_mode: "best_moments"
+  # full_drive_max_duration_sec: 7200
+  # Balanced long-form parts (long-forms run 60-90 minutes). A day over
+  # full_drive_part_max_sec splits into near-equal parts, each >= min; a day of
+  # 91-119 min ships as ONE part. Comment both out for one LF per day.
+  full_drive_part_min_sec: 3600
+  full_drive_part_max_sec: 5400
+  # Per-day STOP mask. A per-second veto built from GPS
+  # speed (falling back to optical motion where speed is unmeasurable)
+  # structurally excludes parked/roadside seconds from the shorts and LF
+  # planners, so a stopped clip can never be selected. Thresholds are read
+  # from the top-level stop_detection block. Default on; set false to disable.
+  # stop_mask_enabled: true
+
+# Daily YouTube playlist reconciler: insert-only desired-state
+# diff, quota-capped at max_inserts_per_run per run (50 quota units/insert,
+# ~2000/run at the default). backfill_since bounds ONLY orphan-short
+# backfill (real_lf/stream/highlight routing is unbounded). overrides_path
+# is optional manual videoId routing for titles with no region signal in
+# the title (see docs/pipeline/). A relative overrides_path
+# resolves against the config home (GMS_CONFIG_HOME), not the cwd. The
+# overrides file is account configuration and is not shipped.
+playlist_reconciler:
+  max_inserts_per_run: 40
+  prune_include_nonpublic: true
+  newest_first: true
+  backfill_since: "2026-01-01"
+  # overrides_path: "playlist_routing_overrides.json"

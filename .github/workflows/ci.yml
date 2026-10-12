@@ -1,0 +1,96 @@
+# One job on a standard hosted runner. No secrets, no self-hosted runner, no
+# matrix: a pull request from a fork runs exactly what a maintainer's does.
+# GPU checks are not run here; see docs/gpu-checks.md.
+# Only the "Set up" step downloads anything. Every check after it runs with the
+# package index switched off, so a check cannot pass or fail on what it fetched.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request replaces the run in progress. Runs on
+# main are keyed by commit, so one never cancels another.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # System Python, isolated mode, before anything is installed.
+      - name: Tree cleanliness (committed tree)
+        run: |
+          python3 -I tools/check_public_tree.py
+          python3 -I tools/tests/test_check_public_tree.py
+          python3 -I tools/tests/test_check_cleanliness_ci.py
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache downloaded packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'requirements.lock', 'ci/tools-requirements.txt', 'ci/siblings.txt') }}
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+
+      - name: Set up tools and the project
+        run: |
+          python3 -m pip install --quiet uv==0.11.17
+          uv venv "$RUNNER_TEMP/ci-tools" --python python3 -q
+          uv pip install --python "$RUNNER_TEMP/ci-tools/bin/python" -q -r ci/tools-requirements.txt
+          bash ci/install-cpu.sh
+          uv pip install --python .venv/bin/python -q mypy==2.3.0
+
+      - name: Secret scan
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: |
+          export DETECT_SECRETS="$RUNNER_TEMP/ci-tools/bin/detect-secrets"
+          python3 ci/tests/test_secret_scan.py
+          python3 ci/secret_scan.py
+
+      - name: Lint and format
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: |
+          "$RUNNER_TEMP/ci-tools/bin/ruff" check . --output-format=github
+          "$RUNNER_TEMP/ci-tools/bin/ruff" format . --check
+
+      - name: Type check
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: .venv/bin/python -m mypy . --config-file pyproject.toml
+
+      - name: Tests
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: .venv/bin/pytest
+
+      # Runs after a failed build too: a build or test that writes into the
+      # tree, or leaves anything behind that is not a known cache, fails here.
+      - name: Tree cleanliness (after build and tests)
+        if: always()
+        run: python3 -I tools/check_public_tree.py --check-clean

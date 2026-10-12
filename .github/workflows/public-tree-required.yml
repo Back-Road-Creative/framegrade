@@ -1,0 +1,88 @@
+name: Trusted product cleanliness
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-product-cleanliness-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    name: Inspect candidate as data
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      maintenance_changed: ${{ steps.paths.outputs.maintenance_changed }}
+      inspected_sha: ${{ steps.paths.outputs.inspected_sha }}
+    steps:
+      - name: Check out trusted event revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out exact candidate for inspection only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+          submodules: false
+          lfs: false
+      - name: Identify enforcement changes using trusted code
+        id: paths
+        working-directory: trusted
+        env:
+          TRUSTED_SHA: ${{ github.sha }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 -I "$GITHUB_WORKSPACE/trusted/tools/check_cleanliness_ci.py"
+          inspect --root "$GITHUB_WORKSPACE/candidate"
+          --base-sha "$TRUSTED_SHA" --head-sha "$CANDIDATE_SHA"
+      - name: Inspect candidate with the trusted guard
+        working-directory: trusted
+        run: >-
+          python3 -I "$GITHUB_WORKSPACE/trusted/tools/check_public_tree.py"
+          --root "$GITHUB_WORKSPACE/candidate" --check-clean
+
+  maintenance-approval:
+    name: Approve enforcement maintenance
+    needs: inspect
+    if: ${{ needs.inspect.result == 'success' && needs.inspect.outputs.maintenance_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # Pre-create this exact environment with required reviewers; never use PR input.
+    environment: product-cleanliness-maintenance
+    steps:
+      - name: Record approval for this run
+        run: echo 'Enforcement maintenance approved for this inspected run.'
+
+  required:
+    name: Product cleanliness required
+    needs: [inspect, maintenance-approval]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check out trusted aggregate implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Require complete inspection and appropriate approval
+        working-directory: trusted
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          INSPECTED_SHA: ${{ needs.inspect.outputs.inspected_sha }}
+          MAINTENANCE_CHANGED: ${{ needs.inspect.outputs.maintenance_changed }}
+          INSPECTION_RESULT: ${{ needs.inspect.result }}
+          APPROVAL_RESULT: ${{ needs.maintenance-approval.result }}
+        run: python3 -I "$GITHUB_WORKSPACE/trusted/tools/check_cleanliness_ci.py" aggregate

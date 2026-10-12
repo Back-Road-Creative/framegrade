@@ -1,0 +1,23 @@
+{% extends "_base.html" %}
+{% block title %}Metadata preview - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Metadata preview</h1>
+  <p>{{ output_dir }}</p>
+  {% for preview in previews %}
+  <section>
+    <h2>{{ preview.file }}</h2>
+    <p><strong>Title:</strong> {{ preview.title }}</p>
+    <p><strong>Description:</strong></p>
+    <pre>{{ preview.description }}</pre>
+    <h3>Gate verdicts</h3>
+    <ul>
+      {% for gate in preview.gates %}
+      <li>
+        {{ "PASS" if gate.passed else "FAIL" }} -- {{ gate.gate }}: {{ gate.message }}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endfor %}
+  <p><a href="/drives">Back to Drives</a></p>
+{% endblock %}

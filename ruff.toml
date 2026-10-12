@@ -1,0 +1,33 @@
+# ruff.toml -- lint ratchet
+#
+# Rule for adding a family: fix every finding in it first, then move it from the
+# "not yet clean" list below into extend-select. Never add a family that still
+# has findings -- this file only ever locks in families that are ALREADY at zero.
+#
+# pyproject.toml's [tool.ruff.lint] already selects E, F, I, N, W, S (E501
+# ignored) and the whole project is clean on all six. Beyond that baseline,
+# the families below still have real findings, so none of them join yet
+# (check with `ruff check . --select <FAMILY> --output-format concise --no-cache`
+# using the ruff version pinned for CI):
+#
+#   UP (pyupgrade)
+#   B  (bugbear)
+#   SIM (flake8-simplify)
+#   RUF (ruff-specific)
+#   C90 (mccabe, max-complexity=12)
+#   PL (pylint)
+#   PT (flake8-pytest-style)
+#   TD (todos)
+#   ERA (eradicate)
+#   T20 (flake8-print)
+#   PERF (perflint)
+#
+# extend-select is empty for now: this file is the mechanism, ready for the
+# first family that clears the bar. It extends pyproject.toml's select/ignore
+# (and any future ruff excludes there) rather than restating them, so a lost
+# exclude here can't silently diverge from pyproject.toml.
+
+extend = "pyproject.toml"
+
+[lint]
+extend-select = []

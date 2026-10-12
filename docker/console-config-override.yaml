@@ -1,0 +1,11 @@
+# Layered into the console image at /home/console/.config/gomoveshift/
+# config.yaml (see console.Dockerfile). Config.load()'s user-override tier
+# merges this over the packaged defaults, whose seo.* paths are cwd-relative
+# and do not hold the SEO data in this image -- without this override every
+# console-launched drive would fail at startup in
+# SeoConfig.validate_paths_exist(). These three paths point at the in-image
+# copy of waypost (COPYed alongside this project) instead.
+seo:
+  storage_path: /app/waypost/data/seo
+  credentials_dir: /app/waypost/credentials
+  manager_path: /app/waypost

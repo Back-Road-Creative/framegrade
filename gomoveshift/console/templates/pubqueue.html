@@ -1,0 +1,167 @@
+{% extends "_base.html" %}
+{% block title %}Publishing - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Publishing</h1>
+  <p><a href="/publishing/calendar">View as a calendar</a></p>
+  <h2>Delivery queue</h2>
+  {% if rows_by_state %}
+  {% for status, rows in rows_by_state %}
+  <h3>{{ status }} ({{ rows|length }})</h3>
+  {% if status == "awaiting_manual_publish" %}
+  <p>{{ awaiting_hint }}</p>
+  {% endif %}
+  <table border="1" class="delivery-table">
+    <tr><th>Project</th><th>Short</th><th>Status</th><th>Platform</th><th>Scheduled</th><th>Title</th><th>Routes</th><th>Attempts</th><th>Last error</th>{% if status == "published" %}<th>Publishes at</th><th>Permalink</th>{% endif %}{% if status == "awaiting_manual_publish" %}<th>Action</th>{% endif %}</tr>
+    {% for row in rows %}
+    <tr><td data-label="Project"><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td><td data-label="Short">{{ row.short_index }}</td><td data-label="Status">{{ status }}</td><td data-label="Platform">{{ row.platform }}</td>
+    <td data-label="Scheduled">
+      {% if row.scheduled_at_effective_local %}
+      {{ row.scheduled_at_effective_local }}
+      {% elif not row.sidecar_read_error %}
+      <em>no schedule recorded</em>
+      {% endif %}
+      {% if row.sidecar_read_error %}
+      <br><em>could not read sidecar</em>
+      {% endif %}
+      {% if row.schedule_discrepancy %}
+      <br><em>{{ row.schedule_discrepancy }}</em>
+      {% endif %}
+      {% if row.held_reason %}
+      <br><em>held: {{ row.held_reason }}</em>
+      {% endif %}
+    </td><td data-label="Title">{{ row.title or "" }}</td>
+    <td data-label="Routes">{{ row.scheduled_platforms or "" }}</td>
+    <td data-label="Attempts">{{ row.attempt_count }}</td><td data-label="Last error">{{ row.error_class or "" }}</td>
+    {% if status == "published" %}
+    {# A scheduled delivery is in this group because the QUEUE is finished with
+       it, not because the platform has run it. The column stays empty for a
+       delivery that went live on the call -- its permalink beside it is the
+       evidence that it did. #}
+    <td data-label="Publishes at">{{ row.platform_published_at or "" }}</td>
+    <td data-label="Permalink">{% if row.permalink %}{% if row.permalink_href %}<a href="{{ row.permalink_href }}">{{ row.permalink }}</a>{% else %}{{ row.permalink }} <em>(not a link this console will open)</em>{% endif %}{% endif %}</td>
+    {% endif %}
+    {% if status == "awaiting_manual_publish" %}
+    <td data-label="Action">
+      <form method="post" action="/publishing/mark-published/{{ row.id }}" style="display:inline">
+        <label>Link to the post, if you have it (optional)
+          <input type="text" name="permalink"></label>
+        <label>The post's id on the platform, if you have it (optional)
+          <input type="text" name="platform_post_id"></label>
+        <button type="submit">Mark published</button>
+      </form>
+    </td>
+    {% endif %}
+    </tr>
+    {% endfor %}
+  </table>
+  {% endfor %}
+  {% else %}
+  <p>The delivery queue is empty.</p>
+  {% endif %}
+  {# The pager line shows even on a single page. The queue only grows, so
+     an operator must always be able to tell "this is the whole queue" from
+     "this is the first hundred of it" -- and the counts above are per-state
+     within THIS page, not queue-wide. #}
+  <p>Showing {{ (page - 1) * per_page + 1 if total else 0 }}-{{ (page - 1) * per_page + rows_on_page }}
+  of {{ total }} deliveries. Page {{ page }} of {{ pages }}.
+  {% if has_prev %}<a href="/publishing?page={{ page - 1 }}">Previous</a>{% endif %}
+  {% if has_next %}<a href="/publishing?page={{ page + 1 }}">Next</a>{% endif %}</p>
+  <h2>Enqueue a plan</h2>
+  <form method="post" action="/publishing/enqueue">
+    <label>Run state path <input type="text" name="state_path" required></label>
+    <label>Output dir (optional) <input type="text" name="output_dir"></label>
+    <label><input type="checkbox" name="shadow" value="true"> Shadow (rehearsal)</label>
+    <button type="submit">Enqueue</button>
+  </form>
+  <h2>Enqueue a standalone asset</h2>
+  <p><small>For a product with no drive run behind it. Run <code>gomoveshift enqueue-asset</code>
+  without <code>--apply</code> first to get the review hash, then paste it here.</small></p>
+  <form method="post" action="/publishing/enqueue-asset">
+    <label>Video path <input type="text" name="video_path" required></label>
+    <label>Platform <input type="text" name="platform" required placeholder="youtube"></label>
+    <label>Scheduled at (UTC ISO) <input type="text" name="at" required></label>
+    <label>Title <input type="text" name="title" required></label>
+    <label>Description <input type="text" name="description"></label>
+    <label>Route-story receipt path (optional) <input type="text" name="receipt_path"></label>
+    <label>Review hash (--confirm) <input type="text" name="confirm" required></label>
+    <label><input type="checkbox" name="shadow" value="true"> Shadow (rehearsal)</label>
+    <button type="submit">Enqueue asset</button>
+  </form>
+  <h2>Publish everything that's due</h2>
+  <p><small>Sends every queued delivery whose scheduled time has passed to its platform
+  (<code>dispatch-queue --apply</code>). This starts immediately -- there is no confirmation
+  step, and a delivery that reaches a platform cannot be recalled from here.</small></p>
+  <form method="post" action="/publishing/drain">
+    <label>Publish plan file location (optional)
+      <small>(--sidecar-dir; each run's publish plan sidecar lives next to its own output and is
+      found automatically -- set this only to point at a different one)</small>
+      <input type="text" name="sidecar_dir">
+    </label>
+    <button type="submit">Publish now</button>
+  </form>
+  <h2>Pause a platform</h2>
+  {# The pause is a row in the queue DB, which `dispatch-queue` opens too --
+     the drain's own SELECT excludes a paused platform, so this governs every
+     drain path rather than just the button above. #}
+  {% if error %}
+  <p role="alert"><strong>Not changed:</strong> {{ error }}</p>
+  {% endif %}
+  <p>Currently paused: <span id="paused-platforms">{{ paused|join(", ") if paused else "nothing" }}</span>.
+  A pause stops the NEXT drain pass picking that platform up. A delivery already in
+  flight is left alone -- the platform call it is mid-way through cannot be un-sent --
+  and nothing is backfilled on resume: whatever piled up simply becomes due again.</p>
+  <form method="post" action="/publishing/pause">
+    <label for="pause-platform">Platform
+      <select name="platform" id="pause-platform">
+        {% for name in platforms %}
+        <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select></label>
+    <button type="submit" name="action" value="pause">Pause</button>
+    <button type="submit" name="action" value="resume">Resume</button>
+  </form>
+  <h2>Bounded response</h2>
+  {# The nightly `metrics collect` run writes a shadow-mode cap decision
+     here per platform; an operator override below (`reason` starting
+     `manual:`) sticks -- the nightly run skips it rather than overwriting
+     it. #}
+  <table>
+    <thead>
+      <tr><th>Platform</th><th>State</th><th>Cap</th><th>Mode</th><th>Reason</th><th>Set at</th></tr>
+    </thead>
+    <tbody>
+      {% for row in daily_caps %}
+      <tr>
+        <td>{{ row.platform }}</td>
+        <td>{{ row.state }}</td>
+        <td>{{ row.cap }}</td>
+        <td>{{ row.mode }}</td>
+        <td>{{ row.reason }}</td>
+        <td>{{ row.set_at }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No bounded-response decisions yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/publishing/override-state">
+    <label for="override-platform">Platform
+      <select name="platform" id="override-platform">
+        {% for name in platforms %}
+        <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select></label>
+    <label for="override-state">State
+      <select name="state" id="override-state">
+        <option value="HEALTHY">HEALTHY</option>
+        <option value="RECOVERING">RECOVERING</option>
+        <option value="SUPPRESSED">SUPPRESSED</option>
+        <option value="clear">clear (lift the override)</option>
+      </select></label>
+    <label>Cap (optional -- default follows the ladder floor for the chosen state)
+      <input type="number" name="cap" min="0">
+    </label>
+    <button type="submit">Set override</button>
+  </form>
+  <p><a href="/">Back</a></p>
+{% endblock %}

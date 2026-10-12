@@ -1,0 +1,18 @@
+{% extends "_base.html" %}
+{% block title %}Shorts CSV - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Shorts CSV</h1>
+  <p>{{ output_dir }}</p>
+  <p><a href="/shorts/csv/download?output_dir={{ output_dir }}">Download CSV</a></p>
+  <table border="1">
+    <thead>
+      <tr>{% for col in header %}<th>{{ col }}</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><a href="/shorts">Back to Shorts</a></p>
+{% endblock %}

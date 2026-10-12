@@ -1,0 +1,23 @@
+{% extends "_base.html" %}
+{% block title %}Pending gates - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Pending review gates</h1>
+  {% if pending %}
+  <ul>
+    {% for row in pending %}
+    <li>
+      {% if row.date_key %}
+      <a href="/drives/gates?output_dir={{ row.output_dir }}&date_key={{ row.date_key }}">
+        {{ row.output_dir }} -- {{ row.gate_id }}
+      </a>: {{ row.question }}
+      {% else %}
+      {{ row.output_dir }} -- {{ row.gate_id }}: {{ row.question }}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No pending gate questions found.</p>
+  {% endif %}
+  <p><a href="/drives">Back to Drives</a></p>
+{% endblock %}

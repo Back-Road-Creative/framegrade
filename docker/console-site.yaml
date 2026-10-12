@@ -1,0 +1,18 @@
+# Optional overlay: the media library and night-import tabs.
+#
+#   docker compose -f docker/console-compose.yaml -f docker/console-site.yaml \
+#     up -d --build gomoveshift-console
+#
+# Without this overlay those two tabs report "not configured". Both mounts are
+# read-only: the library only reads the site (console/library.py) and night
+# imports write to /data (console/night.py). Both variables are required once
+# the overlay is used, and have no default.
+
+services:
+  gomoveshift-console:
+    volumes:
+      - ${GMS_SITE_HOST_PATH:?set GMS_SITE_HOST_PATH to the host path of the site checkout}:/site:ro
+      - ${GMS_NIGHT_HOST_ROOT:?set GMS_NIGHT_HOST_ROOT to the host path of the camera-card root}:/night-source:ro
+    environment:
+      - GMS_SITE_PATH=/site
+      - GMS_NIGHT_SOURCE_ROOTS=/night-source

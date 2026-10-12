@@ -1,0 +1,104 @@
+{% extends "_base.html" %}
+{% block title %}Delivery {{ row.id }} - GoMoveShift Console{% endblock %}
+{% block content %}
+  <p><a href="/publishing">&laquo; Back to the delivery queue</a></p>
+  <h1>Delivery {{ row.id }}</h1>
+  <table border="1">
+    <tr><th>Project</th><td>{{ row.project_name }}</td></tr>
+    <tr><th>Short</th><td>{{ row.short_index }}</td></tr>
+    <tr><th>Platform</th><td>{{ row.platform }}</td></tr>
+    <tr><th>Status</th><td>{{ row.status }}</td></tr>
+    <tr><th>Shadow</th><td>
+      {% if row.shadow %}<strong>This is a shadow (rehearsal) delivery -- not a real publication.</strong>{% else %}No -- this is a real delivery.{% endif %}
+    </td></tr>
+    <tr><th>Scheduled</th><td>
+      {% if row.scheduled_at_effective_local %}{{ row.scheduled_at_effective_local }}{% elif not row.sidecar_read_error %}<em>no schedule recorded</em>{% endif %}
+      {% if row.sidecar_read_error %}<br><em>could not read sidecar</em>{% endif %}
+      {% if row.schedule_discrepancy %}<br><em>{{ row.schedule_discrepancy }}</em>{% endif %}
+      {% if row.held_reason %}<br><em>held: {{ row.held_reason }}</em>{% endif %}
+    </td></tr>
+    <tr><th>Published</th><td>
+      {% if row.published_at %}{{ row.published_at }} (source: {{ row.publish_confirmation }}){% else %}<em>not yet published</em>{% endif %}
+      {# Two different moments. The line above is when this queue handed the
+         delivery over; a scheduled delivery does not go live until the instant
+         the platform recorded, and showing only the handover invited reading
+         it as the publication time. Absent for a delivery published on the
+         call, which has no second moment. #}
+      {% if row.platform_published_at %}<br>Accepted by the platform for publication at {{ row.platform_published_at }} -- it is not live before then.{% endif %}
+    </td></tr>
+    <tr><th>Attempts</th><td>{{ row.attempt_count }}</td></tr>
+    <tr><th>Next attempt</th><td>{{ row.next_attempt_at or "not scheduled" }}{% if row.next_attempt_at and row.next_attempt_reason %} ({{ row.next_attempt_reason|replace("_", " ") }}){% endif %}</td></tr>
+    <tr><th>Lease</th><td>
+      {% if row.lease_state == "live" %}Worker <strong>{{ row.lease_owner }}</strong> currently holds this delivery, lease expires {{ row.lease_expires_at }}.
+      {% elif row.lease_state == "expired" %}Lease expired at {{ row.lease_expires_at }} (last held by {{ row.lease_owner }}) -- no worker is actually holding this delivery right now.
+      {% else %}No worker currently holds this delivery (no lease).{% endif %}
+    </td></tr>
+    <tr><th>Permalink</th><td>{% if row.permalink %}{% if row.permalink_href %}<a href="{{ row.permalink_href }}">{{ row.permalink }}</a>{% else %}{{ row.permalink }} <em>(not a link this console will open)</em>{% endif %}{% endif %}</td></tr>
+    <tr><th>Platform post id</th><td>{{ row.platform_post_id or "" }}</td></tr>
+    {% if not row.permalink and not row.platform_post_id %}
+    <tr><td colspan="2"><em>There is no platform confirmation for this delivery.</em></td></tr>
+    {% endif %}
+  </table>
+
+  <h2>Privacy report</h2>
+  <p>
+    {% if row.privacy_status %}{{ row.privacy_status }}
+    {% elif row.sidecar_read_error %}<em>could not read sidecar -- no privacy report available</em>
+    {% else %}<em>no sidecar for this delivery -- no privacy report available</em>{% endif %}
+  </p>
+
+  <h2>Why it failed</h2>
+  <p>{{ row.error_explanation or "No failure recorded." }}</p>
+
+  <h2>Operator controls</h2>
+  {# These forms sit at block level, never wrapped in a paragraph: the HTML
+     parser ends a paragraph at a form start tag, so the button would land
+     outside the element meant to hold it and the explanation beside it would
+     be orphaned. test_console_accessibility.py pins this. #}
+  {% if row.operator_actions %}
+    {% if "cancel" in row.operator_actions %}
+    <form method="post" action="/publishing/{{ row.id }}/cancel">
+      <button type="submit">Cancel this delivery</button>
+      <span>Stops it for good -- a cancelled delivery never publishes.</span>
+    </form>
+    {% endif %}
+    {% if "retry" in row.operator_actions %}
+    <form method="post" action="/publishing/{{ row.id }}/retry">
+      <button type="submit">Retry now</button>
+      {# A paused platform is skipped by every drain pass, so the half of
+         this sentence promising pickup would be false. #}
+      <span>Drops the backoff wait; the attempt count is unchanged.
+      {% if row.platform_paused %}{{ row.platform }} is paused, so nothing is sent until it is resumed.
+      {% else %}The next drain picks this up.{% endif %}</span>
+    </form>
+    {% endif %}
+    {% if "reschedule" in row.operator_actions %}
+    {# The queue owns every rule here -- a live lease, a terminal row and
+       a timestamp the drain could not compare are all refused there, and the
+       refusal comes back on this page with the value still typed in. #}
+    {% if error %}
+    <p role="alert"><strong>Not changed:</strong> {{ error }}</p>
+    {% endif %}
+    <form method="post" action="/publishing/{{ row.id }}/reschedule">
+      <label for="scheduled-at">New slot (ISO-8601, e.g. 2026-09-13T09:00:00+00:00)
+        <input type="text" id="scheduled-at" name="scheduled_at"
+               value="{{ scheduled_at or row.scheduled_at or '' }}"></label>
+      <button type="submit">Move this slot</button>
+      <span>Changes when the next drain may send it. Moving it later also drops a
+      retry backoff that has already passed; a backoff still in the future is a
+      platform rate limit and is left alone.</span>
+    </form>
+    {% endif %}
+  {% else %}
+  <p>This delivery is {{ row.status }} -- a finished delivery cannot be cancelled or retried.</p>
+  {% endif %}
+
+  <h2>What could be done next</h2>
+  <p>
+    {% if row.status == "awaiting_manual_publish" %}Once this is published from the TikTok app, an operator can confirm it from the delivery queue page.
+    {% elif row.status == "failed_permanent" %}This delivery has failed permanently and will not retry on its own; a person would need to decide whether to re-enqueue it.
+    {% elif row.status == "published" %}No action is needed -- this delivery is complete.
+    {% elif row.platform_paused %}{{ row.platform }} is paused: this delivery is not retried, and nothing is sent to it, until an operator resumes the platform on the delivery queue page.
+    {% else %}This delivery is expected to retry automatically on the schedule shown above.{% endif %}
+  </p>
+{% endblock %}

@@ -1,0 +1,117 @@
+# GoMoveShift console. One instance, published on port 8787.
+#
+#   docker compose -f docker/console-compose.yaml up -d --build gomoveshift-console
+#
+# Every host path below is a REQUIRED variable with no default: Docker
+# auto-creates a missing bind source as an empty root-owned directory, so a
+# guessed default would hand the container a directory where a file belongs
+# (an "age key" or a "SOPS config" that is really an empty folder) and the
+# console would look healthy while being unable to decrypt anything. Set each
+# variable to an existing path first; see docker/README.md.
+#
+# Optional overlays (each adds mounts only when passed with an extra -f):
+#   console-site.yaml          GMS_SITE_HOST_PATH, GMS_NIGHT_HOST_ROOT
+#   console-extra-output.yaml  GMS_VID_OUTPUT_DIR
+#
+# NVENC: run with `--gpus all` (or the compose `deploy.resources` equivalent)
+# to pass a GPU through; omitted, ffmpeg falls back to CPU encode.
+
+services:
+  # `deploy.replicas: 0` makes this un-startable BY CONSTRUCTION: a bare
+  # `docker compose up` (no service names) would otherwise also create an
+  # extra container here -- no ports, but it mounts console-data and runs a
+  # second background ticker against the same job store, a real hazard, not
+  # just clutter. Unlike `profiles:` (which `extends`/`<<` also propagate to
+  # the child), the concrete service below overrides `replicas: 1`, so the
+  # gate can't leak onto it by accident.
+  # The concrete service pulls this block in with a compose `extends`, so every
+  # shared mount, env passthrough, and healthcheck is defined exactly once; a
+  # second service would reuse the same template the same way.
+  # `extends` merges a child's volumes by container target and its environment
+  # by key -- a YAML `<<:` merge would REPLACE the whole list -- which is how a
+  # concrete service adds its own mounts.
+  console-base:
+    build:
+      # The directory that holds the framegrade, gps-journey and waypost
+      # checkouts side by side.
+      context: ../..
+      dockerfile: framegrade/docker/console.Dockerfile
+    image: gomoveshift-console:latest
+    restart: unless-stopped
+    # The image runs as its own system user (uid 999). Every bind mount below
+    # is a host directory owned by a host group with mode 2775, so without
+    # membership in that group the container can read them but not write.
+    # Joining the host's data gid fixes it without chowning the host tree;
+    # set GMS_HOST_GID to the gid that owns the mounted directories.
+    group_add:
+      - "${GMS_HOST_GID:-1000}"
+    deploy:
+      replicas: 0
+    volumes:
+      - console-data:/data
+      - ${GMS_STAGING_DIR:?set GMS_STAGING_DIR to the host directory holding source footage}:${GMS_STAGING_DIR}
+      - ${GMS_OUTPUT_DIR:?set GMS_OUTPUT_DIR to the host directory pipeline output is written to}:${GMS_OUTPUT_DIR}
+      # Container-side targets are fixed literals, not ${VAR}-keyed -- an
+      # operator env override must move only the HOST source. The app looks
+      # these paths up inside the container (see the environment block
+      # below); keying the target off the variable would move the mount away
+      # from the path the app reads, so a GMS_DRIVE_*/GMS_AGE_KEY_FILE/
+      # GMS_SOPS_CONFIG override would leave the credentials unreachable.
+      - ${GMS_DRIVE_CREDENTIALS_ENC:?set GMS_DRIVE_CREDENTIALS_ENC to the encrypted Drive credentials file}:/secrets/drive_credentials.json.enc:ro
+      - ${GMS_DRIVE_TOKEN_ENC:?set GMS_DRIVE_TOKEN_ENC to the encrypted Drive token file}:/secrets/drive_token.json.enc:ro
+      - ${GMS_AGE_KEY_FILE:?set GMS_AGE_KEY_FILE to the age private key file}:/secrets/age.key:ro
+      - ${GMS_SOPS_CONFIG:?set GMS_SOPS_CONFIG to the .sops.yaml file}:/secrets/.sops.yaml:ro
+      # Targets match the seo.* override baked into the image
+      # (docker/console-config-override.yaml). The encrypted YouTube token the
+      # console reads for upload/analytics (_yt_creds.py: creds_dir.parent /
+      # youtube_upload_token.json.enc) lives one level ABOVE credentials_dir,
+      # not inside it, so it is mounted on its own line.
+      - ${GMS_SEO_STORAGE_DIR:?set GMS_SEO_STORAGE_DIR to the host directory for the SEO storage}:/app/waypost/data/seo
+      - ${GMS_SEO_CREDENTIALS_DIR:?set GMS_SEO_CREDENTIALS_DIR to the host directory for the SEO credentials}:/app/waypost/credentials:ro
+      - ${GMS_SEO_YT_TOKEN_ENC:?set GMS_SEO_YT_TOKEN_ENC to the encrypted YouTube token file}:/app/waypost/youtube_upload_token.json.enc:ro
+    environment:
+      - GMS_CONSOLE_DATA_DIR=/data
+      - GMS_STAGING_DIR=${GMS_STAGING_DIR}
+      - GMS_OUTPUT_DIR=${GMS_OUTPUT_DIR}
+      # Fixed literals, matching the mount targets above: the app looks
+      # these up INSIDE the container, which never moves on a host override.
+      - GMS_DRIVE_CREDENTIALS_ENC=/secrets/drive_credentials.json.enc
+      - GMS_DRIVE_TOKEN_ENC=/secrets/drive_token.json.enc
+      - GMS_AGE_KEY_FILE=/secrets/age.key
+      - GMS_SOPS_CONFIG=/secrets/.sops.yaml
+      - GMS_GPU_LOCK_PATH=${GMS_GPU_LOCK_PATH:-/data/gpu.lock}
+      - GMS_COMMENTS_PATH=${GMS_COMMENTS_PATH:-/data/comments.jsonl}
+      - GMS_CONSOLE_TICKER=1
+      - GMS_CONSOLE_TOKEN=${GMS_CONSOLE_TOKEN:-}
+      - GMS_CONSOLE_NOTIFY_URL=${GMS_CONSOLE_NOTIFY_URL:-}
+      - GMS_CONSOLE_URL=${GMS_CONSOLE_URL:-}
+      # The console job store + this service's restart policy ARE the drive
+      # pipeline's supervisor -- asserted so console-launched drives (which
+      # always pass --no-tmux) pass the CLI's tmux-supervision gate.
+      - GMS_SUPERVISED=1
+      - GMS_GATE_ANSWER_TIMEOUT_SEC=${GMS_GATE_ANSWER_TIMEOUT_SEC:-21600}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  gomoveshift-console:
+    extends:
+      service: console-base
+    container_name: gomoveshift-console
+    deploy:
+      replicas: 1
+    ports:
+      # Loopback by default -- an operator who wants the console reachable
+      # from the LAN/WAN must set GMS_CONSOLE_BIND deliberately (e.g. to
+      # 0.0.0.0 or a specific interface address). The container's internal
+      # listener stays 0.0.0.0 (console.Dockerfile); only the host-published
+      # address changes here.
+      - "${GMS_CONSOLE_BIND:-127.0.0.1}:8787:8787"
+
+volumes:
+  console-data:
+    name: docker_console-data
+    driver: local

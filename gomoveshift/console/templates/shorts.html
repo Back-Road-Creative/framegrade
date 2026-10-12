@@ -1,0 +1,52 @@
+{% extends "_base.html" %}
+{% block title %}Shorts - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Shorts</h1>
+  <form method="post" action="/shorts/run">
+    <label>Brand
+      <select name="brand">
+        {% for b in brands %}
+        <option value="{{ b }}" {% if b == brand %}selected{% endif %}>{{ b }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Source directory <input type="text" name="directory" required></label>
+    <label>Output directory <input type="text" name="output_dir" required></label>
+    <label>Region
+      <select name="region">
+        <option value="">(preserve saved region)</option>
+        <option value="ireland">ireland</option>
+        <option value="usa">usa</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="dry_run" checked> Dry run</label>
+    <label>Publish day
+      <select name="publish">
+        <option value="">(none)</option>
+        {% for day in weekdays %}
+        <option value="{{ day }}">{{ day }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Long-form day <small>(--lf-day, the calendar day of footage to assemble)</small>
+      <select name="lf_day">
+        <option value="">(none)</option>
+        {% for day in weekdays %}
+        <option value="{{ day }}">{{ day }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <fieldset>
+      <legend>Pipeline flags</legend>
+      <label>Shorts per long-form (--shorts-target) <input type="number" name="shorts_target"></label>
+      <label>Minimum seconds between shorts (--shorts-gap) <input type="number" step="any" name="shorts_gap"></label>
+    </fieldset>
+    <button type="submit">Launch</button>
+  </form>
+  <h2>Shorts CSV preview</h2>
+  <form method="get" action="/shorts/csv">
+    <label>Output folder of the run <input type="text" name="output_dir" required></label>
+    <button type="submit">Preview CSV</button>
+  </form>
+  <p><a href="/">Back</a></p>
+{% endblock %}

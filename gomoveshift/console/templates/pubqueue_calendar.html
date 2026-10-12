@@ -1,0 +1,82 @@
+{% extends "_base.html" %}
+{% block title %}Publishing calendar - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Publishing</h1>
+  <h2>Calendar</h2>
+  <p>The same delivery queue as the <a href="/publishing">list view</a>, read as a week
+  instead of grouped by status. A delivery with no schedule the list view can't claim a
+  time for is never placed on a day -- see "Not scheduled" below.</p>
+  <p>
+    <a href="/publishing/calendar?week={{ prev_week }}">&larr; Previous week</a>
+    &nbsp;{{ week_start.isoformat() }} to {{ week_end.isoformat() }}&nbsp;
+    <a href="/publishing/calendar?week={{ next_week }}">Next week &rarr;</a>
+  </p>
+  {% if not week_has_rows %}
+  <p><em>Nothing is scheduled this week.</em></p>
+  {% endif %}
+  <table border="1">
+    <tr>
+      {% for day in days %}
+      <th scope="col">{{ day.date.strftime("%a %Y-%m-%d") }}</th>
+      {% endfor %}
+    </tr>
+    <tr>
+      {% for day in days %}
+      <td>
+        {% if day.groups %}
+        {% for group in day.groups %}
+        <strong>{{ group.project_name }}</strong>
+        <ul>
+          {% for row in group.rows %}
+          <li><a href="/publishing/{{ row.id }}">{{ row.time_label }} #{{ row.short_index }}</a>
+          {{ row.platform }} &mdash; {{ row.status }}<br>
+          {% if row.title_status == "present" %}
+          <strong title="{{ row.title }}">{{ row.title|truncate(title_display_max_chars, True, "…") }}</strong>
+          {% elif row.title_status == "unreadable" %}
+          <em>could not read sidecar</em>
+          {% elif row.title_status == "empty" %}
+          <em>empty caption</em>
+          {% else %}
+          <em>no title recorded</em>
+          {% endif %}
+          &mdash; {{ row.format_label }}</li>
+          {% endfor %}
+        </ul>
+        {% endfor %}
+        {% else %}
+        <em>Nothing scheduled</em>
+        {% endif %}
+      </td>
+      {% endfor %}
+    </tr>
+  </table>
+  <h2>Not scheduled</h2>
+  {% if unscheduled %}
+  <table border="1">
+    <tr><th>Project</th><th>Short</th><th>Platform</th><th>Status</th><th>Title</th><th>Format</th></tr>
+    {% for row in unscheduled %}
+    <tr>
+      <td><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td>
+      <td>{{ row.short_index }}</td>
+      <td>{{ row.platform }}</td>
+      <td>{{ row.status }}</td>
+      <td>
+        {% if row.title_status == "present" %}
+        <span title="{{ row.title }}">{{ row.title|truncate(title_display_max_chars, True, "…") }}</span>
+        {% elif row.title_status == "unreadable" %}
+        <em>could not read sidecar</em>
+        {% elif row.title_status == "empty" %}
+        <em>empty caption</em>
+        {% else %}
+        <em>no title recorded</em>
+        {% endif %}
+      </td>
+      <td>{{ row.format_label }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>Every delivery in the queue has a resolvable schedule.</p>
+  {% endif %}
+  <p><a href="/publishing">Back to the list view</a></p>
+{% endblock %}

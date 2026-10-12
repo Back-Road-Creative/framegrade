@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Project specific
+*.analysis.json
+output/
+frames/
+
+# Geocoding / runtime caches (world-readable, derived data — never commit)
+geocoding_cache.json
+*.cache.json
+
+# Temp files
+/tmp/
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+# MagicMock fallout: when a MagicMock is coerced to a filesystem path
+# (e.g. via __fspath__), it produces literal "MagicMock/<repr>/..." dirs
+# in the working tree. Defense-in-depth so such residue never lands in
+# commits even if a leaky test sneaks in.
+MagicMock/
+
+# Secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+token.json
+*_token.json
+*_credentials.json
+.gateway_token
+
+# Versioned backup residue
+*.bak.[0-9]*
+
+# Windows-style drive-letter paths accidentally created on Linux or WSL.
+D:*
+
+# Tool caches
+.cache/
+.ruff_cache/
+.mypy_cache/
+coverage.xml

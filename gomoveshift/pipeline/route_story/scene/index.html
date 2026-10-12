@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Route Story scene</title>
+<link rel="stylesheet" href="../vendor/maplibre-gl-6.10.0/maplibre-gl.css">
+<style>
+  html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  /* Sits on top of MapLibre's own (first-in-DOM) canvas so the near-marker
+     travelled-line overlay drawn in scene.js is captured by the same page
+     screenshot; pointer-events none keeps it purely visual. */
+  #overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<canvas id="overlay"></canvas>
+<!-- MapLibre 6.x is ESM-only. Module scripts run in document order, so the
+     global is set before scene.js runs. -->
+<script type="module">
+  import * as maplibregl from "../vendor/maplibre-gl-6.10.0/maplibre-gl.mjs";
+  window.maplibregl = maplibregl;
+</script>
+<script type="module" src="scene.js"></script>
+</body>
+</html>

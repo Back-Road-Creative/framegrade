@@ -1,0 +1,17 @@
+{
+  "lane": "acceptance",
+  "built": ["J07", "J08"],
+  "not_built": ["J01", "J02", "J03", "J04", "J05", "J06", "J09", "J10", "J11", "J12"],
+  "journeys": [
+    {"id": "J07-01", "name": "payload identity: asset path, caption, account reach the adapter unchanged", "test": "tests/e2e/test_publish_journeys.py::test_j07_01_adapter_receives_exactly_what_was_enqueued"},
+    {"id": "J07-02", "name": "caption keeps its full stop before Filmed", "test": "tests/e2e/test_publish_journeys.py::test_j07_02_caption_keeps_full_stop_before_filmed"},
+    {"id": "J07-03", "name": "missing sidecar is refused, not published", "test": "tests/e2e/test_publish_journeys.py::test_j07_03_missing_sidecar_is_refused_not_published"},
+    {"id": "J07-04", "name": "missing asset is refused, not published", "test": "tests/e2e/test_publish_journeys.py::test_j07_04_missing_asset_is_refused_not_published"},
+    {"id": "J07-05", "name": "TikTok row parked for manual publish is never reported published", "test": "tests/e2e/test_publish_journeys.py::test_j07_05_parked_tiktok_row_is_never_reported_published"},
+    {"id": "J08-01", "name": "transient failure schedules a retry and does not publish", "test": "tests/e2e/test_delivery_failure_journeys.py::test_j08_01_transient_failure_schedules_retry_not_published"},
+    {"id": "J08-02", "name": "auth expiry is held with a visible reason and posts nothing", "test": "tests/e2e/test_delivery_failure_journeys.py::test_j08_02_auth_expiry_is_blocked_with_visible_reason"},
+    {"id": "J08-03", "name": "response lost after remote acceptance never yields a second post", "test": "tests/e2e/test_delivery_failure_journeys.py::test_j08_03_lost_response_never_creates_a_second_post"},
+    {"id": "J08-04", "name": "expired lease on uploaded row never becomes published without a post id", "test": "tests/e2e/test_delivery_failure_journeys.py::test_j08_04_expired_lease_on_uploaded_never_published_without_post_id"},
+    {"id": "J08-05", "name": "expired lease on awaiting_manual_publish row stays parked", "test": "tests/e2e/test_delivery_failure_journeys.py::test_j08_05_expired_lease_on_parked_row_stays_parked"}
+  ]
+}

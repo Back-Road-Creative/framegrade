@@ -1,0 +1,27 @@
+# pip-audit ignore list
+#
+# Format: one vulnerability ID per line. Each entry MUST have a "# reason:"
+# comment immediately above explaining why the risk is accepted.
+#
+# Adding to this file is the LAST resort. First try:
+#   1. Upgrade the affected package
+#   2. Switch to a different package
+#   3. Pin a floor version that contains the fix
+# Only use --ignore-vuln when the upstream has no fix available
+# and the vulnerability is not exploitable in our usage pattern.
+#
+# Every entry below was verified to FIRE in a clean project venv built from
+# requirements.lock; audit that environment. An entry that stops
+# firing is dead and must be deleted rather than left to rot. Do not add an
+# entry from a scan of an ambient environment: audit a clean venv built from
+# the lock, otherwise advisories for packages the project does not ship end up
+# suppressed.
+
+# Do not re-add suppressions for torch, starlette or cryptography advisories
+# without a clean-venv scan that shows them firing: the locked versions of
+# those packages are outside the affected ranges.
+
+# reason: nltk downloader path traversal (Zip-Slip via zipfile.extractall) with
+# no published fix version. nltk.downloader is not invoked in CI or prod.
+# Re-evaluate on the next nltk release.
+PYSEC-2026-597

@@ -1,0 +1,253 @@
+[project]
+name = "gomoveshift-video"
+version = "0.2.0"
+description = "Automated driving video processing: sign detection, OCR, dead spot removal, and intelligent segmentation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    # Headless build: this pipeline never opens a window (no imshow/namedWindow/
+    # waitKey/destroyAllWindows anywhere in this package). Declared directly
+    # rather than leaned on transitively — the ``signs`` extra used to supply it
+    # via easyocr, and that extra is now optional. NOTE: ``deface`` hard-requires
+    # the full ``opencv-python``, so an install carrying it contains BOTH
+    # distributions writing the same ``cv2`` package — requirements.lock
+    # therefore pins them to the SAME version so the shared files can never skew.
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+    # astro_geometry: scipy.optimize.least_squares (soft_l1 loss, sparse
+    # Jacobian, lsmr trust-region solver) for the joint lens+rotation
+    # solve. Already resolved transitively (scikit-image), declared
+    # directly since this module imports it itself.
+    "scipy>=1.11.0",
+    "ffmpeg-python>=0.2.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "jinja2>=3.1.0",
+    # Floor raised to 0.0.31: 0.0.18–0.0.29 carry CVE-2026-53538/53539/53540
+    # (multipart DoS / resource-exhaustion). 0.0.30 fixes 53538/53539, 0.0.31
+    # fixes 53540 — pin the floor that clears all three.
+    "python-multipart>=0.0.31",
+    "watchdog>=3.0.0",
+    "pillow>=10.0.0",
+    # Photo ingest decode front-end: Pillow cannot open camera RAW (DNG/CR2/NEF/ARW)
+    # or HEIC. rawpy floor 0.24.0 = lowest release verified to import against the
+    # locked numpy 2.4.2 (numpy-2 ABI wheels, cp310+cp312 manylinux). pillow-heif
+    # floor 1.0.0 = first line requiring pillow>=11.1.0, so it tracks the locked
+    # pillow 12.3.0 instead of the pre-1.0 releases capped below pillow 12.
+    "rawpy>=0.24.0",
+    "pillow-heif>=1.0.0",
+    # ``--format tiff16`` masters: Pillow has no 48-bit RGB mode and OpenCV cannot
+    # embed an ICC profile; tifffile does both, deterministically. Already locked
+    # via scikit-image — declared because the export path imports it directly.
+    "tifffile>=2023.7.10",
+    "aiofiles>=23.0.0",
+    "pydantic>=2.0.0",
+    # Floor raised to 2.14.2: 2.14.1 carries GHSA-4xgf-cpjx-pc3j (fixed in
+    # 2.14.2).
+    "pydantic-settings>=2.14.2",
+    "pyyaml>=6.0.0",
+    # GPX (user/GoPro-supplied, untrusted) is parsed via defusedxml to block
+    # billion-laughs entity expansion and external-entity resolution in stdlib ET.
+    "defusedxml>=0.7.1",
+    # ruamel.yaml preserves key order, quoting, and comments on round-trip;
+    # PyYAML 6 does not. journal_publisher rewrites
+    # the site checkout's journey page frontmatter and must not churn
+    # the human-authored narrative/locations/keys around the videos[] arrays.
+    "ruamel.yaml>=0.18",
+    # preflight.py reads available RAM via psutil.virtual_memory()
+    # (graceful /proc/meminfo fallback exists, but the dependency is the
+    # cleaner contract on the supported Linux + CI hosts).
+    "psutil>=5.9.0",
+    # Privacy blur chain, now the ``redactcam`` package below.
+    # ``deface`` bundles the CenterFace ONNX face model in its wheel (no
+    # multi-MB weight is git-vendored) and satisfies redactcam's optional
+    # ``[centerface]`` fallback.
+    #
+    # The CUDA onnxruntime build IS the runtime for the face/plate/COCO models,
+    # in core and pinned exactly. The CPU ``onnxruntime`` wheel must appear
+    # nowhere in this file: both wheels own the ``onnxruntime/`` package
+    # directory and the last install wins, so a core dep on the CPU wheel let
+    # ``pip install -e .`` silently replace the GPU build, leaving the blur
+    # pass on CPU with nothing in the log saying why;
+    # ``tests/test_dependency_pins.py::TestOnnxruntimeBuild`` guards this.
+    # 1.22.0 is the last CUDA-12 line — 1.27+ needs CUDA 13, which has no pip
+    # runtime wheels yet. The ``cuda``/``cudnn`` extras install the
+    # nvidia-*-cu12 runtime wheels it links against: torch 2.14 ships CUDA-13
+    # wheels, so nothing else pulls libcudart.so.12 (without it the blur pass
+    # falls back to CPU). Preflight refuses
+    # to start a blur run without ``CUDAExecutionProvider``
+    # (``preflight.check_blur_inference_provider``).
+    "onnxruntime-gpu[cuda,cudnn]==1.22.0",
+    "deface>=1.5.0",
+    # Sibling projects (gps-journey, seo-manager) — bare names; pip resolves to
+    # whichever is already installed in the venv. Local dev and CI must
+    # pre-install both from a checkout of each project (`pip install -e <checkout>`)
+    # before installing this project.
+    # Neither is on PyPI; a file:// URL would either bake in one
+    # developer's home directory or pull a stale cached wheel.
+    "seo-manager",
+    "gps-journey",
+    # Extracted libraries — code that used to live in this tree and now ships as
+    # standalone repos: sun-track (solar elevation + golden hour, GPX position at
+    # an instant), pycube-lut (.cube / HALD / 1D LUT read + apply), keycut
+    # (keyframe-snapped lossless multi-range cutting), redactcam (the whole
+    # privacy-blur chain — tiled face/plate/vehicle/person detection, optical-flow
+    # tracking, region timeline, mask video and the independent cabin-coverage
+    # verifier). PEP 508 direct references,
+    # deliberately NOT bare names like the two siblings above: those two get
+    # preinstalled from the checkout before this project resolves, and nothing
+    # preinstalls these four, so a bare name goes to PyPI and 404s ("No matching
+    # distribution found for pycube-lut"). The URL both names and pins the
+    # revision, which is why requirements.lock carries no entry for them — a
+    # `git+https://…` line there is an *unnamed* requirement and CI feeds that
+    # file to `uv pip install --constraint`, which rejects it outright.
+    # These four require Python >=3.11; this project's >=3.10 floor is already
+    # fictional (CI dropped its 3.10 leg because the lock pins 3.12-only wheels).
+    # pycube-lut's `[hald]` extra is deliberately not requested — it only adds
+    # Pillow, already a direct dependency above; redactcam's `[centerface]` extra
+    # likewise only adds `deface`, declared directly above.
+    "sun-track @ git+https://github.com/Back-Road-Creative/sun-track@v0.1.0",
+    "pycube-lut @ git+https://github.com/Back-Road-Creative/pycube-lut@v0.1.0",
+    "keycut @ git+https://github.com/Back-Road-Creative/keycut@v0.1.0",
+    # redactcam is pinned to a COMMIT, not a tag, unlike its three siblings:
+    # redactcam's release.yml is tag-triggered, so cutting a `v*` tag to move this
+    # pin would also publish a Windows installer as a side effect. ``[gpu]``:
+    # redactcam ≥0.2 ships onnxruntime only through its ``[cpu]``/``[gpu]``
+    # extras, so the ``[gpu]`` extra keeps this project and redactcam asking for
+    # the same onnxruntime wheel.
+    "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam@9ada9f45407265a88c0a23b0b0898fb56567d871",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.0.0",
+    "ruff>=0.1.0",
+    "freezegun>=1.0.0",
+    "types-requests",  # mypy stubs for tools/validate_pipeline_output.py
+    "types-PyYAML",    # mypy stubs for YAML config/frontmatter parsing
+]
+signs = [
+    # Road-sign OCR for the opt-in ``--sign-verify`` pass. Optional because
+    # easyocr drags torch, and torch on Linux unconditionally pulls the whole
+    # CUDA stack (cuda-toolkit, cudnn, nccl, cusparselt, nvshmem, triton) —
+    # ~4.5 GB that a run without --sign-verify never loads. Every import of it
+    # is already lazy: ``analysis/ocr.py`` imports easyocr inside a property,
+    # and ``analysis/sign_pass.py`` never imports it at all, so the package is
+    # only required when the pass actually runs.
+    "easyocr>=1.7.0",
+]
+lens = [
+    # lensfun DB lookup for the opt-in lens-profile correction stage
+    # (``DevelopOptions.lens_correct``). Optional because the lensfun profile
+    # database is a large, separately-maintained data set most develop runs
+    # never touch; ``pipeline/photos/lens_correct.py`` imports it lazily and
+    # is a clear, named no-op with the extra absent.
+    "lensfunpy>=1.13.0",
+]
+gpu = [
+    # NOTE: torch publishes no ``cuda`` extra (its extras are optree,
+    # opt-einsum, pyyaml), so the ``torch[cuda]`` that used to sit here was a
+    # silently-ignored no-op. The Linux wheel bundles CUDA unconditionally, so
+    # plain ``torch`` is what that line always resolved to. Listed for the
+    # ``signs`` extra's benefit; EasyOCR itself is built with gpu=False today.
+    "torch",
+    # onnxruntime-gpu used to be listed here as an opt-in; it is a core
+    # dependency now (see the core block) — the CPU build was never a safe
+    # default once the venv had the GPU wheel.
+]
+gopro = [
+    "gopro2gpx>=0.1.0",  # GoPro GPMF telemetry → GPX extraction
+    # gopro-overlay (GPMF parsing; 0.134 fixes a GRAV component-count crash on certain
+    # firmware) exact-pins gpxpy==1.6.1 and pillow==11.3.0, but gps-journey needs
+    # gpxpy>=1.6.2, so pip cannot resolve it here. It is installed separately with
+    # `pip install --no-deps gopro-overlay==0.134.0` (see the README); these are its
+    # other runtime deps, floored at its pins.
+    "pint>=0.25.1",
+    "fitdecode>=0.10.0",
+    "geographiclib>=1.52",
+    "progressbar2>=4.2.0",
+    "sqlitedict>=2.1.0",
+    "cytoolz>=1.1.0",
+    "aiohttp>=3.13.3",
+    "requests>=2.32.5",
+]
+route-story-3d = [
+    # Route Story's cinematic terrain capture (gomoveshift/pipeline/route_story/scene)
+    # drives a pinned headless Chromium via Playwright to render real 3D MapLibre
+    # scenes offline. Optional: the base install has no browser automation, and
+    # the pinned Chromium build is provisioned separately (GMS_ROUTE_STORY_CHROMIUM).
+    "playwright>=1.58.0",
+]
+
+[project.scripts]
+gomoveshift = "gomoveshift.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["gomoveshift"]
+# Bundle data files needed at runtime that live outside the package dir
+# in the source layout. csv_generator.GOLDEN_REFERENCE looks here first.
+[tool.hatch.build.targets.wheel.force-include]
+"metricool_reference_header.csv" = "gomoveshift/metricool_reference_header.csv"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# --durations=25 makes every run list its slowest tests.
+addopts = "-n auto --dist worksteal --durations=25 --cov --cov-report=term-missing --cov-fail-under=95"
+markers = [
+    "integration: end-to-end tests requiring real FFmpeg/video files",
+    "slow: tests that take more than 30 seconds",
+]
+filterwarnings = [
+    # Robust-by-construction: any future legacy ``PipelineOrchestrator.run(**kwargs)``
+    # call fails the suite. Pass a ``RunOptions`` (or ``RunOptions.from_legacy(...)``).
+    "error:Passing individual keyword arguments to PipelineOrchestrator:DeprecationWarning",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ["tests/", "scripts/", "gomoveshift/"]
+
+[[tool.mypy.overrides]]
+module = ["gomoveshift.*"]
+ignore_errors = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "S"]
+ignore = ["E501"]  # Line length handled separately
+
+[tool.ruff.lint.per-file-ignores]
+# Subprocess calls (S603/S607): all call sites invoke fixed binaries
+# (ffmpeg, ffprobe, sops, sudo, tmux) with programmatic argument lists —
+# no shell=True, no user-controlled args.
+# Temp dirs (S108/S110/S112): pipeline cache paths and intentional try-except-pass
+# around best-effort cleanup.
+# Other (S306/S310/S311/S314/S324): non-security contexts (deterministic IDs, not auth).
+"gomoveshift/**/*.py" = ["S603", "S607", "S108", "S110", "S112", "S306", "S310", "S311", "S314", "S324"]
+# test files: same subprocess/tmp patterns plus test-specific rules
+# N802/N806: test methods named after enum values they test (e.g. test_short_maps_to_SHORT)
+# F401/F841: unused imports/vars kept in test files for readability
+"tests/*.py" = ["S101", "S311", "E402", "I001", "S603", "S607", "S108", "S110", "N802", "N806", "F401", "F841"]
+"test_*.py" = ["S101", "S311", "E402", "I001", "S603", "S607", "S108", "S110", "N802", "N806", "F401", "F841"]
+# tree-cleanliness checkers: fixed git argv, no shell, no user-controlled arguments
+"tools/check_public_tree.py" = ["S603", "S607"]
+"tools/check_cleanliness_ci.py" = ["S603", "S607"]
+# secret scanner: exception class name shared with the sibling projects (N818);
+# fixed git argv, no shell, no user-controlled arguments (S603, S607)
+"ci/secret_scan.py" = ["N818", "S603", "S607"]

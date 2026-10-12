@@ -1,0 +1,63 @@
+# Holds every GMS_* name the README puts in code font, plus console-only settings.
+# tests/test_console_settings.py fails if a README name is missing here.
+- {name: GMS_DATA_HOME, default: null, description: "Root for inputs, outputs, photo state and the comments ledger; unset falls back to $XDG_DATA_HOME/gomoveshift, else ~/.local/share/gomoveshift."}
+- {name: GMS_CACHE_HOME, default: null, description: "Root for stage caches, geocode, Overpass and Route Story caches and lock files; unset falls back to $XDG_CACHE_HOME/gomoveshift, else ~/.cache/gomoveshift."}
+- {name: GMS_CONFIG_HOME, default: null, description: "Root for config.yaml and credential, token, key and SOPS-config files; unset falls back to $XDG_CONFIG_HOME/gomoveshift, else ~/.config/gomoveshift."}
+- {name: GMS_STAGING_DIR, default: "<data home>/input", description: "Video staging/input dir."}
+- {name: GMS_OUTPUT_DIR, default: "<data home>/output", description: "Pipeline output dir; also backs the content ledger."}
+- {name: GMS_INTERMEDIATE_DIR, default: null, description: "Override for the ext4-backed _stages dir."}
+- {name: GMS_ROUTE_STORY_CACHE_DIR, default: "<cache home>/route-story", description: "Route Story offline map-bundle cache (tiles, terrain, labels)."}
+- {name: GMS_GEOCODING_CACHE_DIR, default: "<cache home>/geocoding", description: "Geocode-cache namespace."}
+- {name: GMS_GPS_CACHE_DIR, default: null, description: "Legacy override for the geocode-cache namespace."}
+- {name: GMS_WEB_JOBS_PATH, default: "<GMS_STAGING_DIR>/_stages/web_jobs.json", description: "Web-UI job persistence file."}
+- {name: GMS_OST_ENCODE_TIMEOUT_SEC, default: "7200", description: "Per-LF OST re-encode timeout in seconds."}
+- {name: GMS_WSL_HOST_VOLUME, default: /mnt/c, description: "Host volume the WSL VHDX free-space gate measures."}
+- {name: GMS_DRIVE_CREDENTIALS_ENC, default: "<config home>/drive_credentials.json.enc", description: "SOPS-encrypted Drive OAuth client JSON."}
+- {name: GMS_DRIVE_TOKEN_ENC, default: "<config home>/drive_token.json.enc", description: "SOPS-encrypted Drive refresh token JSON."}
+- {name: GMS_AGE_KEY_FILE, default: "<config home>/age.key", description: "age key used to decrypt the two SOPS *.enc files."}
+- {name: GMS_SOPS_CONFIG, default: "<config home>/.sops.yaml", description: "SOPS config (creation rules + recipients)."}
+- {name: GMS_PHOTO_OUTPUT_DIR, default: "<data home>/photos", description: "Photo-pipeline output dir default."}
+- {name: GMS_EXPORT_DIR, default: "<data home>/output", description: "CSV export target for photos."}
+- {name: GMS_GPU_LOCK_PATH, default: "<cache home>/gpu.lock", description: "Shared GPU lock vs. local LLM inference; empty disables the lock."}
+- {name: GMS_GPU_LOCK_WAIT_S, default: "120", description: "Wait for a live GPU-lock holder before failing."}
+- {name: GMS_BASE_TAGS, default: null, description: "Code constant (longform_metadata.py), not an env var."}
+- {name: GMS_OVERPASS_CACHE_DIR, default: "<cache home>/overpass", description: "Overpass response cache; empty means never cache."}
+- {name: GMS_SITE_PATH, default: null, description: "Hugo site checkout root for journal auto-publish."}
+- {name: GMS_SUPERVISED, default: null, description: "Set to 1 to assert an external supervisor over tmux."}
+- {name: GMS_PUBLISHING_ROUTE_YOUTUBE, default: "off", description: "YouTube Shorts publish route: first_party or off."}
+- {name: GMS_PUBLISHING_ROUTE_INSTAGRAM, default: "off", description: "Instagram Reels publish route: first_party or off."}
+- {name: GMS_PUBLISHING_ROUTE_FACEBOOK, default: "off", description: "Facebook Reels publish route: first_party or off."}
+- {name: GMS_PUBLISHING_ROUTE_TIKTOK, default: "off", description: "TikTok publish route: first_party or off."}
+- {name: GMS_COMMENTS_SEO_LEDGER, default: null, description: "Optional SEO events ledger (JSONL) that `comments triage` reads video titles and descriptions from; unset skips the lookup (no default)."}
+- {name: GMS_COMMENTS_VIDEOS_YAML, default: null, description: "Optional site videos.yaml that `comments triage` reads video titles and descriptions from; unset skips the lookup (no default)."}
+- {name: GMS_COMMENTS_PATH, default: "<data home>/comments.jsonl", description: "Where `gomoveshift comments pull` appends comment rows."}
+- {name: GMS_CONSOLE_TICKER, default: null, description: "Set to 1 to start the console's background due-job ticker (docker lane sets it)."}
+- {name: GMS_NIGHT_SOURCE_ROOTS, default: null, description: "Path-separated private roots allowed for night-project source stacks."}
+- {name: GMS_ROUTE_STORY_SOURCE_ROOTS, default: null, description: "Path-separated private roots allowed for Route Story GPX and media sources."}
+- {name: GMS_ROUTE_STORY_CHROMIUM, default: null, description: "Headless Chromium executable for Route Story 3D capture; unset uses Playwright's bundled browser."}
+- {name: GMS_ROUTE_STORY_MAPLIBRE_DIR, default: null, description: "Vendored MapLibre dist dir (holds maplibre-gl.mjs) for the Route Story scene integration test; unset skips that test."}
+- {name: GMS_ROUTE_STORY_RENDER_WORKERS, default: null, description: "Parallel Route Story capture worker count; unset uses min(6, max(1, cpu_count // 2))."}
+- {name: GMS_ROUTE_STORY_STILL_WORKERS, default: "4", description: "Photos graded in parallel when Route Story loads stills; 1 is serial."}
+- {name: GMS_ROUTE_STORY_GL_BACKEND, default: "swiftshader", description: "Route Story scene GL backend: swiftshader (software, default), auto (GPU when the browser really draws on one, else software), gpu (refuse without one). GPU holds ONE browser: use it only with a single capture worker."}
+- {name: GMS_ROUTE_STORY_FRAME_CACHE, default: "1", description: "Route Story captured-frame cache; 0 re-renders every pose through the browser."}
+- {name: GMS_ROUTE_STORY_FRAME_CACHE_MAX_GB, default: "40", description: "Size cap in GB on the Route Story captured-frame cache; oldest entries are pruned past it."}
+- {name: GMS_NIGHT_ADMISSION_LOCK, default: "<system temp dir>/gomoveshift-night-<uid>.lock", description: "Optional shared host-mounted regular-file lock for participating night workers."}
+- {name: GMS_GATE_ANSWER_TIMEOUT_SEC, default: "0", description: "Seconds a non-interactive review gate waits for a console answer; 0 = don't wait."}
+- {name: GMS_GATE_STALE_MIN, default: "30", description: "Minutes a pending review-gate question waits before the console notifies gate_stale (once)."}
+- {name: GMS_SLOT_MISSED_MIN, default: "30", description: "Minutes a delivery may sit past its scheduled_at before the console notifies slot_missed (once); a paused platform is never late."}
+- {name: GMS_CONSOLE_NOTIFY_URL, default: null, description: "Webhook URL for console failure notifications; unset is a silent no-op."}
+- {name: GMS_CONSOLE_URL, default: null, description: "Console base URL included in failure-notification payloads."}
+- {name: GMS_SEO_STORAGE_DIR, default: null, description: "Compose-only volume source for the SEO content ledger/delivery-queue DB; not read by the app directly."}
+- {name: GMS_SEO_CREDENTIALS_DIR, default: null, description: "Compose-only volume source for the SEO credentials dir (BrandCredentials fallback)."}
+- {name: GMS_SEO_YT_TOKEN_ENC, default: null, description: "SOPS-encrypted YouTube OAuth token, read from credentials_dir's parent (_yt_creds.py)."}
+- {name: GMS_LEASE_BIN, default: null, description: "External lease helper executable for disposable-worktree runs; no default, the guard is off when unset."}
+- {name: GMS_DISPOSABLE_WORKTREE_DIRS, default: null, description: "Extra directory names (OS path separator) marking a code tree as disposable, added to the built-in .worktrees; no default."}
+- {name: GMS_SOPS_SUDO_USER, default: null, description: "OS user for a second sops decrypt attempt via sudo; no default, off when unset."}
+- {name: GMS_ALLOW_CPU_BLUR, default: null, description: "Set to 1 to let preflight accept CPU-only blur inference when onnxruntime-gpu is installed but CUDA is unavailable (~19x slower); unset = hard fail with the repair command."}
+- {name: GMS_OVERPASS_CONTACT, default: null, description: "Contact (e-mail address or URL) appended to the Overpass request User-Agent."}
+- {name: GMS_CORRECTIONS_PATH, default: "<data home>/place_corrections.yaml", description: "Place-corrections ledger and place-name denylist; blank counts as unset."}
+- {name: GMS_SEO_OWNER_USER, default: null, description: "Account named in the SEO state-file repair hint."}
+- {name: GMS_SEO_OWNER_GROUP, default: null, description: "Group named in the SEO state-file repair hint."}
+- {name: GMS_SITE_HOST_PATH, default: null, description: "Compose overlay: host path of the site checkout, mounted read-only at /site by docker/console-site.yaml; checked (warn-only) by 'gomoveshift doctor'."}
+- {name: GMS_NIGHT_HOST_ROOT, default: null, description: "Compose overlay: host camera-card root, mounted read-only at /night-source by docker/console-site.yaml; checked (warn-only) by 'gomoveshift doctor'."}
+- {name: GMS_VID_OUTPUT_DIR, default: null, description: "Compose overlay: host directory of a second output root, mounted by docker/console-extra-output.yaml; checked (warn-only) by 'gomoveshift doctor'."}

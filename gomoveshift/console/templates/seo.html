@@ -1,0 +1,215 @@
+{% extends "_base.html" %}
+{% block title %}SEO & Performance - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>SEO &amp; Performance</h1>
+  {% if journey %}
+  {# The selection is shown and carried in nav, but corrections/
+     denylist are a global place-name list and performance rows carry no
+     journey identity at all (content_id is a slugified video title, not a
+     journey or video id) -- so nothing below is actually narrowed by it.
+     Saying so here is the honest answer; pretending to filter would be a
+     wrong answer wearing the costume of a right one. #}
+  <p>Journey filter: <strong>{{ journey }}</strong>. <a href="/seo">Clear journey filter</a>.
+  Corrections, denylist and performance rows below are not tracked per journey,
+  so this list is not narrowed by it.</p>
+  {% endif %}
+  {# `form` is what was submitted, present only on a refusal, and
+     `form.kind` says which of this page's two forms it came from -- only that
+     one is refilled. On a 409 the tables above it are a FRESH read, so the
+     entry the other editor added is visible before the operator resubmits. #}
+  {% set form = form or {} %}
+  {% set correction = form if form.kind == "correction" else {} %}
+  {% set denyform = form if form.kind == "denylist" else {} %}
+  {% if error %}
+  <p role="alert"><strong>Not saved:</strong> {{ error }}</p>
+  {% endif %}
+  {% if corrupt %}
+  <p role="alert"><strong>This ledger could not be read, so editing is turned off.</strong></p>
+  <p>{{ corrupt }}</p>
+  <p>Fix the file by hand and reload; nothing here has been changed.</p>
+  {% else %}
+  <h2>Place-name corrections</h2>
+  {% if corrections %}
+  <table border="1">
+    <thead><tr><th>Wrong</th><th>Correct</th></tr></thead>
+    <tbody>
+      {% for entry in corrections %}
+      <tr><td>{{ entry.wrong }}</td><td>{{ entry.correct }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No corrections yet.</p>
+  {% endif %}
+  <form method="post" action="/seo/corrections">
+    <input type="hidden" name="revision" value="{{ revision }}">
+    <label>Wrong <input type="text" name="wrong" value="{{ correction.wrong or '' }}"></label>
+    <label>Correct <input type="text" name="correct" value="{{ correction.correct or '' }}"></label>
+    <button type="submit">Add correction</button>
+  </form>
+  <h2>Denylist</h2>
+  {% if denylist %}
+  <ul>
+    {% for name in denylist %}
+    <li>{{ name }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p>No denylisted names yet.</p>
+  {% endif %}
+  <form method="post" action="/seo/corrections">
+    <input type="hidden" name="revision" value="{{ revision }}">
+    <label>Denylist name <input type="text" name="denylist_name" value="{{ denyform.denylist_name or '' }}"></label>
+    <button type="submit">Add to denylist</button>
+  </form>
+  {% endif %}
+
+  {# The performance half of the tab. It sits OUTSIDE the `corrupt` branch
+     above on purpose -- an unreadable corrections ledger must not hide the
+     numbers, and numbers we cannot read must not withhold the editor. #}
+  <h2>Performance</h2>
+  {# The trust badge/panel is a straight readout of `performance.unknowns`
+     -- every line there was derived from a real `None`/"unknown" this read
+     hit, never static prose, so it can't drift from the numbers below it. #}
+  <p><strong>{{ performance.unknowns_badge }}</strong></p>
+  {% if performance.unknowns %}
+  <details>
+    <summary>What we do not know</summary>
+    <ul>
+      {% for note in performance.unknowns %}
+      <li>{{ note }}</li>
+      {% endfor %}
+    </ul>
+    <p><small>A/B thumbnail-test refusal reasons are tracked by the separate
+    Waypost service and are not yet surfaced on this page.</small></p>
+  </details>
+  {% endif %}
+  {% if performance.hint %}
+  <p>{{ performance.hint }}</p>
+  {% endif %}
+  {% if performance.rows %}
+  <p>The table below is the {{ performance.top_performers_cap }} highest-view
+  videos out of
+  {% if performance.total_content_with_performance is none %}an unknown number
+  {% else %}{{ performance.total_content_with_performance }}{% endif %}
+  with recorded performance, ranked by views. A video absent from this table
+  is not evidence about that video &mdash; it may simply not be in the top
+  {{ performance.top_performers_cap }}.</p>
+  {% if performance.totals %}
+  <p><strong>Channel-wide totals</strong> (every video with recorded
+  performance, not just the rows below): {{ performance.totals.total_views }}
+  views, {{ performance.totals.total_clicks }} clicks,
+  {{ performance.totals.total_impressions }} impressions, click rate
+  {% if performance.totals.ctr_percent is none %}not measured{% else %}{{ performance.totals.ctr_percent }}%{% endif %}
+  {% if performance.totals.ctr_basis_label %}({{ performance.totals.ctr_basis_label }}){% endif %}.</p>
+  {% endif %}
+  {# A claim only when at least one row actually carries a timestamp --
+     never rendered off an all-None table, and never a staleness verdict, just
+     the two timestamps actually observed. #}
+  {% if performance.data_as_of or performance.oldest_sample %}
+  <p>Data as of {{ performance.data_as_of or "unknown" }}; oldest sample in
+  this table: {{ performance.oldest_sample or "unknown" }}.</p>
+  {% endif %}
+  <table border="1">
+    <thead>
+      <tr>
+        <th>Video</th><th>Views</th><th>Click rate</th>
+        <th>What that rate measures</th><th>How it was arrived at</th>
+        <th>Last heard</th><th>Observation window</th><th>Updates</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in performance.rows %}
+      <tr>
+        <td>{{ row.content_id }}</td>
+        <td>{{ row.views }}</td>
+        {# A missing rate is a sentence, never a 0: a 0 is the real measurement
+           "every viewer shown this declined to click", which is not what "we
+           have no impressions for it" means. `ctr_percent` is None on exactly
+           these rows, so there is no number here to fall back to. #}
+        <td>{% if row.ctr_percent is none %}Not measured{% else %}{{ row.ctr_percent }}%{% endif %}</td>
+        <td>{{ row.ctr_source_label }}</td>
+        <td>{% if row.ctr_basis_label %}{{ row.ctr_basis_label }}{% else %}&mdash;{% endif %}</td>
+        <td>{{ row.last_updated or "never" }}</td>
+        {# Same rule as the click rate above: a missing timestamp on either
+           end renders as the word "unknown", never a fabricated 0 days. #}
+        <td>{% if row.observation_window_days is none %}unknown{% else %}{{ row.observation_window_days }} day{{ "s" if row.observation_window_days != 1 else "" }}{% endif %}</td>
+        <td>{{ row.data_points }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p>A click rate is only ever the rate this service could actually fetch
+  &mdash; the thumbnail click-through rate YouTube Studio shows is not
+  available through the API, so no row here is evidence about a
+  thumbnail.</p>
+  {% endif %}
+
+  {# The already-built, shadow-only hypothesis engines
+     (tracking/anomaly.py, tracking/suppression.py) had no console call site
+     until now. Absent entirely (not a blank section) when
+     `insights.anomaly_view()` found nothing at all to read -- see its
+     `has_data` docstring. `app.py::_seo_context` always passes it; the
+     `anomalies is defined` guard only keeps a direct template render that
+     omits it (Jinja's default `Undefined` raises on `.has_data`) from
+     crashing. #}
+  {% if anomalies is defined and anomalies.has_data %}
+  <h2>Anomalies &amp; suppression signals (hypotheses, not proof)</h2>
+  <p><strong>Unvalidated.</strong> Shadow-only output of a statistics kernel with
+  no operating call site elsewhere in this service &mdash; nothing acts on any
+  row below; every one carries <code>shadow=true</code> in its own log line.</p>
+  {% if anomalies.hint %}
+  <p>{{ anomalies.hint }}</p>
+  {% endif %}
+  {% if anomalies.findings %}
+  <table border="1">
+    <thead>
+      <tr>
+        <th>Platform</th><th>Video</th><th>Kind</th><th>Target</th>
+        <th>Reference median</th><th>Deviation</th><th>Relative effect</th>
+        <th>p-value</th><th>n</th><th>Allocated alpha</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in anomalies.findings %}
+      <tr>
+        <td>{{ f.platform }}</td>
+        <td>{{ f.video_id }}</td>
+        <td>{{ f.kind }} (hypothesis)</td>
+        <td>{{ f.target }}</td>
+        <td>{{ f.ref_median }}</td>
+        <td>{{ f.deviation }}</td>
+        <td>{{ f.relative_effect }}</td>
+        <td>{{ f.p_value }}</td>
+        <td>{{ f.n }}</td>
+        <td>{{ f.allocated_alpha }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No dip/spike hypotheses right now.</p>
+  {% endif %}
+  {% if anomalies.refusals %}
+  <details>
+    <summary>Refused (not enough data to say)</summary>
+    <ul>
+      {% for r in anomalies.refusals %}
+      <li>{{ r.platform }}: {{ r.reason }} (n={{ r.n }}{% if r.required is not none %}, needs {{ r.required }}{% endif %})</li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+  {% if anomalies.suppression %}
+  <h3>Suppression status (hypothesis)</h3>
+  <ul>
+    {% for s in anomalies.suppression %}
+    <li>{{ s.platform }}: {{ s.status }} as of {{ s.as_of }}
+    ({{ s.consecutive_days }} consecutive day{{ "s" if s.consecutive_days != 1 else "" }})</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+
+  <p><a href="/">Back</a></p>
+{% endblock %}

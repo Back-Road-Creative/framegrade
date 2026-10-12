@@ -1,0 +1,23 @@
+{% extends "_base.html" %}
+{% block title %}Comments & corrections - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Comments inbox</h1>
+  {% if rows %}
+  <table border="1">
+    <thead><tr><th>Platform</th><th>Video</th><th>Text</th><th>Triage</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.platform }}</td>
+        <td>{{ row.video_id }}</td>
+        <td>{{ row.text }}</td>
+        <td>{{ row.triage }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No comments pulled yet.</p>
+  {% endif %}
+  <p><a href="/">Back</a></p>
+{% endblock %}

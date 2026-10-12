@@ -1,0 +1,59 @@
+{% extends "_base.html" %}
+{% block title %}Asset - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>{{ entry.catalog_id }}</h1>
+  <p>Journey: {{ entry.journey }} &mdash; travel date: {{ entry.date }}</p>
+  {% if entry.media_type == "photo" %}
+    {% if media_available %}
+    {# catalog_id is built from a real filename -- an unescaped "#" would
+       truncate this src at the fragment, so the browser fetches a different
+       (or missing) asset than the one this page names. #}
+    <p><img src="/library/media/{{ entry.catalog_id|urlencode }}" alt="{{ entry.catalog_id }}"></p>
+    {% else %}
+    <p class="job-failed">Photo unavailable.</p>
+    {% endif %}
+    <h2>Original</h2>
+    <ul>
+      <li>Content hash: {{ original.content_hash or "no hash recorded" }}</li>
+      <li>Developed with: {{ original.decoder or "none recorded" }}</li>
+      {% if not original.present_here %}
+      <li>The original file is not in this site checkout &mdash; it stays on the
+      card these photos were ingested from. The hash above identifies it, and
+      nothing here has compared it against any bytes.</li>
+      {% endif %}
+    </ul>
+    <h2>What is shown above</h2>
+    <ul>
+      <li>The developed export at <code>{{ derivative.relative_path }}</code>,
+      not the original. Its bytes differ from the original's, so they do not
+      hash to the value above.</li>
+      {% if derivative.present %}
+      <li>Size: {{ derivative.size_bytes }} bytes</li>
+      {% else %}
+      <li class="job-failed">Nothing at that path in this checkout.</li>
+      {% endif %}
+    </ul>
+    {% if cull %}
+    <h2>Culling score</h2>
+    <p>Read-only measurement -- nothing here is deleted or rejected automatically.</p>
+    <ul>
+      <li>Sharpness (Laplacian variance): {{ "%.1f"|format(cull.sharpness) }}</li>
+      <li>Clipped black pixels: {{ "%.1f"|format(cull.exposure_black_fraction * 100) }}%</li>
+      <li>Clipped white pixels: {{ "%.1f"|format(cull.exposure_white_fraction * 100) }}%</li>
+      {% if cull.near_duplicates %}
+      <li class="job-failed">Possible near-duplicate of:
+        {% for name in cull.near_duplicates %}{{ name }}{% if not loop.last %}, {% endif %}{% endfor %}
+      </li>
+      {% endif %}
+    </ul>
+    {% endif %}
+  {% else %}
+    <p>This is a video. Its published URL is the preview; no proxy is served for it here.</p>
+    <h2>History</h2>
+    <ul>
+      <li>Routing id: {{ entry.routing_id }}</li>
+      <li>Travel date: {{ entry.date }}</li>
+    </ul>
+  {% endif %}
+  <p><a href="/library">Back to library</a></p>
+{% endblock %}

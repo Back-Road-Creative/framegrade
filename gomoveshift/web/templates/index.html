@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoMoveShift - Video Processor</title>
+    <!-- SRI N/A: unversioned Tailwind JIT CDN build has no stable hash (127.0.0.1-only dev UI) -->
+    <script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/htmx.org@1.9.10" integrity="sha384-D1Kt99CQMDuVetoL1lrYwg5t+9QdHe7NLX/SoJYkXDFfX37iInKRy5xLSi8nO7UC" crossorigin="anonymous"></script> <!-- pragma: allowlist secret (htmx SRI integrity hash, public) -->
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+    <nav class="bg-gray-800 border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 py-4">
+            <h1 class="text-2xl font-bold text-green-400">GoMoveShift</h1>
+            <p class="text-gray-400 text-sm">Driving Video Processor</p>
+        </div>
+    </nav>
+
+    <main class="max-w-7xl mx-auto px-4 py-8">
+        <!-- Upload/Select Section -->
+        <section class="mb-8">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-semibold mb-4">Analyze Video</h2>
+                <form id="analyze-form" class="flex gap-4">
+                    <input
+                        type="text"
+                        id="video-path"
+                        name="video_path"
+                        placeholder="Enter video file path..."
+                        class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2 focus:outline-none focus:border-green-400"
+                    >
+                    <button
+                        type="submit"
+                        class="bg-green-600 hover:bg-green-700 px-6 py-2 rounded font-medium transition"
+                    >
+                        Analyze
+                    </button>
+                </form>
+                <p class="text-gray-500 text-sm mt-2">
+                    Enter the full path to a video file (e.g., /path/to/clip.mp4)
+                </p>
+            </div>
+        </section>
+
+        <!-- Jobs List -->
+        <section>
+            <h2 class="text-xl font-semibold mb-4">Processing Jobs</h2>
+            <div id="jobs-list" class="space-y-4">
+                {% if jobs %}
+                    {% for job in jobs %}
+                    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h3 class="font-medium">{{ job.video_path.name }}</h3>
+                                <p class="text-gray-400 text-sm">{{ job.video_path }}</p>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <span class="px-3 py-1 rounded-full text-sm
+                                    {% if job.status == 'complete' %}bg-green-900 text-green-300
+                                    {% elif job.status == 'error' %}bg-red-900 text-red-300
+                                    {% elif job.status == 'analyzing' %}bg-blue-900 text-blue-300
+                                    {% elif job.status == 'processing' %}bg-yellow-900 text-yellow-300
+                                    {% else %}bg-gray-700 text-gray-300{% endif %}
+                                ">
+                                    {{ job.status }}
+                                </span>
+                                {% if job.status == 'reviewed' %}
+                                <a href="/review/{{ job.video_path }}"
+                                   class="bg-blue-600 hover:bg-blue-700 px-4 py-1 rounded text-sm transition">
+                                    Review
+                                </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                        {% if job.error_message %}
+                        <p class="text-red-400 text-sm mt-2">Error: {{ job.error_message }}</p>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="bg-gray-800 rounded-lg p-8 text-center text-gray-500">
+                        <p>No jobs yet. Enter a video path above to start.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+    </main>
+
+    <script>
+        document.getElementById('analyze-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const videoPath = document.getElementById('video-path').value;
+
+            if (!videoPath) return;
+
+            try {
+                const response = await fetch('/api/analyze?video_path=' + encodeURIComponent(videoPath), {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    // Refresh the page to show new job
+                    location.reload();
+                } else {
+                    const error = await response.json();
+                    alert('Error: ' + error.detail);
+                }
+            } catch (err) {
+                alert('Error: ' + err.message);
+            }
+        });
+
+        // Auto-refresh jobs list every 5 seconds
+        setInterval(async () => {
+            const response = await fetch('/api/jobs');
+            if (response.ok) {
+                const data = await response.json();
+                // Check if any job status changed
+                const hasChanges = data.jobs.some(job => {
+                    return job.status === 'reviewed' || job.status === 'complete';
+                });
+                if (hasChanges) {
+                    location.reload();
+                }
+            }
+        }, 5000);
+    </script>
+</body>
+</html>

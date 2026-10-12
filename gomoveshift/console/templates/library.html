@@ -1,0 +1,125 @@
+{% extends "_base.html" %}
+{% block title %}Media library - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Media library</h1>
+  {% if night_library %}
+  <section aria-labelledby="night-library-title">
+    <h2 id="night-library-title">Private night projects</h2>
+    <p>Not approved for publishing. Counts show recorded processing results; open a project to review validated previews.</p>
+    {% if night_library.unavailable %}<p role="alert">Some private project records could not be read.</p>{% endif %}
+    <ul>{% for project in night_library.projects %}
+      <li><a href="/photos/night/{{ project.id }}">{{ project.recipe }} · {{ project.id[:12] }}</a>
+        — {{ project.status }} · {{ project.completed }}/{{ project.total }} {{ project.kind }} recorded complete{% if project.selected %} · {{ project.selected }} private keeper{% if project.selected != 1 %}s{% endif %}{% endif %}</li>
+    {% else %}<li>No private night projects yet.</li>{% endfor %}</ul>
+    <p><a href="/photos/night">Open night projects</a> · Showing up to 50 recently created projects. Journey/date filters below apply to gallery media.</p>
+  </section>
+  {% endif %}
+  {% if not site_configured %}
+  <p>No site path configured for this brand. Set <code>GMS_SITE_PATH</code> in Settings.</p>
+  {% elif site_error %}
+  <p>{{ site_error }}</p>
+  {% else %}
+    {% if damaged %}
+    <p class="job-failed">
+      {{ damaged|length }} source(s) could not be read:
+      {% for d in damaged %}{{ d.source }} ({{ d.reason }}){% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+    {% if journey %}
+    {# The active filter has to be visible on the page itself, not just
+       in the URL -- an operator looking at a filtered table must be able to
+       tell it is filtered, to what, and how to clear it. #}
+    <p>Filtered to journey <strong>{{ journey }}</strong>. <a href="/library">Clear journey filter</a></p>
+    {% endif %}
+    <form method="get" action="/library">
+      <label>Type
+        <select name="media_type">
+          <option value="">All</option>
+          <option value="photo" {% if media_type == "photo" %}selected{% endif %}>Photo</option>
+          <option value="video" {% if media_type == "video" %}selected{% endif %}>Video</option>
+        </select>
+      </label>
+      <label>Journey <input type="text" name="journey" value="{{ journey or '' }}"></label>
+      <label>Date <input type="text" name="date" value="{{ date or '' }}"></label>
+      <label>Search <input type="text" name="q" value="{{ q or '' }}" placeholder="title, journey, or tag"></label>
+      <button type="submit">Filter</button>
+    </form>
+    {% if q %}
+    <p>Search results for <strong>{{ q }}</strong>. <a href="/library">Clear search</a></p>
+    {% endif %}
+    {% if entries %}
+    <p>Showing {{ (page - 1) * per_page + 1 }}-{{ (page - 1) * per_page + entries|length }} of {{ total }}</p>
+    <table border="1">
+      <thead><tr>
+        <th>Thumbnail</th><th>Name</th><th>Kind</th><th>Journey</th><th>Date</th>
+        <th>Treatment</th><th>Privacy/export status</th><th>Catalog ID</th><th>Hash</th><th>Tags</th>
+      </tr></thead>
+      <tbody>
+      {% for e in entries %}
+        {% set row = display[e.catalog_id] %}
+        <tr>
+          {# A thumbnail is served only when a privacy status can be
+             established. This catalog records none, for any entry -- so no
+             `<img>` is rendered, and the cell says which honest state that
+             is rather than showing a blank a reader could mistake for "clean". #}
+          <td>no thumbnail ({{ row.privacy_status }})</td>
+          <td>{{ row.name }}</td>
+          <td>{{ row.kind }}</td>
+          <td>{{ e.journey }}</td>
+          <td>{{ e.date }}</td>
+          <td>{{ row.treatment }}</td>
+          <td>{{ row.privacy_status }}</td>
+          {# The id is the link AND stays readable as text -- it is what an
+             operator quotes into a bug report, so a friendlier word must not
+             replace it. `urlencode` is load-bearing, not tidiness: a
+             catalog_id is built from a real filename, and one `#` in one
+             would truncate the href at the fragment, leaving a link that
+             looks right in the page source and opens the wrong asset. #}
+          <td><a href="/library/{{ e.catalog_id|urlencode }}">{{ e.catalog_id }}</a></td>
+          <td>{% if e.hash_recorded %}hash recorded{% else %}no hash recorded{% endif %}</td>
+          <td>
+            {% for t in row.tags %}<span>{{ t }}</span>
+              <form method="post" action="/library/{{ e.catalog_id|urlencode }}/tags" style="display:inline">
+                <input type="hidden" name="tag" value="{{ t }}">
+                <input type="hidden" name="action" value="remove">
+                <button type="submit">x</button>
+              </form>
+            {% endfor %}
+            <form method="post" action="/library/{{ e.catalog_id|urlencode }}/tags" style="display:inline">
+              <input type="text" name="tag" placeholder="add tag" aria-label="Add a tag">
+              <input type="hidden" name="action" value="add">
+              <button type="submit">Add</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if pages > 1 %}
+    <p>
+      {% if has_prev %}<a href="/library?{% if filter_query %}{{ filter_query }}&amp;{% endif %}page={{ page - 1 }}">Previous</a>{% endif %}
+      Page {{ page }} of {{ pages }}
+      {% if has_next %}<a href="/library?{% if filter_query %}{{ filter_query }}&amp;{% endif %}page={{ page + 1 }}">Next</a>{% endif %}
+    </p>
+    {% endif %}
+    {% elif journey %}
+    {# An unknown/non-matching journey filters to nothing -- this is
+       that "nothing", named for what it is rather than reading like the
+       ordinary empty-collection state below. #}
+    <p>No media found for journey <strong>{{ journey }}</strong>. <a href="/library">Clear journey filter</a></p>
+    {% elif damaged %}
+    <p>No readable media in this collection.</p>
+    {% elif absent %}
+    {# Two different empties. This one is almost always a wrong GMS_SITE_PATH
+       or a checkout that was never synced, and phrased as "Nothing here yet"
+       it read as the ordinary case and sent nobody to look. #}
+    <p>Nothing here yet -- and this site has no
+      {% for a in absent %}{{ a.source }}{% if not loop.last %} or {% endif %}{% endfor %}
+      to read from. Either nothing has been published from it, or the site path in Settings
+      points somewhere else.</p>
+    {% else %}
+    <p>Nothing here yet.</p>
+    {% endif %}
+  {% endif %}
+  <p><a href="/">Back</a></p>
+{% endblock %}

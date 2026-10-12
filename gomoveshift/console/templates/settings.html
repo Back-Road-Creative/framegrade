@@ -1,0 +1,60 @@
+{% extends "_base.html" %}
+{% block title %}Settings - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Settings</h1>
+  <h2>Brand overrides</h2>
+  <p>Prefilled from this brand's saved overrides only -- never from the running environment.
+  Leave a field blank to remove its override.</p>
+  <form method="post" action="/settings">
+    {% for row in form_rows %}
+    <label>{{ row.name }}
+      <input type="text" name="{{ row.name }}" value="{{ row.value }}">
+    </label>
+    <br>
+    {% endfor %}
+    <button type="submit">Save</button>
+  </form>
+  <p>Status only below -- values are never shown here.</p>
+  <h2>GMS_* registry</h2>
+  <table border="1">
+    <thead><tr><th>Name</th><th>Description</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for row in registry_rows %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{{ row.description }}</td>
+        <td>{{ "Set" if row.is_set else "Unset" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <h2>Credential status</h2>
+  <table border="1">
+    <thead><tr><th>Name</th><th>Description</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for row in credential_rows %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td>{{ row.description }}</td>
+        <td>{{ "Present" if row.present else "Missing" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <h2>YouTube channel identity</h2>
+  <p>Public channel info only -- no token, no secret. Read offline from the identity sidecar
+  next to each brand's token; never a sops call, never a network call.</p>
+  <table border="1">
+    <thead><tr><th>Brand</th><th>Channel title</th><th>Channel ID</th></tr></thead>
+    <tbody>
+      {% for row in youtube_rows %}
+      <tr>
+        <td>{{ row.brand }}</td>
+        <td>{{ row.channel_title }}</td>
+        <td>{{ row.channel_id or "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p><a href="/">Back</a></p>
+{% endblock %}

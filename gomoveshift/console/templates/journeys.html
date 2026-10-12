@@ -1,0 +1,38 @@
+{% extends "_base.html" %}
+{% block title %}Journeys & site - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Journeys &amp; site</h1>
+  <h2>Open PRs on {{ site_repo or 'the site repo' }}</h2>
+  {% if error %}
+  <p>Could not list PRs: {{ error }}</p>
+  {% elif prs %}
+  <table border="1">
+    <thead><tr><th>#</th><th>Title</th><th>Link</th></tr></thead>
+    <tbody>
+      {% for pr in prs %}
+      <tr>
+        <td>{{ pr.number }}</td>
+        <td>{{ pr.title }}</td>
+        <td><a href="{{ pr.url }}">{{ pr.url }}</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>No open PRs.</p>
+  {% endif %}
+  <h2>Launch a site sync job</h2>
+  {% if sync_error %}
+  <p>{{ sync_error }}</p>
+  {% endif %}
+  {# Site path comes from this brand's own GMS_SITE_PATH config, set in
+     Settings -- never a form field here, which could name any path on the
+     box, including another brand's checkout. #}
+  <form method="post" action="/journeys/sync-site">
+    <button type="submit">Run sync-site (dry-run)</button>
+  </form>
+  <form method="post" action="/journeys/publish-journal-replay">
+    <button type="submit">Run publish-journal --replay-pending (dry-run)</button>
+  </form>
+  <p><a href="/">Back</a></p>
+{% endblock %}

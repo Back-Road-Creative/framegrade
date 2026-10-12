@@ -1,0 +1,35 @@
+{% extends "_base.html" %}
+{% block title %}GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>GoMoveShift Console</h1>
+
+  {% macro section(data, empty_message) %}
+    {% for name in data.unreadable %}
+    <p role="alert">{{ name | capitalize }} could not be read.</p>
+    {% endfor %}
+    {% if data.rows %}
+    <ul>
+      {% for item in data.rows %}
+      <li><a href="{{ item.href }}">{{ item.label }}</a></li>
+      {% endfor %}
+    </ul>
+    {% elif not data.unreadable %}
+    <p>{{ empty_message }}</p>
+    {% endif %}
+  {% endmacro %}
+
+  <section aria-labelledby="needs-attention-heading">
+    <h2 id="needs-attention-heading">Needs attention</h2>
+    {{ section(needs_attention, "Nothing needs you right now.") }}
+  </section>
+
+  <section aria-labelledby="in-progress-heading">
+    <h2 id="in-progress-heading">Jobs in progress</h2>
+    {{ section(in_progress, "No jobs are running or queued.") }}
+  </section>
+
+  <section aria-labelledby="coming-up-heading">
+    <h2 id="coming-up-heading">Deliveries coming up</h2>
+    {{ section(coming_up, "No deliveries are queued or scheduled.") }}
+  </section>
+{% endblock %}

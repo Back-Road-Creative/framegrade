@@ -1,0 +1,50 @@
+{% extends "_base.html" %}
+{% block title %}Job #{{ job.id }} - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Job #{{ job.id }}: {{ job.name }}</h1>
+  <p>Status: {{ job.status }}{% if job.rc is not none %} (rc={{ job.rc }}){% endif %}</p>
+  {% if job.liveness %}
+  <p><em>{{ job.liveness }}</em></p>
+  {% endif %}
+  {% if job.rerun_of %}
+  {# "Re-run" does two things an operator could tell apart, and the job
+     row is the only place the difference is recorded. Say both halves rather
+     than the word "re-run", which reads as whichever one the reader expected. #}
+  <p><em>Started again from job #{{ job.rerun_of }}: the command line is that job's,
+  the settings are this console's as they are now -- not necessarily the ones job
+  #{{ job.rerun_of }} ran under. <a href="/jobs/{{ job.rerun_of }}">See job #{{ job.rerun_of }}</a>.</em></p>
+  {% endif %}
+  {% if outcome_evidence %}
+  <p><em>What this console saw: {{ outcome_evidence }}.</em></p>
+  {% endif %}
+  {% if rerun_blocked %}
+  <p><em>{{ rerun_blocked }}.</em></p>
+  {% else %}
+  <form method="post" action="/jobs/{{ job.id }}/rerun">
+    <button type="submit">Re-run</button>
+  </form>
+  {% endif %}
+  {% if route_story %}
+  <div>
+    <h2>Route story</h2>
+    {% if route_story.leg %}
+    <p>Leg {{ route_story.leg }}/{{ route_story.legs }}, ~{{ route_story.seconds_left }} s left</p>
+    {% endif %}
+    {% if route_story.faults %}
+    <ul>
+      {% for fault in route_story.faults %}
+      <li>{{ fault }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if route_story.enqueue_cmd %}
+    <p>Publish this cut: <code>{{ route_story.enqueue_cmd }}</code>
+    (fill in <code>--at</code>) -- <a href="/publishing">publishing queue</a>.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  <pre>{% for line in log_tail %}{{ line }}
+{% endfor %}</pre>
+  <p><a href="/drives/gates/pending">Pending review gates</a></p>
+  <p><a href="/jobs">Back to jobs</a></p>
+{% endblock %}

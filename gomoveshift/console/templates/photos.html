@@ -1,0 +1,157 @@
+{% extends "_base.html" %}
+{% block title %}Photos - GoMoveShift Console{% endblock %}
+{% block content %}
+  {# `form` is what was submitted, present only on a refusal. Two forms
+     live on this page and only the submitted one is refilled -- restoring
+     typed values into the other would put text in a form nobody touched. #}
+  {% set form = form or {} %}
+  {% set ingest = form if form.action == "ingest" else {} %}
+  {% set develop = form if form.action == "develop" else {} %}
+  <h1>Photos</h1>
+  <p><a href="/photos/night">Night projects</a> — private previews from existing sky stacks; no journey or publishing required.</p>
+
+  {# The normal path, named and in order. Each stage links to the screen
+     that already drives it and carries the selected journey with it, so the
+     operator never retypes the slug to get back here. #}
+  <nav aria-label="Creator journey">
+    <ol class="journey-stages">
+      {% for stage in stages %}
+      <li><a href="{{ stage.href }}">{{ stage.name }}</a> -- {{ stage.hint }}</li>
+      {% endfor %}
+    </ol>
+  </nav>
+
+  {# Derived from the installed modules (console/photos.py::capability_status),
+     never written as prose: this page used to claim selector, reel and astro
+     "are not built yet" while all three shipped and each had its own command.
+     "This screen does not launch it" and "it does not exist" are different
+     facts and are now printed as different facts. #}
+  <h2>What this build can do with photos</h2>
+  <ul class="photo-capabilities">
+    {% for cap in capabilities %}
+    <li>
+      <strong>{{ cap.name }}</strong> --
+      {% if not cap.installed %}
+        not installed in this build.
+      {% elif cap.console %}
+        runs from this screen.
+      {% else %}
+        installed; this screen does not launch it yet -- run <code>{{ cap.command }}</code>.
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+
+  {% if error %}
+  <p role="alert"><strong>Not launched:</strong> {{ error }}</p>
+  {% endif %}
+
+  <h2 id="import">Import photos</h2>
+  <form method="post" action="/photos/run">
+    <input type="hidden" name="action" value="ingest">
+    <label>Card / source directory <input type="text" name="card_dir" value="{{ ingest.card_dir or '' }}" required></label>
+    <label>Journey slug <input type="text" name="journey" value="{{ ingest.journey or journey or '' }}" required></label>
+    <label>Day (YYYY-MM-DD) <input type="text" name="day" value="{{ ingest.day or '' }}" required></label>
+    <label>Location (optional -- derived from EXIF GPS when omitted)
+      <input type="text" name="location" value="{{ ingest.location or '' }}">
+    </label>
+    {# Defaults ON for a fresh form. A refusal must NOT re-tick one the operator
+       cleared, which would turn a corrected form into a live run over the card. #}
+    <label><input type="checkbox" name="dry_run" {% if ingest and ingest.dry_run or not form %}checked{% endif %}> Dry run</label>
+    <button type="submit">Launch ingest</button>
+  </form>
+
+  <h2 id="develop">Suggested treatment</h2>
+  <form method="post" action="/photos/run">
+    <input type="hidden" name="action" value="develop">
+    {# A real picker over the selectable photo set for the selected
+       journey, additive to the typed textarea below -- muscle memory and
+       scripts keep working. Not `required`, and outside the advanced-tuning
+       details block below, same as the other visible fields on this form.
+       Four distinct facts about an empty set (`photo_options.status`), never
+       collapsed to a blank list. #}
+    <fieldset class="photo-picker">
+      <legend>Pick from {{ journey }}'s photos{% if not journey %} (select a journey above){% endif %}</legend>
+      {% if photo_options.status == "ok" %}
+      {% for photo in photo_options.photos %}
+      <label><input type="checkbox" name="picked_paths" value="{{ photo.path }}"> {{ photo.filename }}</label>
+      {% endfor %}
+      {% else %}
+      <p>{{ photo_options.message }}</p>
+      {% endif %}
+    </fieldset>
+    <label>Photo path(s), one per line <textarea name="paths">{{ develop.paths or '' }}</textarea></label>
+    <label>Output directory <input type="text" name="out" value="{{ develop.out or '' }}" required></label>
+    {# The names offered are the catalog's (pipeline/photos/catalog.py), and the
+       server refuses any other by name -- a datalist keeps comma-separated entry
+       while making the real list visible instead of guessed. #}
+    <label>Styles (comma-separated, optional) <input type="text" name="styles" list="style-names" value="{{ develop.styles or '' }}"></label>
+    <datalist id="style-names">
+      {% for style in styles %}
+      <option value="{{ style }}">{{ style }}</option>
+      {% endfor %}
+    </datalist>
+    <label>Look (optional)
+      <select name="look">
+        <option value="">-- none --</option>
+        {% for look in looks %}
+        <option value="{{ look }}" {% if develop.look == look %}selected{% endif %}>{{ look }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Master format
+      <select name="export_format">
+        <option value="" {% if develop.export_format != "tiff16" %}selected{% endif %}>JPEG (default)</option>
+        <option value="tiff16" {% if develop.export_format == "tiff16" %}selected{% endif %}>16-bit TIFF master: larger files, slower</option>
+      </select>
+    </label>
+    {# The numeric film-finish dials are kept, not removed -- they move
+       behind a collapsed Advanced view so the normal path is look-then-launch.
+       The `required` path and output fields deliberately stay OUTSIDE it: a
+       browser cannot focus a required control inside a closed <details>, so
+       hiding them would make the form refuse to submit with nothing shown.
+       Replacing one-path-per-line entry with a picker is follow-up work. #}
+    <details class="advanced-tuning">
+    <summary>Advanced tuning</summary>
+    {# `type="text"`, not `number`: the value that came back is the one that was
+       rejected, and a browser blanks a number input it cannot parse -- which is
+       exactly the field the operator needs to see to spot the typo. #}
+    <label>Vignette (0..1, optional)
+      <input type="text" inputmode="decimal" name="vignette" value="{{ develop.vignette or '' }}">
+    </label>
+    <label>Clarity (-1..1, optional)
+      <input type="text" inputmode="decimal" name="clarity" value="{{ develop.clarity or '' }}">
+    </label>
+    <label>Grain (0..1, optional)
+      <input type="text" inputmode="decimal" name="grain" value="{{ develop.grain or '' }}">
+    </label>
+    <label>Grain size (0.25..4, optional)
+      <input type="text" inputmode="decimal" name="grain_size" value="{{ develop.grain_size or '' }}">
+    </label>
+    <label>Halation (0..1, optional)
+      <input type="text" inputmode="decimal" name="halation" value="{{ develop.halation or '' }}">
+    </label>
+    <label>White balance, green-magenta (-0.5..0.5, optional)
+      <input type="text" inputmode="decimal" name="white_balance_g" value="{{ develop.white_balance_g or '' }}">
+    </label>
+    <label>White balance, red-warm/cool (-0.1..0.1, optional)
+      <input type="text" inputmode="decimal" name="white_balance_r" value="{{ develop.white_balance_r or '' }}">
+    </label>
+    <label>White balance, blue-warm/cool (-0.1..0.1, optional)
+      <input type="text" inputmode="decimal" name="white_balance_b" value="{{ develop.white_balance_b or '' }}">
+    </label>
+    <label>White balance, red highlights only (-0.1..0.1, optional)
+      <input type="text" inputmode="decimal" name="white_balance_r_high" value="{{ develop.white_balance_r_high or '' }}">
+    </label>
+    <label>White balance, blue highlights only (-0.1..0.1, optional)
+      <input type="text" inputmode="decimal" name="white_balance_b_high" value="{{ develop.white_balance_b_high or '' }}">
+    </label>
+    <label>White balance, green highlights only (-0.5..0.5, optional)
+      <input type="text" inputmode="decimal" name="white_balance_g_high" value="{{ develop.white_balance_g_high or '' }}">
+    </label>
+    </details>
+    <button type="submit">Launch develop</button>
+  </form>
+
+  <p><a href="/">Back</a></p>
+{% endblock %}

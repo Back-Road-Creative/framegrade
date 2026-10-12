@@ -1,0 +1,16 @@
+# Optional overlay: a second output root.
+#
+#   docker compose -f docker/console-compose.yaml -f docker/console-extra-output.yaml \
+#     up -d --build gomoveshift-console
+#
+# Use it when runs also write under an output root other than GMS_OUTPUT_DIR:
+# queue rows carry absolute sidecar paths, so a root that is not mounted at the
+# SAME path inside the container makes every such row fail with "could not read
+# sidecar". Read-write, like GMS_OUTPUT_DIR: gate answers are written under
+# <out>/_gates. GMS_VID_OUTPUT_DIR is required once the overlay is used and has
+# no default.
+
+services:
+  gomoveshift-console:
+    volumes:
+      - ${GMS_VID_OUTPUT_DIR:?set GMS_VID_OUTPUT_DIR to the host directory of the second output root}:${GMS_VID_OUTPUT_DIR}

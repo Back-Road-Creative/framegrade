@@ -1,0 +1,82 @@
+{% extends "_base.html" %}
+{% block title %}Drives - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Drives</h1>
+  {% set form = form or {} %}
+  {% if error %}
+  {# Beside the form it belongs to, never on a page of its own. The form
+     below is re-rendered with everything that was submitted, so correcting
+     one field does not mean retyping the other twelve. #}
+  <p class="job-failed" role="alert">{{ error }}</p>
+  {% endif %}
+  <form method="post" action="/drives/run">
+    <label>Brand
+      <select name="brand">
+        {% for b in brands %}
+        <option value="{{ b }}" {% if b == (form.brand or brand) %}selected{% endif %}>{{ b }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Source directory <input type="text" name="directory" value="{{ form.directory or '' }}" required></label>
+    <label>Output directory <input type="text" name="output_dir" value="{{ form.output_dir or '' }}" required></label>
+    <label>Region
+      <select name="region">
+        <option value="">(preserve saved region)</option>
+        <option value="ireland" {% if form.region == "ireland" %}selected{% endif %}>ireland</option>
+        <option value="usa" {% if form.region == "usa" %}selected{% endif %}>usa</option>
+      </select>
+    </label>
+    <label>Publish day
+      <select name="publish">
+        <option value="">(none)</option>
+        {% for day in weekdays %}
+        <option value="{{ day }}" {% if form.publish == day %}selected{% endif %}>{{ day }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Long-form day <small>(--lf-day, the calendar day of footage to assemble)</small>
+      <select name="lf_day">
+        <option value="">(none)</option>
+        {% for day in weekdays %}
+        <option value="{{ day }}" {% if form.lf_day == day %}selected{% endif %}>{{ day }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    {# Defaults ON for a fresh form; a refusal must NOT re-tick one the operator cleared, which would turn a corrected form into a live run. #}
+    <label><input type="checkbox" name="dry_run" {% if form and form.dry_run or not form %}checked{% endif %}> Dry run</label>
+    <label><input type="checkbox" name="no_review" {% if form.no_review %}checked{% endif %}> Skip review (--no-review)</label>
+    <fieldset>
+      <legend>Pipeline flags</legend>
+      <label>Long-form selection mode <small>(--lf-mode)</small>
+        <select name="lf_mode">
+          <option value="">(default)</option>
+          {% for mode in lf_modes %}
+          <option value="{{ mode }}" {% if form.lf_mode == mode %}selected{% endif %}>{{ mode }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Long-form target duration, minutes <small>(--lf-target-duration)</small>
+        <input type="number" step="any" name="lf_target_duration" value="{{ form.lf_target_duration or '' }}">
+      </label>
+      <label><input type="checkbox" name="superlong" {% if form.superlong %}checked{% endif %}> Also produce superlong parts (--superlong)</label>
+      <label>Shorts per long-form (--shorts-target) <input type="number" name="shorts_target" value="{{ form.shorts_target or '' }}"></label>
+      <label>Minimum seconds between shorts (--shorts-gap) <input type="number" step="any" name="shorts_gap" value="{{ form.shorts_gap or '' }}"></label>
+    </fieldset>
+    <button type="submit">Launch</button>
+  </form>
+  <h2>Metadata preview</h2>
+  <form method="get" action="/drives/preview">
+    <label>Output folder of the run to preview <input type="text" name="output_dir"
+      required></label>
+    <button type="submit">Preview metadata</button>
+  </form>
+  <h2>Pending gate</h2>
+  <p><a href="/drives/gates/pending">List all pending gates</a></p>
+  <form method="get" action="/drives/gates">
+    <label>Output folder of the run <input type="text" name="output_dir" required></label>
+    <label>Day of the run, as the gate file names it (e.g. 2026-08-01)
+      <input type="text" name="date_key" required></label>
+    <button type="submit">Check gate</button>
+  </form>
+  <p><a href="/">Back</a></p>
+{% endblock %}
