@@ -199,3 +199,51 @@ def test_no_geocoder_means_no_invented_chapters(tmp_path, caplog):
     assert any("chapter floor" in r.getMessage() for r in caplog.records), [
         r.getMessage() for r in caplog.records
     ]
+
+
+def test_overpass_down_fallback_spreads_samples_and_leaves_budget_for_the_floor():
+    """Overpass down on a 61 min LF: the Nominatim fallback must sample the whole
+    drive inside the session budget and leave requests for the floor top-up.
+
+    It used to geocode one sample per 30 s from the start, so 122 samples burned
+    all 50 requests in the drive's first 25 minutes: the back half had no names
+    and the top-up's road lookups came back empty, leaving 2 of 4 middle chapters.
+    """
+    from types import SimpleNamespace
+
+    from gomoveshift.pipeline.chapters.nominatim_source import NominatimChapterSource
+
+    gps_seconds = 3660
+    start = datetime(2000, 1, 1, 9, 0, 0)
+    waypoints = [
+        SimpleNamespace(
+            latitude=40.1 + s / 100000,
+            longitude=-80.2,
+            location=None,
+            timestamp=start + timedelta(seconds=s),
+        )
+        for s in range(0, gps_seconds + 1, 5)
+    ]
+    geocoder = MagicMock()
+    geocoder.reverse_geocode.side_effect = lambda lat, lon: Location(
+        latitude=lat, longitude=lon, city=f"Townland {lat:.5f}"
+    )
+    source = NominatimChapterSource(geocoder=geocoder, cache=None)
+
+    geocoded = source.geocode_fallback(
+        SimpleNamespace(waypoints=waypoints),
+        float(gps_seconds),
+        float(gps_seconds),
+        lambda g, _gd, _od: g,
+        lambda t: t,
+        lambda _name: True,
+    )
+
+    left = source.MAX_SESSION_REQUESTS - source.session_request_count
+    assert left >= source.MAX_SESSION_REQUESTS // 2, (
+        f"fallback left {left} Nominatim requests for the floor top-up"
+    )
+    times = [t for t, _ in geocoded]
+    assert times and max(times) >= 0.75 * gps_seconds, (
+        f"last fallback sample at {max(times, default=0):.0f}s of a {gps_seconds}s drive"
+    )
