@@ -55,7 +55,12 @@ def test_upsert_derives_slot_and_averages_repeats(tmp_path, conn):
 
     assert folded == 2
     (slot,) = slots_ranked(conn, region="Portfable", platform="youtube", min_n=1)
-    assert (slot.region, slot.platform, slot.weekday, slot.hour_local) == ("Portfable", "youtube", 1, 14)
+    assert (slot.region, slot.platform, slot.weekday, slot.hour_local) == (
+        "Portfable",
+        "youtube",
+        1,
+        14,
+    )
     assert slot.n == 2
     assert slot.mean_views == pytest.approx(200.0)
     assert slot.mean_engagement == pytest.approx(0.15)
@@ -70,7 +75,9 @@ def test_upsert_derives_slot_and_averages_repeats(tmp_path, conn):
 )
 def test_upsert_skips_unresolvable_rows(tmp_path, conn, sidecar_lookup_factory, short_index):
     sidecar = _sidecar(
-        tmp_path, "proj", [_entry(1, "2026-09-01T18:00:00+00:00", "America/New_York", ["Portfable"])]
+        tmp_path,
+        "proj",
+        [_entry(1, "2026-09-01T18:00:00+00:00", "America/New_York", ["Portfable"])],
     )
     rows = [MetricRow("proj", short_index, "youtube", 999, 0.5)]
 
