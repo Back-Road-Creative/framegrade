@@ -8,6 +8,7 @@ skipped only when ffmpeg is genuinely absent.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 
@@ -57,11 +58,20 @@ def test_probe_needs_both_vidstab_filters():
 
 
 def test_probe_matches_expected_ffmpeg_capabilities():
-    """The test environment's ffmpeg is expected to have deflicker and to
-    lack vidstab. If this ever flips, the whole refusal path is untested."""
+    """The real probe agrees with this ffmpeg's own filter list.
+
+    Builds differ on libvidstab (the host build lacks it, stock and static
+    builds ship it), so the expectation is read from ``ffmpeg -filters``
+    independently rather than pinned; the refusal path is covered by the
+    fake-``run`` tests above whichever build is installed.
+    """
     caps = stabilize.probe_ffmpeg_filters()
+    listed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, check=True
+    ).stdout
+    names = {m.group(1) for m in re.finditer(r"^ \S+ +(\S+) ", listed, re.M)}
     assert caps.has_deflicker
-    assert not caps.has_vidstab
+    assert caps.has_vidstab == ({"vidstabdetect", "vidstabtransform"} <= names)
 
 
 # ── require_vidstab / refusal ─────────────────────────────────────────────
