@@ -410,10 +410,10 @@ class _StubScorer:
 
         return UnifiedSegmentScorer.merge_file_scores(self, file_scores, file_durations)
 
-    def save_scores(self, scores, path, metadata):
+    def save_scores(self, scores, path, metadata, extra=None):
         from gomoveshift.analysis.unified_scorer import UnifiedSegmentScorer
 
-        UnifiedSegmentScorer.save_scores(self, scores, path, metadata)
+        UnifiedSegmentScorer.save_scores(self, scores, path, metadata, extra)
 
     def load_scores(self, path):
         from gomoveshift.analysis.unified_scorer import UnifiedSegmentScorer

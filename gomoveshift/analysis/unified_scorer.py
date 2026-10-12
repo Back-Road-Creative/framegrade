@@ -611,6 +611,7 @@ class UnifiedSegmentScorer:
         scores: np.ndarray,
         path: Path,
         metadata: dict,
+        extra: dict[str, np.ndarray] | None = None,
     ) -> None:
         """Save scores to .npz with JSON metadata sidecar.
 
@@ -618,8 +619,10 @@ class UnifiedSegmentScorer:
             scores: Score array (shape (N, 9)).
             path: Output path (should end in .npz).
             metadata: Dict of metadata (total_duration, num_files, etc.).
+            extra: Optional named arrays written beside ``scores`` in the same
+                ``np.savez_compressed`` call (e.g. ``source_sharpness``).
         """
-        np.savez_compressed(path, scores=scores)
+        np.savez_compressed(path, scores=scores, **(extra or {}))
 
         # Save metadata sidecar
         meta_path = path.with_suffix(".json")

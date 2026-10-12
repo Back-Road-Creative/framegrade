@@ -17,6 +17,8 @@ from typing import Dict, List
 import cv2
 import numpy as np
 
+from ..quality import sharpness_score
+
 #: Bounds the Laplacian/pHash pass on a full-res photo (mirrors
 #: ``thumbnail_generator.SHARPNESS_MAX_DIM``): sharpness and the perceptual
 #: hash are both low-frequency-ish properties, so a downscale costs nothing
@@ -119,7 +121,7 @@ def _bounded_gray(rgb: np.ndarray) -> np.ndarray:
 
 
 def _sharpness(gray: np.ndarray) -> float:
-    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    return sharpness_score(gray)
 
 
 def _exposure_clip(gray: np.ndarray) -> tuple[float, float]:

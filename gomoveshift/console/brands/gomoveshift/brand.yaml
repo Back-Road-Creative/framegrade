@@ -1,0 +1,31 @@
+# Example seed profile for the public tree. The pipeline reads this file at import
+# time as its starting publish cadence and media defaults; replace it with your own
+# brand's profile.
+
+# The engine's defaults, stated explicitly (publishing/brand_policy.py MediaProfile).
+media:
+  font: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+  brand_text: GoMoveShift
+  website_text: gomoveshift.com
+  still_card_style: letterbox
+  upscale: "off"
+  claim_native_resolution_only: true
+
+# Each region's shorts_times is every hour its shorts post at; each long-form
+# day's drive takes its share (the last long-form day takes the earliest hours).
+seo:
+  cadence:
+    timezone: America/New_York
+    lead_hours: 72
+    superlong_day: sat
+    regions:
+      ireland:
+        dow: [sun]
+        time: "14:00"
+        shorts_times: ["08:00", "12:00"]
+      usa:
+        dow: [tue, fri]
+        time: "16:00"
+        day_times:
+          fri: "15:00"
+        shorts_times: ["10:00", "14:00", "16:00", "18:00"]

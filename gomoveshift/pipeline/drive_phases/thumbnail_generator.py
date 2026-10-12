@@ -35,6 +35,7 @@ import numpy as np
 from PIL import Image
 
 from ..encoding_constants import LONGFORM_COLOR_RANGE
+from ..quality import sharpness_score
 
 logger = logging.getLogger(__name__)
 
@@ -203,11 +204,7 @@ def probe_frame_quality(video_path: str, timestamp: float) -> Optional[FrameQual
 
     if a.size == 0:
         return None
-    # 4-neighbour Laplacian: variance is cv2.Laplacian(...).var(), no cv2 dep.
-    sharpness = 0.0
-    if a.shape[0] > 2 and a.shape[1] > 2:
-        lap = 4.0 * a[1:-1, 1:-1] - a[:-2, 1:-1] - a[2:, 1:-1] - a[1:-1, :-2] - a[1:-1, 2:]
-        sharpness = float(lap.var())
+    sharpness = sharpness_score(a) if a.shape[0] > 2 and a.shape[1] > 2 else 0.0
     return FrameQuality(
         brightness=float(a.mean()),
         sharpness=sharpness,

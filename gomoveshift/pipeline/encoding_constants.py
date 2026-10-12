@@ -251,4 +251,18 @@ RENDITIONS: dict[str, Rendition] = {
         audio=True,
         min_bitrate_kbps=SHORTS_MIN_BITRATE,
     ),
+    # Route Story full4k (Framegrade T1): the SAME 3840x2160 frame as
+    # drive_longform_4k, with the film's audio kept. Floor matches that row's
+    # LONGFORM_MIN_BITRATE_4K (40 Mbps), the only 4K floor in this file.
+    "route_story_full4k": Rendition(
+        width=3840,
+        height=2160,
+        max_seconds=None,
+        max_bytes=None,
+        fps=None,
+        codec="hevc",
+        faststart=True,
+        audio=True,
+        min_bitrate_kbps=LONGFORM_MIN_BITRATE_4K,
+    ),
 }

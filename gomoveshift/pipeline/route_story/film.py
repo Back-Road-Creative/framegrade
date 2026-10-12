@@ -26,7 +26,7 @@ import tempfile
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from PIL import Image
 
@@ -60,7 +60,7 @@ from .assembly import (
 from .beats import beats_receipt, extract_beats
 from .bundle import _sha256_file
 from .continuity import analyze_rendered_continuity
-from .delivery import check_delivery
+from .delivery import HEVC_PIXEL_FORMAT, check_delivery
 from .display_track import SmoothedTrack, smooth_display_segments
 from .encode import encode_final
 from .frame_qa import FrameQaError, FrameQaLedger, save_refusal_evidence
@@ -1214,6 +1214,36 @@ def render_route_story_film(
 DELIVERY_WIDTH = 1920
 DELIVERY_HEIGHT = 1080
 DELIVERY_FPS = 30
+
+
+_CODEC_FAMILY = {"hevc": "hevc", "h264": "h264"}
+
+
+def build_rendition_check(preset: Any, delivered: Mapping[str, Any]) -> dict[str, bool] | None:
+    """Record-only: does the delivered file match ``preset``'s rendition of record?
+
+    ``None`` when the preset names no rendition. ``codec_ok`` is recorded only
+    for a preset whose delivery encode is HEVC (``hevc_delivery``): social
+    names an hevc row but ships libx264, so a codec comparison there would
+    record a mismatch that is not one.
+    """
+    if preset.rendition is None:
+        return None
+    rendition_of_record = RENDITIONS[preset.rendition]
+    video_info = delivered.get("video") or {}
+    duration = delivered.get("duration_s") or 0.0
+    check = {
+        "audio_stream": delivered.get("audio") is not None,
+        "size_ok": (video_info.get("width"), video_info.get("height"))
+        == (rendition_of_record.width, rendition_of_record.height),
+        "within_ceiling": rendition_of_record.max_seconds is None
+        or duration <= rendition_of_record.max_seconds,
+    }
+    if preset.hevc_delivery:
+        check["codec_ok"] = video_info.get("codec") == _CODEC_FAMILY.get(
+            rendition_of_record.codec, rendition_of_record.codec
+        )
+    return check
 
 
 def _report_qa_faults(
@@ -2475,7 +2505,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_speed_mps=activity_profile.max_speed_mps,
         )
         try:
-            encode_final(assembled, args.output)
+            if preset.hevc_delivery:
+                encode_final(assembled, args.output, rendition=preset.rendition)
+            else:
+                encode_final(assembled, args.output)
         finally:
             assembled.unlink(missing_ok=True)
     finally:
@@ -2489,7 +2522,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             map_renderer.close()
         if scene_capture is not None:
             scene_capture.__exit__(None, None, None)
-    delivered = check_delivery(args.output, width=args.width, height=args.height, fps=args.fps)
+    delivery_spec: dict[str, str] = {}
+    if preset.hevc_delivery:
+        delivery_spec = {
+            "expected_codec": RENDITIONS[preset.rendition].codec,
+            "expected_pix_fmt": HEVC_PIXEL_FORMAT,
+        }
+    delivered = check_delivery(
+        args.output, width=args.width, height=args.height, fps=args.fps, **delivery_spec
+    )
     delivered = _delivery_continuity(args.output, args.fps, timeline, delivered)
     _review_motion_clips(
         review_pack_dir,
@@ -2503,18 +2544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # rendition of record -- no second encode; encode_final() above is the
     # only delivery encode. When the preset names no rendition (full), this
     # stays None and the receipt carries no rendition_check key.
-    rendition_check: dict[str, bool] | None = None
-    if preset.rendition is not None:
-        rendition_of_record = RENDITIONS[preset.rendition]
-        video_info = delivered.get("video") or {}
-        duration = delivered.get("duration_s") or 0.0
-        rendition_check = {
-            "audio_stream": delivered.get("audio") is not None,
-            "size_ok": (video_info.get("width"), video_info.get("height"))
-            == (rendition_of_record.width, rendition_of_record.height),
-            "within_ceiling": rendition_of_record.max_seconds is None
-            or duration <= rendition_of_record.max_seconds,
-        }
+    rendition_check = build_rendition_check(preset, delivered)
 
     # A social (9:16) cut has no long-form upload to sit beside -- only the
     # full preset gets a thumbnail, even when --thumbnail was passed.

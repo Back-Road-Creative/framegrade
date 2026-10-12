@@ -1,9 +1,11 @@
 """Phase A: Ingest & Analyze — scan GoPro files, score episodes, derive OST."""
 
 import logging
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from ...analysis.gps_parser import parse_gpx_file
@@ -31,6 +33,12 @@ from ..ingest import (
 )
 from ..ost_overrides import apply_overrides, load_overrides
 from ..ost_validator import validate_ost
+from ..quality import (
+    SHARPEN_DETAIL_MAX_DIM,
+    SOURCE_SHARPNESS_FLOOR,
+    SOURCE_SHARPNESS_SAMPLES,
+    sharpness_score,
+)
 from ..route_profile import build_route_profile
 
 logger = logging.getLogger(__name__)
@@ -105,6 +113,59 @@ def _assert_no_scored_gaps(valid_episodes: list, file_scores: list) -> None:
                 "merge a scored-timeline gap; investigate the source file instead of "
                 "silently concatenating nothing."
             )
+
+
+def _sample_source_sharpness(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES) -> list:
+    """Sharpness of ``n`` evenly spaced frames of one source (undecodable frames dropped).
+
+    The scorer keeps no frames, so each sample is one reduced-size ffmpeg
+    extraction. Every value comes from ``quality.sharpness_score``.
+    """
+    values = []
+    for i in range(n):
+        ts = max(duration, 0.0) * (i + 0.5) / n
+        cmd = [
+            "ffmpeg", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", str(path),
+            "-frames:v", "1", "-vf", f"scale={int(SHARPEN_DETAIL_MAX_DIM)}:-2",
+            "-f", "image2pipe", "-c:v", "png", "-",
+        ]  # fmt: skip
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode != 0 or not r.stdout:
+            continue
+        gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray is not None:
+            values.append(sharpness_score(gray))
+    return values
+
+
+def _json_safe_sharpness(values) -> list:
+    """Per-source medians as floats; an unmeasured (NaN) source becomes ``None``."""
+    return [None if np.isnan(v) else float(v) for v in values]
+
+
+def _assert_sources_sharp(valid_episodes: list, per_source: list) -> list:
+    """Median sharpness per source; hard-fail on a soft one before anything merges.
+
+    A source with no decodable sample is recorded as NaN (the scored-gap gate
+    owns undecodable footage); it is never silently passed off as sharp.
+    """
+    medians = []
+    for ep, samples in zip(valid_episodes, per_source):
+        median = float(np.median(samples)) if samples else float("nan")
+        medians.append(median)
+        if samples and median < SOURCE_SHARPNESS_FLOOR:
+            raise RuntimeError(
+                f"PHASE-A: source {Path(str(ep.concat_path)).name} is soft: median "
+                f"sharpness {median:.1f} < floor {SOURCE_SHARPNESS_FLOOR:.1f} "
+                f"(samples: {', '.join(f'{v:.1f}' for v in samples)}). Refusing to "
+                "merge a source that cannot be graded sharp; re-shoot or replace it."
+            )
+        if not samples:
+            logger.warning("  Source %s: no frame decoded for sharpness", ep.concat_path)
+    return medians
 
 
 class PhaseA:
@@ -358,25 +419,35 @@ class PhaseA:
             try:
                 cached_scores, cached_meta = scorer.load_scores(scores_path)
                 cached_key = cached_meta.get("score_inputs")
+                with np.load(scores_path) as npz:
+                    cached_sharpness = (
+                        npz["source_sharpness"] if "source_sharpness" in npz else None
+                    )
             except Exception as e:  # corrupt npz / unreadable sidecar
                 logger.warning("  resume: cached drive_scores.npz unreadable (%s) -- re-scoring", e)
             else:
-                if cached_key == current_key and len(cached_scores) > 0:
+                if cached_sharpness is None or len(cached_sharpness) != len(episode_files):
+                    logger.info(
+                        "  resume: cached drive_scores.npz has no usable source_sharpness -- re-scoring"
+                    )
+                elif cached_key == current_key and len(cached_scores) > 0:
                     logger.info("  resume: reusing cached drive_scores.npz, skipping re-score")
                     state.episode_files = episode_files
                     state.gpx_files = gpx_files
                     state.gps_per_episode = gps_per_episode
                     state.drive_scores = cached_scores
+                    state.source_sharpness = _json_safe_sharpness(cached_sharpness)
                     state.file_boundaries = file_boundaries
                     state.file_durations = file_durations
                     state.episode_dates = episode_dates
                     return
-                logger.info(
-                    "  resume: cached drive_scores.npz inputs changed -- re-scoring "
-                    "(cached %d episodes, current %d)",
-                    len(cached_key) if isinstance(cached_key, list) else -1,
-                    len(current_key),
-                )
+                else:
+                    logger.info(
+                        "  resume: cached drive_scores.npz inputs changed -- re-scoring "
+                        "(cached %d episodes, current %d)",
+                        len(cached_key) if isinstance(cached_key, list) else -1,
+                        len(current_key),
+                    )
 
         # --label-dry-run / --list-lfs in full_drive mode never needs the
         # real (GPU frame-decode) scoring pass -- full_drive's LF-per-day (or K balanced parts)
@@ -439,6 +510,18 @@ class PhaseA:
         # Refuse to merge a scored-timeline gap from a failed episode score.
         _assert_no_scored_gaps(valid_episodes, file_scores)
 
+        # Source picture gate -- measured per source, refused before the merge.
+        # labels_only dry runs never score, so they never gate either.
+        source_sharpness: list = []
+        if not labels_only_skip_scoring:
+            source_sharpness = _assert_sources_sharp(
+                valid_episodes,
+                [
+                    _sample_source_sharpness(ep.concat_path, ep.total_duration)
+                    for ep in valid_episodes
+                ],
+            )
+
         # Log suggested action for dead-zone episodes
         for i, ep in enumerate(valid_episodes):
             ep_width, ep_height = 3840, 2160
@@ -497,13 +580,16 @@ class PhaseA:
                     "total_duration": sum(file_durations),
                     "file_durations": file_durations,
                     "score_inputs": current_key,
+                    "source_sharpness": _json_safe_sharpness(source_sharpness),
                 },
+                extra={"source_sharpness": np.asarray(source_sharpness, dtype=np.float64)},
             )
 
         state.episode_files = episode_files
         state.gpx_files = gpx_files
         state.gps_per_episode = gps_per_episode
         state.drive_scores = drive_scores
+        state.source_sharpness = _json_safe_sharpness(source_sharpness)
         state.file_boundaries = file_boundaries
         state.file_durations = file_durations
         state.episode_dates = episode_dates

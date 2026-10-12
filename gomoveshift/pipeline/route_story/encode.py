@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..audio_profile import AudioProfile, LicenceLedger, resolve_bed
+from ..color_filters import NVENCUnavailableError, detect_nvenc
 from ..encoding_constants import RENDITIONS
 from ..journal_publisher import ffprobe_duration_seconds
 from ..loudnorm_measure import (
@@ -39,6 +40,32 @@ _CODEC_ENCODERS = {"hevc": "libx265"}
 
 class RenditionCeilingError(Exception):
     """A rendition's own ceiling (e.g. max_seconds) can't be met by this master."""
+
+
+_BT709_TAGS = [
+    "-color_range",
+    "tv",
+    "-colorspace",
+    "bt709",
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "bt709",
+]
+
+
+def _hevc_video_args() -> list[str]:
+    """10-bit HEVC delivery args: hevc_nvenc, or libx265 when the GPU probe fails."""
+    try:
+        has_nvenc = detect_nvenc()
+    except NVENCUnavailableError:
+        has_nvenc = False
+    if has_nvenc:
+        head = ["-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "18"]
+    else:
+        logger.warning("NVENC unavailable; full4k film falls back to libx265 (CPU)")
+        head = ["-c:v", "libx265", "-preset", "slow", "-crf", "18"]
+    return [*head, "-pix_fmt", "p010le", "-profile:v", "main10", *_BT709_TAGS]
 
 
 def _attenuate_filter(source: Path) -> str:
@@ -80,6 +107,7 @@ def encode_final(
     *,
     audio_profile: AudioProfile | None = None,
     ledger: LicenceLedger | None = None,
+    rendition: str | None = None,
 ) -> dict[str, Any] | None:
     """Single-pass delivery encode: crf 18, preset slow, BT.709 tags, attenuate-only audio.
 
@@ -97,6 +125,11 @@ def encode_final(
     licence}``) for the caller to pass to :func:`write_publish_json`, or
     ``None`` when no bed was mixed in -- in which case the command is
     byte-identical to the no-profile path.
+
+    ``rendition`` names a ``RENDITIONS`` row; when its codec is ``hevc`` the
+    video leg is hevc_nvenc (libx265 when ``detect_nvenc`` finds no GPU)
+    instead of libx264. ``None`` (full, social) keeps the libx264 command
+    byte-identical to the pre-preset one.
     """
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -143,30 +176,33 @@ def encode_final(
             "-map",
             "[aout]",
         ]
-    cmd += [
-        "-c:v",
-        "libx264",
-        "-crf",
-        "18",
-        "-preset",
-        "slow",
-        "-pix_fmt",
-        "yuv420p",
-        "-color_range",
-        "tv",
-        "-colorspace",
-        "bt709",
-        "-color_primaries",
-        "bt709",
-        "-color_trc",
-        "bt709",
-        # libx264 needs the VUI flags spelled out via -x264-params too --
-        # the top-level -color_* options alone tag the container but
-        # leave color_primaries/color_transfer "unknown" in the encoded
-        # stream itself, which is what any downstream probe reads.
-        "-x264-params",
-        "colorprim=bt709:transfer=bt709:colormatrix=bt709",
-    ]
+    if rendition is not None and RENDITIONS[rendition].codec == "hevc":
+        cmd += _hevc_video_args()
+    else:
+        cmd += [
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-preset",
+            "slow",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_range",
+            "tv",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            # libx264 needs the VUI flags spelled out via -x264-params too --
+            # the top-level -color_* options alone tag the container but
+            # leave color_primaries/color_transfer "unknown" in the encoded
+            # stream itself, which is what any downstream probe reads.
+            "-x264-params",
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+        ]
     if bed_path is None:
         cmd += ["-af", audio_filter]
     cmd += [

@@ -21,6 +21,8 @@ from ..validation.longform_validator import color_tag_issues
 
 VIDEO_CODEC = "h264"
 PIXEL_FORMAT = "yuv420p"
+# What ffprobe reports for the 10-bit (p010le) HEVC delivery encode.
+HEVC_PIXEL_FORMAT = "yuv420p10le"
 AUDIO_CODEC = "aac"
 AUDIO_SAMPLE_RATE = 48000
 AUDIO_CHANNELS = 2
@@ -46,6 +48,8 @@ def check_delivery(
     height: int,
     fps: int,
     runner: Runner = subprocess.run,
+    expected_codec: str = VIDEO_CODEC,
+    expected_pix_fmt: str = PIXEL_FORMAT,
 ) -> dict[str, Any]:
     """Return what the delivered film measures as, and every way it misses the spec.
 
@@ -67,7 +71,11 @@ def check_delivery(
     if video is None:
         issues.append("the delivered file has no video stream")
     else:
-        issues.extend(_video_issues(video, report, width, height, fps, duration))
+        issues.extend(
+            _video_issues(
+                video, report, width, height, fps, duration, expected_codec, expected_pix_fmt
+            )
+        )
     audio = [s for s in streams if s.get("codec_type") == "audio"]
     if len(audio) != 1:
         issues.append(f"expected one audio stream, found {len(audio)}")
@@ -103,6 +111,8 @@ def _video_issues(
     height: int,
     fps: int,
     duration: float,
+    expected_codec: str = VIDEO_CODEC,
+    expected_pix_fmt: str = PIXEL_FORMAT,
 ) -> list[str]:
     issues: list[str] = []
     try:
@@ -118,16 +128,16 @@ def _video_issues(
         "fps": rate,
         "frames": frames,
     }
-    if video.get("codec_name") != VIDEO_CODEC:
-        issues.append(f"video codec is {video.get('codec_name')}, expected {VIDEO_CODEC}")
+    if video.get("codec_name") != expected_codec:
+        issues.append(f"video codec is {video.get('codec_name')}, expected {expected_codec}")
     if (video.get("width"), video.get("height")) != (width, height):
         issues.append(
             f"video is {video.get('width')}x{video.get('height')}, expected {width}x{height}"
         )
     if abs(rate - fps) > 1e-6:
         issues.append(f"frame rate is {rate:g} fps, expected {fps}")
-    if video.get("pix_fmt") != PIXEL_FORMAT:
-        issues.append(f"pixel format is {video.get('pix_fmt')}, expected {PIXEL_FORMAT}")
+    if video.get("pix_fmt") != expected_pix_fmt:
+        issues.append(f"pixel format is {video.get('pix_fmt')}, expected {expected_pix_fmt}")
     issues.extend(color_tag_issues(video))
     expected_frames = round(duration * fps)
     if abs(frames - expected_frames) > 1:
