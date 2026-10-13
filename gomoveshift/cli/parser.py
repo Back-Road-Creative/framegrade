@@ -703,8 +703,9 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         const=True,
         default=None,
         help="Retain per-day LF/short work files (segments, with_montage, "
-        ".lf_XX_work, short_XX_raw). Default is to purge these after each "
-        "day's finals are emitted — set this for debug / re-render scenarios. "
+        ".lf_XX_work, short_XX_raw). Default is to purge each long-form's "
+        "work files once its final is burned, and the rest after each day's "
+        "finals are emitted — set this for debug / re-render scenarios. "
         "Argparse-sentinel (default None): a saved opt-out survives a resume "
         "that doesn't re-pass the flag.",
     )

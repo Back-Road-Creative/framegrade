@@ -536,6 +536,70 @@ def finalized_superlong_count(day_dir: Path) -> int:
     return len(_finalized_indices(Path(day_dir) / "superlong", _SUPERLONG_FINAL_RE))
 
 
+def _purge_lf_work(lf_dir: Path, idx: str, summary: Dict[str, int]) -> None:
+    """Delete one finalized LF's work files, adding to ``summary``.
+
+    ``idx`` is the 2-digit index; the caller has verified ``lf_{idx}.mp4``.
+    """
+    for name in (f"lf_{idx}_segments.mp4", f"lf_{idx}_with_montage.mp4"):
+        path = lf_dir / name
+        try:
+            size = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            continue
+        if size == 0 and not path.is_file():
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("  purge: failed to delete %s: %s", path, exc)
+            continue
+        summary["files_deleted"] += 1
+        summary["bytes_freed"] += size
+        logger.debug("  purge: removed %s (%d bytes)", path, size)
+
+    work = lf_dir / f".lf_{idx}_work"
+    if work.is_dir():
+        try:
+            work_size = sum(f.stat().st_size for f in work.rglob("*") if f.is_file())
+        except OSError:
+            work_size = 0
+        try:
+            shutil.rmtree(work)
+        except OSError as exc:
+            logger.warning("  purge: failed to remove %s: %s", work, exc)
+            return
+        summary["dirs_deleted"] += 1
+        summary["bytes_freed"] += work_size
+        logger.debug("  purge: removed %s (%d bytes)", work, work_size)
+
+
+def purge_lf_intermediates(day_dir: Path, lf_index: int) -> Dict[str, int]:
+    """Remove ONE long-form's work files once its final exists.
+
+    Called by ``run_day_pipeline`` right after an LF's burn is fingerprinted,
+    so a multi-part day holds one LF's working set at a time instead of every
+    part's until day end (a 133-minute two-part day needed ~233 GB the old
+    way, ~124 GB this way). Same targets and same gate as the LF half of
+    ``purge_day_intermediates``: ``regular_lfs/lf_XX.mp4`` must exist with
+    non-zero size, else nothing is touched.
+
+    Returns ``{"files_deleted", "dirs_deleted", "bytes_freed"}``.
+    """
+    summary = {"files_deleted": 0, "dirs_deleted": 0, "bytes_freed": 0}
+    lf_dir = Path(day_dir) / "regular_lfs"
+    idx = f"{int(lf_index):02d}"
+    if idx in _finalized_indices(lf_dir, _LF_FINAL_RE):
+        _purge_lf_work(lf_dir, idx, summary)
+        if summary["bytes_freed"]:
+            logger.info(
+                "  purge: LF %s work files released (%.2f GB)",
+                idx,
+                summary["bytes_freed"] / 1_073_741_824,
+            )
+    return summary
+
+
 def purge_day_intermediates(day_dir: Path) -> Dict[str, int]:
     """Remove LF + short work files for a single day once finals exist.
 
@@ -576,37 +640,7 @@ def purge_day_intermediates(day_dir: Path) -> Dict[str, int]:
     sl_ready = _finalized_indices(sl_dir, _SUPERLONG_FINAL_RE)
 
     for idx in lf_ready:
-        for name in (f"lf_{idx}_segments.mp4", f"lf_{idx}_with_montage.mp4"):
-            path = lf_dir / name
-            try:
-                size = path.stat().st_size if path.is_file() else 0
-            except OSError:
-                continue
-            if size == 0 and not path.is_file():
-                continue
-            try:
-                path.unlink()
-            except OSError as exc:
-                logger.warning("  purge: failed to delete %s: %s", path, exc)
-                continue
-            summary["files_deleted"] += 1
-            summary["bytes_freed"] += size
-            logger.debug("  purge: removed %s (%d bytes)", path, size)
-
-        work = lf_dir / f".lf_{idx}_work"
-        if work.is_dir():
-            try:
-                work_size = sum(f.stat().st_size for f in work.rglob("*") if f.is_file())
-            except OSError:
-                work_size = 0
-            try:
-                shutil.rmtree(work)
-            except OSError as exc:
-                logger.warning("  purge: failed to remove %s: %s", work, exc)
-                continue
-            summary["dirs_deleted"] += 1
-            summary["bytes_freed"] += work_size
-            logger.debug("  purge: removed %s (%d bytes)", work, work_size)
+        _purge_lf_work(lf_dir, idx, summary)
 
     for idx in short_ready:
         path = shorts_dir / f"short_{idx}_raw.mp4"
