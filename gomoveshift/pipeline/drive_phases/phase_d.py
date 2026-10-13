@@ -451,6 +451,7 @@ def _build_included_segments_by_episode_for_lf(
 # Both re-exported so existing call sites + test patch targets keep resolving.
 from .phase_d_gates import (  # noqa: E402,F401
     _assert_shorts_quality_gate,
+    _lf_picture_inputs,
     _run_final_validation_gate,
     _run_sidecar_integrity_gate,
 )
@@ -1263,6 +1264,7 @@ class PhaseD:
             drive_plan=drive_plan,
             regular_lf_paths=regular_lf_paths,
             metadata_per_lf=metadata_per_lf,
+            picture_inputs=_lf_picture_inputs(state),
         )
 
         # ── Gate C/D human review — UPSTREAM of every upload ──────────
