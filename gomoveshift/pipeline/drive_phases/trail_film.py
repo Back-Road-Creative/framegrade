@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import fs_safety
 from ..media_api import Deliverables, TrailFilm
 from ..route_story.preflight import TerrainRendererUnavailableError
 
@@ -162,7 +163,7 @@ def _stage_day_photos(pool: Path, stage: Path, gpx: Path, day: str, steps: Trail
             try:
                 os.symlink(photo.resolve(), stage / photo.name)
             except OSError:
-                shutil.copy2(photo, stage / photo.name)
+                fs_safety.safe_copy(photo, stage / photo.name)
     if undated:
         logger.warning(
             "  trail: %d photo(s) in %s have no zoned capture time and cannot be placed on %s: %s",
