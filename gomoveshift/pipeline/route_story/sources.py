@@ -20,7 +20,7 @@ import numpy as np
 import tifffile
 from PIL import Image
 
-from ..chapters.overpass_source import OVERPASS_ENDPOINTS
+from ..overpass_source import OVERPASS_ENDPOINTS
 from .scene.vendor import MAPLIBRE_URL
 
 _DEM_URL = (

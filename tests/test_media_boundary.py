@@ -82,9 +82,6 @@ ALLOWLIST: dict[str, str] = {
     "pipeline/route_story/metadata.py": (
         "imports pipeline.longform_metadata; cut by moving the metadata step out of the engine"
     ),
-    "pipeline/route_story/sources.py": (
-        "imports pipeline.chapters.overpass_source; cut by moving the overpass source into the GPS library"
-    ),
     "pipeline/trail_opening.py": (
         "imports console.settings, publishing.brand_policy (the opening burn loads the brand's MediaProfile when the phases pass none); cut by handing the opening its profile (the phases hand the opening a MediaProfile)"
     ),
