@@ -113,3 +113,36 @@ def test_engine_modules_do_not_import_publish_side_helpers():
         ):
             assert f"import {banned}" not in src and f"from {banned}" not in src, (mod, banned)
             assert f"from ..{banned}" not in src and f"from .{banned}" not in src, (mod, banned)
+
+
+def test_drive_orchestrator_builds_the_kit_and_hands_it_to_phase_bc(monkeypatch):
+    """The production composition root threads a kit into Phase B/C.
+
+    The conftest autouse fixture supplies the real kit whenever a test passes none,
+    so only this opted-out test would catch ``DrivePipelineOrchestrator`` dropping
+    the ``title_kit=`` argument.
+    """
+    from gomoveshift.pipeline import drive_orchestrator
+
+    sentinel = MagicMock(name="kit")
+    built = []
+
+    def fake_build():
+        built.append(1)
+        return sentinel
+
+    monkeypatch.setattr(drive_orchestrator, "build_title_kit", fake_build)
+    orch = drive_orchestrator.DrivePipelineOrchestrator(MagicMock())
+    assert built == [1]
+    assert orch._phases["phase_bc_day_first"].title_kit is sentinel
+
+
+def test_drive_orchestrator_default_kit_is_the_real_gms_kit():
+    from gomoveshift.pipeline import drive_orchestrator
+
+    kit = (
+        drive_orchestrator.DrivePipelineOrchestrator(MagicMock())
+        ._phases["phase_bc_day_first"]
+        .title_kit
+    )
+    assert isinstance(kit, TitleKit)
