@@ -36,6 +36,10 @@ class FilmPreset:
     max_photos: int | None
     max_seconds: float | None
     rendition: str | None
+    # True only when ``encode_final`` must encode the rendition's codec (hevc)
+    # rather than the pre-preset libx264. ``social`` names an hevc rendition
+    # but still ships libx264, so the rendition codec alone cannot decide.
+    hevc_delivery: bool = False
 
 
 # These mirror film.py's pre-preset literals (DELIVERY_WIDTH/HEIGHT,
@@ -74,7 +78,24 @@ SOCIAL = FilmPreset(
     rendition="route_story_short",
 )
 
-PRESETS: dict[str, FilmPreset] = {"full": FULL, "social": SOCIAL}
+# Framegrade T1: FULL's pacing at 3840x2160, encoded as HEVC through the
+# route_story_full4k rendition. Stills, map and intro/recap frames are
+# rendered at this size (film.main hands args.width/height to every renderer).
+FULL4K = FilmPreset(
+    name="full4k",
+    width=3840,
+    height=2160,
+    intro_seconds=FULL.intro_seconds,
+    recap_seconds=FULL.recap_seconds,
+    photo_seconds=FULL.photo_seconds,
+    map_seconds=FULL.map_seconds,
+    max_photos=FULL.max_photos,
+    max_seconds=FULL.max_seconds,
+    rendition="route_story_full4k",
+    hevc_delivery=True,
+)
+
+PRESETS: dict[str, FilmPreset] = {"full": FULL, "social": SOCIAL, "full4k": FULL4K}
 
 
 class FilmTooLongError(ValueError):

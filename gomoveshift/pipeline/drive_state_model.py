@@ -192,6 +192,10 @@ class PipelineState:
     file_boundaries: Optional[list] = None  # list[tuple[float, float]]
     file_durations: Optional[list] = None
     episode_dates: Optional[list] = None
+    # Median sharpness per source, in ``episode_files`` order (V2 source gate).
+    # JSON-safe: an undecodable source is ``None`` here (NaN in the npz), so the
+    # strict-JSON state file never carries a NaN token.
+    source_sharpness: list = dataclasses.field(default_factory=list)
 
     # ── Phase B ────────────────────────────────────────────────────────
     processed_files: Optional[dict] = None  # dict[int, Path]

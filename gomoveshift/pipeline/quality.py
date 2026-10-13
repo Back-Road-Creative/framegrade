@@ -70,6 +70,8 @@ _NOISE_KERNEL = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], dtype=np.float64
 
 
 def _luma(rgb: np.ndarray) -> np.ndarray:
+    if rgb.ndim == 2:  # already a luma/gray plane
+        return rgb.astype(np.float64)
     return rgb.astype(np.float64) @ np.array([0.2126, 0.7152, 0.0722])
 
 
@@ -83,9 +85,31 @@ def _bounded_luma(rgb: np.ndarray, max_dim: float) -> np.ndarray:
     return cv2.resize(luma, size, interpolation=cv2.INTER_AREA)
 
 
-def measure_detail(rgb: np.ndarray) -> float:
-    """Variance of the Laplacian on a width-normalised (bounded) luma view."""
-    return float(cv2.Laplacian(_bounded_luma(rgb, SHARPEN_DETAIL_MAX_DIM), cv2.CV_64F).var())
+def sharpness_score(gray_or_rgb: np.ndarray) -> float:
+    """THE sharpness metric: variance of the Laplacian on a bounded luma view.
+
+    Accepts an RGB frame or a 2-D gray plane. The thumbnail probe, the photo
+    cull, the LF grade and the phase A source gate all call this -- no other
+    module may carry its own Laplacian.
+    """
+    return float(
+        cv2.Laplacian(_bounded_luma(gray_or_rgb, SHARPEN_DETAIL_MAX_DIM), cv2.CV_64F).var()
+    )
+
+
+measure_detail = sharpness_score
+
+# Phase A refuses a source whose median sharpness (over SOURCE_SHARPNESS_SAMPLES
+# frames) falls below this. Derivation: the thumbnail probe calls a frame
+# fully "well-focused" at Laplacian variance 500 (thumbnail_generator
+# SHARPNESS_SATURATION); the floor is 10% of that, 50 (log10 1.7), where the
+# sharpen ramp above is already ~half spent on a frame and a smeared lens or
+# stuck-focus clip is what remains. Scale factor 1.0: the probe's 4-neighbour
+# kernel is cv2.Laplacian's ksize-1 kernel, and its 960 px bound versus this
+# module's 1536 px bound only matters above 960 px.
+# PROVISIONAL until measured on real footage.
+SOURCE_SHARPNESS_FLOOR = 50.0
+SOURCE_SHARPNESS_SAMPLES = 5
 
 
 def measure_noise(rgb: np.ndarray) -> float:

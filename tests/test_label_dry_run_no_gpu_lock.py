@@ -147,10 +147,10 @@ class TestPhaseALabelsOnlyFullDriveNeverScores:
 
                 return np.zeros((5, 11), dtype=np.float64)
 
-            def save_scores(self, scores, path, metadata):
+            def save_scores(self, scores, path, metadata, extra=None):
                 from gomoveshift.analysis.unified_scorer import UnifiedSegmentScorer
 
-                UnifiedSegmentScorer.save_scores(self, scores, path, metadata)
+                UnifiedSegmentScorer.save_scores(self, scores, path, metadata, extra)
 
         monkeypatch.setattr(phase_a_mod, "UnifiedSegmentScorer", _SpyScorer)
         monkeypatch.setattr(phase_a_mod, "create_ingest_plan", lambda *a, **k: object())
