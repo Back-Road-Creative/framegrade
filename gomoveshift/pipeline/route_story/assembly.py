@@ -67,6 +67,14 @@ class FilmTimeline:
     _segment_lengths: list[int | None] = field(default_factory=list)
     _local_cuts: list[list[int]] = field(default_factory=list)
     _local_holds: list[list[tuple[int, int]]] = field(default_factory=list)
+    #: Frame (in the film's first segment) where the opening card and the first map leg
+    #: end -- the span an LF can borrow as its opening. ``None`` until the leg is rendered.
+    opening_end_frame: int | None = None
+
+    def mark_opening_end(self, frame: int) -> None:
+        """Record the first map leg's end; only the first call counts."""
+        if self.opening_end_frame is None:
+            self.opening_end_frame = frame
 
     def new_segment(self) -> int:
         """Open a new segment, returning the id later calls address it by."""

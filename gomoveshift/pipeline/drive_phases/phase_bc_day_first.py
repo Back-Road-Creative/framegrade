@@ -90,6 +90,7 @@ from ..state_invariants import (
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
 from ..title_builder import build_lf_title, ensure_unique_titles
+from ..trail_opening import attach_trail_opening
 from .trail_film import attach_trail_film, make_span_location, retry_trail_skip
 
 # Re-export the moved helpers for backward compatibility — multiple
@@ -2270,7 +2271,11 @@ def _resume_trail_films(
             prior = deliverables_from_state({**record, "date": d.date})
             d.trail_films = [f for f in prior.trail_films if Path(f.path).is_file()]
             d.trail_skips = list(prior.trail_skips)
-        if retry_trail_skip(d, state, config, steps=steps, span_location=span_location):
+            d.trail_openings = list(prior.trail_openings)
+        # A film whose LF still has its montage (a crash after the film, or an LF re-burned
+        # since) gets its opening now; a swap already done is a no-op.
+        opened = any(attach_trail_opening(d, f, config) for f in list(d.trail_films))
+        if retry_trail_skip(d, state, config, steps=steps, span_location=span_location) or opened:
             entry = recorded.get(d.date)
             if isinstance(entry, dict):
                 entry["deliverables"] = _deliverables_record(d, state)

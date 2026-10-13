@@ -44,6 +44,13 @@ SPAN = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_opening_swap(monkeypatch):
+    """These films have no receipt opening span; the swap is covered in test_trail_opening."""
+    monkeypatch.setattr(trail_film, "attach_trail_opening", lambda *a, **k: False)
+    monkeypatch.setattr(phase_bc_day_first, "attach_trail_opening", lambda *a, **k: False)
+
+
 class _Steps:
     """Stand-ins for the four Route Story steps; ``calls`` records the order."""
 

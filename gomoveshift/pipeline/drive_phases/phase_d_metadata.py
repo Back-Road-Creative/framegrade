@@ -30,7 +30,23 @@ def _lf_inserts(state) -> dict[int, list[dict]]:
     """``{lf_index: [insert record, ...]}`` the drive run spliced (``Deliverables.inserts``)."""
     from ..media_api import deliverables_for_publish
 
-    return {i: r for d in deliverables_for_publish(state) for i, r in d.inserts.items() if r}
+    out: dict[int, list[dict]] = {}
+    for d in deliverables_for_publish(state):
+        # a trail opening that replaced the montage moved the stills by its lead change
+        moved = {
+            int(o["lf_index"]): float(o.get("insert_delta_s") or 0.0) for o in d.trail_openings
+        }
+        for i, recs in d.inserts.items():
+            if not recs:
+                continue
+            delta = moved.get(i, 0.0)
+            out[i] = [
+                {**r, "at_s": round(max(0.0, float(r["at_s"]) + delta), 3)}
+                if delta and r.get("kind") == "still"
+                else r
+                for r in recs
+            ]
+    return out
 
 
 def _rescope_arc_to_lf(profile: dict, resolved) -> None:

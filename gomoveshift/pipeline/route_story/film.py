@@ -1040,6 +1040,7 @@ def render_route_story_film(
                 dissolve_from=after_still,
                 fps=fps,
             )
+            timeline.mark_opening_end(frame)
             after_still = None
             beat_photo = beat.photo
             # The map stops on the beat's own route moment before its
@@ -1121,6 +1122,7 @@ def render_route_story_film(
             dissolve_from=after_still,
             fps=fps,
         )
+        timeline.mark_opening_end(frame)
 
         # Bookends shot after the recording ended play right after the last
         # map leg and before the recap -- same rule as before_bookends.
@@ -2605,6 +2607,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             route_trim=receipt_fragment(trim_result, zone_result)["route_trim"],
         )
         receipt["delivery_check"] = delivered
+        # Where the opening card + first map leg end: an LF borrows it as its opening.
+        receipt["opening"] = {
+            "fps": args.fps,
+            "width": args.width,
+            "height": args.height,
+            # a stand-in renderer (tests, a repair-only run) returns no FilmTimeline: no span
+            "end_frame": (
+                timeline.opening_end_frame if isinstance(timeline, FilmTimeline) else None
+            ),
+        }
         receipt["photo_selection"] = photo_selection_block()
         receipt["stills_pacing"] = pacing
         receipt["dashboard"] = dashboard_receipt(

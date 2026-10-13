@@ -69,7 +69,7 @@ from keycut import (
 
 from ..console.settings import current_brand
 from ..publishing.brand_policy import load_brand_policy, load_media_profile
-from . import volume_source
+from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
 from .chapters.marker_merger import chapter_town_events
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
@@ -82,6 +82,8 @@ from .inserts import (
     insert_label,
     insert_records,
     plan_drive_inserts,
+    probe_media,
+    shift_photo_inserts,
     splice_day_lf_inserts,
 )
 from .montage_builder import (
@@ -2198,7 +2200,9 @@ def run_day_pipeline(
             final_lf.is_file()
             and final_lf.stat().st_size > 0
             and fp_path.is_file()
-            and fp_path.read_text().strip() == ost_fingerprint
+            # a swapped-in trail opening is folded into the stored fingerprint
+            and fp_path.read_text().strip()
+            == trail_opening.expected_fingerprint(lf_dir, idx, ost_fingerprint)
         ):
             logger.info(
                 "Day %s: LF %d final is fresh (OST unchanged) — skipping re-burn",
@@ -2222,6 +2226,7 @@ def run_day_pipeline(
             float(file_boundaries[-1][1]) if file_boundaries else 0.0,
             lf_index=idx,
         )
+        trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"
         concatenated = extract_and_concat_segments(
@@ -2289,6 +2294,24 @@ def run_day_pipeline(
                 prepended=prepended,
                 concatenated=concatenated,
             )
+        # Keep the lead and the OST recipe so the trail film, rendered after this
+        # LF, can replace the montage at 0 s once it exists (the intermediates are purged).
+        try:
+            _lead_s = float(probe_media(prepended).duration) - float(
+                probe_media(concatenated).duration
+            )
+            trail_opening.record_lead(
+                lf_dir,
+                idx,
+                lead_s=_lead_s,
+                location=lf_location,
+                crossfade_sec=ost_crossfade_sec,
+                brand_logo_path=brand_logo_path,
+                inserts=shift_photo_inserts(_lf_inserts, _lead_s - montage_duration),
+                planned_s=montage_duration,
+            )
+        except Exception as exc:  # noqa: BLE001 -- the LF is fine; only its trail opening is lost
+            logger.warning("Day %s: LF %d lead not recorded (%s)", date, idx, exc)
         # Persist the burned-OST fingerprint so a later resume can detect this
         # final is fresh and skip the re-burn.
         fp_path.write_text(ost_fingerprint)

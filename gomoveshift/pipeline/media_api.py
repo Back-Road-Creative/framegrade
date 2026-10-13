@@ -69,13 +69,14 @@ class Deliverables(DayArtifacts):
 
     ``trail_films`` are the Route Story films rendered beside the LFs;
     ``trail_skips`` are the reasons a day got none (a skip is recorded, never
-    silent).
+    silent); ``trail_openings`` are the LFs whose montage the film's opening replaced.
     """
 
     sidecars: dict[str, Path] = field(default_factory=dict)
     measurements: Measurements = field(default_factory=Measurements)
     trail_films: list[TrailFilm] = field(default_factory=list)
     trail_skips: list[str] = field(default_factory=list)
+    trail_openings: list[dict] = field(default_factory=list)
 
 
 _SIDECAR_STEMS = ("ost_audit", "shorts_ost_audit")
@@ -171,6 +172,7 @@ def deliverables_to_state(d: Deliverables) -> dict:
             for f in d.trail_films
         ],
         "trail_skips": list(d.trail_skips),
+        "trail_openings": [dict(o) for o in d.trail_openings],
     }
 
 
@@ -204,6 +206,7 @@ def deliverables_from_state(record: dict) -> Deliverables:
             for f in record.get("trail_films") or []
         ],
         trail_skips=list(record.get("trail_skips") or []),
+        trail_openings=[dict(o) for o in record.get("trail_openings") or []],
     )
 
 
