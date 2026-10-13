@@ -16,7 +16,13 @@ width, height, aspect, codec and bitrate floor are written down.
 
 from __future__ import annotations
 
+import json
+import logging
 import math
+import statistics
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -140,6 +146,144 @@ def denoise_strength_for(noise_score: float, *, disabled: bool) -> float:
         return 0.0
     t = min(1.0, (noise_score - DENOISE_NOISE_FLOOR) / (DENOISE_NOISE_FULL - DENOISE_NOISE_FLOOR))
     return round(DENOISE_MAX_STRENGTH * t, 2)
+
+
+# ── Post-rendition picture gate ───────────────────────────────────────────
+# Ringing: near strong edges, how far do pixels poke past the local envelope of
+# a slightly blurred copy of the frame? A clean step edge never exceeds its own
+# plateau (0.0); a Gibbs halo (over/undershoot ripple either side of the edge)
+# does. Measurable on the delivered frame alone.
+RINGING_EDGE_ZONE = 9  # px dilation of the strong-edge mask: halos sit a few px off the edge
+RINGING_ENVELOPE = 5  # local morphological window
+RINGING_BLUR_SIGMA = 0.8
+RINGING_GRADIENT_FLOOR = 1.0  # flat / noise-only frames have no edges to ring on
+
+# PROVISIONAL until measured on real footage. Derived from the synthetic
+# contract in tests/test_post_rendition_picture_gate.py: a 60->190 step scores
+# ~0.00005 clean and ~0.0217 with a +/-24-level Gibbs ripple; 0.01 sits between
+# (~half the haloed score, 200x the clean one) so a ripple of roughly a dozen levels trips it while
+# an unsharpened frame never does. Re-derive from real FINALs.
+RINGING_MAX = 0.01
+
+# Fraction of source sharpness a delivered frame may lose before the gate
+# fails. PROVISIONAL: H.265 re-encode at the delivery bitrate and the scale to
+# the rendition legitimately cost some Laplacian variance, so parity would
+# false-fail; 25% leaves room for that while a rendition step that smeared the
+# picture (denoise too hard, bad scale) loses far more. Tune on real footage.
+DELIVERED_SHARPNESS_TOLERANCE = 0.25
+
+
+def ringing_score(gray_or_rgb: np.ndarray) -> float:
+    """Mean halo/overshoot near strong edges, normalised to luma range (0..1)."""
+    luma = _bounded_luma(gray_or_rgb, SHARPEN_DETAIL_MAX_DIM).astype(np.float32)
+    if min(luma.shape) < 3:
+        return 0.0
+    gx = cv2.Sobel(luma, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(luma, cv2.CV_32F, 0, 1, ksize=3)
+    grad = np.hypot(gx, gy)
+    threshold = max(float(grad.mean() + 2.0 * grad.std()), RINGING_GRADIENT_FLOOR)
+    edges = (grad > threshold).astype(np.uint8)
+    if not edges.any():
+        return 0.0
+    zone = cv2.dilate(edges, np.ones((RINGING_EDGE_ZONE, RINGING_EDGE_ZONE), np.uint8)).astype(bool)
+    blurred = cv2.GaussianBlur(luma, (0, 0), RINGING_BLUR_SIGMA)
+    window = np.ones((RINGING_ENVELOPE, RINGING_ENVELOPE), np.uint8)
+    over = np.maximum(luma - cv2.dilate(blurred, window), 0.0)
+    under = np.maximum(cv2.erode(blurred, window) - luma, 0.0)
+    return float(((over + under)[zone]).mean() / 255.0)
+
+
+def picture_changed(params) -> bool:
+    """True when a rendition step altered the picture (CorrectionParams or mapping).
+
+    Reads with defaults so a future step only has to add a key: sharpen amount,
+    denoise strength, or a truthy stabilise / upscale marker.
+    """
+
+    def read(key: str):
+        if isinstance(params, Mapping):
+            return params.get(key)
+        return getattr(params, key, None)
+
+    for key in ("sharpen_amount", "denoise_strength"):
+        value = read(key)
+        if isinstance(value, (int, float)) and value > 0:
+            return True
+    return any(bool(read(key)) for key in ("stabilise", "stabilize", "upscale"))
+
+
+def sample_delivered_picture(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES):
+    """``(sharpness_values, ringing_values)`` of ``n`` evenly spaced frames of ``path``.
+
+    One reduced-size ffmpeg extraction per sample; undecodable frames are dropped.
+    """
+    sharp: list[float] = []
+    ring: list[float] = []
+    for i in range(n):
+        ts = max(duration, 0.0) * (i + 0.5) / n
+        cmd = [
+            "ffmpeg", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", str(path),
+            "-frames:v", "1", "-vf", f"scale={int(SHARPEN_DETAIL_MAX_DIM)}:-2",
+            "-f", "image2pipe", "-c:v", "png", "-",
+        ]  # fmt: skip
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode != 0 or not r.stdout:
+            continue
+        gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray is not None:
+            sharp.append(sharpness_score(gray))
+            ring.append(ringing_score(gray))
+    return sharp, ring
+
+
+def sample_delivered_sharpness(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES) -> list:
+    """Sharpness of ``n`` evenly spaced frames of a delivered file."""
+    return sample_delivered_picture(path, duration, n)[0]
+
+
+def picture_changed_for_day(cache_path) -> bool:
+    """True when the day's colour cache records any sharpen/denoise/marker step.
+
+    Reads the ``corrections`` list of ``day_<date>_color_cache.json`` (each entry
+    a ``CorrectionParams`` dict). A missing or unreadable file is False, with a
+    warning -- the gate then records "skipped", never a guess.
+    """
+    path = Path(cache_path)
+    try:
+        corrections = json.loads(path.read_text()).get("corrections") or []
+    except (OSError, ValueError, AttributeError):
+        logging.getLogger(__name__).warning(
+            "picture gate: colour cache %s unreadable -- treating picture as unchanged", path
+        )
+        return False
+    return any(picture_changed(c) for c in corrections)
+
+
+def picture_inputs_from_state(state) -> tuple[float | None, dict[int, bool]]:
+    """``(source_sharpness, {lf_index: picture_changed})`` for the post-rendition gate.
+
+    ``state.source_sharpness`` is per source file with no LF->source mapping, so
+    the sharpness is the median over every measured source (``None`` when none
+    was measured). TODO(later unit): map each LF to its day's sources.
+    ``picture_changed`` is per day (``DayArtifacts.regular_lf_indices`` -> that
+    day's colour cache next to the day master), fanned out to the day's LFs.
+    """
+    measured = [v for v in (getattr(state, "source_sharpness", None) or []) if v is not None]
+    sharpness = float(statistics.median(measured)) if measured else None
+    changed: dict[int, bool] = {}
+    for art in getattr(state, "day_artifacts", None) or []:
+        master = getattr(art, "master_path", None)
+        day_changed = (
+            picture_changed_for_day(Path(master).parent / f"day_{art.date}_color_cache.json")
+            if master
+            else False
+        )
+        for idx in getattr(art, "regular_lf_indices", None) or []:
+            changed[idx] = day_changed
+    return sharpness, changed
 
 
 # --- Thumbnail finish (image quality) -----------------------------------------

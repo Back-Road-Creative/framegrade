@@ -10,7 +10,7 @@ from gomoveshift.pipeline import encoding_constants as ec
 from gomoveshift.pipeline.pipeline_validator import GateResult, PipelineValidationResult
 
 from .ffprobe_client import FFprobeClient
-from .longform_validator import color_tag_issues
+from .longform_validator import color_tag_issues, picture_quality_gate
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,13 @@ class ShortsValidator:
     def __init__(self, ffprobe: FFprobeClient) -> None:
         self._ffprobe = ffprobe
 
-    def validate_short_files(self, short_files: list[Path]) -> PipelineValidationResult:
+    def validate_short_files(
+        self,
+        short_files: list[Path],
+        *,
+        source_sharpness: float | None = None,
+        picture_changed: bool = False,
+    ) -> PipelineValidationResult:
         """Run quality validation on a specific list of short files.
 
         Used by phase_d's day-first quality gate where each LF maps to a
@@ -74,6 +80,16 @@ class ShortsValidator:
 
         for short_path in short_files:
             short_gates = self._validate_single_short(short_path)
+            # Hard (not advisory). Callers without the day's source sharpness /
+            # picture-changed inputs get the recorded "skipped" gate, never a guess.
+            short_gates.append(
+                picture_quality_gate(
+                    short_path,
+                    self._ffprobe.probe_duration(short_path) if picture_changed else 0.0,
+                    source_sharpness=source_sharpness,
+                    changed=picture_changed,
+                )
+            )
             for g in short_gates:
                 gates.append(g)
                 if not g.passed and not _is_advisory(g.gate):
