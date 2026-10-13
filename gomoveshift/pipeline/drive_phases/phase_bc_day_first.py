@@ -89,7 +89,7 @@ from ..state_invariants import (
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
 from ..title_builder import build_lf_title, ensure_unique_titles
-from .trail_film import attach_trail_film, retry_trail_skip
+from .trail_film import attach_trail_film, make_span_location, retry_trail_skip
 
 # Re-export the moved helpers for backward compatibility — multiple
 # tests + downstream modules import these names from this module.
@@ -428,7 +428,12 @@ class PhaseBCDayFirst:
         # A resumed day keeps its recorded trail outcome, and a recorded skip whose
         # cause is now resolved re-runs the trail step alone (never the day).
         skipped_artifacts = _resume_trail_films(
-            state, self.config, skipped_artifacts, stages_dir, state_save_fn
+            state,
+            self.config,
+            skipped_artifacts,
+            stages_dir,
+            state_save_fn,
+            span_location=make_span_location(geocoder),
         )
 
         # Snapshot the persisted (already-burned) OST text and the set of
@@ -553,7 +558,9 @@ class PhaseBCDayFirst:
                 # Route Story trail film: a sibling deliverable, attached before
                 # the record so it persists (and resumes) with the day.
                 if isinstance(artifacts, Deliverables):
-                    attach_trail_film(artifacts, st, self.config)
+                    attach_trail_film(
+                        artifacts, st, self.config, span_location=make_span_location(geocoder)
+                    )
                 _record_day_and_save(artifacts, st, state_save_fn)
                 _maybe_drop_day_master(artifacts, st, stages_dir)
 
@@ -2214,7 +2221,7 @@ def _deliverables_record(artifacts, state) -> dict:
 
 
 def _resume_trail_films(
-    state, config, skipped_artifacts, stages_dir, state_save_fn, *, steps=None
+    state, config, skipped_artifacts, stages_dir, state_save_fn, *, steps=None, span_location=None
 ) -> list:
     """Carry each resumed day's recorded trail outcome and retry resolved skips.
 
@@ -2233,7 +2240,7 @@ def _resume_trail_films(
             prior = deliverables_from_state({**record, "date": d.date})
             d.trail_films = [f for f in prior.trail_films if Path(f.path).is_file()]
             d.trail_skips = list(prior.trail_skips)
-        if retry_trail_skip(d, state, config, steps=steps):
+        if retry_trail_skip(d, state, config, steps=steps, span_location=span_location):
             entry = recorded.get(d.date)
             if isinstance(entry, dict):
                 entry["deliverables"] = _deliverables_record(d, state)

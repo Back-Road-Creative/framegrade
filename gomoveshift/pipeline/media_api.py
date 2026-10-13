@@ -52,12 +52,14 @@ class Measurements:
 class TrailFilm:
     """A Route Story film rendered for a day: a sibling of the day's LFs.
 
-    ``lf_index`` is the LF the film placed as its source clip.
+    ``lf_index`` is the LF the film placed as its source clip; ``label`` is that
+    LF's persisted label, the title the film opens with (never resolved here).
     """
 
     lf_index: int
     path: Path
     receipt: Optional[Path] = None
+    label: Optional[str] = None
 
 
 @dataclass
@@ -157,7 +159,12 @@ def deliverables_to_state(d: Deliverables) -> dict:
         "sidecars": {k: str(v) for k, v in d.sidecars.items()},
         "measurements": asdict(d.measurements),
         "trail_films": [
-            {"lf_index": f.lf_index, "path": str(f.path), "receipt": _to_str(f.receipt)}
+            {
+                "lf_index": f.lf_index,
+                "path": str(f.path),
+                "receipt": _to_str(f.receipt),
+                "label": f.label,
+            }
             for f in d.trail_films
         ],
         "trail_skips": list(d.trail_skips),
@@ -188,6 +195,7 @@ def deliverables_from_state(record: dict) -> Deliverables:
                 lf_index=int(f["lf_index"]),
                 path=Path(f["path"]),
                 receipt=Path(f["receipt"]) if f.get("receipt") else None,
+                label=f.get("label"),
             )
             for f in record.get("trail_films") or []
         ],

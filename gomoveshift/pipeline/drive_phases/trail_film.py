@@ -20,6 +20,15 @@ silent no-op). Imagery rasters and credits come from the Route Story launch
 profile named by ``config.drive.trail_profile`` (``--trail-profile``); the day's
 own GPX, date, source clip, output and photos override whatever the profile holds.
 
+The film is titled with the placed LF's label, read from the state the LF's own
+title and burned text came from (``per_lf_ost_text``); nothing in this module
+resolves a place. A day whose label is missing, stale against its
+``ResolvedLocation``, or has no stamped ``ResolvedLocation`` to check it against, is
+skipped. The Phase Q coverage rule (``check_trail_film_coverage``) then runs on a
+fresh vote over the film's own GPX span, before the proof renders: the track can
+cross counties the LF did not. The gate fails closed: a vote that cannot be
+computed (no geocoder wired, no usable vote, an error) is a recorded skip.
+
 The film gets only the day's photos. ``film.main`` refuses a photos dir holding
 media it cannot place on the route, and a drive's photo folder spans every day,
 so the day's photos (capture clock inside its GPX span, widened by the film's own
@@ -81,13 +90,41 @@ class TrailSteps:
     render_proof: Callable[..., Path]
     verify: Callable[[Path], Any]
     film: Callable[[list], int]
+    #: ``(gpx, day) -> ResolvedLocation`` voted over the film's GPX span, or ``None``.
+    #: Required: a step set cannot be built without the Phase Q coverage vote.
+    span_location: Callable[[Path, _date], Optional[Any]]
     #: Raises ``TerrainRendererUnavailableError`` unless the 3D renderer draws the bundle.
     probe_3d: Callable[[Path], None]
     gpx_span: Callable[[Path, _date], tuple[datetime, datetime]] = _gpx_span
     capture_utc: Callable[[Path], Optional[datetime]] = _capture_utc
 
 
-def default_steps() -> TrailSteps:
+def make_span_location(geocoder: Any) -> Callable[[Path, _date], Optional[Any]]:
+    """Vote a ``ResolvedLocation`` over a day's GPX track with the drive's geocoder.
+
+    The caller owns the geocoder (the drive's shared one); an unreadable track or a
+    geocode miss yields ``None`` rather than raising.
+    """
+
+    def span_location(gpx: Path, recorded_on: _date) -> Optional[Any]:
+        from ..gps_enrichment import build_resolved_location
+        from ..route_story.gpx import select_gpx_day
+
+        selection = select_gpx_day(gpx, recorded_on)
+        points = [
+            {"time": point.time_s, "lat": point.latitude, "lon": point.longitude}
+            for segment in selection.segments
+            for point in segment
+        ]
+        resolved = build_resolved_location(points, geocoder=geocoder)
+        return resolved if resolved.vote else None
+
+    return span_location
+
+
+def default_steps(
+    span_location: Optional[Callable[[Path, _date], Optional[Any]]] = None,
+) -> TrailSteps:
     from ..route_story import film, preflight, prepare, proof, verify
 
     return TrailSteps(
@@ -103,12 +140,19 @@ def default_steps() -> TrailSteps:
         ),
         verify=verify.verify_receipt,
         film=film.main,
+        # No geocoder wired means no vote: the gate then records a skip (fail closed).
+        span_location=span_location or _no_span_location,
         probe_3d=preflight.probe_3d_renderer,
     )
 
 
 class _SkipError(Exception):
     """A day that cannot get a trail film; the message is the recorded reason."""
+
+
+def _no_span_location(gpx: Path, recorded_on: _date) -> Optional[Any]:
+    """The default vote when the caller wired no geocoder: none, so the gate skips."""
+    return None
 
 
 class _RendererRefusedError(_SkipError):
@@ -204,6 +248,49 @@ def _film_argv(
     return argv
 
 
+def _lf_label(state: Any, lf_index: int, day: str) -> str:
+    """The placed LF's persisted label; missing, unverifiable or stale is a skip.
+
+    The label is read from the state the LF's own title and burn came from, and must
+    equal the ``ost_signature`` its ``ResolvedLocation`` was derived against. A model
+    that is absent or unstamped cannot vouch for the label, so it is a skip too.
+    """
+    label = ((getattr(state, "per_lf_ost_text", None) or {}).get(lf_index) or "").strip()
+    if not label:
+        raise _SkipError(f"no persisted label for LF {lf_index} on {day}")
+    model = (getattr(state, "per_lf_resolved_location", None) or {}).get(lf_index)
+    signature = getattr(model, "ost_signature", None)
+    if signature is None:
+        raise _SkipError(
+            f"unverified label for LF {lf_index} on {day}: "
+            f"no stamped resolved location to check {label!r} against"
+        )
+    if signature != label:
+        raise _SkipError(
+            f"stale label for LF {lf_index} on {day}: {label!r} is not what its "
+            f"resolved location was derived against ({signature!r})"
+        )
+    return label
+
+
+def _gate_coverage(label: str, gpx: Path, day: str, steps: TrailSteps) -> None:
+    """Phase Q coverage on the film's GPX span: the label may not hide a material county.
+
+    Fails closed: a vote that cannot be computed is a skip, never a pass.
+    """
+    from ..validation.content_gates import check_trail_film_coverage
+
+    try:
+        resolved = steps.span_location(gpx, _date.fromisoformat(day))
+    except Exception as exc:  # noqa: BLE001 -- a vote that cannot run fails closed
+        raise _SkipError(f"coverage gate could not run: {type(exc).__name__}: {exc}") from exc
+    if resolved is None:
+        raise _SkipError("coverage gate could not run: no usable GPX-span vote")
+    result = check_trail_film_coverage(label, resolved)
+    if not result.passed:
+        raise _SkipError(result.message)
+
+
 @dataclass(frozen=True)
 class _DayInputs:
     gpx: Path
@@ -211,6 +298,7 @@ class _DayInputs:
     lf_path: Path
     bundle: Path
     profile: Path
+    label: str
 
 
 def _resolve_inputs(d: Deliverables, state: Any, config: Any, steps: TrailSteps) -> _DayInputs:
@@ -218,6 +306,7 @@ def _resolve_inputs(d: Deliverables, state: Any, config: Any, steps: TrailSteps)
     day = str(d.date)
     gpx = _day_gpx(state, day)
     lf_index, lf_path = _first_lf(d)
+    label = _lf_label(state, lf_index, day)
     try:
         bundle = steps.find_bundle(gpx, recorded_on=_date.fromisoformat(day))
     except (ValueError, OSError) as exc:
@@ -230,7 +319,7 @@ def _resolve_inputs(d: Deliverables, state: Any, config: Any, steps: TrailSteps)
     profile = str(getattr(config.drive, "trail_profile", "") or "")
     if not profile:
         raise _SkipError("no --trail-profile (the film needs imagery rasters and credits)")
-    return _DayInputs(gpx, lf_index, lf_path, bundle, Path(profile))
+    return _DayInputs(gpx, lf_index, lf_path, bundle, Path(profile), label)
 
 
 def _render(d: Deliverables, state: Any, config: Any, steps: TrailSteps) -> TrailFilm:
@@ -238,6 +327,7 @@ def _render(d: Deliverables, state: Any, config: Any, steps: TrailSteps) -> Trai
     inputs = _resolve_inputs(d, state, config, steps)
     gpx, lf_index, lf_path, bundle = inputs.gpx, inputs.lf_index, inputs.lf_path, inputs.bundle
     recorded_on = _date.fromisoformat(day)
+    _gate_coverage(inputs.label, gpx, day, steps)
 
     out_dir = lf_path.parent.parent / "trail"
     proof_path = out_dir / f"trail_proof_{day}.mp4"
@@ -269,6 +359,8 @@ def _render(d: Deliverables, state: Any, config: Any, steps: TrailSteps) -> Trai
             "output": str(film_path),
             "receipt": str(out_dir / f"trail_film_{day}.receipt.json"),
             "renderer": "scene",
+            # The LF's own label, verbatim: film.main burns --title unedited.
+            "title": inputs.label,
             # The bundle the proof just rendered and verified, not a second lookup.
             "bundle": str(bundle),
         },
@@ -287,17 +379,23 @@ def _render(d: Deliverables, state: Any, config: Any, steps: TrailSteps) -> Trai
         lf_index=lf_index,
         path=film_path,
         receipt=Path(argv[argv.index("--receipt") + 1]),
+        label=inputs.label,
     )
 
 
 def attach_trail_film(
-    d: Deliverables, state: Any, config: Any, *, steps: Optional[TrailSteps] = None
+    d: Deliverables,
+    state: Any,
+    config: Any,
+    *,
+    steps: Optional[TrailSteps] = None,
+    span_location: Optional[Callable[[Path, _date], Optional[Any]]] = None,
 ) -> Deliverables:
     """Render ``d``'s trail film in place; a day that cannot get one is recorded."""
     if getattr(getattr(config, "drive", None), "trail", None) is False:
         return d
     try:
-        d.trail_films.append(_render(d, state, config, steps or default_steps()))
+        d.trail_films.append(_render(d, state, config, steps or default_steps(span_location)))
     except _SkipError as skip:
         reason = f"trail film skipped for {d.date}: {skip}"
         explicit = getattr(getattr(config, "drive", None), "trail", None) is True
@@ -314,7 +412,12 @@ def attach_trail_film(
 
 
 def retry_trail_skip(
-    d: Deliverables, state: Any, config: Any, *, steps: Optional[TrailSteps] = None
+    d: Deliverables,
+    state: Any,
+    config: Any,
+    *,
+    steps: Optional[TrailSteps] = None,
+    span_location: Optional[Callable[[Path, _date], Optional[Any]]] = None,
 ) -> bool:
     """Re-run only the trail step for a resumed day recorded with a skip.
 
@@ -328,7 +431,7 @@ def retry_trail_skip(
         return False
     if d.trail_films or not d.trail_skips:
         return False
-    steps = steps or default_steps()
+    steps = steps or default_steps(span_location)
     try:
         _resolve_inputs(d, state, config, steps)
     except _SkipError:

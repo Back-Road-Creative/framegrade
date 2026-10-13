@@ -823,6 +823,26 @@ def resolved_location_gate_dict(rl) -> dict:
     }
 
 
+def check_trail_film_coverage(label: str, resolved) -> GateResult:
+    """Phase Q coverage rule for a trail film: its label names every material county.
+
+    ``resolved`` is the :class:`~gomoveshift.models.ResolvedLocation` voted over the
+    FILM's GPX span (the whole day's track, which can run past the LF the label was
+    derived from). A label naming one county while another holds a material share of
+    that track is refused, exactly as for an LF title.
+    """
+    failures = _coverage_failures({}, resolved_location_gate_dict(resolved), label, label)
+    if failures:
+        return GateResult(
+            gate="trail_film_coverage",
+            passed=False,
+            message="trail film coverage HARD FAIL: " + "; ".join(failures),
+        )
+    return GateResult(
+        gate="trail_film_coverage", passed=True, message="Trail film coverage checks passed"
+    )
+
+
 def _location_claim_surfaces(metadata_json: dict):
     """Yield ``(surface_name, text)`` for every non-title surface staking a
     location claim: the description's ``📍 Location:`` line, its SEO search

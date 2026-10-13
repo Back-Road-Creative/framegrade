@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from gomoveshift.cli.parser import _build_parser
+from gomoveshift.models import ResolvedLocation
 from gomoveshift.pipeline import media_api
 from gomoveshift.pipeline.drive_phases import phase_bc_day_first, trail_film
 from gomoveshift.pipeline.media_api import (
@@ -33,6 +35,8 @@ from gomoveshift.pipeline.route_story.preflight import (
 from gomoveshift.pipeline.route_story.verify import VerifyReport
 
 DAY = "2026-05-01"
+#: The LF's persisted label (``state.per_lf_ost_text``): what the film is titled.
+LABEL = "Townsend to Cades Cove via US-321, Tennessee"
 #: The fake GPX covers 14:00-20:00 UTC on DAY.
 SPAN = (
     datetime(2026, 5, 1, 14, tzinfo=timezone.utc),
@@ -58,6 +62,11 @@ class _Steps:
         self.probed: list[Path] = []
         self._probe_error = probe_error
         self.film_argv: list[str] = []
+        #: What the film's GPX-span location resolver returns (None = no vote).
+        #: Defaults to a single-county span, which any label passes.
+        self.span_rl: "ResolvedLocation | None" = ResolvedLocation(
+            vote={"Blount County, Tennessee": 1.0}
+        )
         #: photo file name -> zoned capture instant (absent = no zoned time).
         self.photo_times: dict[str, datetime] = photo_times or {}
         self.bundle_dir = tmp_path / "bundle"
@@ -104,6 +113,7 @@ class _Steps:
             film=film,
             gpx_span=lambda gpx, recorded_on: SPAN,
             capture_utc=lambda photo: self.photo_times.get(photo.name),
+            span_location=lambda gpx, recorded_on: self.span_rl,
         )
 
 
@@ -143,7 +153,17 @@ def _state(tmp_path: Path, *dates: str):
         episode_dates=list(dates),
         gpx_files=[str(tmp_path / f"{d}.gpx") for d in dates],
         source_dir=str(tmp_path / "src"),
+        per_lf_ost_text={n: LABEL for n in range(1, 4)},
+        per_lf_resolved_location={n: ResolvedLocation(ost_signature=LABEL) for n in range(1, 4)},
     )
+
+
+def _stamp(state):
+    """Stamp each LF's ResolvedLocation with its current persisted label (as Phase B/C does)."""
+    state.per_lf_resolved_location = {
+        n: ResolvedLocation(ost_signature=text) for n, text in state.per_lf_ost_text.items()
+    }
+    return state
 
 
 def _cfg(
@@ -337,6 +357,156 @@ def test_drive_trail_renders_film_per_lf_day(tmp_path):
     assert argv[argv.index("--national-raster") + 1] == "/r/n.jpg"
 
 
+def test_trail_film_title_equals_lf_label(tmp_path):
+    fake = _Steps(tmp_path)
+    state = _state(tmp_path)
+    state.per_lf_ost_text = {1: LABEL, 2: "some other LF"}
+    _stamp(state)
+    d = _day(tmp_path, lfs=2)
+    trail_film.attach_trail_film(d, state, _cfg(tmp_path), steps=fake.steps())
+
+    # The film is titled with the placed LF's persisted label, verbatim.
+    assert d.trail_skips == []
+    assert _argv_value(fake.film_argv, "--title") == LABEL
+    (film,) = d.trail_films
+    assert film.label == LABEL
+    # The label is part of the persisted record, so a resume shows what was titled.
+    back = media_api.deliverables_from_state(media_api.deliverables_to_state(d))
+    assert back.trail_films[0].label == LABEL
+
+
+def test_trail_film_overrides_a_profile_title_with_the_lf_label(tmp_path):
+    fake = _Steps(tmp_path)
+    cfg = _cfg(tmp_path)
+    with open(cfg.drive.trail_profile, "a") as fh:
+        fh.write('title: "Operator trip name"\n')
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, _state(tmp_path), cfg, steps=fake.steps())
+    assert d.trail_skips == []
+    assert _argv_value(fake.film_argv, "--title") == LABEL
+
+
+def test_trail_film_skips_without_a_persisted_label(tmp_path):
+    fake = _Steps(tmp_path)
+    state = _state(tmp_path)
+    state.per_lf_ost_text = {}
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, state, _cfg(tmp_path), steps=fake.steps())
+    assert d.trail_films == []
+    assert fake.calls == []  # the media engine never invents a label
+    (reason,) = d.trail_skips
+    assert "label" in reason and DAY in reason
+
+
+def test_trail_film_skips_a_label_its_resolved_location_was_not_derived_against(tmp_path):
+    fake = _Steps(tmp_path)
+    state = _state(tmp_path)
+    state.per_lf_resolved_location = {1: ResolvedLocation(ost_signature="an older label")}
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, state, _cfg(tmp_path), steps=fake.steps())
+    assert d.trail_films == [] and fake.calls == []
+    assert "stale" in d.trail_skips[0]
+
+
+_TWO_COUNTIES = {"Blount County, Tennessee": 0.6, "Sevier County, Tennessee": 0.4}
+
+
+def test_trail_film_coverage_gate_runs_on_the_gpx_span(tmp_path):
+    fake = _Steps(tmp_path)
+    fake.span_rl = ResolvedLocation(vote=dict(_TWO_COUNTIES))
+    d = _day(tmp_path)
+    # LABEL names neither county: the film's span holds two material counties.
+    trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=fake.steps())
+    assert d.trail_films == []
+    assert fake.calls == [f"bundle:{DAY}.gpx:{DAY}"]  # refused before the proof renders
+    (reason,) = d.trail_skips
+    assert "Sevier County" in reason and "Blount County" in reason
+
+
+def test_trail_film_coverage_gate_passes_a_label_naming_every_county(tmp_path):
+    fake = _Steps(tmp_path)
+    fake.span_rl = ResolvedLocation(vote=dict(_TWO_COUNTIES))
+    state = _state(tmp_path)
+    state.per_lf_ost_text = {1: "Blount County to Sevier County, Tennessee"}
+    _stamp(state)
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, state, _cfg(tmp_path), steps=fake.steps())
+    assert d.trail_skips == []
+    assert _argv_value(fake.film_argv, "--title") == "Blount County to Sevier County, Tennessee"
+
+
+def test_trail_film_without_a_span_vote_is_a_recorded_skip(tmp_path):
+    fake = _Steps(tmp_path)
+    fake.span_rl = None  # the resolver found no usable vote
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=fake.steps())
+    # A coverage gate that cannot run fails closed: nothing renders.
+    assert d.trail_films == [] and fake.calls == [f"bundle:{DAY}.gpx:{DAY}"]
+    (reason,) = d.trail_skips
+    assert "coverage gate could not run" in reason and "no usable GPX-span vote" in reason
+
+
+def test_trail_film_span_vote_that_raises_is_a_recorded_skip(tmp_path):
+    fake = _Steps(tmp_path)
+    steps = fake.steps()
+
+    def boom(gpx, recorded_on):
+        raise RuntimeError("geocoder down")
+
+    steps = replace(steps, span_location=boom)
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=steps)
+    assert d.trail_films == [] and fake.calls == [f"bundle:{DAY}.gpx:{DAY}"]
+    assert "geocoder down" in d.trail_skips[0]
+
+
+def test_trail_film_without_a_wired_span_location_fails_closed(tmp_path, monkeypatch):
+    # The default steps (no span_location passed) carry a gate that skips, never one that passes.
+    fake = _Steps(tmp_path)
+    steps = replace(trail_film.default_steps(), find_bundle=fake.steps().find_bundle)
+    with pytest.raises(TypeError):
+        trail_film.TrailSteps(
+            find_bundle=steps.find_bundle, render_proof=steps.render_proof,
+            verify=steps.verify, film=steps.film,
+        )  # fmt: skip
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=steps)
+    assert d.trail_films == [] and "coverage gate could not run" in d.trail_skips[0]
+
+
+def test_trail_film_skips_an_unstamped_or_missing_resolved_location(tmp_path):
+    for models in ({1: ResolvedLocation()}, {}):
+        fake = _Steps(tmp_path)
+        state = _state(tmp_path)
+        state.per_lf_resolved_location = models
+        d = _day(tmp_path)
+        trail_film.attach_trail_film(d, state, _cfg(tmp_path), steps=fake.steps())
+        assert d.trail_films == [] and fake.calls == []
+        assert "unverified" in d.trail_skips[0]
+
+
+def test_span_location_votes_the_gpx_span_with_the_drives_geocoder(tmp_path, monkeypatch):
+    from gomoveshift.pipeline import gps_enrichment
+    from gomoveshift.pipeline.route_story import gpx as gpx_mod
+    from gomoveshift.pipeline.route_story.metrics import RoutePoint
+
+    seen = {}
+    selection = SimpleNamespace(
+        segments=[[RoutePoint(0.0, 35.6, -83.7), RoutePoint(60.0, 35.7, -83.6)]]
+    )
+    monkeypatch.setattr(gpx_mod, "select_gpx_day", lambda gpx, day: selection)
+
+    def build(points, *, geocoder):
+        seen["points"], seen["geocoder"] = points, geocoder
+        return ResolvedLocation(vote=dict(_TWO_COUNTIES) if geocoder == "geo" else {})
+
+    monkeypatch.setattr(gps_enrichment, "build_resolved_location", build)
+    voted = trail_film.make_span_location("geo")(tmp_path / "a.gpx", date(2026, 5, 1))
+    assert voted.vote == _TWO_COUNTIES
+    assert seen["points"][1] == {"time": 60.0, "lat": 35.7, "lon": -83.6}
+    assert trail_film.make_span_location("other")(tmp_path / "a.gpx", date(2026, 5, 1)) is None
+
+
 def test_trail_preflight_refuses_without_3d_renderer(tmp_path, caplog):
     """No browser / no terrain tile: refuse before the proof or the film encode."""
     fake = _Steps(
@@ -477,8 +647,10 @@ def test_step_exception_is_recorded_not_raised(tmp_path):
         render_proof=boom,
         verify=steps.verify,
         film=steps.film,
+        span_location=steps.span_location,
         probe_3d=steps.probe_3d,
     )
+    fake.span_rl = ResolvedLocation(vote={"Blount County, Tennessee": 1.0})
     d = _day(tmp_path)
     trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=steps)
     assert "no browser" in d.trail_skips[0]
