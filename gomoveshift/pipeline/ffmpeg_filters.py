@@ -18,6 +18,7 @@ from .encoding_constants import (
     SHORTS_PRESET,
     SHORTS_WIDTH,
 )
+from .quality import UPSCALE_KERNEL, UPSCALE_SCALER
 
 logger = logging.getLogger(__name__)
 
@@ -192,13 +193,19 @@ def get_video_dimensions(video_path: Path) -> tuple[int, int]:
     raise RuntimeError(f"No video stream found in {video_path}")
 
 
-def build_crop_filter(
+def crop_upscaled_from(
     src_w: int,
     src_h: int,
     dst_w: int = DEFAULT_OUTPUT_WIDTH,
     dst_h: int = DEFAULT_OUTPUT_HEIGHT,
-) -> str:
-    """Build center-crop filter for vertical 9:16 output."""
+) -> list[int] | None:
+    """``[crop_w, crop_h]`` when the 9:16 crop is smaller than the output (an upscale)."""
+    crop_w, crop_h = _crop_size(src_w, src_h, dst_w, dst_h)
+    return [crop_w, crop_h] if crop_w < dst_w or crop_h < dst_h else None
+
+
+def _crop_size(src_w: int, src_h: int, dst_w: int, dst_h: int) -> tuple[int, int]:
+    """Even-rounded centre-crop window for ``dst_w:dst_h`` out of the source."""
     dst_aspect = dst_w / dst_h  # 0.5625
 
     src_aspect = src_w / src_h
@@ -218,12 +225,23 @@ def build_crop_filter(
     # Down, never up: a crop larger than the source makes ffmpeg fail outright.
     crop_w -= crop_w % 2
     crop_h -= crop_h % 2
+    return crop_w, crop_h
 
-    # flags=lanczos: swscale's default bicubic softens detail-heavy driving
-    # footage on the 4K→1080 drop. No dither flag is
-    # needed: shorts encode 10-bit end-to-end (SHORTS_PIX_FMT p010le from the
-    # 10-bit graded master), so no 10→8-bit depth reduction remains here.
-    return f"crop={crop_w}:{crop_h},scale={dst_w}:{dst_h}:flags=lanczos"
+
+def build_crop_filter(
+    src_w: int,
+    src_h: int,
+    dst_w: int = DEFAULT_OUTPUT_WIDTH,
+    dst_h: int = DEFAULT_OUTPUT_HEIGHT,
+) -> str:
+    """Build center-crop filter for vertical 9:16 output."""
+    crop_w, crop_h = _crop_size(src_w, src_h, dst_w, dst_h)
+    # One scaler for every resize (quality.UPSCALE_SCALER): swscale's default
+    # bicubic softens detail-heavy driving footage on the 4K→1080 drop, and a crop narrower than the output is a declared upscale
+    # that goes through the same filter. No dither flag is needed: shorts
+    # encode 10-bit end-to-end (SHORTS_PIX_FMT p010le), so no 10→8-bit depth
+    # reduction remains here.
+    return f"crop={crop_w}:{crop_h},{UPSCALE_SCALER}=w={dst_w}:h={dst_h}:filter={UPSCALE_KERNEL}"
 
 
 def measure_text_width(

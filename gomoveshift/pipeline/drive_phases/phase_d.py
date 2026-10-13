@@ -66,6 +66,18 @@ _LFMeta = LongFormMetadataGenerator
 logger = logging.getLogger(__name__)
 
 
+def _claim_native_only() -> bool:
+    """The brand MediaProfile's ``claim_native_resolution_only`` (strict ``True`` if unloadable)."""
+    from ...console.settings import current_brand
+    from ...publishing.brand_policy import load_media_profile
+
+    try:
+        return bool(load_media_profile(current_brand()).claim_native_resolution_only)
+    except Exception:  # noqa: BLE001 — fail closed to the strict policy
+        logger.warning("phase D: media profile unreadable -- native-only claim policy assumed")
+        return True
+
+
 def log_upload_lfs_banner(
     *,
     youtube_upload_enabled: bool,
@@ -451,6 +463,7 @@ def _build_included_segments_by_episode_for_lf(
 # Both re-exported so existing call sites + test patch targets keep resolving.
 from .phase_d_gates import (  # noqa: E402,F401
     _assert_shorts_quality_gate,
+    _lf_day_records,
     _lf_picture_inputs,
     _run_final_validation_gate,
     _run_sidecar_integrity_gate,
@@ -1265,6 +1278,10 @@ class PhaseD:
             regular_lf_paths=regular_lf_paths,
             metadata_per_lf=metadata_per_lf,
             picture_inputs=_lf_picture_inputs(state),
+            # The day's upscale record + the brand's claim policy, so an
+            # upscaled day cannot pass the 4K gate claiming native pixels.
+            day_records=_lf_day_records(state),
+            claim_native_resolution_only=_claim_native_only(),
         )
 
         # ── Gate C/D human review — UPSTREAM of every upload ──────────

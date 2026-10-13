@@ -7,12 +7,13 @@ import logging
 import re
 import statistics
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from gomoveshift.pipeline import encoding_constants as ec
 from gomoveshift.pipeline import quality
 from gomoveshift.pipeline.pipeline_validator import GateResult
-from gomoveshift.pipeline.quality import aspect_of, rendition_for
+from gomoveshift.pipeline.quality import HONEST_RESOLUTION_RULE, aspect_of, rendition_for
 
 from .ffprobe_client import FFprobeClient
 
@@ -371,8 +372,20 @@ class LongformValidator:
             video_path, duration, source_sharpness=source_sharpness, changed=changed
         )
 
-    def check_video_quality(self, video_path: Path, *, skip_audio: bool = False) -> GateResult:
-        """Verify video codec, resolution, and bitrate meet minimums."""
+    def check_video_quality(
+        self,
+        video_path: Path,
+        *,
+        skip_audio: bool = False,
+        day_record: Mapping | None = None,
+        claim_native_resolution_only: bool = True,
+    ) -> GateResult:
+        """Verify video codec, resolution, and bitrate meet minimums.
+
+        ``day_record`` is the day's completion record (``upscaled_from`` /
+        ``native_resolution_claim``): an upscaled day that still claims a native
+        resolution under ``claim_native_resolution_only`` fails.
+        """
         try:
             data = self._ffprobe.probe(video_path, show_streams=True, show_format=True)
             fmt = data.get("format", {})
@@ -443,6 +456,17 @@ class LongformValidator:
                         f"{lf4k.width}x{lf4k.height} ({want_aw}:{want_ah}) long-form frame "
                         f"the 4K claim requires"
                     )
+
+            if (
+                day_record
+                and day_record.get("upscaled_from")
+                and day_record.get("native_resolution_claim")
+                and claim_native_resolution_only
+            ):
+                issues.append(
+                    f"upscaled from {tuple(day_record['upscaled_from'])} but the record "
+                    f"claims a native resolution ({HONEST_RESOLUTION_RULE})"
+                )
 
             # Floors are constants-sourced. The former hardcoded
             # 30000/12000 sat BELOW encoding_constants' real 40000/15000, so a

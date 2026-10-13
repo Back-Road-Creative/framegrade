@@ -26,6 +26,7 @@ color/audio per episode.
 """
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -310,6 +311,44 @@ def assert_master_duration_integrity(
         )
 
 
+def _upscale_sidecar(master_path: Path) -> Path:
+    """Where ``encode_day_master`` leaves the declared-upscale facts of a master."""
+    return Path(master_path).with_suffix(".upscale.json")
+
+
+def _record_upscale(master_path: Path, plan, profile) -> None:
+    """Persist (or clear) the declared-upscale facts next to the promoted master.
+
+    ``build_master_record`` folds them into ``per_day_completed`` as
+    ``upscaled_from`` / ``native_resolution_claim``.
+    """
+    from .quality import claim_native_resolution_allowed
+
+    sidecar = _upscale_sidecar(master_path)
+    if plan is None:
+        sidecar.unlink(missing_ok=True)
+        return
+    sidecar.write_text(
+        json.dumps(
+            {
+                "upscaled_from": list(plan.source),
+                "native_resolution_claim": claim_native_resolution_allowed(profile, plan),
+            }
+        )
+    )
+
+
+def _read_upscale(master_path: Path) -> dict:
+    try:
+        data = json.loads(_upscale_sidecar(master_path).read_text())
+    except (OSError, ValueError):
+        data = {}
+    return {
+        "upscaled_from": data.get("upscaled_from"),
+        "native_resolution_claim": bool(data.get("native_resolution_claim", True)),
+    }
+
+
 def build_master_record(
     day_batch,
     master_path: Path,
@@ -358,6 +397,9 @@ def build_master_record(
         # Encode-rule version — invalidates a cached master on any future
         # master-encode rule change (see MASTER_ENCODE_ALGO_VERSION).
         "encode_algo_version": MASTER_ENCODE_ALGO_VERSION,
+        # Declared resampling upscale (source size, or None) and whether the
+        # delivery may claim a native resolution.
+        **_read_upscale(master_path),
     }
 
 
@@ -1563,6 +1605,8 @@ def encode_day_master(
             except OSError:
                 pass
         return None
+
+    _record_upscale(master_path, getattr(result, "upscale_plan", None), profile)
 
     # UPSTREAM duration-integrity gate: the master exists at its final path and
     # NOTHING has been derived from it yet, so this is the earliest point the

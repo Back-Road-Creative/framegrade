@@ -134,6 +134,17 @@ def _lf_picture_inputs(state) -> dict:
     return {idx: (sharpness, flag) for idx, flag in changed.items()}
 
 
+def _lf_day_records(state) -> dict:
+    """``{lf_index: day master_record}`` so the 4K gate sees each LF's upscale facts."""
+    records: dict = {}
+    for art in getattr(state, "day_artifacts", None) or []:
+        record = getattr(art, "master_record", None)
+        if isinstance(record, dict):
+            for idx in getattr(art, "regular_lf_indices", None) or []:
+                records[idx] = record
+    return records
+
+
 def _run_final_validation_gate(
     *,
     validator_cls,
@@ -144,6 +155,8 @@ def _run_final_validation_gate(
     perceptual_check_fn=None,
     picture_inputs: dict | None = None,
     picture_check_fn=None,
+    day_records: dict | None = None,
+    claim_native_resolution_only: bool = True,
 ) -> None:
     """Run per-LF post-encode validation + audio-loudness HARD FAIL.
 
@@ -208,11 +221,20 @@ def _run_final_validation_gate(
                 f"({lf_path.stat().st_size} bytes, under the 1 MiB floor)"
             )
             continue
+        claim_kwargs = (
+            {
+                "day_record": day_records[lf.index],
+                "claim_native_resolution_only": claim_native_resolution_only,
+            }
+            if day_records and lf.index in day_records
+            else {}
+        )
         gate_result = gate_validator.validate(
             video_path=lf_path,
             expected_duration=lf.total_duration,
             metadata_json=metadata_per_lf.get(lf.index),
             skip_audio=skip_audio,
+            **claim_kwargs,
         )
         if not gate_result.passed:
             logger.warning(

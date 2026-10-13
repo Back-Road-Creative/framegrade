@@ -67,9 +67,11 @@ class TestCropDimensionsAreEven:
         crop_w, crop_h = _crop_dims(build_crop_filter(3840, 2160))
         assert crop_w / crop_h == pytest.approx(1080 / 1920, abs=0.002)
 
-    def test_lanczos_flag_survives(self):
-        """Regression guard: the lanczos scaling flag must not be lost."""
-        assert "flags=lanczos" in build_crop_filter(3840, 2160)
+    def test_scaler_survives(self):
+        """Regression guard: the explicit scaler on the shorts crop must not be
+        lost. The scaler is the one declared upscaler, ``zscale`` spline36."""
+        chain = build_crop_filter(3840, 2160)
+        assert "zscale=" in chain and "filter=spline36" in chain
 
 
 class TestPrependMontageCleansPartialOutput:
