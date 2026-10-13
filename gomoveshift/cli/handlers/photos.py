@@ -1953,6 +1953,7 @@ def cmd_photos(args, config):
         PhotoOrchestrator,
         describe_scheduler_export,
     )
+    from ...publishing.photo_run_hooks import photo_run_hooks
 
     configure_logging()
 
@@ -1975,7 +1976,9 @@ def cmd_photos(args, config):
         return _cmd_photos_daylight_timelapse(args)
     # Per-run social crop, resolved at construction so an unknown label fails
     # before selection — None falls through to photos.social_aspect.
-    orchestrator = PhotoOrchestrator(social_aspect=getattr(args, "social_aspect", None))
+    orchestrator = PhotoOrchestrator(
+        social_aspect=getattr(args, "social_aspect", None), **photo_run_hooks()
+    )
 
     # Explicit escape for the fail-closed state load: archive the ledger aside
     # (never delete) BEFORE any selection touches it, so the accepted wipe

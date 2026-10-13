@@ -79,17 +79,8 @@ ALLOWLIST: dict[str, str] = {
     "pipeline/drive_phases/phase_bc_day_first.py": (
         "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),
-    "pipeline/ingest/ost_formatter.py": (
-        "imports pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
-    ),
-    "pipeline/orchestrator.py": (
-        "imports pipeline.longform_metadata; cut by the RunSpec split (the metadata and analytics_sync stages take the generator from the run context, not from _orch)"
-    ),
     "pipeline/orchestrator_fingerprint.py": (
         "imports pipeline.drive_phases.phase_d; cut by the RunSpec split (the Phase D resume check moves beside drive_orchestrator)"
-    ),
-    "pipeline/photos/orchestrator.py": (
-        "imports pipeline.content_ledger, seo_manager.analytics.theme_rotator; cut by the RunSpec split (the ledger write and the voice theme arrive as callables)"
     ),
     "pipeline/volume_source.py": (
         "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the RunSpec split (RunSpec carries Waypost's decided count, so the engine stops importing analytics)"
