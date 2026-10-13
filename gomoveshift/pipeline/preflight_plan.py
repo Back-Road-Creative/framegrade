@@ -72,7 +72,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, Sequence
 
 if TYPE_CHECKING:
     from .calibration import CalibrationRecord
@@ -340,6 +340,7 @@ class PreflightPlan:
     rows: list[PlanRow] = field(default_factory=list)
     wall_clock_estimate_seconds: int = 0
     wall_clock_breakdown: dict[str, int] = field(default_factory=dict)
+    fast_skipped: list[str] = field(default_factory=list)
     calibration: "CalibrationRecord | None" = None
 
 
@@ -707,6 +708,7 @@ def build_plan(
     state: Any,
     stages_dir: Path,
     probe_duration_fn: Optional[Callable[[Path], Optional[float]]] = None,
+    fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
 ) -> PreflightPlan:
     """Inspect state + the stages directory and return a plan snapshot.
@@ -732,6 +734,7 @@ def build_plan(
         rows=rows,
         wall_clock_estimate_seconds=total,
         wall_clock_breakdown=breakdown,
+        fast_skipped=list(fast_skipped),
         calibration=calibration,
     )
 
@@ -764,6 +767,8 @@ def _render_plan_lines(plan: PreflightPlan) -> list[str]:
         label_col = f"{row.label}:".ljust(label_width + 2)
         status_col = row.status.ljust(4)
         lines.append(f"  {label_col}{status_col} ({row.reason})")
+    if plan.fast_skipped:
+        lines.append(f"  fast mode: skipped {', '.join(plan.fast_skipped)}")
     bd = plan.wall_clock_breakdown
     bd_parts = []
     # Order: master, lfs, shorts, superlong, phase_a, phase_d — heavy work first.
@@ -787,6 +792,7 @@ def print_plan(
     stages_dir: Path,
     out=None,
     probe_duration_fn: Optional[Callable[[Path], Optional[float]]] = None,
+    fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
 ) -> PreflightPlan:
     """Render the plan for ``state`` to ``out`` (defaults to ``sys.stdout``).
@@ -798,7 +804,11 @@ def print_plan(
     if out is None:
         out = sys.stdout
     plan = build_plan(
-        state, stages_dir, probe_duration_fn=probe_duration_fn, calibration=calibration
+        state,
+        stages_dir,
+        probe_duration_fn=probe_duration_fn,
+        fast_skipped=fast_skipped,
+        calibration=calibration,
     )
     for line in _render_plan_lines(plan):
         print(line, file=out)

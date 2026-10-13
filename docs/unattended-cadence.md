@@ -36,8 +36,12 @@ executes; it never decides.
   the date the run started with. When nothing of the run is live yet, Phase D drops the
   passed date and asks seo_manager for the next free slot, the same call a fresh run
   makes, and logs `LF_SLOT_RERESOLVED` with the old and new dates. When an LF of the run
-  is already live, the run stops with `LF_SLOT_PASSED` before the insert, since the
-  remaining LFs follow the live one's date.
+  is already live, it keeps its real date and each pending LF whose slot has passed gets
+  seo_manager's next free slot on the run's LF day, behind the LFs before it (the run's
+  own bookings are not rivals; its unconfirmed `schedule.sqlite3` rows move to the new
+  dates). A later resume keeps those dates. The run stops with `LF_SLOT_PASSED` before
+  the insert only when that cannot be done safely: no `--publish` day, a live LF with no
+  readable publish time, or a new slot that has passed too.
 - A confirmed LF upload is booked in the ledger and mirrored into `schedule.sqlite3`
   when that file exists (never created by GMS), even when the ledger write failed (`LEDGER-UNBOOKED`). A failed mirror logs
   `SCHEDULE-STORE-UNBOOKED` and never fails the upload.

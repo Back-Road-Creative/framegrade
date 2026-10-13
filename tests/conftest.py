@@ -223,6 +223,50 @@ def pin_free_ram_probe(monkeypatch):
     monkeypatch.setattr(preflight, "_virtual_memory", lambda: _PinnedMem)
 
 
+# The exact argv ``color_filters.detect_nvenc`` runs; tests/test_conftest_nvenc_probe_pin.py
+# fails if the probe's argv drifts away from this list.
+_NVENC_PROBE_ARGV = [
+    "ffmpeg",
+    "-f",
+    "lavfi",
+    "-i",
+    "testsrc=duration=1:size=256x256:rate=1",
+    "-c:v",
+    "hevc_nvenc",
+    "-f",
+    "null",
+    "-",
+]
+
+
+@pytest.fixture(autouse=True)
+def stub_nvenc_probe(request, monkeypatch):
+    """Answer the NVENC probe's ffmpeg run with returncode 0 unless marked ``real_nvenc``.
+
+    ``detect_nvenc`` is a real ``hevc_nvenc`` encode with a 10 s timeout, called
+    from six pipeline sites; tests that only assemble a command read the host GPU
+    through it, and on a runner whose GPU was busy it timed out and turned an
+    unrelated test red. Only the probe's exact argv is
+    answered, so ``detect_nvenc``'s own code still runs, every other command
+    reaches the real ``subprocess.run``, and a test that patches
+    ``subprocess.run`` or ``detect_nvenc`` itself still wins. A test marked
+    ``real_nvenc`` runs the real probe on the host GPU.
+    """
+    if request.node.get_closest_marker("real_nvenc"):
+        return
+    import subprocess
+
+    real_run = subprocess.run
+
+    def _run(*popenargs, **kwargs):
+        argv = popenargs[0] if popenargs else kwargs.get("args")
+        if isinstance(argv, (list, tuple)) and list(argv) == _NVENC_PROBE_ARGV:
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return real_run(*popenargs, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+
 @pytest.fixture(autouse=True)
 def pin_lf_insert_clock(request, monkeypatch):
     """Pin the long-form insert loop's clock to 2000-01-01 UTC.
@@ -892,6 +936,11 @@ def pytest_ignore_collect(collection_path, config):
 
 
 def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_nvenc: opt out of the conftest ``stub_nvenc_probe`` answer and run "
+        "the real ``hevc_nvenc`` probe on the host GPU.",
+    )
     config.addinivalue_line(
         "markers",
         "real_seo_validation: opt out of the conftest no-op stub for "

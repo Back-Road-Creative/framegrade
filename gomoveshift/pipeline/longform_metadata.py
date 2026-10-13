@@ -1930,13 +1930,16 @@ class LongFormMetadataGenerator:
         no analytics fields get added to this video's event; the Data API
         sync path is unaffected.
         """
+        from seo_manager.analytics.youtube_sync import analytics_report_window
+
+        start_date, end_date = analytics_report_window()
         try:
             response = (
                 sync.youtube_analytics.reports()
                 .query(
                     ids="channel==MINE",
-                    startDate="2005-01-01",
-                    endDate="2100-01-01",
+                    startDate=start_date,
+                    endDate=end_date,
                     metrics=self._ANALYTICS_METRICS,
                     filters=f"video=={video_id}",
                 )
