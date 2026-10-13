@@ -19,7 +19,6 @@ class ChapterGenerationStage(BaseStage):
         from .. import orchestrator as _orch
         from ..chapters import ChapterGenerator
 
-        LongFormMetadataGenerator = _orch.LongFormMetadataGenerator  # noqa: N806
         props = ctx.video_properties
         output_dir = ctx.paths.project_dir
         try:
@@ -72,7 +71,7 @@ class ChapterGenerationStage(BaseStage):
                 metadata["chapters"] = chapters
                 metadata["chapter_text"] = chapter_text
                 if "description" in metadata:
-                    metadata["description"] = LongFormMetadataGenerator._embed_chapters(
+                    metadata["description"] = ctx.require_metadata_generator()._embed_chapters(
                         metadata["description"], chapter_text
                     )
                 if ctx.recording_date and "description" in metadata:

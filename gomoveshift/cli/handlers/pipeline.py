@@ -20,6 +20,7 @@ def cmd_pipeline(args, config):
     """Run the full long form processing pipeline."""
     from ...config import ConfigError
     from ...pipeline import PipelineOrchestrator
+    from ...pipeline.longform_metadata import LongFormMetadataGenerator
 
     # Fail-fast SEO config validation. See ``cmd_drive`` for
     # the full rationale. Runs BEFORE tmux re-exec so a missing SEO
@@ -80,7 +81,7 @@ def cmd_pipeline(args, config):
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGHUP, _handle_sigterm)
 
-    orchestrator = PipelineOrchestrator(config)
+    orchestrator = PipelineOrchestrator(config, metadata_generator=LongFormMetadataGenerator)
 
     try:
         from ...pipeline.orchestrator import RunOptions

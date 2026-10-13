@@ -83,6 +83,7 @@ def cmd_batch(args, config):
         execute_ingest,
         run_batch_pipeline,
     )
+    from ...pipeline.longform_metadata import LongFormMetadataGenerator
 
     # ENFORCE: Long-running batch MUST run in tmux
     if not is_in_tmux():
@@ -178,6 +179,7 @@ def cmd_batch(args, config):
         skip_color=args.skip_color,
         skip_stops=args.skip_stops,
         draft=args.draft,
+        metadata_generator=LongFormMetadataGenerator,
     )
 
     # Summary

@@ -63,6 +63,9 @@ class PipelineContext:
     schedule: Any = None  # ReleaseSchedule — avoid circular import
     social_posts: Optional[list] = None
     upload_manifest: Any = None  # UploadManifest — avoid circular import
+    # The publish-side long-form metadata generator class (a ``LongFormMetadataGenerator``),
+    # injected by the caller so the engine never imports publishing code.
+    metadata_generator: Any = None
 
     # ── Tracking ──────────────────────────────────────────────────────
     stages_completed: list[str] = field(default_factory=list)
@@ -83,6 +86,19 @@ class PipelineContext:
     num_shorts: int = 0
     metadata_file: Optional[Path] = None
     final_video: Optional[Path] = None
+
+    def require_metadata_generator(self):
+        """Return the injected long-form metadata generator class, or raise.
+
+        The engine never imports the publish-side generator; the caller (the CLI,
+        the batch runner) hands it to ``PipelineOrchestrator(metadata_generator=...)``.
+        """
+        if self.metadata_generator is None:
+            raise RuntimeError(
+                "no metadata generator was injected: construct the orchestrator with "
+                "PipelineOrchestrator(config, metadata_generator=LongFormMetadataGenerator)"
+            )
+        return self.metadata_generator
 
     # ── Stage names ───────────────────────────────────────────────────
     # Canonical stage name constants. Used by skip_stages, stages_completed,

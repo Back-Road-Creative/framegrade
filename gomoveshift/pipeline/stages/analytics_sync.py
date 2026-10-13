@@ -13,10 +13,7 @@ class AnalyticsSyncStage(BaseStage):
 
     def run(self, ctx):
         try:
-            from .. import orchestrator as _orch
-
-            LongFormMetadataGenerator = _orch.LongFormMetadataGenerator  # noqa: N806
-            meta_gen = LongFormMetadataGenerator()
+            meta_gen = ctx.require_metadata_generator()()
             meta_gen._sync_youtube_analytics()
             return StageResult(success=True)
         except FileNotFoundError as e:

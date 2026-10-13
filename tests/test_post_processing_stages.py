@@ -16,6 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from gomoveshift.pipeline.longform_metadata import LongFormMetadataGenerator
+
 # These drive the full orchestrator on a dummy video; blur is on by default,
 # so opt out of the real face/plate detector (see conftest ``disable_blur``).
 pytestmark = pytest.mark.usefixtures("disable_blur")
@@ -115,7 +117,7 @@ class TestThumbnailStage:
         """Thumbnail stage should create thumbnails/styled/ directory."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         thumb_dir = pipeline_output / "testproject" / "thumbnails" / "styled"
 
         # The directory structure should be created by the stage
@@ -167,7 +169,7 @@ class TestThumbnailStage:
             }
             thumb_dir.mkdir(parents=True)
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             _result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -190,7 +192,7 @@ class TestThumbnailStage:
         """--skip-thumbnails should skip stage 7."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         result = orch.run(
             RunOptions.from_legacy(
                 video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -218,7 +220,7 @@ class TestThumbnailStage:
 
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         with patch("gomoveshift.pipeline.orchestrator.generate_thumbnails_from_video") as mock_gen:
             result = orch.run(
                 RunOptions.from_legacy(
@@ -269,7 +271,7 @@ class TestShortsAnalysisStage:
             mock_result.errors = []
             mock_instance.extract_and_render.return_value = mock_result
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -309,7 +311,7 @@ class TestShortsAnalysisStage:
             mock_result.errors = []
             mock_instance.extract_and_render.return_value = mock_result
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             _result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -334,7 +336,7 @@ class TestShortsAnalysisStage:
         """--skip-shorts should skip stage 8."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         result = orch.run(
             RunOptions.from_legacy(
                 video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -372,7 +374,7 @@ class TestShortsAnalysisStage:
             mock_result.errors = []
             mock_instance.extract_and_render.return_value = mock_result
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -435,7 +437,7 @@ class TestScheduleStage:
             mock_schedule.to_dict.return_value = {"publish_date": "2026-02-07", "slots": []}
             mock_instance.generate_schedule.return_value = mock_schedule
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -458,7 +460,7 @@ class TestScheduleStage:
         """--skip-schedule should skip stage 9."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         result = orch.run(
             RunOptions.from_legacy(
                 video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -534,7 +536,7 @@ class TestSocialPostStage:
                 mock_posts.append(p)
             mock_instance.generate_all.return_value = mock_posts
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -560,7 +562,7 @@ class TestSocialPostStage:
         """--skip-social should skip stage 10."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         result = orch.run(
             RunOptions.from_legacy(
                 video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -601,7 +603,7 @@ class TestSocialPostStage:
             mock_instance = MockSocial.return_value
             mock_instance.generate_all.return_value = []
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -712,7 +714,7 @@ class TestMetricoolCSVStage:
                     writer.writerow([f"Drive #{i + 1}", "2026-02-08", "08:00:00", "FALSE", "TRUE"])
             mock_instance.generate.return_value = csv_path
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -737,7 +739,7 @@ class TestMetricoolCSVStage:
         """--skip-csv should skip stage 11."""
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
-        orch = PipelineOrchestrator()
+        orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
         result = orch.run(
             RunOptions.from_legacy(
                 video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -792,7 +794,7 @@ class TestPostProcessingResume:
             patch("gomoveshift.pipeline.orchestrator.SocialGenerator") as mock_social,
             patch("gomoveshift.pipeline.orchestrator.CSVGenerator") as mock_csv,
         ):
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
@@ -826,7 +828,7 @@ class TestPostProcessingResume:
             # A real thumbnail on disk: the stage gate now requires one.
             (thumb_dir / "a.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 20480)
 
-            orch = PipelineOrchestrator()
+            orch = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator)
             _result = orch.run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",

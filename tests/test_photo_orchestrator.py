@@ -11,6 +11,11 @@ import pytest
 
 from gomoveshift.pipeline.photos.caption_generator import CaptionBatch, PhotoCaption
 from gomoveshift.pipeline.photos.orchestrator import PhotoOrchestrator
+from gomoveshift.publishing.photo_run_hooks import (
+    next_photo_voice_style,
+    photo_run_hooks,
+    record_photo_theme_usage,
+)
 from gomoveshift.pipeline.uploader import VerificationResult
 
 
@@ -128,8 +133,10 @@ class TestPhotoOrchestratorPublish:
             )
             mock_uploader_cls.return_value = mock_uploader
 
-            with patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as _book:
-                orchestrator = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path)
+            with patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload") as _book:
+                orchestrator = PhotoOrchestrator(
+                    site_root=site_root, output_dir=tmp_path, **photo_run_hooks()
+                )
 
                 # Mock the resizer to return fake paths (slug-prefixed names)
                 resized_path = (
@@ -191,8 +198,10 @@ class TestPhotoOrchestratorPublish:
             ]
             mock_uploader_cls.return_value = mock_uploader
 
-            with patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as _book:
-                orchestrator = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path)
+            with patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload") as _book:
+                orchestrator = PhotoOrchestrator(
+                    site_root=site_root, output_dir=tmp_path, **photo_run_hooks()
+                )
 
                 resized_path = (
                     tmp_path / "photo_resized" / "2026-02-23" / "test-journey_photo-001.jpg"
@@ -264,9 +273,11 @@ class TestPhotoOrchestratorEndDateFlow:
             )
             mock_uploader_cls.return_value = mock_uploader
 
-            with patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as _book:
+            with patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload") as _book:
                 # Photos resolve from the selector's configured root, not a default.
-                orchestrator = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path)
+                orchestrator = PhotoOrchestrator(
+                    site_root=site_root, output_dir=tmp_path, **photo_run_hooks()
+                )
                 resized_path = (
                     tmp_path / "photo_resized" / "2026-02-23" / "test-journey_photo-001.jpg"
                 )
@@ -549,12 +560,7 @@ class TestThemeRotatorHardening:
     a RUNTIME failure from it must never crash caption generation, and a failed
     usage-record must be visible (WARNING), not swallowed at debug."""
 
-    @pytest.fixture
-    def orch(self, tmp_path):
-        (tmp_path / "content" / "journeys").mkdir(parents=True)
-        return PhotoOrchestrator(site_root=tmp_path, output_dir=tmp_path / "output")
-
-    def test_runtime_rotator_error_defaults_without_crashing(self, orch, caplog):
+    def test_runtime_rotator_error_defaults_without_crashing(self, caplog):
         """A non-ImportError failure (e.g. corrupt rotation state) must fall back
         to FIRST_PERSON with a WARNING, not propagate into generate_batch."""
         from gomoveshift.pipeline.photos.voice_styles import VoiceStyle
@@ -564,12 +570,12 @@ class TestThemeRotatorHardening:
             side_effect=RuntimeError("rotation state corrupt"),
         ):
             with caplog.at_level(logging.WARNING):
-                style = orch._get_voice_style_from_rotator()
+                style = next_photo_voice_style()
 
         assert style == VoiceStyle.FIRST_PERSON
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
-    def test_import_error_still_defaults(self, orch):
+    def test_import_error_still_defaults(self):
         """Regression: a missing seo_manager still defaults to FIRST_PERSON."""
         from gomoveshift.pipeline.photos.voice_styles import VoiceStyle
 
@@ -581,20 +587,19 @@ class TestThemeRotatorHardening:
             return real_import(name, *a, **k)
 
         with patch("builtins.__import__", side_effect=fake_import):
-            style = orch._get_voice_style_from_rotator()
+            style = next_photo_voice_style()
 
         assert style == VoiceStyle.FIRST_PERSON
 
-    def test_record_theme_usage_failure_logs_warning(self, orch, caplog):
+    def test_record_theme_usage_failure_logs_warning(self, caplog):
         """A failed usage-record must surface at WARNING (was swallowed at debug)
         and must never raise into the publish flow."""
-        batch = MagicMock(voice_style="voice_first_person", week_start="2025-01-06")
         with patch(
             "seo_manager.analytics.theme_rotator.ThemeRotator",
             side_effect=RuntimeError("disk full"),
         ):
             with caplog.at_level(logging.DEBUG):
-                orch._record_theme_usage(batch)  # must not raise
+                record_photo_theme_usage("voice_first_person", "2025-01-06")  # must not raise
 
         assert any(
             r.levelno >= logging.WARNING and "theme" in r.message.lower() for r in caplog.records
@@ -665,7 +670,9 @@ class TestPhotoOrchestratorLedgerBooking:
             )
             mock_uploader_cls.return_value = mock_uploader
 
-            orchestrator = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path)
+            orchestrator = PhotoOrchestrator(
+                site_root=site_root, output_dir=tmp_path, **photo_run_hooks()
+            )
 
             resized_path = tmp_path / "photo_resized" / "2026-02-23" / "test-journey_photo-001.jpg"
             resized_path.parent.mkdir(parents=True, exist_ok=True)
@@ -695,7 +702,7 @@ class TestPhotoOrchestratorLedgerBooking:
         from gomoveshift.pipeline.photos.caption_generator import PhotoCaption
         from gomoveshift.pipeline.photos.scheduler import PhotoSlot
 
-        orchestrator = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
+        orchestrator = PhotoOrchestrator(output_dir=tmp_path, **photo_run_hooks())
         slots = [PhotoSlot(date="2026-02-23", time="10:00:00", day_of_week="Monday")]
         caption = PhotoCaption(
             photo_index=0,

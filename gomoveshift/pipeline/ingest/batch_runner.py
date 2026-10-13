@@ -24,6 +24,7 @@ def run_batch_pipeline(
     skip_color: bool = False,
     skip_stops: bool = False,
     draft: bool = False,
+    metadata_generator=None,
 ) -> list[dict]:
     """Run the full pipeline on each episode in the ingest plan.
 
@@ -39,6 +40,8 @@ def run_batch_pipeline(
         skip_color: Skip color correction
         skip_stops: Skip stop detection
         draft: Mark outputs as draft
+        metadata_generator: Publish-side ``LongFormMetadataGenerator`` class the pipeline's
+            metadata stages use (the engine does not import it)
 
     Returns:
         List of result dicts per episode
@@ -51,7 +54,7 @@ def run_batch_pipeline(
         output_base = gms_output_dir()
 
     config = get_config()
-    orchestrator = PipelineOrchestrator(config)
+    orchestrator = PipelineOrchestrator(config, metadata_generator=metadata_generator)
 
     # Publish dates: the first is --start-date or the next free slot on publish_day (ledger
     # occupancy, decided by seo_manager); each later episode takes the next free slot after it.
