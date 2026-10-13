@@ -500,6 +500,8 @@ def cmd_drive(args, config):
     config.drive.preview = args.preview
     config.drive.no_sharpen = bool(getattr(args, "no_sharpen", False))
     config.drive.no_denoise = bool(getattr(args, "no_denoise", False))
+    config.drive.trail = getattr(args, "trail", None)
+    config.drive.trail_profile = getattr(args, "trail_profile", "") or ""
     # CLI override beats config.
     _ingest_mode = getattr(args, "ingest_mode", None)
     if _ingest_mode in ("gopro", "generic"):

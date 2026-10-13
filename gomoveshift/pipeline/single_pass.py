@@ -55,7 +55,13 @@ from .color import (
     scale_range_token,
 )
 from .color_filters import cfr_filter
-from .ffmpeg_filters import BRAND_TEXT, WEBSITE_TEXT, _validate_font_path, escape_ffmpeg_text
+from .ffmpeg_filters import (
+    BRAND_TEXT,
+    FONT_PATH,
+    WEBSITE_TEXT,
+    _validate_font_path,
+    escape_ffmpeg_text,
+)
 from .ffmpeg_runner import run_ffmpeg_encode, run_ffmpeg_quick, validate_video
 from .loudnorm_measure import (
     build_attenuate_filter,
@@ -380,10 +386,13 @@ class SinglePassProcessor:
     """
 
     # Validated at load: it is interpolated bare into drawtext=fontfile='...'.
-    DEFAULT_FONT = _validate_font_path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    DEFAULT_FONT = _validate_font_path(FONT_PATH)
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, profile: Optional[object] = None):
         self.config = config
+        # Per-tenant MediaProfile (brand_policy.load_media_profile), set once;
+        # None = engine defaults; the upscaler reads upscale/claim_native_resolution_only.
+        self.profile = profile
         # Set True whenever _wrap_text falls back from PIL metrics to the
         # 0.55×fontsize char approximation, so the fallback is recorded (queryable
         # on the instance) rather than silently taking over the legacy burn path.
@@ -400,9 +409,10 @@ class SinglePassProcessor:
         font = font_path or self.DEFAULT_FONT
         if Path(font).exists():
             return font
+        fonts_root = Path(FONT_PATH).parent.parent
         fallbacks = [
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/ubuntu/Ubuntu-Bold.ttf",
+            str(fonts_root / "liberation" / "LiberationSans-Bold.ttf"),
+            str(fonts_root / "ubuntu" / "Ubuntu-Bold.ttf"),
         ]
         for fb in fallbacks:
             if Path(fb).exists():
@@ -1001,7 +1011,7 @@ class SinglePassProcessor:
 
         loc_alpha = self._build_fade_alpha(loc_start, loc_end, fade_duration)
 
-        brand_esc = self._escape_text(BRAND_TEXT)
+        brand_esc = self._escape_text(getattr(self.profile, "brand_text", None) or BRAND_TEXT)
         filters.append(
             f"drawtext="
             f"fontfile='{font_path}':"
@@ -1059,7 +1069,7 @@ class SinglePassProcessor:
         website_fontsize: int,
     ) -> str:
         """Build drawtext filter fragment for the website CTA overlay."""
-        website_text = WEBSITE_TEXT
+        website_text = getattr(self.profile, "website_text", None) or WEBSITE_TEXT
         ws_end = duration - 0.5
         ws_start = ws_end - website_duration
         website_esc = self._escape_text(website_text)

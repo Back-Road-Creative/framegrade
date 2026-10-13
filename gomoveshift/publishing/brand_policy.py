@@ -184,3 +184,92 @@ def load_brand_policy(slug: str) -> BrandPolicy:
         blackout=blackout,
         quiet_after_alert_hours=quiet_after_alert_hours,
     )
+
+
+# --- Per-tenant media profile (``media:`` block) ---------------------------
+# Defaults reproduce the pre-profile engine literals. The canonical strings
+# also live in ``pipeline/ffmpeg_filters.py`` (BRAND_TEXT / WEBSITE_TEXT /
+# FONT_PATH); a test pins the two together. Path existence (lut, logo, font)
+# is checked at the use site, not at load.
+
+_KNOWN_MEDIA_KEYS = frozenset(
+    {
+        "lut",
+        "logo",
+        "font",
+        "still_card_style",
+        "preset_defaults",
+        "upscale",
+        "claim_native_resolution_only",
+        "brand_text",
+        "website_text",
+    }
+)
+_UPSCALE_MODES = frozenset({"resample", "ml", "off"})
+
+
+@dataclass(frozen=True)
+class MediaProfile:
+    """A brand's ``media:`` block, defaults matching today's engine behaviour."""
+
+    lut: Optional[str] = None
+    logo: Optional[str] = None
+    font: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    still_card_style: str = "letterbox"
+    preset_defaults: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
+    upscale: str = "off"
+    claim_native_resolution_only: bool = True
+    brand_text: str = "GoMoveShift"
+    website_text: str = "gomoveshift.com"
+
+
+def _load_raw_media_block(slug: str) -> dict:
+    path = _SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+    if not path.exists():
+        return {}
+    raw = yaml.safe_load(path.read_text()) or {}
+    return raw.get("media") or {}
+
+
+def load_media_profile(slug: str) -> MediaProfile:
+    """Read the optional ``media:`` block from ``brand.yaml`` for ``slug``.
+
+    Missing file/block/key falls back to :class:`MediaProfile` defaults. An
+    unknown key or an invalid value raises ``ValueError`` naming ``media.<key>``.
+    """
+    block = _load_raw_media_block(slug)
+    unknown = set(block) - _KNOWN_MEDIA_KEYS
+    if unknown:
+        raise ValueError(f"media.{sorted(unknown)[0]} is not a recognized media key")
+
+    kwargs: dict = {}
+    for key in ("lut", "logo"):
+        if block.get(key) is not None:
+            if not isinstance(block[key], str) or not block[key]:
+                raise ValueError(f"media.{key} must be a non-empty string path, got {block[key]!r}")
+            kwargs[key] = block[key]
+    for key in ("font", "still_card_style", "brand_text", "website_text"):
+        if key in block:
+            if not isinstance(block[key], str) or not block[key]:
+                raise ValueError(f"media.{key} must be a non-empty string, got {block[key]!r}")
+            kwargs[key] = block[key]
+    if "upscale" in block:
+        if block["upscale"] not in _UPSCALE_MODES:
+            raise ValueError(
+                f"media.upscale must be one of {sorted(_UPSCALE_MODES)}, got {block['upscale']!r}"
+            )
+        kwargs["upscale"] = block["upscale"]
+    if "claim_native_resolution_only" in block:
+        if not isinstance(block["claim_native_resolution_only"], bool):
+            raise ValueError(
+                "media.claim_native_resolution_only must be a bool, "
+                f"got {block['claim_native_resolution_only']!r}"
+            )
+        kwargs["claim_native_resolution_only"] = block["claim_native_resolution_only"]
+    if block.get("preset_defaults") is not None:
+        if not isinstance(block["preset_defaults"], dict):
+            raise ValueError(
+                f"media.preset_defaults must be a mapping, got {block['preset_defaults']!r}"
+            )
+        kwargs["preset_defaults"] = MappingProxyType(dict(block["preset_defaults"]))
+    return MediaProfile(**kwargs)

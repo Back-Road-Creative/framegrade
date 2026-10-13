@@ -434,6 +434,31 @@ either requirement is unmet, so a route with no explicit privacy trim can never 
 artifact. The private `--receipt` output is unaffected by requesting `--public-receipt` alongside
 it.
 
+## Inside a drive: the trail film (`--trail`, `pipeline/drive_phases/trail_film.py`)
+
+`gomoveshift drive` can render a Route Story film beside each LF day. `attach_trail_film(deliverables,
+state, config)` runs from Phase B/C's per-day callback, after the day's LFs render and before the day is
+recorded, so the outcome persists (and resumes) with the day's `Deliverables`:
+
+1. Resolve the day's GPX from `state.gpx_files` (parallel to `state.episode_dates`).
+2. Look up the prepared imagery bundle with `prepare.find_prepared_bundle`. The "prepare" step is a lookup
+   only; the network fetch never runs inside a drive, so run `gomoveshift route-story-prepare` first.
+3. Render a cheap terrain proof clip (960x540, 24 fps) through `proof.render_proof_with_receipt` -- the same
+   entry `route-story-proof` uses -- and re-check its receipt with `verify.verify_receipt`.
+4. Render the film with `film.main`. The imagery rasters and credits come from the Route Story launch
+   profile named by `--trail-profile` (see `route_story_profiles/README.md`); the day's GPX, date, output,
+   `--renderer scene`, the verified bundle and the LF override the profile. The LF is the placed source
+   clip: the day's lowest-index regular LF.
+
+The film is a sibling deliverable: `Deliverables.trail_films` (a `TrailFilm` with the LF index, path and
+receipt), written to `day_<date>/trail/trail_film_<date>.mp4`. Phase D does not publish it yet.
+
+`--trail` / `--no-trail` is tri-state. Neither flag is auto: on when the day has a GPX and a prepared
+bundle. `--no-trail` is a silent no-op. A day that cannot get a film (no GPX, no prepared bundle, no
+`--trail-profile`, a failed proof or verify, a film that exits nonzero) logs a warning and records the
+reason in `Deliverables.trail_skips`; it never fails the drive, because the LFs are the primary product.
+A skip is recorded with the day, so a resume does not retry it.
+
 ## Motion summary: a before number for "does this feel hectic"
 
 `planner.motion_report`/`assert_smooth` only ever see the WORST frame of a plan -- pass/fail against
