@@ -109,6 +109,6 @@ def test_lf_time_derives_from_slot():
 
 
 def test_lf_time_no_slot_keeps_config_default():
-    cfg = _cfg()  # long_form_publish_time default "11:00"
+    cfg = _cfg()  # no run transport: the last fallback is Waypost's time
     out = schedule_constants.resolve_lf_time(cfg, lf_day="wed", lf_time_arg=None)
-    assert out == "11:00"
+    assert out == "16:00"  # the seed's earliest-day time (tue); wed is not a Waypost day

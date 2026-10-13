@@ -47,6 +47,9 @@ def brand(tmp_path):
     return path
 
 
+SEED_CADENCE = True  # opt out of conftest.legacy_test_cadence
+
+
 def _hhmm(text: str) -> dt_time:
     h, m = text.split(":")
     return dt_time(int(h), int(m))

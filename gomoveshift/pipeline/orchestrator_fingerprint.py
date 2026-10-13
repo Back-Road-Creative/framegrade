@@ -88,14 +88,17 @@ def build_phase_d_fingerprint_inputs(state, *, config) -> dict:
     """Construct the canonical Phase D fingerprint inputs from
     the orchestrator's current ``state`` + ``config``.
     """
-    # ``--lf-day`` reaches the orchestrator only via
-    # ``config.drive.long_form_publish_days`` (the CLI handler maps
-    # ``mon/tue/.../sun`` → weekday-int and assigns the list before
-    # ``orchestrator.run()`` is called). Encode the list as a sorted
+    # The run's long-form days: ``--lf-day`` (the CLI handler maps
+    # ``mon/tue/.../sun`` → weekday-int into the config transport before
+    # ``orchestrator.run()``), else Waypost's days -- read through the
+    # ``long_form_days`` accessor, so a Waypost decision that moves the days
+    # invalidates a stale checkpoint. Encode the list as a sorted
     # tuple-of-ints so a re-ordering of the same selection doesn't
     # spuriously invalidate the checkpoint.
+    from .schedule_constants import long_form_days, long_form_time
+
     try:
-        lf_day_value = sorted(int(d) for d in (config.drive.long_form_publish_days or []))
+        lf_day_value = sorted(int(d) for d in long_form_days(config))
         lf_day_repr: list[int] | None = list(lf_day_value) or None
     except (AttributeError, TypeError, ValueError):
         lf_day_repr = None
@@ -123,7 +126,7 @@ def build_phase_d_fingerprint_inputs(state, *, config) -> dict:
         "shorts_per_day": getattr(state, "shorts_per_day", None),
         "per_lf_locations": getattr(state, "per_lf_overrides", None),
         "location": getattr(state, "location", None),
-        "lf_time": getattr(drive_cfg, "long_form_publish_time", None),
+        "lf_time": long_form_time(config).strftime("%H:%M"),
         "shorts_times": getattr(drive_cfg, "shorts_publish_times", None),
         "lf_publish_date": getattr(state, "lf_publish_date", None),
     }

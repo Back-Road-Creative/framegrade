@@ -1207,6 +1207,56 @@ def isolate_cadence_store_from_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(seo_slots, "load_cadence", _load)
 
 
+_SEED_MIRRORS: dict = {}  # the import-time (seed) mirrors, captured before the first pin
+
+
+@pytest.fixture(autouse=True)
+def legacy_test_cadence(request):
+    """Pin the long-form module mirrors to the cadence most tests were written for.
+
+    The hand-set Wed / 11:00 default is gone: ``LONG_FORM_DAYS`` /
+    ``LONG_FORM_TIME`` now mirror Waypost's packaged seed (Tue, Fri, Sun / 16:00).
+    The many tests that build a Wednesday fixture and read the module mirrors
+    (state invariants, quality gates, scheduler windows) name that cadence HERE,
+    once, instead of each carrying its own copy. The days are the seed's Tue, Fri, Sun
+    PLUS Wednesday, so a Wednesday fixture and a Waypost-derived default day (Tuesday)
+    are both valid to the invariants; the time stays 11:00. A module that tests the seed
+    itself sets ``SEED_CADENCE = True`` to opt out; a test that wants a
+    different cadence still monkeypatches the mirrors or uses ``waypost_lf_days``
+    (both override this pin).
+
+    Teardown puts the SEED values back unconditionally (not "whatever was there"): the
+    suite's own save/restore fixtures capture the pinned values and would otherwise
+    hand them to the next test in the worker.
+    """
+    from datetime import time as _time
+
+    from gomoveshift.pipeline import schedule_constants as _sc
+    from gomoveshift.pipeline import scheduler as _sched
+
+    mods = (_sc, _sched)
+    if not _SEED_MIRRORS:
+        _SEED_MIRRORS.update(
+            {
+                (m.__name__, n): getattr(m, n)
+                for m in mods
+                for n in ("LONG_FORM_DAYS", "LONG_FORM_TIME")
+            }
+        )
+    seed_run = getattr(request.module, "SEED_CADENCE", False)
+    days, lf_time = frozenset({1, 2, 4, 6}), _time(11, 0)
+    for m in mods:
+        if seed_run:  # a leaked pin from an earlier test must not reach a seed test
+            m.LONG_FORM_DAYS = _SEED_MIRRORS[(m.__name__, "LONG_FORM_DAYS")]
+            m.LONG_FORM_TIME = _SEED_MIRRORS[(m.__name__, "LONG_FORM_TIME")]
+        else:
+            m.LONG_FORM_DAYS, m.LONG_FORM_TIME = days, lf_time
+    yield
+    for m in mods:
+        m.LONG_FORM_DAYS = _SEED_MIRRORS[(m.__name__, "LONG_FORM_DAYS")]
+        m.LONG_FORM_TIME = _SEED_MIRRORS[(m.__name__, "LONG_FORM_TIME")]
+
+
 @pytest.fixture
 def waypost_lf_days(tmp_path):
     """Name the long-form weekdays a test assumes, the way Waypost records them.
