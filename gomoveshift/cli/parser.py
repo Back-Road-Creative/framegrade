@@ -740,6 +740,23 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Do not denoise the LF day master (hqdn3d strength is forced to 0).",
     )
     p.add_argument(
+        "--trail",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Render a Route Story trail film beside each LF day (the day's GPX, "
+        "photos and first LF as the placed clip). Default (neither flag): on when "
+        "the day has a GPX and a prepared imagery bundle, else a logged skip. "
+        "--no-trail turns it off.",
+    )
+    p.add_argument(
+        "--trail-profile",
+        default="",
+        metavar="YAML",
+        help="Route Story launch profile (route_story_profiles/<trip>.yaml) "
+        "supplying the trail film's imagery rasters and credits; the day's GPX, "
+        "date, LF clip and output override its values.",
+    )
+    p.add_argument(
         "--allow-bad-shorts",
         action="store_const",
         const=True,

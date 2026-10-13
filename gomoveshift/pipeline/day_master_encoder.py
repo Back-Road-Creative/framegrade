@@ -1236,6 +1236,7 @@ def encode_day_master(
     config: Optional[Config] = None,
     location: str = "",
     per_day_record: Optional[dict] = None,
+    profile: Optional[object] = None,
 ) -> Optional[Path]:
     """Encode a day's master video file from a DayBatch.
 
@@ -1442,7 +1443,7 @@ def encode_day_master(
     # Without this, a SIGKILL or power loss mid-encode leaves a corrupt
     # mp4 (no `moov` atom) at the final filename, and the resume fast-path
     # silently trusts it via `Path.exists()`.
-    processor = SinglePassProcessor(cfg)
+    processor = SinglePassProcessor(cfg, profile=profile)
     # ── Privacy blur (drive path) ─────────────────────────────────────
     # Detect faces/plates/occupants/persons on the raw concat and composite the
     # blur DURING this single existing encode pass (color+audio already re-encode

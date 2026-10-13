@@ -60,7 +60,7 @@ from ..gps_enrichment import (
     validate_burned_ost_text,
 )
 from ..longform_assembler import LongFormAssembler
-from ..media_api import deliverables_to_state, lift_artifacts
+from ..media_api import Deliverables, deliverables_to_state, lift_artifacts
 from ..post_encoding_invariants import (
     _assert_mapping_complete,
     _assert_per_lf_distance_complete,
@@ -84,6 +84,7 @@ from ..state_invariants import (
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
 from ..title_builder import build_lf_title, ensure_unique_titles
+from .trail_film import attach_trail_film
 
 # Re-export the moved helpers for backward compatibility — multiple
 # tests + downstream modules import these names from this module.
@@ -539,6 +540,10 @@ class PhaseBCDayFirst:
             # fails after days 0..N-1 landed) must leave the already-done
             # days recorded so the next resume short-circuits them.
             def _on_day_complete(artifacts, st) -> None:
+                # Route Story trail film: a sibling deliverable, attached before
+                # the record so it persists (and resumes) with the day.
+                if isinstance(artifacts, Deliverables):
+                    attach_trail_film(artifacts, st, self.config)
                 _record_day_and_save(artifacts, st, state_save_fn)
                 _maybe_drop_day_master(artifacts, st, stages_dir)
 

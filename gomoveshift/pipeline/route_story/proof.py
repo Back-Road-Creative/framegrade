@@ -1254,6 +1254,37 @@ def _git_head() -> str:
         return "unknown"
 
 
+def render_proof_with_receipt(
+    gpx_path: Path,
+    bundle_root: Path,
+    output_path: Path,
+    *,
+    recorded_on: date,
+    fps: float = 30.0,
+    width: int = 1920,
+    height: int = 1080,
+    workers: int | None = None,
+) -> Path:
+    """Render a proof clip and write its receipt beside it; returns the receipt path.
+
+    The one entry the ``route-story-proof`` handler and the in-drive trail film
+    share, so both write ``<clip>.receipt.json`` the same way.
+    """
+    receipt = render_proof_clip(
+        gpx_path,
+        bundle_root,
+        output_path,
+        recorded_on=recorded_on,
+        fps=fps,
+        width=width,
+        height=height,
+        workers=workers,
+    )
+    receipt_path = Path(str(output_path) + ".receipt.json")
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+    return receipt_path
+
+
 def render_proof_clip(
     gpx_path: Path,
     bundle_root: Path,

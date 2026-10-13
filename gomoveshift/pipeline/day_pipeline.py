@@ -68,7 +68,7 @@ from keycut import (
 )
 
 from ..console.settings import current_brand
-from ..publishing.brand_policy import load_brand_policy
+from ..publishing.brand_policy import load_brand_policy, load_media_profile
 from . import volume_source
 from .blur_gate import BlurGateError
 from .chapters.marker_merger import chapter_town_events
@@ -1355,6 +1355,7 @@ def _produce_superlong_parts(
     lf_plans: Optional[list] = None,
     state=None,
     day_gps_points: Optional[list[tuple[float, float, float]]] = None,
+    media_profile=None,
 ) -> dict:
     """Cut + OST-burn opt-in superlong parts (``sl_NN.mp4``) from the day
     master. Never turned into ``RegularLFPlan``s, so they can't reach
@@ -1566,6 +1567,7 @@ def _produce_superlong_parts(
             lower_thirds=part_transitions,
             lower_third_duration_sec=lt_duration_sec,
             lower_third_min_gap_sec=lt_min_gap_sec,
+            media_profile=media_profile,
         )
         if ost_result is None:
             raise RuntimeError(f"Superlong OST failed: day {date} part {part.part_index}")
@@ -1683,12 +1685,16 @@ def run_day_pipeline(
         _pdc = state.get("per_day_completed")
         if isinstance(_pdc, dict):
             _per_day_record = _pdc.get(date)
+    # The tenant's MediaProfile, loaded once per run on the orchestration
+    # side and handed to the engine (encode_day_master, apply_ost).
+    media_profile = load_media_profile(current_brand())
     master_path = encode_day_master(
         day_batch,
         day_dir,
         config=config,
         location=location,
         per_day_record=_per_day_record,
+        profile=media_profile,
     )
     if master_path is None:
         logger.error("Day %s: master encode failed, aborting day", date)
@@ -2217,6 +2223,7 @@ def run_day_pipeline(
             prefer_nvenc=True,
             montage_duration=montage_duration,
             crossfade_sec=ost_crossfade_sec,
+            media_profile=media_profile,
         )
         if ost_result is None:
             raise RuntimeError(
@@ -2500,6 +2507,7 @@ def run_day_pipeline(
                 lf_plans=lf_plans,
                 state=state,
                 day_gps_points=_day_gps_points,
+                media_profile=media_profile,
             )
             if state is not None:
                 state.setdefault("superlong_parts", {})[date] = _sl_plan

@@ -58,3 +58,8 @@ re-raises that original exception. `render_proof_clip`'s `workers` argument defa
 at 6); the receipt records the `workers` actually used and the `readback` format (`SceneCapture`'s
 `readback="jpeg"|"png"` screenshot kwarg — JPEG quality 95 by default, replacing a PNG-encode-then-PIL-
 decode round trip). `scene.js`'s settle poll (`SETTLE_POLL_MS`) is 60ms, not 250ms.
+
+`proof.render_proof_with_receipt` is the one entry that renders a proof clip and writes its
+`<clip>.receipt.json` beside it. `route-story-proof` and the in-drive trail film
+(`drive_phases/trail_film.py`, see `16-route-story-film.md`) both call it, so the receipt is written the
+same way on either path.

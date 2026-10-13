@@ -76,6 +76,9 @@ from gomoveshift.pipeline.ffmpeg_filters import (
     escape_ffmpeg_text,
     wrap_text_for_ffmpeg,
 )
+from gomoveshift.pipeline.ffmpeg_filters import (
+    FONT_PATH as _DEFAULT_FONT_PATH,
+)
 from gomoveshift.pipeline.ffmpeg_runner import run_ffmpeg_encode, validate_video
 from gomoveshift.pipeline.loudnorm_measure import (
     build_loudnorm_measure_cmd,
@@ -173,7 +176,7 @@ def _audio_attenuate_filter(measured: Optional[dict] = None) -> str:
 
 # Font path — DejaVu Sans Bold is the canonical GoMoveShift brand font.
 # Validated at load: it is interpolated bare into drawtext=fontfile='...'.
-FONT_PATH = _validate_font_path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+FONT_PATH = _validate_font_path(_DEFAULT_FONT_PATH)
 
 # ffmpeg timeout for the OST re-encode step. This is the ONLY re-encode that
 # produces a drive-path LF FINAL, and it owns a whole-file ``+faststart``
@@ -566,6 +569,7 @@ def _build_drawtext_filter(
     lower_third_duration_sec: float = _LOWER_THIRD_DURATION_SEC_DEFAULT,
     lower_third_min_gap_sec: float = _LOWER_THIRD_MIN_GAP_SEC_DEFAULT,
     brand_kit: Optional[dict] = None,
+    media_profile: Optional[object] = None,
 ) -> str:
     """Build the ffmpeg `-vf` filter chain for the OST overlay.
 
@@ -602,7 +606,9 @@ def _build_drawtext_filter(
     lower_third_fontsize = int(_LOWER_THIRD_FONTSIZE * scale)
 
     text_color = _kit_text_color(brand_kit)
-    brand_esc = _escape_drawtext(_BRAND_TEXT)
+    brand_text = getattr(media_profile, "brand_text", None) or _BRAND_TEXT
+    website_text = getattr(media_profile, "website_text", None) or _WEBSITE_TEXT
+    brand_esc = _escape_drawtext(brand_text)
 
     if montage_duration is not None:
         # regular_lf path (brand shares montage gate + crossfade with location).
@@ -718,7 +724,7 @@ def _build_drawtext_filter(
     # Separate from the end-card CTA below; this is the always-on brand
     # attribution (mirror of the old non-day-first filtergraph._apply_url_text).
     if layout.get("show_persistent_url"):
-        url_esc = _escape_drawtext(_WEBSITE_TEXT)
+        url_esc = _escape_drawtext(website_text)
         # Smaller than end-card (persistent watermark shouldn't dominate)
         url_fontsize = int(_CTA_FONTSIZE * 0.6 * scale)
         filters.append(
@@ -742,7 +748,7 @@ def _build_drawtext_filter(
             ws_end = video_duration - _CTA_END_MARGIN
             ws_start = ws_end - ws_duration
             ws_alpha = _alpha_expr(ws_start, ws_end, _FADE_DURATION)
-            ws_esc = _escape_drawtext(_WEBSITE_TEXT)
+            ws_esc = _escape_drawtext(website_text)
             filters.append(
                 f"drawtext="
                 f"fontfile='{font_path}':"
@@ -1124,6 +1130,7 @@ def apply_ost(
     lower_third_duration_sec: float = _LOWER_THIRD_DURATION_SEC_DEFAULT,
     lower_third_min_gap_sec: float = _LOWER_THIRD_MIN_GAP_SEC_DEFAULT,
     brand_kit: Optional[dict] = None,
+    media_profile: Optional[object] = None,
 ) -> Optional[Path]:
     """Burn an OST location overlay onto a video with layout-specific timing.
 
@@ -1192,7 +1199,14 @@ def apply_ost(
     # font_path (explicit override) wins; else the brand kit's font; else the
     # module default. brand_kit is None at every call site today, so this is
     # identical to the pre-kit `font_path or FONT_PATH`.
-    font = font_path or (brand_kit or {}).get("font") or FONT_PATH
+    font = (
+        font_path
+        or (brand_kit or {}).get("font")
+        or getattr(media_profile, "font", None)
+        or FONT_PATH
+    )
+    if not brand_logo_path:
+        brand_logo_path = getattr(media_profile, "logo", None)
 
     # An empty/whitespace location reaching the burn is an UPSTREAM state
     # defect (the OST/title cascade should always resolve a label, gated by
@@ -1270,6 +1284,7 @@ def apply_ost(
         lower_third_duration_sec=lower_third_duration_sec,
         lower_third_min_gap_sec=lower_third_min_gap_sec,
         brand_kit=brand_kit,
+        media_profile=media_profile,
     )
 
     # Build encoder args. _resolve_encoding_args retries the NVENC probe

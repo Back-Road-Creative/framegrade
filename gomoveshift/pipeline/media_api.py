@@ -49,11 +49,30 @@ class Measurements:
 
 
 @dataclass
+class TrailFilm:
+    """A Route Story film rendered for a day: a sibling of the day's LFs.
+
+    ``lf_index`` is the LF the film placed as its source clip.
+    """
+
+    lf_index: int
+    path: Path
+    receipt: Optional[Path] = None
+
+
+@dataclass
 class Deliverables(DayArtifacts):
-    """``DayArtifacts`` plus the sidecars written and the measurements taken."""
+    """``DayArtifacts`` plus the sidecars written and the measurements taken.
+
+    ``trail_films`` are the Route Story films rendered beside the LFs;
+    ``trail_skips`` are the reasons a day got none (a skip is recorded, never
+    silent).
+    """
 
     sidecars: dict[str, Path] = field(default_factory=dict)
     measurements: Measurements = field(default_factory=Measurements)
+    trail_films: list[TrailFilm] = field(default_factory=list)
+    trail_skips: list[str] = field(default_factory=list)
 
 
 _SIDECAR_STEMS = ("ost_audit", "shorts_ost_audit")
@@ -137,6 +156,11 @@ def deliverables_to_state(d: Deliverables) -> dict:
         "shorts_target_in_force": d.shorts_target_in_force,
         "sidecars": {k: str(v) for k, v in d.sidecars.items()},
         "measurements": asdict(d.measurements),
+        "trail_films": [
+            {"lf_index": f.lf_index, "path": str(f.path), "receipt": _to_str(f.receipt)}
+            for f in d.trail_films
+        ],
+        "trail_skips": list(d.trail_skips),
     }
 
 
@@ -159,6 +183,15 @@ def deliverables_from_state(record: dict) -> Deliverables:
         shorts_target_in_force=record.get("shorts_target_in_force"),
         sidecars={k: Path(v) for k, v in (record.get("sidecars") or {}).items()},
         measurements=Measurements(**(record.get("measurements") or {})),
+        trail_films=[
+            TrailFilm(
+                lf_index=int(f["lf_index"]),
+                path=Path(f["path"]),
+                receipt=Path(f["receipt"]) if f.get("receipt") else None,
+            )
+            for f in record.get("trail_films") or []
+        ],
+        trail_skips=list(record.get("trail_skips") or []),
     )
 
 

@@ -1426,6 +1426,11 @@ class DriveConfig(BaseModel):
     # color-analysis cache (and a resume) carries the choice.
     no_sharpen: bool = False
     no_denoise: bool = False
+    # Route Story trail film beside each LF day (--trail / --no-trail). None is
+    # auto: on when the day has a GPX and a prepared imagery bundle. The profile
+    # (--trail-profile) supplies the imagery rasters and credits.
+    trail: Optional[bool] = None
+    trail_profile: str = ""
     preview: bool = False  # Encode 90s preview clips from middle of each episode, then exit
     no_review: bool = False  # Skip human review gates (automated checks still run)
     skip_validation: bool = False  # Skip terminal DoD validator gate (emergency only)

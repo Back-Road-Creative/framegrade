@@ -10,9 +10,7 @@ handler only resolves paths and writes the receipt file.
 
 from __future__ import annotations
 
-import json
 import sys
-from pathlib import Path
 
 from ...pipeline.route_story import prepare, proof
 
@@ -34,7 +32,7 @@ def cmd_route_story_proof(args, config) -> int:
                 "no prepared Route Story bundle found for this GPX on "
                 f"{args.recorded_on.isoformat()}; run route-story-prepare first"
             )
-        receipt = proof.render_proof_clip(
+        receipt_path = proof.render_proof_with_receipt(
             args.gpx,
             bundle_root,
             args.output,
@@ -48,7 +46,5 @@ def cmd_route_story_proof(args, config) -> int:
         print(f"Route Story proof render failed: {exc}", file=sys.stderr)
         return 1
 
-    receipt_path = Path(str(args.output) + ".receipt.json")
-    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
-    print(json.dumps(receipt, indent=2, sort_keys=True))
+    print(receipt_path.read_text(encoding="utf-8"))
     return 0
