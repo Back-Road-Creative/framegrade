@@ -252,7 +252,7 @@ def _resolve_endpoint_name(detected: dict | None, anchor: dict | None, waypoint)
     (legacy fixtures) has nothing to contradict it and is kept. One rule for the
     OST string and the route profile.
     """
-    from ..title_builder import _looks_like_county, _looks_like_region, _looks_like_township
+    from ..place_shape import _looks_like_county, _looks_like_region, _looks_like_township
 
     detected_name = (detected or {}).get("name") or None
     anchor = anchor or {}
@@ -451,8 +451,8 @@ def _format_ost_from_route(
     if (cross_county or cross_state) and waypoints and geocoder:
         # VOTE the midpoint across several central samples, not a single
         # waypoint — one flaky mid geocode must not fail the demotion open.
-        # Shared modal-vote helper (see title_builder._vote_mid_region).
-        from ..title_builder import _central_window, _vote_mid_region
+        # Shared modal-vote helper (see place_shape._vote_mid_region).
+        from ..place_shape import _central_window, _vote_mid_region
 
         mid_coords = [
             (wp.latitude, wp.longitude)

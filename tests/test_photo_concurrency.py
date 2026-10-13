@@ -26,10 +26,11 @@ from gomoveshift.pipeline.orchestrator_lock import (
     _release_run_lock,
 )
 from gomoveshift.pipeline.photos.orchestrator import PHOTO_RUN_LOCK_NAME, PhotoOrchestrator
+from gomoveshift.publishing.photo_run_hooks import photo_run_hooks
 
 
 def _book(tmp_path: Path, date: str, text: str) -> None:
-    orch = PhotoOrchestrator(site_root=tmp_path, output_dir=tmp_path)
+    orch = PhotoOrchestrator(site_root=tmp_path, output_dir=tmp_path, **photo_run_hooks())
     orch._book_slots(
         [SimpleNamespace(date=date, time="12:00:00")],
         [SimpleNamespace(main_caption=text)],

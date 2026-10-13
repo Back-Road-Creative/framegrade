@@ -22,7 +22,6 @@ from ..paths import gms_output_dir
 from .context import SKIP_FLAG_TO_STAGE, PipelineContext, PipelinePaths
 from .csv_generator import CSVGenerator  # noqa: F401 — stages import via _orch
 from .ffmpeg_runner import validate_video
-from .longform_metadata import LongFormMetadataGenerator  # noqa: F401
 from .pipeline_validator import PipelineValidator  # noqa: F401
 from .scheduler import PipelineScheduler  # noqa: F401
 from .shorts_extractor import PipelineShortsExtractor  # noqa: F401
@@ -218,8 +217,12 @@ class PipelineOrchestrator:
         "sun": "Sunday",
     }
 
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(self, config: Optional[Config] = None, metadata_generator=None):
         self.config = config or get_config()
+        # Publish-side ``LongFormMetadataGenerator`` class, handed in by the
+        # caller; the metadata, chapter and analytics-sync stages read it from
+        # the run context so the engine imports no publishing code.
+        self.metadata_generator = metadata_generator
 
     @staticmethod
     def _ensure_wsl_mount(path, retries=3, delay=2.0):
@@ -342,6 +345,7 @@ class PipelineOrchestrator:
             draft=draft,
             fresh=fresh,
             params=params,
+            metadata_generator=self.metadata_generator,
         )
         existing_state = None if fresh else self._load_state(paths_obj.state_file)
         if existing_state and self._can_resume(existing_state, video_path, params):

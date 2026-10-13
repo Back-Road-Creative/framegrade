@@ -317,11 +317,7 @@ def test_record_confirmed_upload_returns_false_on_failure(tmp_path, monkeypatch,
 
 
 def test_book_slots_writes_marker_when_booking_fails(tmp_path, monkeypatch):
-    orch = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
-    monkeypatch.setattr(
-        "gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload",
-        lambda entries: False,
-    )
+    orch = PhotoOrchestrator(output_dir=tmp_path, ledger_booker=lambda rows: False)
     orch._book_slots([_slot()], [_caption()], tmp_path / "week.csv")
     marker = tmp_path / LEDGER_UNBOOKED_MARKER
     assert marker.exists()
@@ -331,11 +327,7 @@ def test_book_slots_writes_marker_when_booking_fails(tmp_path, monkeypatch):
 
 
 def test_book_slots_no_marker_on_success(tmp_path, monkeypatch):
-    orch = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
-    monkeypatch.setattr(
-        "gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload",
-        lambda entries: True,
-    )
+    orch = PhotoOrchestrator(output_dir=tmp_path, ledger_booker=lambda rows: True)
     orch._book_slots([_slot()], [_caption()], tmp_path / "week.csv")
     assert not (tmp_path / LEDGER_UNBOOKED_MARKER).exists()
 

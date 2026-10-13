@@ -15,6 +15,7 @@ from gomoveshift.cli.parser import _build_parser
 from gomoveshift.pipeline.photos.caption_generator import CaptionBatch
 from gomoveshift.pipeline.photos.orchestrator import PhotoOrchestrator
 from gomoveshift.pipeline.photos.voice_styles import VoiceStyle
+from gomoveshift.publishing.photo_run_hooks import photo_run_hooks
 
 JOURNEY_MD = """\
 ---
@@ -311,11 +312,13 @@ def test_publish_batch_start_date_overrides_week_start(tmp_path, monkeypatch):
 
     with (
         patch("gomoveshift.pipeline.photos.orchestrator.PipelineUploader") as uploader_cls,
-        patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as _book,
+        patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload") as _book,
     ):
         uploader_cls.return_value.verify_uploads.return_value = SimpleNamespace(failed=[])
 
-        orch = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path / "out")
+        orch = PhotoOrchestrator(
+            site_root=site_root, output_dir=tmp_path / "out", **photo_run_hooks()
+        )
         orch.resizer.resize_batch = MagicMock(return_value=[])
         orch.scheduler.schedule_batch = MagicMock(
             return_value=[PhotoSlot(date="2026-08-10", time="10:00:00", day_of_week="Monday")]

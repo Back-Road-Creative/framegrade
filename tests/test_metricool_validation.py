@@ -452,6 +452,7 @@ class TestUploadStageWired:
 
     def test_upload_stage_calls_uploader(self, pipeline_output):
         """Upload stage should call PipelineUploader.upload_shorts()."""
+        from gomoveshift.pipeline.longform_metadata import LongFormMetadataGenerator
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
         mock_vr = MagicMock()
@@ -470,7 +471,7 @@ class TestUploadStageWired:
                 pipeline_output / "testproject" / "test.csv"
             )
 
-            result = PipelineOrchestrator().run(
+            result = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator).run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
                     location="Test Location, Italy",
@@ -493,6 +494,7 @@ class TestUploadStageWired:
 
     def test_upload_stage_skippable(self, pipeline_output):
         """--skip-upload should skip the upload stage."""
+        from gomoveshift.pipeline.longform_metadata import LongFormMetadataGenerator
         from gomoveshift.pipeline.orchestrator import PipelineOrchestrator, RunOptions
 
         with patch("gomoveshift.pipeline.orchestrator.CSVGenerator") as MockCSV:  # noqa: N806
@@ -500,7 +502,7 @@ class TestUploadStageWired:
                 pipeline_output / "testproject" / "test.csv"
             )
 
-            result = PipelineOrchestrator().run(
+            result = PipelineOrchestrator(metadata_generator=LongFormMetadataGenerator).run(
                 RunOptions.from_legacy(
                     video_path=pipeline_output / "testproject" / "testproject.mp4",
                     location="Test Location, Ireland",

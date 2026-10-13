@@ -37,9 +37,6 @@ class MetadataGenerationStage(BaseStage):
     name = PipelineContext.STAGE_METADATA_GENERATION
 
     def run(self, ctx):
-        from .. import orchestrator as _orch
-
-        LongFormMetadataGenerator = _orch.LongFormMetadataGenerator  # noqa: N806
         props = ctx.video_properties
         output_dir = ctx.paths.project_dir
         if ctx.recording_date is None:
@@ -56,7 +53,7 @@ class MetadataGenerationStage(BaseStage):
             "sun": "Sunday",
         }
         try:
-            meta_gen = LongFormMetadataGenerator()
+            meta_gen = ctx.require_metadata_generator()()
             chapters, chapter_text = [], ""
             chapters_path = output_dir / f"{ctx.project_name}_chapters.txt"
             if chapters_path.exists():

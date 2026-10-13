@@ -14,12 +14,11 @@ import subprocess
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ... import paths as _paths
 from .. import fs_safety
 from .._atomic_write import atomic_write_json
-from ..content_ledger import ContentEntry, record_confirmed_upload
 from ..orchestrator_lock import _acquire_run_lock, _release_run_lock
 from ..uploader import PipelineUploader
 from .caption_generator import CaptionBatch, CaptionGenerator
@@ -77,7 +76,20 @@ class PhotoOrchestrator:
         output_dir: Optional[Path] = None,
         social_aspect: Optional[str] = None,
         cull_floors: Optional[CullFloors] = None,
+        ledger_booker: Optional[Callable[[list[dict]], bool]] = None,
+        voice_source: Optional[Callable[[], VoiceStyle]] = None,
+        theme_recorder: Optional[Callable[[str, str], None]] = None,
     ):
+        # Publish-side seams, wired by the caller (see
+        # ``publishing.photo_run_hooks.photo_run_hooks``) so the engine imports
+        # no ledger or seo_manager code:
+        #   ledger_booker(rows) -> bool   books confirmed photo slots; rows are
+        #       {"date", "time", "title", "source_file"}; False = booking missed.
+        #   voice_source() -> VoiceStyle  the next rotated voice (default FIRST_PERSON).
+        #   theme_recorder(voice, week)   records a batch's voice usage (default no-op).
+        self.ledger_booker = ledger_booker
+        self.voice_source = voice_source
+        self.theme_recorder = theme_recorder
         self.output_dir = output_dir or _paths.gms_photo_output_dir()
         # The selector reads the Hugo site checkout (``photos.site_root``, which has no
         # default), so it is built on first use: cleanup needs no site, and an
@@ -561,26 +573,28 @@ class PhotoOrchestrator:
 
     def _book_slots(self, slots, valid_captions, csv_path) -> None:
         """Book this batch's photo slots into the shared content ledger."""
-        entries = []
-        for i, slot in enumerate(slots):
-            title = valid_captions[i].main_caption[:40] if i < len(valid_captions) else ""
-            entries.append(
-                ContentEntry(
-                    date=slot.date,
-                    time=slot.time,
-                    content_type="photo",
-                    title=title,
-                    platform="all",
-                    status="scheduled",
-                    source="photo_pipeline",
-                    source_file=str(csv_path),
-                )
+        rows = [
+            {
+                "date": slot.date,
+                "time": slot.time,
+                "title": valid_captions[i].main_caption[:40] if i < len(valid_captions) else "",
+                "source_file": str(csv_path),
+            }
+            for i, slot in enumerate(slots)
+        ]
+        # The injected booker holds the ledger lock across the whole
+        # load→add→save so a concurrent booking can't lose-update this one. It is
+        # best-effort: never RAISES post-upload (that would release_pending
+        # shipped photos), but a SILENT miss risks a later double-book,
+        # so mark the failure. No booker wired counts as a miss.
+        if self.ledger_booker is None:
+            logger.error(
+                "LEDGER-BOOKING-FAILED: no ledger_booker wired; %d slot(s) unbooked", len(rows)
             )
-        # Locked writer holds the ledger lock across the whole load→add→save so
-        # a concurrent booking can't lose-update this one. Best-effort: never
-        # RAISES post-upload (that would release_pending shipped photos),
-        # but a SILENT miss risks a later double-book, so mark the failure.
-        if not record_confirmed_upload(entries):
+            booked = False
+        else:
+            booked = self.ledger_booker(rows)
+        if not booked:
             self._mark_ledger_unbooked(slots, csv_path)
 
     def _mark_ledger_unbooked(self, slots, csv_path) -> None:
@@ -761,34 +775,15 @@ class PhotoOrchestrator:
         }
 
     def _get_voice_style_from_rotator(self) -> VoiceStyle:
-        """Get next voice style from SEO manager's ThemeRotator."""
-        try:
-            from seo_manager.analytics.theme_rotator import ContentTheme, ThemeRotator
-
-            rotator = ThemeRotator()
-            theme = rotator.get_next_theme(category="photo")
-
-            # Map ContentTheme back to VoiceStyle
-            mapping = {
-                ContentTheme.VOICE_FIRST_PERSON: VoiceStyle.FIRST_PERSON,
-                ContentTheme.VOICE_MINIMAL_ZEN: VoiceStyle.MINIMAL_ZEN,
-                ContentTheme.VOICE_ENGAGING: VoiceStyle.ENGAGING_CONVERSATIONAL,
-            }
-            # VOICE_INTERACTIVE may not exist in older seo_manager versions
-            if hasattr(ContentTheme, "VOICE_INTERACTIVE"):
-                mapping[ContentTheme.VOICE_INTERACTIVE] = VoiceStyle.INTERACTIVE
-            return mapping.get(theme, VoiceStyle.FIRST_PERSON)
-
-        except ImportError:
-            logger.warning("seo_manager not available, defaulting to FIRST_PERSON")
+        """Next voice style from the injected rotator; FIRST_PERSON when none is wired
+        or it fails (the rotator is an optional A/B-tracking nicety)."""
+        if self.voice_source is None:
             return VoiceStyle.FIRST_PERSON
+        try:
+            return self.voice_source()
         except Exception as e:
-            # A RUNTIME ThemeRotator failure (corrupt/locked rotation state, a
-            # concurrent writer, etc.) must never crash caption generation —
-            # the rotator is an optional A/B-tracking nicety. Fall back to the
-            # default voice and surface the failure.
             logger.warning(
-                f"ThemeRotator failed ({type(e).__name__}: {e}); defaulting to FIRST_PERSON"
+                f"Voice rotator failed ({type(e).__name__}: {e}); defaulting to FIRST_PERSON"
             )
             return VoiceStyle.FIRST_PERSON
 
@@ -821,27 +816,11 @@ class PhotoOrchestrator:
         return plan
 
     def _record_theme_usage(self, batch: CaptionBatch):
-        """Record voice style usage in ThemeRotator for A/B tracking."""
+        """Record voice style usage through the injected recorder (A/B tracking)."""
+        if self.theme_recorder is None:
+            return
         try:
-            from seo_manager.analytics.theme_rotator import ContentTheme, ThemeRotator
-
-            rotator = ThemeRotator()
-            voice_map = {
-                "voice_first_person": ContentTheme.VOICE_FIRST_PERSON,
-                "voice_minimal_zen": ContentTheme.VOICE_MINIMAL_ZEN,
-                "voice_engaging": ContentTheme.VOICE_ENGAGING,
-            }
-            if hasattr(ContentTheme, "VOICE_INTERACTIVE"):
-                voice_map["voice_interactive"] = ContentTheme.VOICE_INTERACTIVE
-            theme = voice_map.get(batch.voice_style)
-            if theme:
-                content_id = f"photo_batch_{batch.week_start}"
-                rotator.record_usage(
-                    content_id=content_id,
-                    video_id=batch.week_start,
-                    theme=theme,
-                    category="photo",
-                )
+            self.theme_recorder(batch.voice_style, batch.week_start)
         except Exception as e:
             # Non-fatal (A/B tracking only) but must be visible: a silent debug
             # swallow hid this failing for every batch. Warn, don't raise.
