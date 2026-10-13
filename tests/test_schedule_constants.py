@@ -170,23 +170,17 @@ class TestShortsPoolRegionFence:
         ie_pool = resolve_shorts_pool_for_region(Config(), "ireland")
         assert not (set(ie_pool) & {"14:00", "18:00", "10:00", "16:00"})
 
-    def test_validator_rejects_pool_polluted_with_other_region_window(self):
-        import pytest
-        from pydantic import ValidationError
+    def test_every_region_pool_is_disjoint_from_the_others(self):
+        """Waypost's seed keeps the pools region-fenced: no hour is two regions' slot."""
+        from gomoveshift.config import Config
+        from gomoveshift.pipeline import seo_slots
 
-        from gomoveshift.config import DriveConfig
-
-        with pytest.raises(ValidationError):
-            DriveConfig(
-                shorts_publish_times_by_region={
-                    "ireland": ["08:00", "16:00"],
-                    "usa": ["14:00", "18:00"],
-                },
-                shorts_slot_pool_by_region={
-                    "ireland": ["08:00", "16:00"],
-                    "usa": ["14:00", "18:00", "16:00"],  # 16:00 is Ireland's → reject
-                },
-            )
+        cfg = Config()
+        regions = sorted(seo_slots.waypost_cadence(cfg).regions)
+        for i, a in enumerate(regions):
+            for b in regions[i + 1 :]:
+                shared = set(seo_slots.shorts_pool(cfg, a)) & set(seo_slots.shorts_pool(cfg, b))
+                assert not shared, (a, b, shared)
 
 
 class TestRequiredShortsPerLf:

@@ -25,21 +25,21 @@ from .schedule_constants import (
     resolve_shorts_times_for_region,
     resolve_superlong_publish_day,
 )
-from .seo_slots import build_report
+from .seo_slots import build_report, waypost_cadence
 from .title_builder import _SUPERLONG_PART_SUFFIX_RE
 
 
 def _regions(config) -> list[str]:
-    """Region roster — the keys of the region-aware shorts map."""
-    return sorted(getattr(config.drive, "shorts_publish_times_by_region", None) or {})
+    """Region roster — Waypost's cadence regions."""
+    return sorted(waypost_cadence(config).regions)
 
 
 def _availability_matrix(ledger: ContentLedger, config, now: datetime) -> tuple[dict, list]:
     """seo_manager's availability report over the ledger, plus the GMS-only shorts columns.
 
     Each region lists ITS OWN Waypost days at Waypost's designed time (the packaged seed
-    overlaid with the ``lf_days`` decisions); the shorts windows and count per row are GMS's
-    (``shorts_publish_times_by_region``), looked up by the row's region and day.
+    overlaid with the ``lf_days`` decisions); the shorts windows and count per row are Waypost's
+    ``shorts_times`` (dealt by ``drive_share``), looked up by the row's region and day.
     """
     core = build_report(ledger, config, now)
     matrix: list[dict] = []

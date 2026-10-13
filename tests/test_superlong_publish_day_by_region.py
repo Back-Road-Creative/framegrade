@@ -1,6 +1,5 @@
 """Superlong publish day is REGION-AWARE, like every other location-dependent
-drive setting (``shorts_publish_times_by_region``, ``shorts_slot_pool_by_region``,
-``active_journey_by_region``). The flat ``superlong_publish_day`` stays the
+drive setting (``active_journey_by_region``). The flat ``superlong_publish_day`` stays the
 fallback for a region absent from the map — the same shape
 ``resolve_shorts_times_for_region`` uses."""
 

@@ -26,7 +26,6 @@ def _cfg(tmp_path):
     return SimpleNamespace(
         drive=SimpleNamespace(
             shorts_publish_times=["14:00", "18:00"],
-            shorts_slot_pool_by_region={"usa": ["14:00", "18:00", "10:00", "16:00"]},
             long_form_publish_days=[1],
             long_form_publish_time="16:00",
         ),

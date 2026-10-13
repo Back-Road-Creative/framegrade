@@ -11,7 +11,7 @@ import datetime as dt
 
 from gomoveshift.pipeline.scheduler import PipelineScheduler
 
-# Region-fenced USA pool (matches config.drive.shorts_slot_pool_by_region["usa"]):
+# Region-fenced USA pool (the same four hours as Waypost's seed for usa):
 # USA owns 10/14/16/18 — Ireland's 08:00/12:00 are deliberately absent so a
 # contended USA drive can never substitute into an Ireland window.
 USA_POOL = [
@@ -129,13 +129,14 @@ def test_ireland_2lf_unaffected_by_usa_16():
 
 
 def test_ireland_config_grid_disjoint_from_usa():
-    """Shipped config: Ireland's slots (08/12) and USA's pool (10/14/16/18) are
+    """Waypost seed: Ireland's slots (08/12) and USA's pool (10/14/16/18) are
     fully disjoint — no double-owned time like the old 16:00."""
-    from gomoveshift.config import DriveConfig
+    from gomoveshift.config import Config
+    from gomoveshift.pipeline.seo_slots import shorts_pool
 
-    d = DriveConfig()
-    ie = set(d.shorts_publish_times_by_region["ireland"])
-    usa = set(d.shorts_slot_pool_by_region["usa"])
+    cfg = Config()
+    ie = set(shorts_pool(cfg, "ireland"))
+    usa = set(shorts_pool(cfg, "usa"))
     assert ie == {"08:00", "12:00"}
     assert not (ie & usa)
 
