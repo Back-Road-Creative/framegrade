@@ -21,6 +21,7 @@ from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
     _assert_skeleton_lf_has_location,
 )
 
+from gomoveshift.pipeline.drive_phases import phase_bc_day_first as phase_bc_day_first_mod
 from _state_helpers import make_state
 
 
@@ -776,14 +777,15 @@ class TestPerDayCompletedBookkeeping:
         )
         return state, output_base, stages_dir
 
-    def _run_phase(self, state, run_all_days_impl):
+    def _run_phase(self, state, run_all_days_impl, geocoder=None):
         from gomoveshift.config import Config
         from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
             PhaseBCDayFirst,
         )
 
-        geocoder = MagicMock()
-        geocoder.reverse_geocode.return_value = None
+        if geocoder is None:
+            geocoder = MagicMock()
+            geocoder.reverse_geocode.return_value = None
 
         # Fast-path #1 now ffprobes recorded masters. These tests
         # write placeholder bytes to the master files; a real ffprobe call
@@ -960,6 +962,98 @@ class TestPerDayCompletedBookkeeping:
 
         # Both days fell through because stale record is invalid AND no record for day 2
         assert sorted(seen) == ["2026-02-20", "2026-02-21"]
+
+
+class TestTrailFilmDriveWiring:
+    """The drive hands the trail film a span vote built on ITS shared geocoder.
+
+    ``attach_trail_film`` (fresh day) and ``retry_trail_skip`` (resume) fail
+    closed without a working ``span_location``, so a broken wiring here turns
+    every drive film into a recorded skip. The trail functions are replaced by
+    recorders that call the ``span_location`` they were handed on a real GPX.
+    """
+
+    DAY = "2026-02-20"
+    VOTE = {"Swain County, NC": 0.6, "Haywood County, NC": 0.4}
+
+    def _gpx(self, tmp_path):
+        gpx = tmp_path / "day.gpx"
+        pts = "".join(
+            f'<trkpt lat="35.{i}" lon="-83.{i}"><time>{self.DAY}T{h}:00:00Z</time></trkpt>'
+            for i, h in enumerate(("14", "15", "20"))
+        )
+        gpx.write_text(
+            '<gpx version="1.1" creator="t" xmlns="http://www.topografix.com/GPX/1/1">'
+            "<trk><trkseg>" + pts + "</trkseg></trk></gpx>"
+        )
+        return gpx
+
+    def _drive(self, tmp_path, monkeypatch, *, resume):
+        from datetime import date
+
+        from gomoveshift.models import ResolvedLocation
+        from gomoveshift.pipeline import gps_enrichment
+        from gomoveshift.pipeline.media_api import Deliverables
+
+        harness = TestPerDayCompletedBookkeeping()
+        state, _out, stages_dir = harness._base_state(tmp_path, dates=(self.DAY,))
+        gpx = self._gpx(tmp_path)
+        geocoder = MagicMock(name="drive_geocoder")
+        geocoder.reverse_geocode.return_value = None
+        votes: list = []
+        monkeypatch.setattr(
+            gps_enrichment,
+            "build_resolved_location",
+            lambda points, *, geocoder, **kw: (
+                votes.append((points, geocoder)) or ResolvedLocation(vote=dict(self.VOTE))
+            ),
+        )
+        seen: dict = {}
+
+        def _record(name):
+            def _fn(*args, span_location=None, **kwargs):
+                seen[name] = span_location
+                if span_location is not None:
+                    seen[name + "_vote"] = span_location(gpx, date.fromisoformat(self.DAY))
+                return False
+
+            return _fn
+
+        monkeypatch.setattr(phase_bc_day_first_mod, "attach_trail_film", _record("attach"))
+        monkeypatch.setattr(phase_bc_day_first_mod, "retry_trail_skip", _record("retry"))
+
+        master = stages_dir / f"day_{self.DAY}_master.mp4"
+        master.write_bytes(b"m")
+        if resume:
+            state["per_day_completed"] = {self.DAY: {"master_path": str(master)}}
+
+        def _fake_run_all_days(**kwargs):
+            day = Deliverables(date=self.DAY, master_path=master, regular_lf_paths=[])
+            kwargs["on_day_complete"](day, state)
+            return [day]
+
+        harness._run_phase(state, _fake_run_all_days, geocoder=geocoder)
+        return seen, votes, geocoder
+
+    def test_fresh_day_gets_a_working_span_vote_on_the_drive_geocoder(self, tmp_path, monkeypatch):
+        seen, votes, geocoder = self._drive(tmp_path, monkeypatch, resume=False)
+
+        assert callable(seen["attach"])
+        assert seen["attach_vote"].vote == self.VOTE
+        # The vote was built over the GPX fixes with the drive's own geocoder.
+        points, used = votes[-1]
+        assert used is geocoder
+        assert [round(p["lat"], 1) for p in points] == [35.0, 35.1, 35.2]
+        assert "retry" not in seen  # no resumed day on a fresh run
+
+    def test_resumed_day_retry_gets_a_working_span_vote_on_the_drive_geocoder(
+        self, tmp_path, monkeypatch
+    ):
+        seen, votes, geocoder = self._drive(tmp_path, monkeypatch, resume=True)
+
+        assert callable(seen["retry"])
+        assert seen["retry_vote"].vote == self.VOTE
+        assert votes[-1][1] is geocoder
 
 
 class TestPerDayCompletedStateRoundTrip:
