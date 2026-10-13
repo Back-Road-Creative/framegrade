@@ -1460,13 +1460,37 @@ def encode_day_master(
                 pass
         return None
 
+    # Step 1.4: opt-in picture steps (--deflicker / --stabilize), measured. They run on
+    # the raw concat BEFORE the grade, blur mask and encode so all three see the same
+    # frames. Intermediates live next to the raw concat under ``output_dir``. A
+    # discarded / failed step falls back to the raw concat; never raises.
+    graded_src = raw_concat
+    if cfg.drive.deflicker or cfg.drive.stabilize:
+        from .stabilize import apply_picture_steps
+
+        steps = apply_picture_steps(
+            raw_concat,
+            output_dir,
+            f"day_{date}_raw",
+            deflicker=bool(cfg.drive.deflicker),
+            stabilize=bool(cfg.drive.stabilize),
+        )
+        graded_src = steps.path
+        try:
+            (output_dir / f"day_{date}_picture_steps.json").write_text(
+                json.dumps(steps.record, indent=2, sort_keys=True)
+            )
+        except OSError as e:
+            logger.warning("  Day %s: could not write picture-steps record: %s", date, e)
+    picture_changed = graded_src != raw_concat
+
     # Step 1.5: Pre-seed color cache from stable cache if available.
     # The raw concat is freshly created (new mtime), which would
     # invalidate the mtime-based color cache that _analyze_color
     # maintains. By pre-seeding the transient cache with verified
     # stable data, we skip the ~35 min color re-analysis on restart.
     stable_color = _load_stable_color_cache(output_dir, date, concat_paths)
-    if stable_color:
+    if stable_color and not picture_changed:
         _preseed_transient_color_cache(raw_concat, stable_color)
 
     # Step 2: Color + audio encode in a single pass. OST is deliberately NOT
@@ -1497,7 +1521,7 @@ def encode_day_master(
     if blur_gate.blur_required(cfg):
         regions_sidecar = output_dir / f"day_{date}_blur_regions.json"
         blur_mask_path = _build_day_blur_mask(
-            raw_concat,
+            graded_src,
             cfg,
             output_dir / f"day_{date}_blur_mask.mkv",
             regions_sidecar,
@@ -1509,9 +1533,9 @@ def encode_day_master(
         # legacy per-episode gate (blur_gate.check_cabin_coverage). A failure gets
         # one targeted repair and a fresh check of the whole day; only a leak that
         # survives the repair stops the run.
-        cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, raw_concat, blur_mask_path)
-        if cabin_err and _repair_cabin_leaks(raw_concat, cfg, blur_mask_path, regions_sidecar):
-            cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, raw_concat, blur_mask_path)
+        cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, graded_src, blur_mask_path)
+        if cabin_err and _repair_cabin_leaks(graded_src, cfg, blur_mask_path, regions_sidecar):
+            cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, graded_src, blur_mask_path)
         if cabin_err:
             raise blur_gate.BlurGateError(cabin_err)
     # Use ``<stem>.tmp<suffix>`` (e.g. ``day_2025-01-15_master.tmp.mp4``) rather
@@ -1531,7 +1555,7 @@ def encode_day_master(
             logger.debug("  Could not unlink stale tmp master %s: %s", tmp_master_path, e)
     try:
         result = processor.process(
-            video_path=raw_concat,
+            video_path=graded_src,
             output_path=tmp_master_path,
             location=location,
             skip_ost=True,
@@ -1545,7 +1569,7 @@ def encode_day_master(
     except Exception as e:
         logger.error("  Day %s master encode raised: %s", date, e)
         # Clean up partial tmp master, raw concat on failure
-        for partial in (tmp_master_path, raw_concat):
+        for partial in (tmp_master_path, raw_concat, graded_src):
             if partial.exists():
                 try:
                     partial.unlink()
@@ -1558,15 +1582,17 @@ def encode_day_master(
 
     # Step 2.5: Persist color analysis to stable cache so it survives
     # pipeline restarts (the transient cache dies with the raw concat).
-    _save_stable_color_cache(output_dir, date, raw_concat, concat_paths)
+    if not picture_changed:
+        _save_stable_color_cache(output_dir, date, raw_concat, concat_paths)
 
     # Step 3: Clean up the intermediate raw concat file regardless of
     # success so we don't leave ~multi-GB scratch files behind.
-    if raw_concat.exists():
-        try:
-            raw_concat.unlink()
-        except OSError as e:
-            logger.debug("  Could not unlink raw concat %s: %s", raw_concat, e)
+    for scratch in (raw_concat, graded_src):
+        if scratch.exists():
+            try:
+                scratch.unlink()
+            except OSError as e:
+                logger.debug("  Could not unlink raw concat %s: %s", scratch, e)
 
     # Clean up the work directory if it's empty
     try:

@@ -17,9 +17,9 @@ input when its jitter measurably dropped. A pass that makes jitter worse (or
 doesn't improve it) is discarded and the caller is told why — never a silent
 pass-through of a filter that made things worse.
 
-Not yet wired into the render path or CLI — that's a named follow-up
-(``docs/pipeline/142-stabilise-and-deflicker.md``); this module only owns the
-capability-probe, argv builders, and the quality gate.
+``apply_picture_steps`` is the drive-path entry (``--stabilize`` /
+``--deflicker`` via ``day_master_encoder.encode_day_master``); see
+``docs/pipeline/142-stabilise-and-deflicker.md``.
 """
 
 from __future__ import annotations
@@ -282,3 +282,92 @@ def run_deflicker(
         Path(output_path).unlink(missing_ok=True)
         logger.warning("deflicker output discarded: %s", gate.reason)
     return gate
+
+
+@dataclass(frozen=True)
+class PictureStepsResult:
+    """Path to grade (``src`` when nothing was kept) plus the record of what ran."""
+
+    path: Path
+    record: dict
+
+
+def _step_record(gate: JitterGateResult) -> dict:
+    return {
+        "input_jitter": gate.input_jitter,
+        "output_jitter": gate.output_jitter,
+        "kept": gate.passed,
+    }
+
+
+def apply_picture_steps(
+    src: StrPath,
+    out_dir: StrPath,
+    stem: str,
+    *,
+    deflicker: bool,
+    stabilize: bool,
+    capabilities: FfmpegFilterCapabilities | None = None,
+    run: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> PictureStepsResult:
+    """Deflicker then stabilise ``src`` into ``out_dir``; never raises.
+
+    Each step is gated on measured luma jitter: a discarded (or failed) step
+    deletes its output and the chain continues with the previous input. The
+    returned ``record`` carries ``deflicker_applied`` / ``stabilize_applied``
+    plus per-step jitter numbers. Intermediates other than the returned path
+    are removed; the caller owns removing the returned path when it is not
+    ``src``.
+    """
+    run = run or subprocess.run
+    out_dir = Path(out_dir)
+    current = Path(src)
+    record: dict = {"deflicker_applied": False, "stabilize_applied": False, "steps": {}}
+
+    if deflicker:
+        out = out_dir / f"{stem}.deflicker.mp4"
+        try:
+            gate = run_deflicker(current, out, run=run)
+        except Exception as exc:  # encode / measure failure: keep the input
+            out.unlink(missing_ok=True)
+            logger.warning("deflicker failed, continuing with input: %s", exc)
+            record["steps"]["deflicker"] = {"kept": False, "error": str(exc)}
+        else:
+            record["steps"]["deflicker"] = _step_record(gate)
+            if gate.passed:
+                current = out
+                record["deflicker_applied"] = True
+
+    if stabilize:
+        out = out_dir / f"{stem}.stabilize.mp4"
+        trf = out_dir / f"{stem}.stabilize.trf"
+        try:
+            caps = capabilities if capabilities is not None else probe_ffmpeg_filters()
+            for argv in (
+                build_vidstabdetect_argv(current, trf, caps),
+                build_vidstabtransform_argv(current, trf, out, caps),
+            ):
+                res = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)
+                if res.returncode != 0:
+                    raise RuntimeError(f"vidstab rc={res.returncode}: {res.stderr[-2000:]}")
+            gate = gate_on_jitter(
+                measure_luma_jitter(current, run=run), measure_luma_jitter(out, run=run)
+            )
+        except Exception as exc:
+            out.unlink(missing_ok=True)
+            logger.warning("stabilise failed, continuing with input: %s", exc)
+            record["steps"]["stabilize"] = {"kept": False, "error": str(exc)}
+        else:
+            record["steps"]["stabilize"] = _step_record(gate)
+            if gate.passed:
+                if current != Path(src):
+                    current.unlink(missing_ok=True)
+                current = out
+                record["stabilize_applied"] = True
+            else:
+                out.unlink(missing_ok=True)
+                logger.warning("stabilise output discarded: %s", gate.reason)
+        finally:
+            trf.unlink(missing_ok=True)
+
+    return PictureStepsResult(current, record)

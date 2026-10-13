@@ -217,6 +217,17 @@ def measure_noise(rgb: np.ndarray) -> float:
     return float(np.median(np.abs(response[1:-1, 1:-1])) / (0.6745 * 6.0))
 
 
+def flicker_score(frames) -> float:
+    """Mean absolute frame-to-frame difference of per-frame mean luma.
+
+    ``frames`` are consecutive gray/RGB frames; fewer than two give 0.0.
+    """
+    means = [float(_luma(np.asarray(f)).mean()) for f in frames]
+    if len(means) < 2:
+        return 0.0
+    return float(np.mean(np.abs(np.diff(means))))
+
+
 def sharpen_amount_for(detail_score: float, width: int, *, disabled: bool) -> tuple[float, float]:
     """Return ``(amount, radius)``; ``(0.0, 0.0)`` when disabled, crisp, or unusable."""
     if disabled:
@@ -334,14 +345,32 @@ def sample_delivered_sharpness(path, duration: float, n: int = SOURCE_SHARPNESS_
     return sample_delivered_picture(path, duration, n)[0]
 
 
+def picture_steps_applied_for_day(cache_path) -> bool:
+    """True when ``day_<date>_picture_steps.json`` (beside the colour cache) kept a step.
+
+    The record is written by ``encode_day_master`` (``stabilize_applied`` /
+    ``deflicker_applied``). Absent or unreadable is False: no step ran.
+    """
+    path = Path(cache_path)
+    record_path = path.with_name(path.name.replace("_color_cache.json", "_picture_steps.json"))
+    try:
+        record = json.loads(record_path.read_text())
+    except (OSError, ValueError):
+        return False
+    return bool(record.get("stabilize_applied") or record.get("deflicker_applied"))
+
+
 def picture_changed_for_day(cache_path) -> bool:
-    """True when the day's colour cache records any sharpen/denoise/marker step.
+    """True when the day's colour cache records any sharpen/denoise/marker step,
+    or its picture-steps record kept a stabilise / deflicker pass.
 
     Reads the ``corrections`` list of ``day_<date>_color_cache.json`` (each entry
     a ``CorrectionParams`` dict). A missing or unreadable file is False, with a
     warning -- the gate then records "skipped", never a guess.
     """
     path = Path(cache_path)
+    if picture_steps_applied_for_day(path):
+        return True
     try:
         corrections = json.loads(path.read_text()).get("corrections") or []
     except (OSError, ValueError, AttributeError):
