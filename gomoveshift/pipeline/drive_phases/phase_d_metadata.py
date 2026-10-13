@@ -442,6 +442,11 @@ def _build_metadata_per_lf(
             metadata["resolved_location"] = resolved_location_gate_dict(lf_resolved)
         if lf_recording_date is not None:
             metadata.setdefault("recording_date", lf_recording_date)
+            # Pass the day's native-resolution claim through for the
+            # publish side (False = the day was upscaled; do not label it native).
+            _day = (getattr(state, "per_day_completed", None) or {}).get(lf_recording_date)
+            if isinstance(_day, dict) and "native_resolution_claim" in _day:
+                metadata["native_resolution_claim"] = bool(_day["native_resolution_claim"])
         if lf_source_duration is not None:
             metadata.setdefault("source_duration", lf_source_duration)
         # Format-aware playlist routing (playlist_resolver's derived

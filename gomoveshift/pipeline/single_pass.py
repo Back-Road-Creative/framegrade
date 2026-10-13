@@ -69,6 +69,7 @@ from .loudnorm_measure import (
     parse_loudnorm_stats,
 )
 from .ost_validator import validate_ost
+from .quality import rendition_for, upscale_plan
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,8 @@ class SinglePassResult:
     encoding_time: float = 0.0
     total_time: float = 0.0
     tonemap: str = ""  # "<filter>:<operator>" when an HDR source was tonemapped
+    # Declared resampling upscale applied by this encode (quality.UpscalePlan), else None.
+    upscale_plan: Optional[object] = None
 
     def to_dict(self) -> dict:
         return {
@@ -1106,6 +1109,7 @@ class SinglePassProcessor:
         skip_ost: bool = False,
         source_range: str = "full",
         tonemap_filter: str = "",
+        upscale_filter: str = "",
     ) -> str:
         """
         Build the combined video filter chain:
@@ -1121,6 +1125,10 @@ class SinglePassProcessor:
         # HDR source: tonemap to BT.709 ahead of everything.
         if tonemap_filter:
             filters.append(tonemap_filter)
+        # A declared upscale runs ahead of the grade (after any HDR tonemap), so the grade, fades and
+        #    text all run at the output size. Absent a plan the chain is unchanged.
+        if upscale_filter:
+            filters.append(upscale_filter)
 
         # 0. Tag the PROBED range before anything converts colour space: the
         #    YUV→RGB conversion ffmpeg auto-inserts ahead of curves/colorbalance
@@ -1212,6 +1220,7 @@ class SinglePassProcessor:
         skip_ost: bool = False,
         source_range: str = "full",
         tonemap_filter: str = "",
+        upscale_filter: str = "",
     ) -> str:
         """Privacy-blur ``filter_complex`` (input 0 = video, 1 = privacy mask).
 
@@ -1227,6 +1236,10 @@ class SinglePassProcessor:
         base: list[str] = []
         if tonemap_filter:
             base.append(tonemap_filter)
+        # Mirrors _build_video_filter's upscale: first, so the blur composite
+        # and the mask below both run at the output size.
+        if upscale_filter:
+            base.append(upscale_filter)
         # Mirrors _build_video_filter step 0 — same tag, or the two paths grade
         # in different domains.
         base.append(f"setrange={source_range}")
@@ -1271,7 +1284,7 @@ class SinglePassProcessor:
             f"[0:v]{','.join(base)}[base]",
             "[base]split[b1][b2]",
             f"[b2]{blur_filter}[bl]",
-            "[1:v]format=gray[m]",
+            f"[1:v]{upscale_filter + ',' if upscale_filter else ''}format=gray[m]",
             f"[bl][m]alphamerge,format={BLUR_ALPHA_FORMAT}[bla]",
         ]
         # CFR conversion rides the tail, strictly AFTER the composite — the
@@ -1735,6 +1748,23 @@ class SinglePassProcessor:
             if not skip_ost and not font:
                 logger.warning("  No font found — OST text will be skipped")
 
+            # A source below the drive long-form rendition is resampled up
+            # (profile.upscale); "off" refuses here, before the multi-hour
+            # encode. Only a tenant-profiled encode (the day master) is
+            # held to the rendition; the generic path keeps the source size.
+            plan = None
+            if self.profile is not None:
+                plan = upscale_plan(
+                    width,
+                    height,
+                    rendition_for("drive_longform_4k"),
+                    getattr(self.profile, "upscale", "off"),
+                )
+            if plan is not None:
+                logger.info(
+                    "  Upscale: %sx%s -> %sx%s (%s)", *plan.source, *plan.target, plan.scaler
+                )
+
             # Build combined video filter. The blur filter_complex reuses the
             # exact same chain inputs, so the two paths never drift.
             filter_kwargs = dict(
@@ -1743,18 +1773,20 @@ class SinglePassProcessor:
                 font_path=font or "",
                 duration=duration,
                 fade_video=not skip_ost,
-                video_width=width,
+                video_width=plan.target[0] if plan else width,
                 skip_ost=skip_ost,
                 source_range=_scale_range_token(info.get("color_range", "")),
                 tonemap_filter=tonemap_filter,
             )
+            if plan is not None:
+                filter_kwargs["upscale_filter"] = plan.filter
             vf = self._build_video_filter(**filter_kwargs)
 
             filter_complex = None
             if blur_mask_path is not None:
                 filter_complex = self._build_blur_filter_complex(
                     **filter_kwargs,
-                    blur_filter=self._build_blur_filter(width),
+                    blur_filter=self._build_blur_filter(filter_kwargs["video_width"]),
                 )
 
             result = self._run_encode_step(
@@ -1796,4 +1828,5 @@ class SinglePassProcessor:
         else:
             _clear_tonemap_record(output_path)
         result.total_time = total_time
+        result.upscale_plan = plan
         return result
