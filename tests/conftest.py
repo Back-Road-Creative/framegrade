@@ -1181,3 +1181,69 @@ def tmp_path_disk_budget(request):
             "`path.touch(); os.truncate(path, size)` -- same st_size, no disk -- "
             "instead of writing real bytes; pytest never reclaims basetemps."
         )
+
+
+@pytest.fixture(autouse=True)
+def isolate_cadence_store_from_cwd(tmp_path, monkeypatch):
+    """No test may read Waypost's decision store from the working directory.
+
+    A bare ``Config()`` carries the relative ``seo.storage_path`` ``./data/seo``, so
+    ``seo_slots.waypost_cadence`` would open ``<cwd>/data/seo/cadence_decisions.sqlite3``:
+    a host that has run the decider there would hand every such test its own days. A
+    RELATIVE store path is redirected under ``tmp_path``; an absolute one (the only kind
+    ``SEOConfig.validate_paths_exist`` accepts in production) is read as given.
+    """
+    if not HAS_GOMOVESHIFT:
+        return
+    from gomoveshift.pipeline import seo_slots
+
+    real = seo_slots.load_cadence
+
+    def _load(brand_yaml_path, decisions_db=None):
+        if decisions_db is not None and not Path(decisions_db).is_absolute():
+            decisions_db = tmp_path / "bare-config-seo" / Path(decisions_db).name
+        return real(brand_yaml_path, decisions_db=decisions_db)
+
+    monkeypatch.setattr(seo_slots, "load_cadence", _load)
+
+
+@pytest.fixture
+def waypost_lf_days(tmp_path):
+    """Name the long-form weekdays a test assumes, the way Waypost records them.
+
+    ``waypost_lf_days({"ireland": (2,), "usa": (2,)}, config=None)`` appends one ``lf_days``
+    decision row per region to the decision store under ``config.seo.storage_path`` (the
+    loaded ``get_config()`` when ``config`` is None), so ``seo_slots.cadence_for`` sees them.
+    Opt in with ``pytestmark = pytest.mark.usefixtures("waypost_lf_days")`` or by argument;
+    it is deliberately not autouse -- a test names the cadence it assumes.
+    """
+    from datetime import datetime
+    from pathlib import Path
+
+    from seo_manager.analytics import cadence_decisions
+
+    from gomoveshift.config import get_config
+    from gomoveshift.pipeline.volume_source import DB_NAME
+
+    def _set(days_by_region, config=None):
+        cfg = config if config is not None else get_config()
+        if not str(cfg.seo.storage_path).startswith(str(tmp_path)):
+            cfg.seo.storage_path = str(tmp_path)  # a bare Config() points at ./data/seo
+        db = Path(cfg.seo.storage_path) / DB_NAME
+        db.parent.mkdir(parents=True, exist_ok=True)
+        for region, dow in days_by_region.items():
+            cadence_decisions.append(
+                db,
+                knob="lf_days",
+                region=region,
+                value=len(dow),
+                prev=len(dow),
+                status="ok",
+                source="policy",
+                reason_code="TAIL_UP",
+                basis="test fixture",
+                applied_at=datetime(2026, 1, 1, 12, 0),
+                evidence={"dow": sorted(dow)},
+            )
+
+    return _set

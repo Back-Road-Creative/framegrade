@@ -975,7 +975,7 @@ class TestAllowSeoDegradedFlagWiresThrough:
                 "--no-tmux",
                 "--allow-seo-degraded",
                 "--lf-day",
-                "mon",
+                "tue",
             ]
         )
         monkeypatch.setattr("gomoveshift.cli.handlers.drive.is_in_tmux", lambda: True)

@@ -125,18 +125,17 @@ class TestNextFreeSuperlongSlot:
 
 
 class TestSingleVideoPathUsesConfigCadence:
-    def test_get_next_available_slot_follows_module_cadence(self, monkeypatch):
-        monkeypatch.setattr(schedule_constants, "LONG_FORM_DAYS", frozenset({6}))
-        monkeypatch.setattr(schedule_constants, "LONG_FORM_TIME", dt_time(14, 0))
+    def test_get_next_available_slot_follows_waypost_cadence(self, monkeypatch, waypost_lf_days):
+        waypost_lf_days({"ireland": (6,), "usa": (6,)})  # the Sunday cadence this assumes
+        monkeypatch.setattr(schedule_constants, "LONG_FORM_TIME", dt_time(14, 0))  # flat time
         slot = ContentLedger().get_next_available_slot("longform", after=ANCHOR)
         assert slot is not None
         assert slot["date"] == "2026-06-14"
         assert slot["time"] == "14:00:00"
         assert slot["day_name"] == "Sunday"
 
-    def test_get_next_available_slot_skips_occupied_region_aware(self, monkeypatch):
-        monkeypatch.setattr(schedule_constants, "LONG_FORM_DAYS", frozenset({6}))
-        monkeypatch.setattr(schedule_constants, "LONG_FORM_TIME", dt_time(14, 0))
+    def test_get_next_available_slot_skips_occupied_region_aware(self, waypost_lf_days):
+        waypost_lf_days({"ireland": (6,), "usa": (6,)})
         ledger = ContentLedger()
         ledger.entries.append(_lf_entry("2026-06-14", region="usa"))
         slot = ledger.get_next_available_slot("longform", after=ANCHOR)  # legacy: any-entry view

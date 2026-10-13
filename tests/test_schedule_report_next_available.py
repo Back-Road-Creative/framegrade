@@ -1,10 +1,9 @@
 """``build_schedule_report``'s ``next_available`` availability MATRIX — the next
 free long-form slot per (region, designed day) and that slot's associated shorts.
 
-A matrix rather than one row per region on purpose: no config field binds a
-region to a weekday (the "Ireland publishes Sunday" pairing lives only in
-the free-text ``cadence_line_by_region``), so collapsing would assert a binding
-the config does not contain."""
+A matrix rather than one row per region on purpose: a region may publish several days.
+Each region lists ITS OWN Waypost days (the packaged seed overlaid with the ``lf_days``
+decisions); no config field binds a region to a weekday."""
 
 from __future__ import annotations
 
@@ -48,10 +47,12 @@ def _earliest(rows, region: str) -> str:
 
 
 class TestMatrixShape:
-    def test_every_region_gets_a_row_per_designed_day(self, ledger):
+    def test_every_region_gets_a_row_per_its_own_waypost_day(self, ledger):
         rows = _rows(ledger)
         assert {(r["region"], r["day"]) for r in rows} == {
-            (reg, d) for reg in ("ireland", "usa") for d in ("tue", "fri", "sun")
+            ("ireland", "sun"),
+            ("usa", "tue"),
+            ("usa", "fri"),
         }
         assert all(datetime.fromisoformat(r["slot"]) > ANCHOR for r in rows)
 
@@ -82,17 +83,27 @@ class TestSlotTime:
         for row in _rows(ledger):
             assert datetime.fromisoformat(row["slot"]).strftime("%H:%M") == DESIGNED[row["day"]]
 
-    def test_a_designed_time_earlier_than_the_flat_default_is_never_backdated(self, ledger):
-        """A day designed EARLIER than the flat long_form_publish_time (11:00)
-        must have its true time honoured by the SEARCH itself — patching the
-        time on afterward can return a slot already before ``after`` (the
-        search's own "not yet occurred" check ran against the wrong time)."""
+    def test_a_designed_time_earlier_than_the_region_default_is_never_backdated(self, ledger):
+        """A day designed EARLIER than the region's Waypost time (usa 16:00) must have its
+        true time honoured by the SEARCH itself -- patching the time on afterward can return
+        a slot already before ``after`` (the search's own "not yet occurred" check ran
+        against the wrong time)."""
         config = Config()
-        config.drive.publish_slots["sun"].lf_time = "09:00"
-        after = datetime(2026, 8, 16, 10, 0, tzinfo=schedule_constants.EST)  # a Sunday, 10:00
+        config.drive.publish_slots["fri"].lf_time = "09:00"
+        after = datetime(2026, 8, 14, 10, 0, tzinfo=schedule_constants.EST)  # a Friday, 10:00
         rows = build_schedule_report(ledger, config, after=after)["next_available"]
-        sun_row = next(r for r in rows if r["day"] == "sun" and r["region"] == "usa")
-        assert datetime.fromisoformat(sun_row["slot"]) > after
+        fri_row = next(r for r in rows if r["day"] == "fri" and r["region"] == "usa")
+        assert datetime.fromisoformat(fri_row["slot"]) > after
+
+    def test_a_designed_time_later_than_the_flat_default_is_honoured_by_the_search(self, ledger):
+        """Waypost's Sunday time (14:00) is LATER than the flat 11:00: asked at Sunday 12:00 the
+        SEARCH must land on that same day's 14:00, not skip it by judging 11:00 as passed."""
+        after = datetime(2026, 8, 16, 12, 0, tzinfo=schedule_constants.EST)  # a Sunday, 12:00
+        rows = build_schedule_report(ledger, Config(), after=after)["next_available"]
+        sun_row = next(r for r in rows if r["day"] == "sun" and r["region"] == "ireland")
+        assert datetime.fromisoformat(sun_row["slot"]) == datetime(
+            2026, 8, 16, 14, 0, tzinfo=schedule_constants.EST
+        )
 
 
 class TestAssociatedShorts:

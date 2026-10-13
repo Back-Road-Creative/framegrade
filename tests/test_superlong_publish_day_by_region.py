@@ -198,5 +198,6 @@ class TestSlotBooking:
             superlong_publish_day="sat",
             superlong_publish_day_by_region={"ireland": "sun"},
         )
-        slot = next_free_superlong_slot(ContentLedger(), config, "france", after=ANCHOR)
+        slot = next_free_superlong_slot(ContentLedger(), config, "usa", after=ANCHOR)
+        # "usa" is not in the by-region map (only a region Waypost knows can be searched)
         assert slot.weekday() == 5  # sat

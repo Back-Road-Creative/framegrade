@@ -384,16 +384,18 @@ def test_hint_never_names_a_date_the_gate_would_refuse(restore_schedule_module):
 def test_hint_suggests_a_date_on_the_allowed_day(restore_schedule_module):
     from gomoveshift.pipeline.seo_slots import anchor_refusal
 
+    config = Config()
+    config.drive.long_form_publish_days = [1]  # the run's pick: Tuesday, a Waypost usa day
     msg = anchor_refusal(
-        Config(),
+        config,
         ContentLedger(),
-        anchor="2031-01-03",  # a Friday; the default LF day is Wednesday
+        anchor="2031-01-03",  # a Friday: not the run's day
         publish_day=None,
         region="usa",
         project_names=["p"],
         now=datetime(2030, 12, 1, tzinfo=EST),
     )
-    assert msg is not None and "next free slot: --lf-publish-date 2030-12-04" in msg
+    assert msg is not None and "next free slot: --lf-publish-date 2030-12-03" in msg
 
 
 def test_ledger_failure_still_mirrors_the_booking_into_the_store(tmp_path, caplog):

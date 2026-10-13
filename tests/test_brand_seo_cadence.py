@@ -1,21 +1,24 @@
 """A tenant ``brand.yaml`` carries the ``seo: cadence:`` block the hourly publisher reads.
 
 Without that block ``schedule claim`` (SEO_BRAND_YAML) raises "no `seo: cadence:` block" and
-nothing can claim. The block is a COPY of what GMS config already says (``drive.publish_slots``
-per LF day, the region -> LF-day map in ``docs/unattended-cadence.md``), so it is pinned to
-``seo_slots.cadence_for(config)`` and cannot drift. The real brand profile is account
-configuration and is not part of this tree, so these tests build a synthetic ``brand.yaml``
-holding the documented cadence and check it against the config."""
+nothing can claim. The packaged ``brand.yaml`` is the SEED of Waypost's cadence (the ``lf_days``
+decisions overlay its days); its designed times are pinned to ``drive.publish_slots`` and its
+days to ``seo_slots.cadence_for`` so the two cannot drift. The shape tests build a synthetic
+``brand.yaml`` holding the documented cadence."""
 
 from __future__ import annotations
 
 from datetime import time as dt_time
+from pathlib import Path
+
 import pytest
 from seo_manager.core.profile import DAY_ABBR, load_cadence, parse_weekday
 
 from gomoveshift.config import Config
 from gomoveshift.pipeline.schedule_constants import _SUPERLONG_DEFAULT_DAY, EST
 from gomoveshift.pipeline.seo_slots import cadence_for
+
+SEED = Path(__file__).resolve().parents[1] / "gomoveshift/console/brands/gomoveshift/brand.yaml"
 
 _BRAND_YAML = """\
 seo:
@@ -55,25 +58,20 @@ def test_brand_yaml_carries_a_loadable_cadence_block(brand):
     assert cad.tz == EST
 
 
-def test_block_matches_the_gms_config_cadence(brand):
+def test_block_matches_the_gms_config_cadence(tmp_path):
+    """The seed's designed times equal ``drive.publish_slots`` (the shorts/lf-time table), and
+    ``cadence_for`` over an empty decision store returns the seed's own days."""
     config = Config()
-    block = load_cadence(brand)
-    assert set(block.regions) == {r for r in cadence_for(config).regions if r != "default"}
+    config.seo.storage_path = str(tmp_path)
+    block = load_cadence(SEED)
+    assert set(block.regions) == set(cadence_for(config).regions)
     for name, region in block.regions.items():
         days = {DAY_ABBR[d].lower() for d in region.dow}
         assert days <= set(config.drive.publish_slots), (name, days)
-        mine = cadence_for(
-            config,
-            name,
-            days=region.dow,
-            day_times={
-                d: _hhmm(config.drive.publish_slots[DAY_ABBR[d].lower()].lf_time)
-                for d in region.dow
-            },
-        ).region(name)
-        assert tuple(region.dow) == tuple(mine.dow)
+        assert tuple(region.dow) == tuple(cadence_for(config, name).region(name).dow)
         for d in region.dow:
-            assert region.day_times.get(d, region.time) == mine.day_times[d], (name, d)
+            designed = _hhmm(config.drive.publish_slots[DAY_ABBR[d].lower()].lf_time)
+            assert region.day_times.get(d, region.time) == designed, (name, d)
     assert block.superlong_day == parse_weekday("superlong", _SUPERLONG_DEFAULT_DAY)
 
 

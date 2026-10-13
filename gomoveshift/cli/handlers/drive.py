@@ -87,8 +87,10 @@ def _launch_anchor_refusal(args, config, publish_day) -> str | None:
     (it survives a resume), else ``--start-date``; the effective day is ``--publish``/``--lf-day`` or the saved
     one. Off the run's LF day, past its slot time, or booked by another project -> the
     message (naming the next free date). An audit-only run keeps only the weekday check.
-    Silent when there is no anchor, or when ``args`` carries
-    no real values (a partial namespace).
+    With no anchor the run's day must still be one of Waypost's for its region
+    (``seo_slots.lf_day_refusal``). An unreadable Waypost cadence refuses with
+    ``CADENCE_SOURCE_UNREADABLE``. Silent when ``args`` carries no real values (a partial
+    namespace).
     """
     anchor = getattr(args, "lf_publish_date", None)
     anchor = anchor if isinstance(anchor, str) and anchor else None
@@ -118,15 +120,21 @@ def _launch_anchor_refusal(args, config, publish_day) -> str | None:
             arg_start = getattr(args, "start_date", None)
             if isinstance(arg_start, str) and arg_start:
                 anchor, flag = arg_start, "--start-date"
+    day = publish_day if isinstance(publish_day, str) and publish_day else saved.get("publish_day")
+    region = getattr(args, "region", None)
+    region = region if isinstance(region, str) and region else saved.get("region")
+    from ...pipeline.seo_slots import CadenceSourceUnreadableError, lf_day_refusal
+
     if anchor is None:
-        return None
+        # Nothing booked yet, but the day must still be one of Waypost's for the region.
+        try:
+            return lf_day_refusal(config, region if isinstance(region, str) else None, day)
+        except CadenceSourceUnreadableError as exc:
+            return str(exc)
     # An audit-only run (--skip-upload with --no-youtube-upload) books nothing, so a past or
     # booked date cannot hurt: only the weekday is checked, like a resumed live drive.
     if getattr(args, "skip_upload", None) and getattr(args, "no_youtube_upload", None):
         resumed = True
-    day = publish_day if isinstance(publish_day, str) and publish_day else saved.get("publish_day")
-    region = getattr(args, "region", None)
-    region = region if isinstance(region, str) and region else saved.get("region")
     from ...pipeline.content_ledger import ContentLedger
     from ...pipeline.seo_slots import anchor_refusal
 
@@ -134,16 +142,19 @@ def _launch_anchor_refusal(args, config, publish_day) -> str | None:
     ledger = ContentLedger.load(ledger_path)
     stem = source_dir.stem
     names = list(dict.fromkeys([stem.replace(" ", "_").lower(), stem]))
-    return anchor_refusal(
-        config,
-        ledger,
-        anchor=anchor,
-        publish_day=day,
-        region=region if isinstance(region, str) else None,
-        project_names=names,
-        resumed=resumed,
-        flag=flag,
-    )
+    try:
+        return anchor_refusal(
+            config,
+            ledger,
+            anchor=anchor,
+            publish_day=day,
+            region=region if isinstance(region, str) else None,
+            project_names=names,
+            resumed=resumed,
+            flag=flag,
+        )
+    except CadenceSourceUnreadableError as exc:
+        return str(exc)
 
 
 def _run_date_from_state(state: dict) -> str | None:

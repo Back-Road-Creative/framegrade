@@ -25,7 +25,7 @@ def _args(**overrides):
         region="usa",
         # cmd_drive now refuses when
         # neither --publish nor --lf-day is given.
-        publish="mon",
+        publish="tue",
         location=None,
         start_date=None,
         shorts_per_day=None,

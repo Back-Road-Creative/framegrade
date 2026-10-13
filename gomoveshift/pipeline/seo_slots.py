@@ -5,7 +5,8 @@ lives in ``seo_manager.scheduling.slots``. GMS keeps what only it knows: the con
 ledger (``.content_ledger.json``) and the loaded ``config``. This module translates both
 into the two things seo_manager decides over, and makes no slot decision itself:
 
-* :func:`cadence_for` -- config -> ``seo_manager.core.profile.Cadence``;
+* :func:`cadence_for` -- Waypost's effective ``seo_manager.core.profile.Cadence`` (the
+  packaged brand seed overlaid with the ``lf_days`` decisions, :func:`waypost_cadence`);
 * :class:`Occupancy` -- ledger long-forms (plus ``schedule.sqlite3`` when it exists) ->
   the ``tz`` + ``bookings()`` pair the slot functions read.
 
@@ -19,6 +20,10 @@ shorts window end, the metadata next-slot label, Phase D's base date and the sin
 stage / ingest batch default dates all ask here, and so do the dates of LF 2..N:
 :func:`lf_series` is ``seo_manager.scheduling.slots.lf_series_dates`` (LF n = LF1 + 7 *
 (n - 1), same weekday), the rule the slot claim books too. GMS adds no days of its own.
+
+The long-form WEEKDAYS and times are Waypost's: no GMS config field binds a region to a
+day. ``--lf-day`` is only the run's pick among Waypost's days, and an unreadable source
+stops planning (``CADENCE_SOURCE_UNREADABLE``) instead of falling back to a guess.
 """
 
 from __future__ import annotations
@@ -31,11 +36,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable, Optional
 
-from seo_manager.core.profile import Cadence, RegionCadence, canon_region, parse_weekday
+from seo_manager.analytics import cadence_decisions
+from seo_manager.core.profile import (
+    DAY_ABBR,
+    Cadence,
+    RegionCadence,
+    canon_region,
+    load_cadence,
+    parse_weekday,
+)
 from seo_manager.scheduling import slots
 from seo_manager.scheduling.store import Booking, ScheduleStore, SlotTaken
 
-from .schedule_constants import EST, long_form_days, long_form_time
+from .schedule_constants import EST, long_form_days
 
 logger = logging.getLogger(__name__)
 
@@ -43,33 +56,73 @@ STORE_FILENAME = "schedule.sqlite3"
 _SYNTHETIC_REGION = "default"
 
 
-def _config_regions(config) -> list[str]:
-    drive = getattr(config, "drive", None)
-    return sorted(getattr(drive, "shorts_publish_times_by_region", None) or {})
+class CadenceSourceUnreadableError(RuntimeError):
+    """Waypost's cadence cannot be read; nothing is planned."""
 
 
-def cadence_for(
-    config,
-    region: Optional[str] = None,
-    *,
-    days: Optional[Iterable[int]] = None,
-    day_times: Optional[dict] = None,
-) -> Cadence:
-    """The loaded config as a ``Cadence``.
+def _brand_yaml() -> Path:
+    from ..publishing.brand_policy import _SHIPPED_BRANDS_DIR
 
-    GMS config binds no region to its own weekdays, so every region gets the run's
-    long-form days (``days`` or ``long_form_days(config)``) and flat time. The requested
-    ``region`` is always present (seo_manager refuses an unknown one); with no region at
-    all a synthetic one stands in so the all-regions view still has a cadence.
+    return _SHIPPED_BRANDS_DIR / "gomoveshift" / "brand.yaml"
+
+
+def waypost_cadence(config) -> Cadence:
+    """Waypost's effective cadence: the packaged ``brand.yaml`` seed overlaid with the
+    ``lf_days`` decisions in ``<config.seo.storage_path>/cadence_decisions.sqlite3``
+    (``config=None`` reads the loaded ``get_config()``).
+
+    Read afresh on every call, so a new decision is seen by the next one. A malformed
+    seed or decision row, an unreadable store or file refuses with
+    :class:`CadenceSourceUnreadableError`; nothing falls back to a hand-set day.
     """
-    chosen = sorted(long_form_days(config) if days is None else days)
-    names = {canon_region(r) for r in _config_regions(config)}
+    from ..config import get_config
+    from .volume_source import DB_NAME
+
+    storage = (config if config is not None else get_config()).seo.storage_path
+    db = Path(storage) / DB_NAME
+    try:
+        return load_cadence(_brand_yaml(), decisions_db=db)
+    except (ValueError, cadence_decisions.DecisionStoreUnreadable, OSError) as exc:
+        logger.error("CADENCE_SOURCE_UNREADABLE reason=%s (planning halted)", exc)
+        raise CadenceSourceUnreadableError(
+            f"CADENCE_SOURCE_UNREADABLE reason={exc} (planning halted)"
+        ) from exc
+
+
+def cadence_for(config, region: Optional[str] = None) -> Cadence:
+    """Waypost's cadence (:func:`waypost_cadence`); an unknown ``region`` is refused
+    (``ValueError``) rather than given a synthetic entry."""
+    cadence = waypost_cadence(config)
     if region:
-        names.add(canon_region(region))
-    if not names:
-        names = {_SYNTHETIC_REGION}
-    rc = RegionCadence(dow=tuple(chosen), time=long_form_time(config), day_times=day_times or {})
-    return Cadence(regions={n: rc for n in sorted(names)}, tz=EST)
+        cadence.region(region)
+    return cadence
+
+
+def _day_names(days: Iterable[int]) -> list[str]:
+    return [DAY_ABBR[d] for d in sorted(days)]
+
+
+def lf_day_refusal(config, region: Optional[str], publish_day: Optional[str]) -> Optional[str]:
+    """Why ``publish_day`` is not a long-form day for ``region``, or ``None`` when it is.
+
+    ``region=None`` judges against the union of Waypost's days. The message names the
+    days and points at ``gomoveshift schedule``, where the operator reads them.
+    """
+    if not publish_day:
+        return None
+    try:
+        cadence = cadence_for(config, region)
+        dow = parse_weekday("publish_day", publish_day)
+        days = cadence.days(region)
+    except ValueError as exc:
+        return str(exc)
+    if dow in days:
+        return None
+    return (
+        f"--publish/--lf-day {publish_day!r} is not a long-form day for "
+        f"{region or 'any region'}: Waypost's days are {_day_names(days)}; "
+        "run 'gomoveshift schedule' and pass one of them"
+    )
 
 
 class Occupancy:
@@ -225,11 +278,12 @@ def assert_dates_free(
     )
 
 
-def build_report(ledger, config, days: list[str], day_times: dict, now: datetime) -> dict:
-    """The availability core of the schedule report, built by ``seo_manager.scheduling.report``."""
+def build_report(ledger, config, now: datetime) -> dict:
+    """The availability core of the schedule report, built by ``seo_manager.scheduling.report``
+    over Waypost's cadence: one row per region per ITS OWN days at Waypost's designed time."""
     from seo_manager.scheduling import report as seo_report
 
-    cadence = cadence_for(config, None, days=day_times.keys(), day_times=day_times)
+    cadence = waypost_cadence(config)
     return seo_report.build(Occupancy(ledger, cadence=cadence), cadence, now=now)
 
 
@@ -260,9 +314,17 @@ def anchor_refusal(
     from .state_invariants import lf_anchor_problem
 
     now = now or datetime.now(EST)
-    problem = lf_anchor_problem(anchor, publish_day, long_form_days(config), flag=flag)
+    try:
+        cadence = cadence_for(config, region)
+    except ValueError as exc:  # an unknown region; an unreadable source raises its own error
+        return str(exc)
+    allowed = _allowed_days(config, cadence, region, resumed)
+    problem = lf_anchor_problem(anchor, publish_day, allowed, flag=flag)
     if problem:
-        return problem + _hint(ledger, config, region, publish_day, now, project_names)
+        waypost = (
+            f" (Waypost's days for {region or 'all regions'}: {_day_names(cadence.days(region))})"
+        )
+        return problem + waypost + _hint(ledger, config, region, publish_day, now, project_names)
     if resumed:
         return None
     day = datetime.strptime(anchor, "%Y-%m-%d").date()  # the parser validate_anchor used
@@ -272,7 +334,6 @@ def anchor_refusal(
         )
     names = list(project_names)
     own = names[0] if names else None
-    cadence = cadence_for(config, region)
     occ = Occupancy(ledger, aliases={n: own for n in names}, cadence=cadence)
     try:
         slots.assert_free(occ, cadence, canon_region(region), [anchor], project=own)
@@ -282,6 +343,15 @@ def anchor_refusal(
             ledger, config, region, publish_day, max(now, after), project_names
         )
     return None
+
+
+def _allowed_days(config, cadence: Cadence, region: Optional[str], resumed: bool) -> frozenset:
+    """The weekdays a launch may anchor on. A fresh launch: Waypost's days for the region
+    that the run's own ``--lf-day`` pick (``long_form_days``) also names. A resumed live
+    drive keeps the run's days alone -- its anchor is history, and a later decision must
+    never strand it."""
+    own = long_form_days(config)
+    return frozenset(own) if resumed else cadence.days(region) & frozenset(own)
 
 
 def _slot_has_passed(config, region, day, now: datetime) -> bool:
@@ -301,35 +371,45 @@ def _slot_has_passed(config, region, day, now: datetime) -> bool:
 
 
 def _hint(ledger, config, region, publish_day, after: datetime, project_names) -> str:
-    """The next free date over the SAME allowed set the gate uses (LF days within the
-    run's ``--publish``); when that set is empty there is no date to suggest."""
+    """The next free date over the SAME allowed set the gate uses (Waypost's days for the
+    region within the run's LF days, narrowed to ``--publish``); when that set is empty
+    there is no date to suggest."""
+    cadence = cadence_for(config, region)
+    allowed = _allowed_days(config, cadence, region, False)
     if publish_day:
         try:
             dow = parse_weekday("publish_day", publish_day)
         except ValueError:
             return ""
-        if dow not in long_form_days(config):
-            have = [calendar.day_abbr[d] for d in sorted(long_form_days(config))]
+        if dow not in allowed:
+            have = [calendar.day_abbr[d] for d in sorted(allowed)]
             return (
-                f"; no LF day: --publish {publish_day} is not one of the configured "
-                f"LF days {have} (set --lf-day or --publish to match)"
+                f"; no LF day: --publish {publish_day} is not one of the run's "
+                f"LF days {have} (Waypost's days, narrowed by --lf-day)"
             )
+        allowed = frozenset({dow})
     names = list(project_names)
     own = names[0] if names else None
-    cadence = cadence_for(config, region)
-    try:
-        nxt = slots.next_free_slot(
-            Occupancy(ledger, aliases={n: own for n in names}, cadence=cadence),
-            cadence,
-            canon_region(region),
-            after=after,
-            publish_day=(publish_day or None),
-            include_today=False,
-            project=own,
-        )
-    except (RuntimeError, ValueError):
+    occ = Occupancy(ledger, aliases={n: own for n in names}, cadence=cadence)
+    found = []
+    for dow in sorted(allowed):
+        try:
+            found.append(
+                slots.next_free_slot(
+                    occ,
+                    cadence,
+                    canon_region(region),
+                    after=after,
+                    publish_day=DAY_ABBR[dow],
+                    include_today=False,
+                    project=own,
+                )
+            )
+        except (RuntimeError, ValueError):
+            continue
+    if not found:
         return ""
-    return f"; next free slot: --lf-publish-date {nxt.strftime('%Y-%m-%d')}"
+    return f"; next free slot: --lf-publish-date {min(found).strftime('%Y-%m-%d')}"
 
 
 def book_in_store(
@@ -376,7 +456,10 @@ __all__ = [
     "book_in_store",
     "build_report",
     "cadence_for",
+    "CadenceSourceUnreadableError",
     "default_publish_slot",
+    "lf_day_refusal",
     "next_cadence_day",
     "next_free_slot",
+    "waypost_cadence",
 ]
