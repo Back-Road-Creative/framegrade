@@ -15,6 +15,8 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 
+from .. import quality
+
 logger = logging.getLogger(__name__)
 
 GPS_IFD_TAG = 0x8825
@@ -277,10 +279,13 @@ class PhotoResizer:
         quality: Optional[int] = None,
         output_base: Optional[Path] = None,
         social_aspect: Optional[str] = None,
+        upscale: str = "off",
     ):
         # None means "take the configured value" — resolved here rather than
         # as a def-time default so config/env overrides are not frozen at import.
         photos = _photos_config()
+        # ``ml`` (MediaProfile.upscale) enlarges a smaller still; anything else never upscales.
+        self.upscale = upscale
         self.target_width = target_width if target_width is not None else photos.target_width
         self.quality = quality if quality is not None else photos.jpeg_quality
         self.output_base = output_base if output_base is not None else photos.resolve_resized_base()
@@ -288,6 +293,27 @@ class PhotoResizer:
             social_aspect if social_aspect is not None else getattr(photos, "social_aspect", "")
         )
         aspect_ratio(self.social_aspect)  # fail closed on an unknown label, before any write
+
+    def _ml_upscale(self, prepared, new_h: int):
+        """Lanczos first (the fallback), then the measured ML attempt; returns (image, record)."""
+        import numpy as np
+        from PIL import Image
+
+        src_w, src_h = prepared.size
+        resampled = prepared.resize((self.target_width, new_h), Image.LANCZOS)
+        out, rep = quality.ml_upscale_still(
+            np.array(prepared), self.target_width, new_h, resampled=np.array(resampled)
+        )
+        record = {
+            "scaler": "ml" if rep.used else "resample",
+            "upscaled_from": [src_w, src_h],
+            "reason": rep.reason,
+            "sharpness_ml": rep.sharpness_ml,
+            "sharpness_resampled": rep.sharpness_resampled,
+            "ringing_ml": rep.ringing_ml,
+            "ssim_to_resampled": rep.ssim_to_resampled,
+        }
+        return (Image.fromarray(out) if rep.used else resampled), record
 
     def resize_batch(
         self,
@@ -384,6 +410,7 @@ class PhotoResizer:
                     elif (
                         crop_ratio is None
                         and orig_w <= self.target_width
+                        and self.upscale != "ml"
                         and _is_clean_jpeg(img, photo_path)
                     ):
                         # Nothing to resize, strip, convert or blur — copy, don't re-encode
@@ -415,8 +442,16 @@ class PhotoResizer:
                         continue
 
                     src_w, src_h = prepared.size
+                    upscale_record = None
 
-                    if src_w > self.target_width:
+                    if src_w < self.target_width and self.upscale == "ml":
+                        new_h = round(src_h * (self.target_width / src_w))
+                        prepared, upscale_record = self._ml_upscale(prepared, new_h)
+                        logger.info(
+                            f"  {photo_path.name}: {src_w}x{src_h} → {self.target_width}x{new_h}"
+                            f" ({upscale_record['scaler']} upscale)"
+                        )
+                    elif src_w > self.target_width:
                         new_h = int(src_h * (self.target_width / src_w))
                         prepared = prepared.resize(
                             (self.target_width, new_h),
@@ -462,6 +497,8 @@ class PhotoResizer:
                         }
                     ),
                 }
+                if upscale_record is not None:
+                    entry["upscale"] = upscale_record
                 if icc is None:
                     entry["color_assumption"] = ASSUMED_SRGB_NOTE
                 provenance.append(entry)

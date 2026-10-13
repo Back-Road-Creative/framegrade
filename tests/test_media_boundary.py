@@ -76,9 +76,6 @@ ALLOWLIST: dict[str, str] = {
     "pipeline/drive_phases/phase_bc_day_first.py": (
         "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),
-    "pipeline/orchestrator_fingerprint.py": (
-        "imports pipeline.drive_phases.phase_d; cut by the RunSpec split (the Phase D resume check moves beside drive_orchestrator)"
-    ),
     "pipeline/volume_source.py": (
         "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the RunSpec split (RunSpec carries Waypost's decided count, so the engine stops importing analytics)"
     ),
