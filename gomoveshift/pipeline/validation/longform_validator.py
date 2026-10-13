@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 import subprocess
 from pathlib import Path
 
 from gomoveshift.pipeline import encoding_constants as ec
+from gomoveshift.pipeline import quality
 from gomoveshift.pipeline.pipeline_validator import GateResult
 from gomoveshift.pipeline.quality import aspect_of, rendition_for
 
@@ -78,6 +80,49 @@ PERCEPTUAL_FILTER = "blackdetect=d=0.5:pix_th=0.10,freezedetect=n=0.003:d=2"
 
 _BLACK_DURATION_RE = re.compile(r"black_duration:\s*([0-9.]+)")
 _FREEZE_DURATION_RE = re.compile(r"freeze_duration:\s*([0-9.]+)")
+
+
+PICTURE_SKIPPED_MESSAGE = "skipped: no rendition step changed the picture"
+
+
+def picture_quality_gate(
+    video_path: Path,
+    duration: float,
+    *,
+    source_sharpness: float | None,
+    changed: bool,
+) -> GateResult:
+    """Fail a delivered file that is softer than its source or rings.
+
+    Skipped (recorded as passed, with a message -- never absent) when no
+    rendition step changed the picture or the source sharpness is unmeasured.
+    """
+    gate = "picture_quality"
+    if not changed or source_sharpness is None:
+        return GateResult(gate=gate, passed=True, message=PICTURE_SKIPPED_MESSAGE)
+    sharp, ring = quality.sample_delivered_picture(video_path, duration)
+    if not sharp:
+        return GateResult(
+            gate=gate, passed=False, message="no frame could be decoded for the picture check"
+        )
+    delivered = float(statistics.median(sharp))
+    ringing = float(statistics.median(ring))
+    floor = source_sharpness * (1.0 - quality.DELIVERED_SHARPNESS_TOLERANCE)
+    problems = []
+    if delivered < floor:
+        problems.append(
+            f"delivered sharpness {delivered:.1f} < {floor:.1f} "
+            f"(source {source_sharpness:.1f} less {quality.DELIVERED_SHARPNESS_TOLERANCE:.0%})"
+        )
+    if ringing > quality.RINGING_MAX:
+        problems.append(f"ringing {ringing:.4f} > max {quality.RINGING_MAX:.4f}")
+    if problems:
+        return GateResult(gate=gate, passed=False, message="; ".join(problems))
+    return GateResult(
+        gate=gate,
+        passed=True,
+        message=f"sharpness {delivered:.1f} (source {source_sharpness:.1f}), ringing {ringing:.4f}",
+    )
 
 
 class LongformValidator:
@@ -312,6 +357,19 @@ class LongformValidator:
                 passed=False,
                 message=f"momentary-loudness measurement error: {e}",
             )
+
+    def check_picture_quality(
+        self,
+        video_path: Path,
+        *,
+        source_sharpness: float | None,
+        changed: bool,
+    ) -> GateResult:
+        """Post-rendition picture gate -- see ``picture_quality_gate``."""
+        duration = self._ffprobe.probe_duration(video_path) if changed else 0.0
+        return picture_quality_gate(
+            video_path, duration, source_sharpness=source_sharpness, changed=changed
+        )
 
     def check_video_quality(self, video_path: Path, *, skip_audio: bool = False) -> GateResult:
         """Verify video codec, resolution, and bitrate meet minimums."""

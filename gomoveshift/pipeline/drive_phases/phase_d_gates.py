@@ -117,6 +117,23 @@ def _run_sidecar_integrity_gate(
         assert_superlong_sidecar_integrity(output_base, state)
 
 
+def _default_picture_check(lf_path: Path, duration: float | None, source_sharpness, changed):
+    """Real picture gate (post-rendition softness / ringing); injectable like the spot-check."""
+    from ..validation.longform_validator import picture_quality_gate
+
+    return picture_quality_gate(
+        lf_path, duration or 0.0, source_sharpness=source_sharpness, changed=changed
+    )
+
+
+def _lf_picture_inputs(state) -> dict:
+    """``{lf_index: (source_sharpness, picture_changed)}`` for the picture gate."""
+    from ..quality import picture_inputs_from_state
+
+    sharpness, changed = picture_inputs_from_state(state)
+    return {idx: (sharpness, flag) for idx, flag in changed.items()}
+
+
 def _run_final_validation_gate(
     *,
     validator_cls,
@@ -125,6 +142,8 @@ def _run_final_validation_gate(
     regular_lf_paths,
     metadata_per_lf: dict,
     perceptual_check_fn=None,
+    picture_inputs: dict | None = None,
+    picture_check_fn=None,
 ) -> None:
     """Run per-LF post-encode validation + audio-loudness HARD FAIL.
 
@@ -168,6 +187,7 @@ def _run_final_validation_gate(
     video_quality_failures: list[str] = []
     perceptual_failures: list[str] = []
     perceptual_check = perceptual_check_fn or _default_perceptual_check
+    picture_check = picture_check_fn or _default_picture_check
     for lf, lf_path in zip(drive_plan.regular_lfs, regular_lf_paths):
         lf_path = Path(lf_path)
         # A missing or truncated (<1 MiB) FINAL.mp4 is exactly the
@@ -235,7 +255,7 @@ def _run_final_validation_gate(
             metadata_failures.append(f"  LF {lf.index} ({lf_path.name}): {metadata_gate.message}")
         # The encode-contract pair. Both measure the FINAL against frozen
         # encoding_constants, so neither is a judgment call — they abort.
-        for gate_name in ("video_quality", "bitrate_preservation"):
+        for gate_name in ("video_quality", "bitrate_preservation", "picture_quality"):
             quality_gate = next(
                 (g for g in gate_result.gates if g.gate == gate_name),
                 None,
@@ -244,6 +264,14 @@ def _run_final_validation_gate(
                 video_quality_failures.append(
                     f"  LF {lf.index} ({lf_path.name}): {quality_gate.message}"
                 )
+        # Post-rendition picture gate; ``picture_inputs`` maps LF index to
+        # ``(source_sharpness, picture_changed)``. Absent -> recorded as skipped.
+        source_sharpness, changed = (picture_inputs or {}).get(lf.index, (None, False))
+        picture_gate = picture_check(lf_path, lf.total_duration, source_sharpness, changed)
+        if picture_gate is not None and not picture_gate.passed:
+            video_quality_failures.append(
+                f"  LF {lf.index} ({lf_path.name}): {picture_gate.message}"
+            )
         # The only gate that looks at pixels rather than metadata.
         perceptual_gate = perceptual_check(lf_path, lf.total_duration)
         if perceptual_gate is not None and not perceptual_gate.passed:
@@ -323,7 +351,12 @@ def _assert_shorts_quality_gate(state, *, validator_cls, probe_duration_fn=None)
         "  D-shorts-quality-gate: validating %d shorts (1080x1920 enforcement)",
         len(all_short_files),
     )
-    _qr = validator_cls().validate_short_files(all_short_files)
+    from ..quality import picture_inputs_from_state
+
+    _sharp, _by_lf = picture_inputs_from_state(state)
+    _qr = validator_cls().validate_short_files(
+        all_short_files, source_sharpness=_sharp, picture_changed=any(_by_lf.values())
+    )
     if not _qr.passed:
         # D-shorts-quality-gate identity preserved for log greps, but the
         # human-readable cause comes from the validator's own per-gate summary
