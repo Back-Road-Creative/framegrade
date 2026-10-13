@@ -342,6 +342,8 @@ class PreflightPlan:
     wall_clock_breakdown: dict[str, int] = field(default_factory=dict)
     fast_skipped: list[str] = field(default_factory=list)
     calibration: "CalibrationRecord | None" = None
+    # One line per requested insert (``--insert-photos`` / ``--insert-clip``).
+    insert_lines: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +712,7 @@ def build_plan(
     probe_duration_fn: Optional[Callable[[Path], Optional[float]]] = None,
     fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
+    insert_lines: Optional[list[str]] = None,
 ) -> PreflightPlan:
     """Inspect state + the stages directory and return a plan snapshot.
 
@@ -736,6 +739,7 @@ def build_plan(
         wall_clock_breakdown=breakdown,
         fast_skipped=list(fast_skipped),
         calibration=calibration,
+        insert_lines=list(insert_lines or []),
     )
 
 
@@ -777,6 +781,9 @@ def _render_plan_lines(plan: PreflightPlan) -> list[str]:
         if val > 0:
             bd_parts.append(f"{key} {_format_duration(val)}")
     bd_str = ", ".join(bd_parts) if bd_parts else "(nothing to run)"
+    if plan.insert_lines:
+        lines.append(f"  Inserts ({len(plan.insert_lines)}):")
+        lines.extend(f"    {line}" for line in plan.insert_lines)
     lines.append(_eta_basis_line(plan.calibration))
     lines.append(
         f"  Estimated wall-clock: {_format_duration(plan.wall_clock_estimate_seconds)} "
@@ -794,6 +801,7 @@ def print_plan(
     probe_duration_fn: Optional[Callable[[Path], Optional[float]]] = None,
     fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
+    insert_lines: Optional[list[str]] = None,
 ) -> PreflightPlan:
     """Render the plan for ``state`` to ``out`` (defaults to ``sys.stdout``).
 
@@ -809,6 +817,7 @@ def print_plan(
         probe_duration_fn=probe_duration_fn,
         fast_skipped=fast_skipped,
         calibration=calibration,
+        insert_lines=insert_lines,
     )
     for line in _render_plan_lines(plan):
         print(line, file=out)
