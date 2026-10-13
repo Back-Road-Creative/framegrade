@@ -457,7 +457,8 @@ receipt), written to `day_<date>/trail/trail_film_<date>.mp4`. Phase D does not 
 bundle. `--no-trail` is a silent no-op. A day that cannot get a film (no GPX, no prepared bundle, no
 `--trail-profile`, a failed proof or verify, a film that exits nonzero) logs a warning and records the
 reason in `Deliverables.trail_skips`; it never fails the drive, because the LFs are the primary product.
-A skip is recorded with the day, so a resume does not retry it.
+A skip is recorded with the day; on resume it is restored and, once its cause is resolved, retried
+(trail step only). The film's photo slice and the resume retry are in `47-trail-film-photos-and-resume.md`.
 
 ## Motion summary: a before number for "does this feel hectic"
 
