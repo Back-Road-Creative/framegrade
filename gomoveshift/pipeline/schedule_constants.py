@@ -220,34 +220,24 @@ def shorts_times(config: Optional[object] = None) -> list:
 def resolve_shorts_times_for_region(
     config, region: Optional[str], lf_day: Optional[str] = None
 ) -> list:
-    """Return the region-aware shorts HH:MM strings for ``region`` + ``lf_day``.
+    """Return the shorts ``HH:MM`` windows of the drive for ``region`` + ``lf_day``.
 
-    Maps ``region`` through ``config.drive.shorts_publish_times_by_region``. A
-    region's value is EITHER a flat ``list`` (one window for every drive — e.g.
-    Ireland) OR a per-LF-day ``dict`` keyed by 3-letter weekday with a
-    ``"_default"`` (the USA Tue+Fri anti-cannibalization case from the
-    6-slot map): ``lf_day`` selects the day's window, else
-    ``"_default"``. A region absent from the map (or ``None``) falls back to
-    the flat ``config.drive.shorts_publish_times``. Returns raw ``HH:MM``
-    strings — the only caller assigns the result back to
-    ``config.drive.shorts_publish_times``.
+    Waypost decides them: the region's list in its cadence (``brand.yaml`` seed, replaced
+    by the latest ``shorts_times`` decision) is every hour its shorts post at, and each
+    long-form day's drive takes its share (``seo_slots.shorts_windows``). A region
+    Waypost has no hours for, or an unreadable source, stops planning
+    (``CadenceSourceUnreadableError``); nothing falls back to another list. ``region=None``
+    keeps the flat ``config.drive.shorts_publish_times``.
 
-    Precedence note: an explicit ``--shorts-times`` is applied UPSTREAM of
-    this (it mutates ``shorts_publish_times`` in the drive handler), so the
-    handler only calls this when no ``--shorts-times`` was given — the
-    explicit flag always wins.
-
-    No data path: the resolver once moved the best-ranked configured slot to the front
-    per platform (``best_slot_from_data``); that is retired, and no GMS ranking
-    moves a posting slot.
+    Precedence note: an explicit ``--shorts-times`` is applied UPSTREAM of this (it
+    mutates ``shorts_publish_times`` in the drive handler), so the handler only calls this
+    when no ``--shorts-times`` was given -- the explicit flag always wins.
     """
-    by_region = getattr(config.drive, "shorts_publish_times_by_region", None) or {}
-    if region is not None and region in by_region:
-        val = by_region[region]
-        if isinstance(val, dict):
-            return list(val.get(lf_day) or val.get("_default") or config.drive.shorts_publish_times)
-        return list(val)
-    return list(config.drive.shorts_publish_times)
+    if region is None:
+        return list(config.drive.shorts_publish_times)
+    from .seo_slots import shorts_windows
+
+    return shorts_windows(config, region, lf_day)
 
 
 # The DriveConfig field default (config.py). Compared against verbatim to
@@ -389,18 +379,16 @@ def required_shorts_per_lf(
 def resolve_shorts_pool_for_region(
     config, region: Optional[str], lf_day: Optional[str] = None
 ) -> list:
-    """Return the region's candidate shorts-time POOL (HH:MM) for collision fallback.
+    """Return the region's shorts-time POOL (HH:MM) for collision fallback: Waypost's
+    whole list for the region (``seo_slots.shorts_pool``), every hour a drive may
+    substitute into when its preferred slot is already booked. ``lf_day`` is accepted
+    for the callers' symmetry; the pool is the region's, not a drive's share. ``None``
+    region: the flat ``shorts_publish_times``."""
+    if region is None:
+        return list(config.drive.shorts_publish_times)
+    from .seo_slots import shorts_pool
 
-    Maps ``region`` through ``config.drive.shorts_slot_pool_by_region`` (the full
-    set of times the scheduler may substitute into when a preferred slot is
-    already booked). A region absent from that map (or ``None``) falls back to
-    the region's own default times (``resolve_shorts_times_for_region`` with the
-    same ``lf_day``), i.e. pool == default times (no extra fallback room).
-    """
-    by_region = getattr(config.drive, "shorts_slot_pool_by_region", None) or {}
-    if region is not None and region in by_region:
-        return list(by_region[region])
-    return resolve_shorts_times_for_region(config, region, lf_day)
+    return shorts_pool(config, region)
 
 
 def resolve_publish_slot(config, lf_day: Optional[str]):
@@ -421,18 +409,15 @@ def resolve_shorts_times(
 ) -> list:
     """Resolve the effective shorts HH:MM strings — the single precedence point.
 
-    Shorts times are determined by ``shorts_publish_times_by_region`` (the
-    single source of truth). ``lf_day`` selects the
-    day's window ONLY within that region map (the USA Tue/Fri per-day
-    staggering); it never reaches a separate ``publish_slots`` shorts source
-    (that override was removed).
+    Shorts times are Waypost's (``seo_slots.shorts_windows``). ``lf_day`` selects the
+    drive's share of the region's list; it never reaches a separate ``publish_slots``
+    shorts source (that override was removed).
 
     Order:
 
     1. Explicit ``--shorts-times`` (``shorts_times_arg``, comma-separated).
-    2. ``shorts_publish_times_by_region[region]`` (per-``lf_day`` when that
-       region maps to a per-day dict, else the region's flat window).
-    3. The flat ``shorts_publish_times`` (via the region resolver's fallback).
+    2. The region's Waypost windows for ``lf_day``.
+    3. The flat ``shorts_publish_times`` when there is no region.
     """
     if isinstance(shorts_times_arg, str) and shorts_times_arg.strip():
         return [t.strip() for t in shorts_times_arg.split(",") if t.strip()]

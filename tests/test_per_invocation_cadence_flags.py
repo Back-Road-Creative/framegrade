@@ -101,13 +101,15 @@ class TestResolveShortsTimesForRegion:
             "12:00",
         ]
 
-    def test_region_absent_falls_back_to_flat(self):
+    def test_region_waypost_has_no_hours_for_halts(self):
+        # Waypost owns every region's hours: a region it has none for stops planning
+        # instead of borrowing the flat list.
+        from gomoveshift.pipeline.seo_slots import CadenceSourceUnreadableError
+
         cfg = Config()
         cfg.drive.shorts_publish_times = ["15:00", "18:00"]
-        assert schedule_constants.resolve_shorts_times_for_region(cfg, "japan") == [
-            "15:00",
-            "18:00",
-        ]
+        with pytest.raises(CadenceSourceUnreadableError, match="region japan has no shorts hours"):
+            schedule_constants.resolve_shorts_times_for_region(cfg, "japan")
 
     def test_none_region_falls_back_to_flat(self):
         cfg = Config()
@@ -246,7 +248,7 @@ class TestCmdDriveCadenceMerge:
             orch_cls.return_value.run.return_value = SimpleNamespace(
                 success=True, stages_completed=[], drive_plan=None
             )
-            drive_handler.cmd_drive(args, cfg)
+            return drive_handler.cmd_drive(args, cfg)
 
     def test_lf_day_overrides_config(self, tmp_path, restore_schedule_module):
         cfg = Config()
@@ -346,8 +348,11 @@ class TestCmdDriveCadenceMerge:
         assert cfg.drive.shorts_publish_times == ["08:00", "12:00"]
         assert schedule_constants.SHORTS_TIMES == [dt_time(8, 0, 0), dt_time(12, 0, 0)]
 
-    def test_unmapped_region_keeps_flat_default(self, tmp_path, restore_schedule_module):
-        # A region absent from the map leaves the flat default untouched.
+    def test_region_without_waypost_hours_halts_and_keeps_flat_default(
+        self, tmp_path, restore_schedule_module
+    ):
+        # A region Waypost has no hours for stops the launch (rc 2); the flat default is
+        # left untouched, never borrowed.
         cfg = Config()
         args = self._args(
             directory=str(tmp_path),
@@ -355,5 +360,5 @@ class TestCmdDriveCadenceMerge:
             region="canada",
             shorts_times=None,
         )
-        self._run(args, cfg)
+        assert self._run(args, cfg) == 2
         assert cfg.drive.shorts_publish_times == ["15:00", "18:00"]

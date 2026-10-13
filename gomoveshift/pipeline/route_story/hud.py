@@ -26,7 +26,13 @@ from typing import Any, Callable, Sequence
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from ..photos.develop import _ROT90_BY_FLIP, develop
+from ..photos.develop import (
+    _ROT90_BY_FLIP,
+    SUPPORTED_EXTENSIONS,
+    _srgb_from_icc,
+    decode,
+    develop,
+)
 from . import grade, graded_cache
 from .dashboard import GRADE_WINDOW_M, PACE_WINDOW_S, DashboardState
 from .layout import HudLayout, hud_layout
@@ -1060,7 +1066,7 @@ def _load_still(path: Path, *, source: str = "developed") -> Image.Image:
 def _grade_still_from_file(path: Path, source: str) -> Image.Image:
     try:
         with Image.open(path) as opened:
-            image = opened.convert("RGB")
+            opened.load()
     except (OSError, SyntaxError):
         preview = _camera_preview(path) if source == "camera" else None
         if source == "camera" and preview is None:
@@ -1072,6 +1078,20 @@ def _grade_still_from_file(path: Path, source: str) -> Image.Image:
             # decode, measured denoise/colour correction and sharpening.  It does
             # not generate or paint scene detail.
             image = Image.fromarray(_to_display_rgb(np.asarray(develop(path).rgb)), "RGB")
+    else:
+        # A Pillow-readable still is made upright (EXIF orientation) and
+        # colour-managed to sRGB, an unusable ICC profile refused rather than
+        # passed through: via develop.decode for supported suffixes, via the
+        # same ICC step on the Pillow path for the rest.
+        if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+            image = Image.fromarray(_to_display_rgb(np.asarray(decode(path).rgb)), "RGB")
+        else:
+            # A format the photo pipeline does not ingest (an insert's .webp):
+            # upright by EXIF orientation, flattened to RGB, then colour-managed
+            # to sRGB through the same ICC step (unusable profile refused).
+            with Image.open(path) as opened:
+                upright = ImageOps.exif_transpose(opened).convert("RGB")
+            image = _srgb_from_icc(upright, path)
     cropped, _ = crop_black_border(image)
     cropped = grade.crop_lens_corners(cropped)
     return grade.grade_still(cropped, enabled=_GRADE_STILLS)
