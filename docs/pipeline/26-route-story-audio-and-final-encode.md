@@ -55,14 +55,15 @@ delivery -- per-platform payload TEXT limits (title/description/tags/caption len
 
 ### Licensed music bed and per-brand audio profile
 
-`pipeline.audio_profile.load_audio_profile(slug)` reads an optional `audio:` block from a brand's
-`console/brands/<slug>/brand.yaml`, beside `publishing.brand_policy`'s `policy:` block and using the
-same shipped-brands directory -- a missing file/block/key falls back to a disabled `AudioProfile`
-(no bed). A present block sets `enabled`, `bed_path` (resolved relative to the brand's directory),
+`pipeline.audio_profile.load_audio_profile(slug, brands_dir=...)` reads an optional `audio:` block
+from a brand's `<brands_dir>/<slug>/brand.yaml`, beside `publishing.brand_policy`'s `policy:` block.
+The engine never imports publishing code (`tests/test_media_boundary.py`), so the orchestration-side
+caller passes the shipped-brands directory (`brand_policy._SHIPPED_BRANDS_DIR`) in. A missing
+file/block/key falls back to a disabled `AudioProfile` (no bed). A present block sets `enabled`, `bed_path` (resolved relative to the brand's directory),
 `gain_db` (default -18.0) and `fade_out_s` (default 2.0), and an optional `ledger_path` (defaulting
 to `<brand-dir>/music/ledger.json`).
 
-**GoMoveShift's slug is refused unconditionally** -- `load_audio_profile("gomoveshift")` raises
+**GoMoveShift's slug is refused unconditionally** -- `load_audio_profile("gomoveshift", ...)` raises
 `GmsAudioRefused` before any file is even read. Its audio contract, described at the top of this file, is near-silent and attenuate-only; a music bed is a different thing and no `brand.yaml` can turn it
 on.
 

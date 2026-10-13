@@ -13,11 +13,11 @@ thing regardless of anything a brand's ``brand.yaml`` might say.
 
 The optional ``audio:`` block lives in ``brand.yaml`` beside the
 ``policy:`` block (``publishing.brand_policy``) and is read with the
-same idiom: same shipped-brands directory, same "missing file/block/key
-falls back to disabled" rule. ``brand_policy._SHIPPED_BRANDS_DIR`` is
-imported (not duplicated) so the two loaders can never disagree about
-where a brand's config lives, and so a test that monkeypatches it for
-one loader also relocates the other.
+same "missing file/block/key falls back to disabled" rule. The engine
+never imports publishing code (``tests/test_media_boundary.py``), so the
+caller on the orchestration side passes the shipped-brands directory in
+(``brand_policy._SHIPPED_BRANDS_DIR``) and the two loaders cannot
+disagree about where a brand's config lives.
 """
 
 from __future__ import annotations
@@ -28,8 +28,6 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import yaml
-
-from ..publishing import brand_policy as _brand_policy
 
 # Default music source: Pixabay Music (Pixabay Content
 # License). The ledger's ``source`` field accepts any string -- this is
@@ -62,28 +60,29 @@ class AudioProfile:
     ledger_path: Optional[Path] = None
 
 
-def _load_raw_audio_block(slug: str) -> dict:
-    path = _brand_policy._SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+def _load_raw_audio_block(slug_dir: Path) -> dict:
+    path = slug_dir / "brand.yaml"
     if not path.exists():
         return {}
     raw = yaml.safe_load(path.read_text()) or {}
     return raw.get("audio") or {}
 
 
-def load_audio_profile(slug: str) -> AudioProfile:
+def load_audio_profile(slug: str, *, brands_dir: Path) -> AudioProfile:
     """Read the optional ``audio:`` block from ``brand.yaml`` for ``slug``.
 
     ``gomoveshift`` raises :class:`GmsAudioRefused` unconditionally, before
     any file is even read. Any other missing file/block/key falls back to
-    :class:`AudioProfile`'s disabled defaults.
+    :class:`AudioProfile`'s disabled defaults. ``brands_dir`` is the
+    directory holding one ``<slug>/brand.yaml`` per brand.
     """
     if slug == _GMS_SLUG:
         raise GmsAudioRefused(
             "GoMoveShift's near-silent, attenuate-only audio contract refuses any music bed"
         )
 
-    slug_dir = _brand_policy._SHIPPED_BRANDS_DIR / slug
-    block = _load_raw_audio_block(slug)
+    slug_dir = Path(brands_dir) / slug
+    block = _load_raw_audio_block(slug_dir)
     if not block:
         return AudioProfile()
 

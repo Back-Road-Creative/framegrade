@@ -357,25 +357,26 @@ def _media_type(product: NightProduct, specs: list[dict]) -> None:
         raise ValueError(f"{product.value} requires TIFF primary output")
 
 
+# Matches ``publishing.media_fingerprint.DEFAULT_FFPROBE_TIMEOUT_SEC``.
+_PROBE_TIMEOUT_SEC = 30
+
+
 def _validate_media(product: NightProduct, path: Path, spec: dict) -> bool | dict:
     suffix = path.suffix.lower()
     try:
         if suffix == ".mp4":
-            from ...publishing.media_fingerprint import fingerprint_media
             from ..ffmpeg_runner import validate_video
+            from ..validation.ffprobe_client import probe_video_summary
 
             result = validate_video(
                 path, expected_duration=spec.get("duration_s"), require_audio=False
             )
             if not result.valid or result.duration <= 0:
                 return False
-            fingerprint = fingerprint_media(path)
-            return {
-                "duration_s": fingerprint.duration_seconds,
-                "width": fingerprint.width,
-                "height": fingerprint.height,
-                "codec": fingerprint.codec,
-            }
+            duration_s, width, height, codec = probe_video_summary(
+                path, timeout=_PROBE_TIMEOUT_SEC, label="night media probe"
+            )
+            return {"duration_s": duration_s, "width": width, "height": height, "codec": codec}
         if suffix in {".tif", ".tiff"}:
             import tifffile
 

@@ -204,6 +204,20 @@ def redrive_state(state_path: Path, dry_run: bool = False) -> RedriveResult:
     return result
 
 
+def _configure_logging() -> None:
+    """Errors render with the level/logger-name format the CLI uses.
+
+    Same stdout handler and format as ``cli.logging_setup.configure_logging``
+    (INFO, no file); inlined because the engine never imports ``cli``
+    (``tests/test_media_boundary.py``).
+    """
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s %(message)s", datefmt="%H:%M:%S")
+    )
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m gomoveshift.pipeline.redrive_ost",
@@ -217,11 +231,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    # Route through the shared logging setup so errors render with the
-    # standard formatter/handlers instead of bare INFO-formatted lines.
-    from ..cli.logging_setup import configure_logging
-
-    configure_logging(verbose=False)
+    _configure_logging()
 
     try:
         result = redrive_state(args.state_file, dry_run=args.dry_run)
