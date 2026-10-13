@@ -19,6 +19,7 @@ from typing import NamedTuple, Optional
 from ..analysis.unified_scorer import UnifiedSegmentScorer
 from ..config import Config, get_config
 from ..models import DrivePipelineResult
+from ..publishing.title_kit import build_title_kit
 from ._drive_state import load_drive_state, save_drive_state
 from .auto_enqueue import auto_enqueue_shorts
 from .drive_phases.phase_a import PhaseA
@@ -440,7 +441,7 @@ class DrivePipelineOrchestrator:
         self._phases = {
             "phase_a": PhaseA(self.config),
             "phase_b_preview": PhaseBPreview(self.config),
-            "phase_bc_day_first": PhaseBCDayFirst(self.config),
+            "phase_bc_day_first": PhaseBCDayFirst(self.config, title_kit=build_title_kit()),
             "phase_d": PhaseD(self.config),
         }
 

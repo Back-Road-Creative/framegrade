@@ -70,12 +70,6 @@ FORBIDDEN_PREFIXES = (
 # Engine cross-imports still to cut: path relative to gomoveshift/ -> reason.
 # Shrinking this is the goal; growing it needs a reviewer.
 ALLOWLIST: dict[str, str] = {
-    "pipeline/day_pipeline.py": (
-        "imports console.settings, pipeline.chapters.generator, pipeline.chapters.marker_merger, pipeline.title_builder, publishing.brand_policy; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
-    ),
-    "pipeline/drive_phases/phase_bc_day_first.py": (
-        "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
-    ),
     "pipeline/volume_source.py": (
         "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the RunSpec split (RunSpec carries Waypost's decided count, so the engine stops importing analytics)"
     ),

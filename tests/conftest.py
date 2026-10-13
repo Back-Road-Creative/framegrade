@@ -525,6 +525,31 @@ def restore_schedule_constants_identity():
 
 
 @pytest.fixture(autouse=True)
+def default_title_kit(request, monkeypatch):
+    """Run the engine's title-kit consumers on the real GMS kit when a test passes none.
+
+    Production threads a ``TitleKit`` ``DrivePipelineOrchestrator`` ->
+    ``PhaseBCDayFirst`` -> ``run_all_days`` -> ``RunSpec`` -> ``run_day_pipeline``;
+    a test that calls ``run_day_pipeline`` / ``PhaseBCDayFirst`` directly would
+    otherwise have to build one. Opt-out: ``@pytest.mark.no_default_title_kit``
+    (the "a run without a kit fails loudly" tests).
+    """
+    if not HAS_GOMOVESHIFT:
+        return
+    if request.node.get_closest_marker("no_default_title_kit"):
+        return
+    from gomoveshift.pipeline import day_pipeline
+    from gomoveshift.pipeline.drive_phases import phase_bc_day_first
+    from gomoveshift.publishing.title_kit import build_title_kit
+
+    def _require(kit=None):
+        return kit if kit is not None else build_title_kit()
+
+    monkeypatch.setattr(day_pipeline, "require_title_kit", _require)
+    monkeypatch.setattr(phase_bc_day_first, "require_title_kit", _require)
+
+
+@pytest.fixture(autouse=True)
 def hermetic_forward_geocode(request, monkeypatch):
     """Stub ``_nominatim_search`` to ``None`` and ``_nominatim_places`` to
     ``[]`` — no live Nominatim from tests.
@@ -547,10 +572,12 @@ def hermetic_forward_geocode(request, monkeypatch):
         return
     if request.node.get_closest_marker("real_forward_geocode"):
         return
+    from gomoveshift.pipeline import forward_geocode
     from gomoveshift.pipeline.chapters import nominatim_source
 
-    monkeypatch.setattr(nominatim_source, "_nominatim_search", lambda _q: None)
-    monkeypatch.setattr(nominatim_source, "_nominatim_places", lambda _q, **_kw: [])
+    for module in (forward_geocode, nominatim_source):
+        monkeypatch.setattr(module, "_nominatim_search", lambda _q: None)
+        monkeypatch.setattr(module, "_nominatim_places", lambda _q, **_kw: [])
 
 
 _LIVE_NETWORK_OPT_IN_MARKERS = (
@@ -950,6 +977,11 @@ def pytest_configure(config):
         "markers",
         "real_content_ledger: opt out of the conftest hermetic-ledger redirect "
         "and resolve the real default ``ContentLedger`` path.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "no_default_title_kit: opt out of the conftest fixture that supplies the real "
+        "TitleKit to the engine when a test passes none.",
     )
     config.addinivalue_line(
         "markers",

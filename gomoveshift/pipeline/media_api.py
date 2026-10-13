@@ -33,6 +33,9 @@ class RunSpec:
     short_regions_fn: Optional[Callable] = None
     state: Any = None
     inserts_by_lf: Optional[dict] = None
+    # The publish-side title / chapter / brand inputs (``TitleKit``); the engine
+    # imports no publishing code, so the caller hands them in.
+    kit: Any = None
 
 
 @dataclass
@@ -117,6 +120,7 @@ def render_day(spec: RunSpec) -> Optional[Deliverables]:
         short_regions_fn=spec.short_regions_fn,
         state=spec.state,
         inserts_by_lf=spec.inserts_by_lf,
+        kit=spec.kit,
     )
     if artifacts is None:
         return None

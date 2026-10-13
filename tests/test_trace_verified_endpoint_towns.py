@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from gomoveshift.models import ResolvedLocation
+from gomoveshift.pipeline import forward_geocode
 from gomoveshift.pipeline.chapters import nominatim_source
 from gomoveshift.pipeline.chapters.nominatim_source import (
     _nominatim_places as _real_nominatim_places,
@@ -320,7 +321,7 @@ class TestPopulateStampsTraceVerifiedPlaces:
 
     def test_production_forward_geocoder_is_the_default(self, monkeypatch):
         calls: list[str] = []
-        monkeypatch.setattr(nominatim_source, "_nominatim_places", _places(calls=calls))
+        monkeypatch.setattr(forward_geocode, "_nominatim_places", _places(calls=calls))
         rl = self._populate().per_lf_resolved_location[1]
         assert rl.trace_verified_places == ["Crookhaven", "Goleen"]
         assert sorted(calls) == ["Crookhaven, County Cork", "Goleen, County Cork"]
@@ -329,7 +330,7 @@ class TestPopulateStampsTraceVerifiedPlaces:
         def _boom(*_a, **_k):
             raise OSError("network down")
 
-        monkeypatch.setattr(nominatim_source, "_nominatim_places", _boom)
+        monkeypatch.setattr(forward_geocode, "_nominatim_places", _boom)
         with caplog.at_level("WARNING", logger=phase_bc_day_first.__name__):
             assert phase_bc_day_first._forward_geocode_places("Goleen, County Cork") == []
         # The failure is named, not mistaken for "no settlement of that name".

@@ -44,6 +44,8 @@ from ...models import DrivePlan, RegularLFPlan
 from .. import volume_source
 from ..day_grouper import group_episodes_by_day
 from ..day_pipeline import DayArtifacts, _enforce_shorts_contract, run_all_days
+from ..forward_geocode import forward_geocode as _ladder_forward_geocode
+from ..forward_geocode import forward_geocode_places as _forward_geocode_places
 from ..gps_enrichment import (
     _assert_per_lf_locations_resolvable,
     _build_drive_gps_points,
@@ -67,6 +69,7 @@ from ..media_api import (
     deliverables_to_state,
     lift_artifacts,
 )
+from ..place_shape import _road_ref_members, normalize_state_abbr, render_degraded_tier_label
 from ..post_encoding_invariants import (
     _assert_mapping_complete,
     _assert_per_lf_distance_complete,
@@ -89,7 +92,7 @@ from ..state_invariants import (
     assert_phase_bc_per_lf_complete,
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
-from ..title_builder import build_lf_title, ensure_unique_titles
+from ..title_kit import TitleKit, require_title_kit
 from ..trail_opening import attach_trail_opening
 from .trail_film import attach_trail_film, make_span_location, retry_trail_skip
 
@@ -272,8 +275,11 @@ class PhaseBCDayFirst:
 
     name = "phase_bc_day_first"
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, title_kit: Optional[TitleKit] = None) -> None:
         self.config = config
+        # Publish-side title / chapter / brand inputs, handed in by the caller
+        # (``DrivePipelineOrchestrator``) so the engine imports no publishing code.
+        self.title_kit = title_kit
 
     def run(self, state, probe_duration_fn=None, state_save_fn=None) -> None:
         _probe = probe_duration_fn or _probe_duration
@@ -477,17 +483,14 @@ class PhaseBCDayFirst:
         # dedup against a stale on-disk ledger. Reused at every
         # ``load_published_titles`` site below. Degrades to {} on any
         # credential/API failure.
-        from ..longform_metadata import refresh_channel_title_ledger
-
-        _channel_title_ids = refresh_channel_title_ledger()
+        kit = require_title_kit(self.title_kit)
+        _channel_title_ids = kit.refresh_title_ledger()
 
         if _preseed_ost_text:
-            from ..longform_metadata import load_published_titles
-
             state.per_lf_ost_text = dict(_preseed_ost_text)
-            state.per_lf_titles = ensure_unique_titles(
+            state.per_lf_titles = kit.unique_titles(
                 dict(_preseed_ost_text),
-                published_titles=load_published_titles() | set(_channel_title_ids),
+                published_titles=kit.published_titles() | set(_channel_title_ids),
                 published_title_ids=_channel_title_ids,
             )
         _preseed_recording_date = _build_per_lf_recording_date_map(lf_plans_by_date)
@@ -536,7 +539,9 @@ class PhaseBCDayFirst:
                 state=state,
             )
             if _demoted:
-                _apply_demoted_labels(_demoted, _preseed_ost_text, per_lf_ost_text_by_date, state)
+                _apply_demoted_labels(
+                    _demoted, _preseed_ost_text, per_lf_ost_text_by_date, state, kit
+                )
             _assert_pre_encode_location_invariant(
                 _preseed_ost_text,
                 state.per_lf_resolved_location or {},
@@ -628,6 +633,7 @@ class PhaseBCDayFirst:
                 short_ost_text_fn=short_ost_text_fn,
                 short_regions_fn=short_regions_fn,
                 state=state,
+                kit=kit,
                 on_day_complete=_on_day_complete,
                 # Persist the front-load OST hash markers before the first
                 # master encode so a mid-encode kill can't lose them.
@@ -989,7 +995,7 @@ class PhaseBCDayFirst:
                     per_lf_ost_text[lf_idx] = canonical
                 continue
             try:
-                canonical = build_lf_title(
+                canonical = kit.lf_title(
                     segments,
                     geocoder=geocoder,
                     per_lf_location=lf_location,
@@ -1064,16 +1070,14 @@ class PhaseBCDayFirst:
                 "_derive_per_lf_recording_date_from_paths should cover "
                 "any LF that the partition path missed."
             )
-        from ..longform_metadata import load_published_titles
-
         state.per_lf_ost_text = dict(per_lf_ost_text)
         # Dedup via (Part N of M) suffix on collisions — TITLE ONLY. Also
         # dedup FINAL titles against already-published channel titles so an
         # upload can't silently duplicate a live video's title.
         # ``_channel_title_ids`` was refreshed once, earlier in this method.
-        per_lf_titles = ensure_unique_titles(
+        per_lf_titles = kit.unique_titles(
             dict(per_lf_ost_text),
-            published_titles=load_published_titles() | set(_channel_title_ids),
+            published_titles=kit.published_titles() | set(_channel_title_ids),
             published_title_ids=_channel_title_ids,
         )
         state.per_lf_titles = per_lf_titles
@@ -1545,37 +1549,6 @@ def _build_per_lf_recording_date_map(lf_plans_by_date) -> dict:
     return out
 
 
-def _ladder_forward_geocode(town: str):
-    """Defensive forward-geocode for the ladder's endpoint-proximity check.
-
-    Wraps ``_nominatim_search`` (the one (name)->(lat, lon) geocoder in the
-    codebase) so any failure — import, network, malformed response — degrades
-    to ``None`` and the gate skips the check instead of crashing pre-encode.
-    """
-    try:
-        from ..chapters import nominatim_source
-
-        return nominatim_source._nominatim_search(town)
-    except Exception:  # noqa: BLE001 — a geocoder failure never blocks an encode
-        return None
-
-
-def _forward_geocode_places(query: str) -> list:
-    """Defensive settlement-candidate lookup for trace-verifying label endpoints.
-
-    Wraps ``_nominatim_places`` so any failure degrades to ``[]`` — nothing
-    verified, and the location invariant then fails closed exactly as before.
-    The failure is logged so it is not mistaken for "no settlement of that name".
-    """
-    try:
-        from ..chapters import nominatim_source
-
-        return nominatim_source._nominatim_places(query)
-    except Exception as exc:  # noqa: BLE001 — unverified, never a crash
-        logger.warning("TRACE-UNVERIFIED-PLACE: %r — geocoder failed (%s)", query, exc)
-        return []
-
-
 def _verify_trace_places(rl, label, points, places_fn) -> None:
     """Stamp ``rl.trace_verified_places`` for ``label`` from the LF's own trace.
 
@@ -1626,8 +1599,6 @@ def _build_ladder_evidence(
     signal only bites below tier 1: ``award_tier`` returns tier 1 for
     coverage ≥ the tier-1 floor regardless of these keys.
     """
-    from ..title_builder import _road_ref_members
-
     gps_by_lf = gps_points_by_lf or {}
     resolved = resolved_by_lf or {}
     durations: dict[int, float] = {}
@@ -1705,7 +1676,6 @@ def _degrade_labels_to_awarded_tier(
     each burned label was awarded and on what evidence. Recording only — the
     demotion decision itself is untouched.
     """
-    from ..title_builder import normalize_state_abbr, render_degraded_tier_label
     from ..validation.content_gates import award_tier_for_evidence
 
     demoted: dict[int, str] = {}
@@ -1744,7 +1714,7 @@ def _degrade_labels_to_awarded_tier(
 
 
 def _apply_demoted_labels(
-    demoted: dict, per_lf_ost_text: dict, per_lf_ost_text_by_date: dict, state
+    demoted: dict, per_lf_ost_text: dict, per_lf_ost_text_by_date: dict, state, kit: TitleKit
 ) -> None:
     """Write the demoted labels to every burn surface in lockstep: the flat
     pre-seed map (specificity-ladder gate + ``state.per_lf_ost_text``/``per_lf_titles`` for
@@ -1756,16 +1726,14 @@ def _apply_demoted_labels(
     before Phase D reads it, so an unrefreshed ledger here is a missed
     early-preview detection at worst, never a shipped duplicate.
     """
-    from ..longform_metadata import load_published_titles
-
     for lf_idx, label in demoted.items():
         per_lf_ost_text[int(lf_idx)] = label
         for day_map in (per_lf_ost_text_by_date or {}).values():
             if int(lf_idx) in day_map:
                 day_map[int(lf_idx)] = label
     state.per_lf_ost_text = dict(per_lf_ost_text)
-    state.per_lf_titles = ensure_unique_titles(
-        dict(per_lf_ost_text), published_titles=load_published_titles()
+    state.per_lf_titles = kit.unique_titles(
+        dict(per_lf_ost_text), published_titles=kit.published_titles()
     )
 
 

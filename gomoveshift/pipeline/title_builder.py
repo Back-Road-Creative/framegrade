@@ -38,13 +38,19 @@ if TYPE_CHECKING:
 from .place_shape import (  # noqa: F401 — re-exported for callers/tests of the old home
     _MID_VOTE_SAMPLES,
     _REGION_TOKENS_RE,
+    _US_STATE_ABBR,
+    _US_STATE_ABBR_VALUES,
     _central_window,
     _endpoint_county_state,
     _evenly_sample,
+    _hyphenate_route_ref,
     _looks_like_county,
     _looks_like_region,
     _looks_like_township,
+    _road_ref_members,
     _vote_mid_region,
+    normalize_state_abbr,
+    render_degraded_tier_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,70 +77,6 @@ _VIA_ROAD_MAX_SPAN_KM = 50.0
 _SUPERLONG_PART_SUFFIX_RE = re.compile(r"\s+—\s+Part\s+\d+\s+of\s+\d+\s*$")
 
 
-# ── US state abbreviation map ──────────────────────────────────────────
-# Only 50 states + DC. Not an exhaustive i18n solution — deliberately
-# scoped to current region (USA). Ireland + other regions need their
-# own format rules; extend here when a non-USA project starts.
-_US_STATE_ABBR: dict[str, str] = {
-    "alabama": "AL",
-    "alaska": "AK",
-    "arizona": "AZ",
-    "arkansas": "AR",
-    "california": "CA",
-    "colorado": "CO",
-    "connecticut": "CT",
-    "delaware": "DE",
-    "district of columbia": "DC",
-    "florida": "FL",
-    "georgia": "GA",
-    "hawaii": "HI",
-    "idaho": "ID",
-    "illinois": "IL",
-    "indiana": "IN",
-    "iowa": "IA",
-    "kansas": "KS",
-    "kentucky": "KY",
-    "louisiana": "LA",
-    "maine": "ME",
-    "maryland": "MD",
-    "massachusetts": "MA",
-    "michigan": "MI",
-    "minnesota": "MN",
-    "mississippi": "MS",
-    "missouri": "MO",
-    "montana": "MT",
-    "nebraska": "NE",
-    "nevada": "NV",
-    "new hampshire": "NH",
-    "new jersey": "NJ",
-    "new mexico": "NM",
-    "new york": "NY",
-    "north carolina": "NC",
-    "north dakota": "ND",
-    "ohio": "OH",
-    "oklahoma": "OK",
-    "oregon": "OR",
-    "pennsylvania": "PA",
-    "rhode island": "RI",
-    "south carolina": "SC",
-    "south dakota": "SD",
-    "tennessee": "TN",
-    "texas": "TX",
-    "utah": "UT",
-    "vermont": "VT",
-    "virginia": "VA",
-    "washington": "WA",
-    "west virginia": "WV",
-    "wisconsin": "WI",
-    "wyoming": "WY",
-}
-
-
-# Reverse lookup set for abbreviation validation. Frozen at import so the
-# membership test below is O(1) and never mutated.
-_US_STATE_ABBR_VALUES: frozenset[str] = frozenset(_US_STATE_ABBR.values())
-
-
 def is_us_state(token: Optional[str]) -> bool:
     """True when ``token`` is a US state — full name or 2-letter abbreviation.
 
@@ -155,23 +97,6 @@ def is_us_state(token: Optional[str]) -> bool:
     if s.lower() in _US_STATE_ABBR:
         return True
     return len(s) == 2 and s.upper() in _US_STATE_ABBR_VALUES
-
-
-def normalize_state_abbr(state_str: Optional[str]) -> str:
-    """Convert a full state name to its 2-letter abbreviation.
-
-    Returns the input uppercased if it's already 2 chars (assumed
-    abbreviation); returns the mapped abbreviation for known US states;
-    returns empty string if unmapped.
-
-    Case-insensitive; trims whitespace.
-    """
-    if not state_str:
-        return ""
-    s = state_str.strip()
-    if len(s) == 2 and s.isalpha():
-        return s.upper()
-    return _US_STATE_ABBR.get(s.lower(), "")
 
 
 # Reverse of ``_US_STATE_ABBR`` (abbr → title-cased full name) for the
@@ -273,34 +198,6 @@ _THROUGH_ROAD_NAME_RE = re.compile(
     r"\b(?:Parkway|Highway|Freeway|Expressway|Turnpike|Byway|Pike|Beltway|Causeway|Motorway)\b",
     re.IGNORECASE,
 )
-
-# Display-normalize an OSM road ``ref``/name for a title. OSM joins concurrent
-# routes in the ``ref`` tag with ';' ("I 81;US 58") and stores refs space-
-# separated ("I 81"); a title wants the primary route, hyphenated ("I-81"). A
-# named road (no leading route-ref token, e.g. "Sea Island Parkway") is
-# returned unchanged. Idempotent on an already-hyphenated ref ("US-64").
-_ROUTE_REF_HYPHENATE_RE = re.compile(r"^([A-Za-z]{1,3})[\s-](\d+[A-Za-z]?)$")
-
-
-def _hyphenate_route_ref(token: str) -> str:
-    """Hyphenate a single route-ref token (``"I 81"`` → ``"I-81"``); a named
-    road or already-hyphenated ref passes through unchanged. Shared by the
-    display normalizer and the per-member vote-site splitter."""
-    m = _ROUTE_REF_HYPHENATE_RE.match(token)
-    if m:
-        return f"{m.group(1).upper()}-{m.group(2).upper()}"
-    return token
-
-
-def _road_ref_members(road: str) -> list[str]:
-    """Every ';'-separated member of an OSM concurrency ``ref``, each stripped
-    and hyphenated (``"I 77;I 81;US 52"`` → ``["I-77", "I-81", "US-52"]``); a
-    single road yields a one-element list. Used at the via-road vote site so a
-    concurrency credits EVERY carried route, not just the primary — otherwise an
-    I-77/I-81 overlap collapses to "I-77" and outvotes the I-81 the drive stays
-    on after I-77 branches away."""
-    return [_hyphenate_route_ref(m.strip()) for m in road.split(";") if m.strip()]
-
 
 # A hyphenated interstate ref as produced by ``_hyphenate_route_ref`` ("I-81").
 # Used by the class-aware via-road tie policy: an interstate member is the only
@@ -1184,44 +1081,6 @@ def award_tier(coverage: float, corroborations: int, *, has_bracket_route: bool 
     if has_bracket_route:
         return 4
     return 5
-
-
-def render_degraded_tier_label(
-    tier: int,
-    *,
-    road: Optional[str] = None,
-    county: Optional[str] = None,
-    region: Optional[str] = None,
-    state: Optional[str] = None,
-) -> str:
-    """Render the DEGRADED burned-OST label for a below-tier-1 award.
-
-    Conservative forms sourced from the LF's ``ResolvedLocation`` (no named
-    corridors / genre words the pipeline can't mechanically produce):
-
-    * tier 2 (corridor + region) → ``"{road}, {region}"``   (e.g. ``"I-81, VA"``)
-    * tier 3 (county / region)   → ``"{county}, {region}"`` (e.g. ``"Franklin County, PA"``)
-    * tier 4 (state only)        → bare ``"{state}"``       (e.g. ``"Virginia"``)
-
-    ``region`` is the trailing abbreviation for tiers 2/3 (the tier-1 ``…, VA``
-    shape); ``state`` is the full name the bare tier-4 claim prefers. A missing
-    field FALLS to the broadest form it CAN support rather than a blank/fabricated
-    component. Tier 1 (renders via :func:`build_lf_title`) and tier 5 (no-claim)
-    return ``""`` — the caller keeps the original or hard-fails.
-    """
-    road = (road or "").strip()
-    county = (county or "").strip()
-    region = (region or "").strip()
-    state = (state or "").strip()
-    if tier == 2 and road and region:
-        return f"{road}, {region}"
-    if tier in (2, 3) and county and region:
-        return f"{county}, {region}"
-    if tier in (2, 3, 4):
-        # tier-4 form (bare region); also the fall-through for a tier-2/3 award
-        # whose more-specific field is absent. Full state name reads best.
-        return state or region
-    return ""
 
 
 def build_lf_title(

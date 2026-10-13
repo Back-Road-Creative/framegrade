@@ -67,11 +67,8 @@ from keycut import (
     segments_to_master_ranges,
 )
 
-from ..console.settings import current_brand
-from ..publishing.brand_policy import load_brand_policy, load_media_profile
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
-from .chapters.marker_merger import chapter_town_events
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
@@ -134,6 +131,7 @@ from .stop_mask import (
     mask_summary,
     stop_mask_kwargs,
 )
+from .title_kit import TitleKit, require_title_kit
 from .validation.content_gates import check_short_location_invariant, check_stop_free_windows
 
 logger = logging.getLogger(__name__)
@@ -1295,6 +1293,7 @@ def _build_superlong_part_metadata(
     config,
     stages_dir: Path,
     day_journey=None,
+    kit: Optional[TitleKit] = None,
 ) -> dict:
     """Build one superlong part's title / chapters / description.
 
@@ -1314,22 +1313,20 @@ def _build_superlong_part_metadata(
     ``validation.content_gates.check_metadata_quality`` already honours
     for GPS-less regular LFs.
     """
-    from .chapters.generator import YOUTUBE_MIN_CHAPTERS, ChapterGenerator, superlong_max_chapters
-    from .title_builder import build_superlong_part_title
-
-    title = build_superlong_part_title(location, part.part_index, part.part_count)
+    kit = require_title_kit(kit)
+    title = kit.superlong_title(location, part.part_index, part.part_count)
     has_gps = day_journey is not None or gpx_path is not None
     chapters: list = []
     chapter_text = ""
     if has_gps:
         try:
-            generator = ChapterGenerator(config)
+            generator = kit.chapter_generator(config)
             chapters = generator.generate(
                 gpx_path=gpx_path,
                 day_journey=day_journey,
                 video_duration=part.kept_duration_sec,
                 start_location=location,
-                max_chapters=superlong_max_chapters(part.kept_duration_sec),
+                max_chapters=kit.superlong_max_chapters(part.kept_duration_sec),
                 resolved_location=resolved_location,
                 stages_dir=stages_dir,
                 included_segments=list(part.ranges) if day_journey is not None else None,
@@ -1349,7 +1346,7 @@ def _build_superlong_part_metadata(
         f"The whole day's drive from {location}, part {part.part_index} of "
         f"{part.part_count} — stops removed, nothing else cut."
     )
-    if len(chapters) >= YOUTUBE_MIN_CHAPTERS:
+    if len(chapters) >= kit.min_chapters:
         description = f"{description}\n\n\U0001f4cd CHAPTERS\n{chapter_text}"
 
     return {
@@ -1377,6 +1374,7 @@ def _produce_superlong_parts(
     state=None,
     day_gps_points: Optional[list[tuple[float, float, float]]] = None,
     media_profile=None,
+    kit: Optional[TitleKit] = None,
 ) -> dict:
     """Cut + OST-burn opt-in superlong parts (``sl_NN.mp4``) from the day
     master. Never turned into ``RegularLFPlan``s, so they can't reach
@@ -1400,7 +1398,6 @@ def _produce_superlong_parts(
     ``None`` falls back to the legacy single-episode-GPX chapters.
     """
     from ..models import LFSegment
-    from .chapters.generator import build_day_master_journey
     from .superlong_planner import plan_superlong_parts
 
     _drive = getattr(config, "drive", None) if config is not None else None
@@ -1430,7 +1427,8 @@ def _produce_superlong_parts(
         _resolved_location = (getattr(state, "per_lf_resolved_location", None) or {}).get(
             _first_idx
         )
-    _day_journey = build_day_master_journey(day_gps_points)
+    kit = require_title_kit(kit)
+    _day_journey = kit.day_master_journey(day_gps_points)
     _gpx_path: Optional[Path] = None
     for _ep in episodes:
         _p = getattr(_ep, "gpx_path", None)
@@ -1460,9 +1458,10 @@ def _produce_superlong_parts(
                 config=config,
                 stages_dir=sl_dir,
                 day_journey=_day_journey,
+                kit=kit,
             )
         )
-        part_transitions = chapter_town_events(record.get("chapters"))
+        part_transitions = kit.town_events(record.get("chapters"))
         records.append(record)
         _burn_work.append(
             {
@@ -1617,6 +1616,7 @@ def run_day_pipeline(
     short_regions_fn: Optional[Callable] = None,
     state=None,
     inserts_by_lf: Optional[dict] = None,
+    kit: Optional[TitleKit] = None,
 ) -> Optional[DayArtifacts]:
     """Run the full day-first pipeline for a single day.
 
@@ -1709,7 +1709,8 @@ def run_day_pipeline(
             _per_day_record = _pdc.get(date)
     # The tenant's MediaProfile, loaded once per run on the orchestration
     # side and handed to the engine (encode_day_master, apply_ost).
-    media_profile = load_media_profile(current_brand())
+    kit = require_title_kit(kit)
+    media_profile = kit.media_profile()
     master_path = encode_day_master(
         day_batch,
         day_dir,
@@ -2410,7 +2411,7 @@ def run_day_pipeline(
     # gate below checks THIS cap-derived target, never the uncapped
     # config/derived value or the unrelated min_shorts_per_lf floor.
     if _state_target is None and target_count is not None:
-        _policy_cap = load_brand_policy(current_brand()).per_location_cap
+        _policy_cap = kit.per_location_cap()
         if _policy_cap is not None and _policy_cap < _effective_per_lf:
             _effective_per_lf = _policy_cap
             target_count = _effective_per_lf * num_lfs
@@ -2598,6 +2599,7 @@ def run_day_pipeline(
                 state=state,
                 day_gps_points=_day_gps_points,
                 media_profile=media_profile,
+                kit=kit,
             )
             if state is not None:
                 state.setdefault("superlong_parts", {})[date] = _sl_plan
@@ -2703,6 +2705,7 @@ def run_all_days(
     state_save_fn: Optional[Callable] = None,
     all_day_batches: Optional[list] = None,
     all_gps_points_by_date: Optional[dict] = None,
+    kit: Optional[TitleKit] = None,
 ) -> list:
     """Run the day-first pipeline for every day in `day_batches`.
 
@@ -2912,6 +2915,7 @@ def run_all_days(
                     short_regions_fn=short_regions_fn,
                     state=state,
                     inserts_by_lf=_inserts_by_date.get(day_batch.date) or None,
+                    kit=kit,
                 )
             )
         except OstAuditPendingError:
