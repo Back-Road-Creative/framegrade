@@ -32,7 +32,7 @@
     <li>
       <strong>{{ cap.name }}</strong> --
       {% if not cap.installed %}
-        not installed in this build.
+        not available -- {{ cap.reason }}.
       {% elif cap.console %}
         runs from this screen.
       {% else %}
