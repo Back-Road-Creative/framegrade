@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 import cv2
 
-from ...publishing.dispatch import PRIVACY_REQUIRED_CLASSES
+from ..day_master_encoder import REQUIRED_PRIVACY_CLASSES
 from ..photos.face_filter import (
     FaceBlurError,
     attestable_privacy_classes,
@@ -107,7 +107,7 @@ def apply_privacy_gate(
 
     effective_blur = blur_enabled() if blur is None else blur
     classes = attestable_privacy_classes(blur)
-    missing = set(PRIVACY_REQUIRED_CLASSES) - set(classes)
+    missing = set(REQUIRED_PRIVACY_CLASSES) - set(classes)
     if missing:
         raise ValueError(f"privacy attestation missing required classes: {sorted(missing)}")
     attestation = {"classes": classes, "blur": effective_blur, "detector": sorted(classes)}

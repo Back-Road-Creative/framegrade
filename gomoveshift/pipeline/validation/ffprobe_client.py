@@ -176,3 +176,45 @@ class FFprobeClient:
 
 class FFprobeError(Exception):
     """Raised when ffprobe returns a non-zero exit code."""
+
+
+def probe_video_summary(
+    path: Path, *, timeout: int, label: str = "probe_video_summary"
+) -> tuple[float, int, int, str]:
+    """Return ``(duration_seconds, width, height, codec)`` for ``path``'s first video stream.
+
+    Raises ``RuntimeError`` naming ``label`` and ``path`` on a failed probe, a
+    file with no video stream, an unparseable duration, or a stream missing
+    width/height/codec_name -- never a zeroed placeholder. Shared by the
+    publish-side ``fingerprint_media`` (``label="fingerprint_media"``) and the
+    engine's night-product validator, which must not import publishing code.
+    """
+    client = FFprobeClient(subprocess, timeout=timeout)
+    try:
+        data = client.probe(path, show_format=True, show_streams=True)
+    except FFprobeError as exc:
+        raise RuntimeError(f"{label}: ffprobe failed for {path}: {exc}") from exc
+
+    video_stream = next(
+        (s for s in data.get("streams", []) if s.get("codec_type") == "video"), None
+    )
+    if video_stream is None:
+        raise RuntimeError(f"{label}: no video stream in {path}")
+
+    try:
+        duration_seconds = float(data.get("format", {}).get("duration"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label}: unparseable duration for {path}") from exc
+
+    # Same loud-or-nothing rule as duration: a stream missing width/height/
+    # codec_name would otherwise raise a bare TypeError naming neither the
+    # field nor the file, and int(None) is the likeliest real-world shape of
+    # a malformed probe.
+    try:
+        width = int(video_stream["width"])
+        height = int(video_stream["height"])
+        codec = str(video_stream["codec_name"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"{label}: incomplete video stream for {path}: {exc}") from exc
+
+    return duration_seconds, width, height, codec

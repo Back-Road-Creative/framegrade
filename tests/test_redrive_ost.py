@@ -271,25 +271,29 @@ class TestRedriveOST:
 
 
 class TestRedriveLoggingSetup:
-    """The ``__main__``/``main`` entrypoint routes through the shared
-    ``configure_logging`` instead of a bare ``logging.basicConfig``, so
-    errors render with the standard handlers, not plain INFO lines."""
+    """The ``main`` entrypoint installs the standard stdout handler
+    (level + logger name), not plain INFO lines. The engine cannot import
+    ``cli.logging_setup``, so the handler is inlined and checked here."""
 
-    def test_main_configures_logging(self, tmp_path, monkeypatch):
-        from gomoveshift.cli import logging_setup
+    def test_main_configures_logging(self, tmp_path):
+        import logging
+        import sys
+
         from gomoveshift.pipeline import redrive_ost
 
-        calls: list[dict] = []
-        monkeypatch.setattr(
-            logging_setup,
-            "configure_logging",
-            lambda **kw: calls.append(kw),
-        )
-        # Stop after logging is configured — a missing state file exits 2.
-        state_path = tmp_path / "does_not_exist.json"
-
-        rc = redrive_ost.main([str(state_path)])
+        root = logging.getLogger()
+        saved = (root.level, list(root.handlers))
+        try:
+            rc = redrive_ost.main([str(tmp_path / "does_not_exist.json")])
+            handlers = list(root.handlers)
+            level = root.level
+        finally:
+            root.handlers[:] = saved[1]
+            root.setLevel(saved[0])
 
         assert rc == 2  # FileNotFoundError path
-        assert calls, "main() must call configure_logging"
-        assert calls[0] == {"verbose": False}
+        assert level == logging.INFO
+        assert len(handlers) == 1
+        assert handlers[0].stream is sys.stdout
+        record = logging.LogRecord("gomoveshift.x", logging.WARNING, "f.py", 1, "boom", (), None)
+        assert "[WARNING] gomoveshift.x boom" in handlers[0].format(record)

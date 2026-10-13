@@ -71,46 +71,31 @@ FORBIDDEN_PREFIXES = (
 # Shrinking this is the goal; growing it needs a reviewer.
 ALLOWLIST: dict[str, str] = {
     "pipeline/_drive_helpers.py": (
-        "imports pipeline.chapters._journey_filter; cut by moving the caller into phase_a (phase_a owns the caller)"
-    ),
-    "pipeline/audio_profile.py": (
-        "imports publishing; cut by the MediaProfile split (MediaProfile replaces brand_policy)"
+        "imports pipeline.chapters._journey_filter; cut by moving the journey filter into the GPS library"
     ),
     "pipeline/day_pipeline.py": (
-        "imports console.settings, pipeline.chapters.generator, pipeline.chapters.marker_merger, pipeline.title_builder, publishing.brand_policy; cut by the MediaProfile split (MediaProfile carries title/chapter/brand inputs)"
+        "imports console.settings, pipeline.chapters.generator, pipeline.chapters.marker_merger, pipeline.title_builder, publishing.brand_policy; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),
     "pipeline/drive_phases/phase_bc_day_first.py": (
-        "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the MediaProfile split (MediaProfile carries title/chapter/brand inputs)"
+        "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),
     "pipeline/ingest/ost_formatter.py": (
-        "imports pipeline.title_builder; cut by the MediaProfile split (MediaProfile carries title/chapter/brand inputs)"
+        "imports pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),
     "pipeline/orchestrator.py": (
-        "imports pipeline.longform_metadata; cut by the MediaProfile split (engine side stops importing Phase D once MediaProfile carries the publish inputs)"
+        "imports pipeline.longform_metadata; cut by the RunSpec split (the metadata and analytics_sync stages take the generator from the run context, not from _orch)"
     ),
     "pipeline/orchestrator_fingerprint.py": (
-        "imports pipeline.drive_phases.phase_d; cut by the MediaProfile split (engine side stops importing Phase D once MediaProfile carries the publish inputs)"
-    ),
-    "pipeline/photos/night_products.py": (
-        "imports publishing.media_fingerprint; cut by moving the import out of the engine"
+        "imports pipeline.drive_phases.phase_d; cut by the RunSpec split (the Phase D resume check moves beside drive_orchestrator)"
     ),
     "pipeline/photos/orchestrator.py": (
-        "imports pipeline.content_ledger, seo_manager.analytics.theme_rotator; cut by moving the import out of the engine"
-    ),
-    "pipeline/post_encoding_invariants.py": (
-        "imports pipeline.drive_phases.phase_d; cut by the MediaProfile split (engine side stops importing Phase D once MediaProfile carries the publish inputs)"
-    ),
-    "pipeline/redrive_ost.py": (
-        "imports cli.logging_setup; cut by moving the import out of the engine"
+        "imports pipeline.content_ledger, seo_manager.analytics.theme_rotator; cut by the RunSpec split (the ledger write and the voice theme arrive as callables)"
     ),
     "pipeline/volume_source.py": (
-        "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the MediaProfile split (MediaProfile carries the decided count)"
+        "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the RunSpec split (RunSpec carries Waypost's decided count, so the engine stops importing analytics)"
     ),
     "pipeline/route_story/metadata.py": (
         "imports pipeline.longform_metadata; cut by moving the metadata step out of the engine"
-    ),
-    "pipeline/route_story/privacy.py": (
-        "imports publishing.dispatch; cut by moving the import out of the engine"
     ),
     "pipeline/route_story/sources.py": (
         "imports pipeline.chapters.overpass_source; cut by moving the overpass source into the GPS library"

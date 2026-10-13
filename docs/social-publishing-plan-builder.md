@@ -87,7 +87,9 @@ across working directories should pass an absolute `Path`.
 
 Reuses the existing `FFprobeClient`
 (`gomoveshift/pipeline/validation/ffprobe_client.py`) rather than a new
-inline `subprocess.run(["ffprobe", ...])` — it already has retry-on-timeout
+inline `subprocess.run(["ffprobe", ...])` through `probe_video_summary`, the
+engine-side probe `fingerprint_media` shares with the night-product validator
+(the engine never imports `publishing`; `tests/test_media_boundary.py`) — it already has retry-on-timeout
 and a configurable timeout matching `DriveConfig.ffprobe_timeout_sec`
 (default 30s, overridable via the `ffprobe_timeout_sec` kwarg).
 

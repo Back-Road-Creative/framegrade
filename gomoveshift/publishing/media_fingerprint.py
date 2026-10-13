@@ -11,7 +11,6 @@ rather than a third inline ``subprocess.run(["ffprobe", ...])`` pattern.
 from __future__ import annotations
 
 import hashlib
-import subprocess
 from pathlib import Path
 
 from .models import MediaFingerprint, ShortPublishRecord
@@ -87,39 +86,11 @@ def verify_media(record: ShortPublishRecord) -> None:
 
 def _probe_video(path: Path, *, timeout: int) -> tuple[float, int, int, str]:
     # Local import mirrors the established call sites (day_master_encoder.py,
-    # pipeline_validator.py, ost_applier.py) — the client is imported inside
+    # pipeline_validator.py, ost_applier.py) -- the client is imported inside
     # the function that needs it, not at module load.
-    from ..pipeline.validation.ffprobe_client import FFprobeClient, FFprobeError
+    from ..pipeline.validation.ffprobe_client import probe_video_summary
 
-    client = FFprobeClient(subprocess, timeout=timeout)
-    try:
-        data = client.probe(path, show_format=True, show_streams=True)
-    except FFprobeError as exc:
-        raise RuntimeError(f"fingerprint_media: ffprobe failed for {path}: {exc}") from exc
-
-    video_stream = next(
-        (s for s in data.get("streams", []) if s.get("codec_type") == "video"), None
-    )
-    if video_stream is None:
-        raise RuntimeError(f"fingerprint_media: no video stream in {path}")
-
-    try:
-        duration_seconds = float(data.get("format", {}).get("duration"))
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(f"fingerprint_media: unparseable duration for {path}") from exc
-
-    # Same loud-or-nothing rule as duration: a stream missing width/height/
-    # codec_name would otherwise raise a bare TypeError naming neither the
-    # field nor the file, and int(None) is the likeliest real-world shape of
-    # a malformed probe.
-    try:
-        width = int(video_stream["width"])
-        height = int(video_stream["height"])
-        codec = str(video_stream["codec_name"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError(f"fingerprint_media: incomplete video stream for {path}: {exc}") from exc
-
-    return duration_seconds, width, height, codec
+    return probe_video_summary(path, timeout=timeout, label="fingerprint_media")
 
 
 def _sha256_streamed(path: Path) -> str:

@@ -669,13 +669,14 @@ def _assert_post_encoding_invariants(
 
     # Window every per-LF description stat to the segments the LF is
     # actually assembled from — a best-moments LF (trim ~0.3) must not advertise
-    # the whole representative episode's distance/counties. Reuses phase_d's
-    # included-segments builder (episode-local segment ranges for the LF's
-    # representative GPX — the same GPX per_lf_gpx_path resolves to, so the
-    # ranges share this trace's time base); lazy-imported to avoid a module-load
-    # cycle. An LF with no resolvable segment window yields ``[]`` → the whole
-    # trace (prior behaviour), so GPS-less / synthetic LFs degrade gracefully.
-    from .drive_phases.phase_d import _build_included_segments_for_lf
+    # the whole representative episode's distance/counties. Reuses the shared
+    # included-segments builder (``lf_segment_window``, also re-exported by
+    # phase_d): episode-local segment ranges for the LF's representative GPX —
+    # the same GPX per_lf_gpx_path resolves to, so the ranges share this
+    # trace's time base. An LF with no resolvable segment window yields ``[]``
+    # → the whole trace (prior behaviour), so GPS-less / synthetic LFs degrade
+    # gracefully.
+    from .lf_segment_window import _build_included_segments_for_lf
 
     _per_lf_included_segments = {
         int(getattr(lf, "index")): _build_included_segments_for_lf(lf)
