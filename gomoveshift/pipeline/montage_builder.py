@@ -53,6 +53,7 @@ from keycut import (
 )
 from keycut import (
     concat_demuxer,
+    keyframe_at_or_before,
     probe_keyframes,
     reencode_range,
     segment_to_master_range,
@@ -109,6 +110,44 @@ def lf_reencode_args() -> list[str]:
             "256k",
         ]
     return list(_LF_REENCODE_ARGS)
+
+
+def copy_range_argv(src, start: float, end: float, out, *, ffmpeg_bin: str = "ffmpeg") -> list[str]:
+    """argv of keycut's ``stream_copy_range`` (input-side seek, ``-c copy``)."""
+    return [ffmpeg_bin, "-y", "-ss", f"{float(start)}", "-to", f"{float(end)}", "-i", str(src)] + [
+        "-c",
+        "copy",
+        str(out),
+    ]
+
+
+def reencode_range_argv(
+    src, start: float, end: float, out, *, ffmpeg_bin: str = "ffmpeg"
+) -> list[str]:
+    """argv of keycut's ``reencode_range`` with the pinned join-repair args."""
+    return [ffmpeg_bin, "-y", "-i", str(src), "-ss", f"{float(start)}", "-to", f"{float(end)}"] + [
+        *lf_reencode_args(),
+        str(out),
+    ]
+
+
+def concat_copy_argv(list_file, out, *, ffmpeg_bin: str = "ffmpeg") -> list[str]:
+    """argv of keycut's ``concat_demuxer`` (stream-copy join, faststart)."""
+    return [ffmpeg_bin, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy"] + [
+        "-movflags",
+        "+faststart",
+        str(out),
+    ]
+
+
+def keyframe_span(
+    start: float, end: float, keyframes: list[float], duration: float
+) -> tuple[float, float]:
+    """The GOP-aligned span bounding ``[start, end]``: the keyframe at or before
+    ``start`` and the first keyframe at or after ``end`` (else the file end)."""
+    cut_in = keyframe_at_or_before(start, keyframes)
+    cut_out = next((k for k in keyframes if k >= end), duration)
+    return (0.0 if cut_in is None else cut_in), cut_out
 
 
 def to_cut_segment(segment) -> CutSegment:
