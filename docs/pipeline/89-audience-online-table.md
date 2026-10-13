@@ -17,28 +17,11 @@ collector imports this module, so the fetch and the persistence stay independent
 treated as a fault), and upserts any non-empty histogram — same swallow-and-warn failure
 contract as the fold, since the refresh runs after collection is already persisted. An empty
 histogram (expected when the token lacks the insights scopes) writes zero rows and is
-reported as such, not as an error. The consumer is the two-source best-time resolver, which
-requires this curve and `slots_ranked` to agree before it will move a posting slot.
+reported as such, not as an error. `metrics best-times` prints this curve's top hours beside the ranking; no GMS resolver
+reads it to move a posting slot.
 
-**`resolve_shorts_times_for_region(config, region, lf_day, *, conn=None, platform=None,
-min_n=5)`** (`pipeline/schedule_constants.py`) gains an optional data path: passing a live
-`conn` + `platform` moves `slot_performance`'s top-ranked slot for `(region, platform)` to the
-front of the returned window when `n >= min_n` (default 5) **and** that slot's hour is in
-`audience_online`'s top-3 hours for that platform where `audience_online` has any rows for it
-(Meta only today — YouTube has no hour dimension by design, so B alone decides there and this
-is never logged as a fault; TikTok is the same shape once a TikTok backfill exists). The candidate slot
-must already be a member of `config.drive.shorts_slot_pool_by_region[region]` (falling back to
-the configured window itself when the region has no pool) — the data only ever picks WHICH
-configured slot to prefer, it never invents an hour. A caller that passes neither
-keyword gets the previous behaviour unchanged. A missing/broken/absent database, disagreement between
-the two sources, or `n < min_n` all keep the configured window and log an INFO line explaining
-why; none of them raise. `metrics best-times` is a CLI table over this. The production
-caller is phase D's `_shorts_times_by_platform` (`drive_phases/phase_d_scheduling.py`), which opens the spool
-(`<seo.storage_path>/social_queue.sqlite3`, where `metrics ingest` writes `slot_performance`), asks
-this once per first-party platform with the run's region and `--lf-day` (inverted from
-the run's `--lf-day` transport, `long_form_publish_days`), and hands only the platforms whose window differs from the configured one
-to `build_publish_plan(shorts_times_by_platform=…)` — see `docs/social-publishing-queue.md`. It
-skips itself (every platform keeps the slot, one INFO line) when the flat `shorts_publish_times` no
-longer equals the region spec — an explicit `--shorts-times` — so data never reorders an operator's
-window, the same precedence the drive handler enforces; a spool that cannot be opened is the same
-no-op, never a failed drive.
+**The data path is retired.** `resolve_shorts_times_for_region` once moved `slot_performance`'s
+top slot to the front of a region's shorts window where `audience_online` agreed, and phase D's
+`_shorts_times_by_platform` carried a per-platform result into the publish plan. Both are gone with
+`best_slot_from_data`: GMS reorders nothing from this table. `audience_online` is still collected;
+`metrics best-times` prints its top hours beside the ranking.

@@ -1,5 +1,5 @@
 """``gomoveshift metrics best-times`` (CLI): the region x platform x top-3
-report, with which source agreed on the top slot. Report-only, always exits 0."""
+report, with the platform's own audience-online hours beside it. Report-only, always exits 0."""
 
 from __future__ import annotations
 
@@ -55,13 +55,6 @@ def _run(monkeypatch, conn, capsys, min_n=5, trend=False):
     monkeypatch.setattr("gomoveshift.cli.handlers.metrics.open_queue_db", lambda *a: conn)
     config = SimpleNamespace(
         seo=SimpleNamespace(storage_path="ignored"),
-        drive=SimpleNamespace(
-            shorts_slot_pool_by_region={
-                "ireland": ["08:00", "12:00"],
-                "usa": ["14:00", "18:00"],
-            },
-            shorts_publish_times=["15:00", "18:00"],
-        ),
     )
     args = SimpleNamespace(metrics_command="best-times", min_n=min_n, trend=trend)
     rc = cmd_metrics(args, config)
@@ -74,7 +67,7 @@ def test_empty_store_exits_zero_saying_so(monkeypatch, capsys):
     assert "insufficient data" in out.lower()
 
 
-def test_top3_and_source_agreement_printed_for_a_ranked_platform(monkeypatch, capsys):
+def test_top3_and_the_audience_hours_printed_for_a_ranked_platform(monkeypatch, capsys):
     conn = _conn()
     _insert_slot(conn, "ireland", "instagram", weekday=1, hour_local=12, n=8, mean_views=500)
     _insert_slot(conn, "ireland", "instagram", weekday=2, hour_local=8, n=8, mean_views=100)
@@ -86,30 +79,18 @@ def test_top3_and_source_agreement_printed_for_a_ranked_platform(monkeypatch, ca
     assert rc == 0
     assert "ireland / instagram" in out
     assert "12:00" in out and "n=8" in out
-    assert "agree" in out.lower()
-    assert "12:00" in out  # audience_online top-3 line also names hour 12
+    assert "audience_online top-3: 12:00, 09:00, 20:00" in out
+    assert "agreement:" not in out  # GMS judges no slot from the ranking (that path is retired)
 
 
-def test_disagreement_reported_not_hidden(monkeypatch, capsys):
-    conn = _conn()
-    _insert_slot(conn, "ireland", "instagram", weekday=1, hour_local=12, n=8, mean_views=500)
-    _insert_online(conn, "instagram", weekday=1, hour_local=8, n_online=900)
-    _insert_online(conn, "instagram", weekday=2, hour_local=9, n_online=800)
-    _insert_online(conn, "instagram", weekday=3, hour_local=20, n_online=700)
-
-    rc, out = _run(monkeypatch, conn, capsys)
-    assert rc == 0
-    assert "disagree" in out.lower()
-
-
-def test_youtube_has_no_audience_online_b_alone_decides_and_is_labeled(monkeypatch, capsys):
+def test_a_platform_without_audience_rows_prints_no_audience_line(monkeypatch, capsys):
     conn = _conn()
     _insert_slot(conn, "usa", "youtube", weekday=1, hour_local=14, n=10, mean_views=1000)
 
     rc, out = _run(monkeypatch, conn, capsys)
     assert rc == 0
     assert "usa / youtube" in out
-    assert "no audience_online" in out.lower()
+    assert "audience_online" not in out
 
 
 def test_trend_prints_last_4_week_history_for_top_slot(monkeypatch, capsys):

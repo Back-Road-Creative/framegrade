@@ -444,14 +444,11 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
 
 def _cmd_metrics_best_times(args, config) -> int:
     """``metrics best-times``: print the region x platform x top-3
-    ``slot_performance`` table, with which source agreed on the top slot.
+    ``slot_performance`` table, with the platform's audience-online hours.
 
     Report-only and always exits 0 — thin data is the normal case and a
-    cron must not go red for it. Reuses ``schedule_constants.best_slot_from_data``
-    (the same Source-B-gated-by-Source-A resolution ``resolve_shorts_times_for_region``
-    applies) rather than re-deriving the agreement logic.
+    cron must not go red for it. GMS moves no slot from the ranking.
     """
-    from ...pipeline.schedule_constants import best_slot_from_data
     from ...tracking.slot_performance import (
         ensure_audience_online_schema,
         slot_performance_trend,
@@ -478,8 +475,6 @@ def _cmd_metrics_best_times(args, config) -> int:
         for row in ranked:
             groups.setdefault((row.region, row.platform), []).append(row)
 
-        pool_by_region = getattr(config.drive, "shorts_slot_pool_by_region", None) or {}
-        default_pool = getattr(config.drive, "shorts_publish_times", None) or []
         ensure_audience_online_schema(conn)
 
         for region, platform in sorted(groups):
@@ -490,10 +485,6 @@ def _cmd_metrics_best_times(args, config) -> int:
                     f"  #{rank} {row.hour_local:02d}:00 -- n={row.n} "
                     f"mean_views={row.mean_views:.1f} mean_engagement={row.mean_engagement:.3f}"
                 )
-
-            pool = pool_by_region.get(region) or default_pool
-            _, reason = best_slot_from_data(conn, region, platform, pool, min_n)
-            print(f"  agreement: {reason}")
 
             if show_trend:
                 top = top3[0]

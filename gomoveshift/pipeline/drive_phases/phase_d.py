@@ -494,7 +494,6 @@ from .phase_d_scheduling import (  # noqa: E402,F401
     _build_and_persist_drive_schedule,
     _build_social_posts_per_lf,
     _maybe_rebase_drive_schedule,
-    _shorts_times_by_platform,
     assert_all_places_verified,
 )
 
@@ -920,7 +919,6 @@ def _emit_publish_plan_sidecar(
         parent_publish_at_by_short_index=parent_publish_at,
         route_selected=route_selected,
         tiktok_privacy_level=getattr(drive_cfg, "publishing_tiktok_privacy_level", "SELF_ONLY"),
-        shorts_times_by_platform=_shorts_times_by_platform(config, region, route_selected),
     )
 
     plan_path = output_base / f"{project_base}_publish_plan.json"
