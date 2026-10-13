@@ -44,12 +44,15 @@ def _post_index_ranges(buckets: list[int]) -> list[range]:
     return ranges
 
 
-def test_unequal_buckets_keep_each_lfs_shorts_in_its_own_window(tmp_path):
+def test_unequal_buckets_keep_each_lfs_shorts_in_its_own_window(tmp_path, waypost_lf_days):
     """A multi-LF day with unequal buckets: LF1's shorts must not land in
     LF0's window (the spill). LF0 bucket (10) < fixed window capacity
     (2/day × 7 = 14), so LF1's early posts previously took slots that
     physically sit before LF1 publishes."""
     buckets = [10, 8]
+    config = Config()
+    waypost_lf_days({"usa": (2,), "ireland": (2,)}, config)  # names its cadence: Wednesday only
+    config.drive.long_form_publish_time = "11:00"  # the run's --lf-time: before both shorts windows
     state = make_state(
         shorts_per_day=2,
         shorts_per_lf={0: ["a"] * buckets[0], 1: ["b"] * buckets[1]},
@@ -60,7 +63,7 @@ def test_unequal_buckets_keep_each_lfs_shorts_in_its_own_window(tmp_path):
     )
     schedule = _build_and_persist_drive_schedule(
         scheduler_cls=PipelineScheduler,
-        config=Config(),
+        config=config,
         drive_plan=SimpleNamespace(regular_lfs=[_lf(0), _lf(1)]),
         state=state,
         region="usa",

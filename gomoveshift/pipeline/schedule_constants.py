@@ -67,11 +67,40 @@ def _default_drive_config():
 # attributes so existing monkeypatch-based tests stay green.
 _DEFAULT_DRIVE = _default_drive_config()
 
-# Long form publish days (0=Mon, 2=Wed, 5=Sat). Default: Wednesday only.
-LONG_FORM_DAYS = frozenset(_DEFAULT_DRIVE.long_form_publish_days)
 
-# Long form publish time (EST). Default: 11:00 AM.
-LONG_FORM_TIME = _parse_hhmm(_DEFAULT_DRIVE.long_form_publish_time)
+def _seed_cadence():
+    """Waypost's packaged seed cadence (``brand.yaml``), read with no decision db.
+
+    Import-time only: the mirrors below start from the seed so no hand-set default is
+    left; the live answer (seed + ``lf_days`` decisions) is ``seo_slots.waypost_cadence``.
+    """
+    from pathlib import Path
+
+    from seo_manager.core.profile import load_cadence
+
+    return load_cadence(
+        Path(__file__).resolve().parent.parent / "console" / "brands" / "gomoveshift" / "brand.yaml"
+    )
+
+
+def _waypost_time(cadence, days) -> dt_time:
+    """Waypost's time for the earliest of ``days`` in the all-regions view; when no region
+    publishes that day (a ``--lf-day`` off Waypost's days), the first region's default."""
+    if days:
+        weekday = min(days)
+        if weekday in cadence.days(None):
+            return cadence.time_for(None, weekday)
+    return cadence.regions[sorted(cadence.regions)[0]].time
+
+
+_SEED = _seed_cadence()
+
+# Long form publish days (0=Mon .. 6=Sun): the seed's all-regions union, until
+# ``apply_config`` replaces it from the live accessors.
+LONG_FORM_DAYS = frozenset(_SEED.days(None))
+
+# Long form publish time (EST): the seed's time for its earliest day.
+LONG_FORM_TIME = _waypost_time(_SEED, LONG_FORM_DAYS)
 
 # Shorts posting times — computed from DriveConfig defaults, mirroring
 # the long-form attrs above. Configurable via
@@ -101,7 +130,11 @@ _DAY_INT_TO_NAME: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "
 
 
 def long_form_days(config: Optional[object] = None) -> frozenset:
-    """Return the long-form publish-day set, honoring ``config.drive``.
+    """Return the long-form publish-day set.
+
+    The run's ``--lf-day`` transport (``config.drive.long_form_publish_days``) when set,
+    otherwise Waypost's days for every region (``seo_slots.waypost_cadence``; raises
+    ``CadenceSourceUnreadableError`` when that cannot be read).
 
     Args:
         config: Optional ``gomoveshift.config.Config`` instance. When
@@ -114,7 +147,11 @@ def long_form_days(config: Optional[object] = None) -> frozenset:
     """
     if config is None:
         return frozenset(LONG_FORM_DAYS)
-    return frozenset(config.drive.long_form_publish_days)
+    if config.drive.long_form_publish_days:
+        return frozenset(config.drive.long_form_publish_days)
+    from .seo_slots import waypost_cadence
+
+    return frozenset(waypost_cadence(config).days(None))
 
 
 def default_publish_day(config: Optional[object] = None) -> str:
@@ -152,11 +189,17 @@ def long_form_time(config: Optional[object] = None) -> dt_time:
             returned.
 
     Returns:
-        ``datetime.time`` in EST.
+        ``datetime.time`` in EST: the run's ``--lf-time`` transport when set, else
+        Waypost's time for the run's day in the all-regions view (the first region's
+        default when no region publishes that day).
     """
     if config is None:
         return LONG_FORM_TIME
-    return _parse_hhmm(config.drive.long_form_publish_time)
+    if config.drive.long_form_publish_time:
+        return _parse_hhmm(config.drive.long_form_publish_time)
+    from .seo_slots import waypost_cadence
+
+    return _waypost_time(waypost_cadence(config), long_form_days(config))
 
 
 def shorts_times(config: Optional[object] = None) -> list:
@@ -511,14 +554,15 @@ def resolve_lf_time(config, lf_day: Optional[str], lf_time_arg: Optional[str]) -
     """Resolve the effective long-form publish time (HH:MM).
 
     Order: explicit ``--lf-time`` → the LF day's designed slot →
-    ``config.drive.long_form_publish_time``.
+    Waypost's time (``long_form_time``).
     """
     if isinstance(lf_time_arg, str) and lf_time_arg.strip():
         return lf_time_arg
     slot = resolve_publish_slot(config, lf_day)
     if slot is not None:
         return slot.lf_time
-    return config.drive.long_form_publish_time
+    t = long_form_time(config)
+    return f"{t.hour:02d}:{t.minute:02d}"
 
 
 def apply_config(config) -> None:
@@ -544,6 +588,6 @@ def apply_config(config) -> None:
     "LONG_FORM_DAYS", ...)`` in tests still wins when applied AFTER
     this call — the monkeypatch targets the same module attrs.
     """
-    globals()["LONG_FORM_DAYS"] = frozenset(config.drive.long_form_publish_days)
-    globals()["LONG_FORM_TIME"] = _parse_hhmm(config.drive.long_form_publish_time)
+    globals()["LONG_FORM_DAYS"] = long_form_days(config)
+    globals()["LONG_FORM_TIME"] = long_form_time(config)
     globals()["SHORTS_TIMES"] = [_parse_hhmm(t) for t in config.drive.shorts_publish_times]

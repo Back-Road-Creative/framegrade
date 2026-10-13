@@ -7,6 +7,9 @@ from datetime import time as dt_time
 from zoneinfo import ZoneInfo
 
 
+SEED_CADENCE = True  # opt out of conftest.legacy_test_cadence
+
+
 class TestScheduleConstantsSingleSource:
     """All three files must import from schedule_constants, not define their own."""
 
@@ -18,8 +21,10 @@ class TestScheduleConstantsSingleSource:
             SHORTS_TIMES,
         )
 
-        assert LONG_FORM_DAYS == {2}, "New cadence: Wednesday only"
-        assert LONG_FORM_TIME == dt_time(11, 0, 0)
+        # The import-time mirrors come from Waypost's packaged seed: usa tue + fri,
+        # ireland sun; the time is the earliest day's (tue) 16:00.
+        assert LONG_FORM_DAYS == {1, 4, 6}
+        assert LONG_FORM_TIME == dt_time(16, 0, 0)
         assert SHORTS_TIMES == [dt_time(15, 0, 0), dt_time(18, 0, 0)], (
             "Afternoon audience-online window: 3pm + 6pm EST"
         )
@@ -55,10 +60,8 @@ class TestScheduleConstantsSingleSource:
 class TestConfigurableCadence:
     """Cadence (LF days + time) must be configurable via ``config.drive.*``.
 
-    Default values preserve the current hardwired behavior (Wed, 11:00 EST)
-    so existing tests stay green. Operator override ships via
-    ``~/.config/gomoveshift/config.yaml`` for later cohorts that use a
-    different slot (for example Friday 11:00 EST).
+    Defaults are empty / unset: Waypost's cadence answers. The drive fields
+    survive only as the per-run ``--lf-day`` / ``--lf-time`` transport.
     """
 
     def test_long_form_days_accessor_reads_config_override(self):
@@ -92,20 +95,19 @@ class TestConfigurableCadence:
         assert long_form_days() == frozenset(LONG_FORM_DAYS)
         assert long_form_time() == LONG_FORM_TIME
 
-    def test_config_defaults_preserve_current_behavior(self):
+    def test_config_defaults_are_waypost_not_hand_set(self):
         from datetime import time as dt_time
 
         from gomoveshift.config import Config
 
         cfg = Config()
-        assert cfg.drive.long_form_publish_days == [2]  # Wed
-        assert cfg.drive.long_form_publish_time == "11:00"
-        # And the accessors, given the default config, agree with the
-        # module-level constants.
+        cfg.seo.storage_path = "/nonexistent/seo"  # no decisions: the packaged seed answers
+        assert cfg.drive.long_form_publish_days == []
+        assert cfg.drive.long_form_publish_time is None
         from gomoveshift.pipeline.schedule_constants import long_form_days, long_form_time
 
-        assert long_form_days(cfg) == frozenset({2})
-        assert long_form_time(cfg) == dt_time(11, 0, 0)
+        assert long_form_days(cfg) == frozenset({1, 4, 6})  # seed: usa tue+fri, ireland sun
+        assert long_form_time(cfg) == dt_time(16, 0, 0)  # the earliest day's (tue) time
 
     def test_config_rejects_invalid_day(self):
         import pytest
@@ -193,11 +195,12 @@ class TestRequiredShortsPerLf:
 
     @staticmethod
     def _config(**overrides):
-        from types import SimpleNamespace
+        from gomoveshift.config import Config, DriveConfig
 
-        from gomoveshift.config import DriveConfig
-
-        return SimpleNamespace(drive=DriveConfig(**overrides))
+        cfg = Config()
+        cfg.seo.storage_path = "/nonexistent/seo"  # no decisions: the packaged seed answers
+        cfg.drive = DriveConfig(**overrides)
+        return cfg
 
     def test_ireland_derives_14(self):
         from gomoveshift.pipeline.schedule_constants import required_shorts_per_lf

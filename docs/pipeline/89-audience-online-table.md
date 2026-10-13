@@ -36,7 +36,7 @@ why; none of them raise. `metrics best-times` is a CLI table over this. The prod
 caller is phase D's `_shorts_times_by_platform` (`drive_phases/phase_d_scheduling.py`), which opens the spool
 (`<seo.storage_path>/social_queue.sqlite3`, where `metrics ingest` writes `slot_performance`), asks
 this once per first-party platform with the run's region and `--lf-day` (inverted from
-`long_form_publish_days`), and hands only the platforms whose window differs from the configured one
+the run's `--lf-day` transport, `long_form_publish_days`), and hands only the platforms whose window differs from the configured one
 to `build_publish_plan(shorts_times_by_platform=…)` — see `docs/social-publishing-queue.md`. It
 skips itself (every platform keeps the slot, one INFO line) when the flat `shorts_publish_times` no
 longer equals the region spec — an explicit `--shorts-times` — so data never reorders an operator's

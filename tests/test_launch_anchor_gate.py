@@ -67,7 +67,7 @@ def _ledger(tmp_path: Path, *entries: ContentEntry) -> ContentLedger:
 # -- (b) launch-time anchor gate --------------------
 
 
-def _launch(tmp_path, monkeypatch, *, persisted=None, **arg_overrides):
+def _launch(tmp_path, monkeypatch, *, persisted=None, own_lf_days=None, **arg_overrides):
     """Run ``cmd_drive`` with a mocked orchestrator; return (rc, run_called, stderr)."""
     from test_cli_lf_day_propagation import _drive_args
 
@@ -81,6 +81,8 @@ def _launch(tmp_path, monkeypatch, *, persisted=None, **arg_overrides):
     cfg = Config()
     cfg.seo.storage_path = str(tmp_path / "seo")
     Path(cfg.seo.storage_path).mkdir(exist_ok=True)
+    if own_lf_days is not None:
+        cfg.drive.long_form_publish_days = list(own_lf_days)  # the run's own --lf-day transport
     opts = dict(
         directory=str(tmp_path / "src-run"),
         output_dir=str(tmp_path / "out"),
@@ -364,12 +366,14 @@ def test_unpadded_anchor_is_a_clean_refusal_not_a_traceback(restore_schedule_mod
 
 
 def test_hint_never_names_a_date_the_gate_would_refuse(restore_schedule_module):
-    """Default config LF day is Wed; ``--publish fri`` leaves no allowed day, so the
-    refusal must say so instead of suggesting a Friday the same gate rejects."""
+    """The run's own LF day is Wed (the transport); ``--publish fri`` leaves no allowed
+    day, so the refusal must say so instead of suggesting a Friday the same gate rejects."""
     from gomoveshift.pipeline.seo_slots import anchor_refusal
 
+    cfg = Config()
+    cfg.drive.long_form_publish_days = [2]
     msg = anchor_refusal(
-        Config(),
+        cfg,
         ContentLedger(),
         anchor="2031-01-03",  # a Friday
         publish_day="fri",
@@ -544,7 +548,10 @@ def test_a_resumed_saved_anchor_beats_start_date_like_phase_d(
 def test_a_start_date_refusal_names_start_date_not_lf_publish_date(
     tmp_path, monkeypatch, restore_schedule_module, capsys
 ):
-    rc, ran, _ = _launch(tmp_path, monkeypatch, publish="fri", start_date="2026-10-13")
+    # the run's own pick is Wed, so there is no Friday to suggest
+    rc, ran, _ = _launch(
+        tmp_path, monkeypatch, publish="fri", start_date="2026-10-13", own_lf_days=[2]
+    )
     assert rc == 2 and not ran
     err = capsys.readouterr().err
     assert "--start-date" in err and "--lf-publish-date" not in err

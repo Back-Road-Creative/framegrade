@@ -22,6 +22,9 @@ from gomoveshift.pipeline.schedule_report import build_schedule_report
 
 from test_launch_anchor_gate import restore_schedule_module  # noqa: F401  (fixture)
 
+SEED_CADENCE = True  # opt out of conftest.legacy_test_cadence
+
+
 EST = schedule_constants.EST
 pytestmark = pytest.mark.usefixtures("restore_schedule_module")
 BRAND = Path(__file__).resolve().parents[1] / "gomoveshift/console/brands/gomoveshift/brand.yaml"

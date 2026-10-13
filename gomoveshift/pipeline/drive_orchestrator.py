@@ -769,10 +769,10 @@ class DrivePipelineOrchestrator:
         output_base = Path(output_base)
         project_dir, stages_base = self._resolve_paths(source_dir, output_base)
         if publish_day is None:
-            # No explicit --lf-day: derive the default from config's
-            # long_form_publish_days (earliest configured day) instead of a
+            # No explicit --lf-day: derive the default from
+            # the run's long_form_days (Waypost's earliest day) instead of a
             # stale "sat"/"wed" literal. The old USA "sat" (dow=5) is not in
-            # the default LONG_FORM_DAYS={2}, so a USA drive without --lf-day
+            # Waypost's long-form days, so a USA drive without --lf-day
             # tripped state-invariant Rule 2. Mirrors scheduler's
             # min(long_form_days) source of truth. An explicit publish_day
             # (non-None) bypasses this and still wins.

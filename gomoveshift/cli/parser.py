@@ -615,15 +615,15 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--lf-day",
         choices=["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         default=None,
-        help="Long-form publish weekday set for this run (overrides "
-        "config.drive.long_form_publish_days). Single weekday only; "
+        help="Long-form publish weekday for this run, narrowing Waypost's days "
+        "(see `gomoveshift schedule`). Single weekday only; "
         "drives the scheduler's window math for the next-LF boundary.",
     )
     p.add_argument(
         "--lf-time",
         default=None,
         help="Long-form publish time HH:MM 24h EST for this run "
-        "(overrides config.drive.long_form_publish_time).",
+        "(overrides Waypost's time for the day).",
     )
     p.add_argument(
         "--shorts-times",

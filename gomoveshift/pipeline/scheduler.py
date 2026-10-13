@@ -216,7 +216,7 @@ class PipelineScheduler:
 
     def __init__(
         self,
-        long_form_time: dt_time = LONG_FORM_TIME,
+        long_form_time: dt_time | None = None,
         shorts_times: Optional[List[dt_time]] = None,
         long_form_days: Optional[set] = None,
     ):
@@ -226,7 +226,7 @@ class PipelineScheduler:
             shorts_times: Times of day shorts publish (EST)
             long_form_days: Days of week for long form (0=Mon, 6=Sun)
         """
-        self.long_form_time = long_form_time
+        self.long_form_time = long_form_time if long_form_time is not None else LONG_FORM_TIME
         self.shorts_times = shorts_times or SHORTS_TIMES
         self.long_form_days = frozenset(long_form_days) if long_form_days else LONG_FORM_DAYS
 
@@ -234,8 +234,8 @@ class PipelineScheduler:
     def from_config(cls, config) -> "PipelineScheduler":
         """Build a ``PipelineScheduler`` using cadence from ``config.drive``.
 
-        Honors ``config.drive.long_form_publish_days`` and
-        ``long_form_publish_time``; falls back to the module-level
+        Takes the long-form days and time from Waypost (the run's
+        ``--lf-day`` / ``--lf-time`` transport wins); falls back to the module-level
         defaults for ``shorts_times``. See ``schedule_constants`` for
         the accessor contract.
         """
