@@ -78,7 +78,7 @@ SOCIAL = FilmPreset(
     rendition="route_story_short",
 )
 
-# Framegrade T1: FULL's pacing at 3840x2160, encoded as HEVC through the
+# FULL's pacing at 3840x2160, encoded as HEVC through the
 # route_story_full4k rendition. Stills, map and intro/recap frames are
 # rendered at this size (film.main hands args.width/height to every renderer).
 FULL4K = FilmPreset(
