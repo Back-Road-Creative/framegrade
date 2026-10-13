@@ -99,6 +99,17 @@ def _format_distance_line(
     return f"🛣️ {label}: {km_int:,} km ({mi_int:,} mi)\n"
 
 
+def _format_insert_line(count: int) -> str:
+    """``📸 N photo/clip inserts`` for a cut carrying inserts; empty (line omitted) for none.
+
+    ``count`` comes from ``Deliverables.inserts`` (the drive run's per-LF insert records).
+    """
+    n = int(count or 0)
+    if n <= 0:
+        return ""
+    return f"\U0001f4f8 {n} photo/clip insert{'s' if n != 1 else ''}\n"
+
+
 # Elevation description lines (scalar ⛰️ gain + 📈 profile range) are DROPPED
 # — low SEO value and GPS-noise-inflated on flat drives. Their
 # formatters (`_format_elevation_line` / `_format_elevation_profile_line`) and
@@ -1441,6 +1452,7 @@ class LongFormMetadataGenerator:
         has_gps: Optional[bool] = None,
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
+        insert_count: int = 0,
     ) -> dict:
         """
         Generate complete YouTube metadata for a long form video.
@@ -1525,6 +1537,7 @@ class LongFormMetadataGenerator:
                 regions=regions,
                 resolved_location=resolved_location,
                 full_drive_stats=full_drive_stats,
+                insert_count=insert_count,
             )
         else:
             logger.warning(
@@ -1552,6 +1565,7 @@ class LongFormMetadataGenerator:
                 regions=regions,
                 resolved_location=resolved_location,
                 full_drive_stats=full_drive_stats,
+                insert_count=insert_count,
             )
 
         # Enrich with route profile data (GPS-verified towns, roads, features)
@@ -2050,6 +2064,7 @@ class LongFormMetadataGenerator:
         regions: Optional[list] = None,
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
+        insert_count: int = 0,
     ) -> dict:
         """Generate metadata using SEO Manager with analytics optimization."""
         from seo_manager import ContentType
@@ -2128,6 +2143,7 @@ class LongFormMetadataGenerator:
             regions=regions,
             resolved_location=resolved_location,
             full_drive_stats=full_drive_stats,
+            insert_count=insert_count,
         )
 
         # Transactional booking: NO ledger write here (metadata-gen is
@@ -2396,6 +2412,7 @@ class LongFormMetadataGenerator:
         regions: Optional[list] = None,
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
+        insert_count: int = 0,
     ) -> str:
         """
         Build GoMoveShift-specific YouTube description.
@@ -2624,6 +2641,8 @@ class LongFormMetadataGenerator:
         # (ordered_place_sequence). Finer granularity than the county-level
         # ``🗺️ Through:`` line above; empty for GPS-less / single-point LFs.
         route_line = _format_route_line(resolved_location)
+        # The ``📸`` line names how many photo/clip inserts the cut carries.
+        insert_line = _format_insert_line(insert_count)
 
         # Build factual body line from verifiable data only
         body_line = self._build_factual_body(
@@ -2694,6 +2713,7 @@ class LongFormMetadataGenerator:
             f"{bearing_line}"
             f"{regions_line}"
             f"{route_line}"
+            f"{insert_line}"
             f"{recording_line}"
             f"\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -2758,6 +2778,7 @@ class LongFormMetadataGenerator:
         regions: Optional[list] = None,
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
+        insert_count: int = 0,
     ) -> dict:
         """Fallback: basic metadata generation without SEO Manager."""
         duration_str = self._format_duration(video_duration)
@@ -2796,6 +2817,7 @@ class LongFormMetadataGenerator:
             regions=regions,
             resolved_location=resolved_location,
             full_drive_stats=full_drive_stats,
+            insert_count=insert_count,
         )
 
         # Curated tags — base tags + whole-phrase location tags.
