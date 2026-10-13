@@ -87,6 +87,13 @@ choice keeps its key.
   - `determinism_check(capture, pose)` renders the same pose twice and
     diffs the arrays exactly.
 
+## Preflight for the drive's trail film
+
+`preflight.probe_3d_renderer(bundle_root)` is the measured gate `attach_trail_film`
+runs before any encode: it opens a `SceneCapture` on the day's bundle (Playwright
+importable, Chromium launching, scene ready) and raises `TerrainRendererUnavailableError`
+on any failure. The day then records a trail skip and no proof or film is encoded.
+
 ## Installing the optional extra
 
 ```

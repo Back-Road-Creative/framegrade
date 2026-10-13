@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, ContextManager, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -54,6 +54,50 @@ def map_field_rows(width: int, height: int) -> int:
         # than masking the whole frame and passing anything.
         return map_rows
     return min(map_rows, rail_top)
+
+
+class TerrainRendererUnavailableError(RuntimeError):
+    """The 3D terrain renderer cannot launch or draw a terrain tile on this host."""
+
+
+#: The probe's frame: small, since only "a tile drew" is being proved.
+PROBE_WIDTH, PROBE_HEIGHT = 320, 180
+
+
+def probe_3d_renderer(
+    bundle_root: Path,
+    *,
+    capture_factory: Callable[[Path, int, int], ContextManager[object]] | None = None,
+) -> None:
+    """Prove the 3D terrain renderer works on ``bundle_root`` before any encode.
+
+    Opens the same ``SceneCapture`` the film render uses: it imports Playwright
+    (the optional ``route-story-3d`` extra), launches the pinned Chromium on the
+    resolved GL backend, loads the bundle's terrain scene and waits for the
+    scene's ready flag, which MapLibre raises only once its style and tiles have
+    loaded and drawn. Any failure -- the extra missing, the browser not
+    launching, the scene never ready -- raises ``TerrainRendererUnavailableError``
+    naming the cause. ``capture_factory`` is the injection point for tests, so
+    the refusal path never launches a real browser.
+    """
+    if capture_factory is None:
+        try:
+            import playwright  # noqa: F401  -- presence check for the optional extra
+        except ImportError as exc:
+            raise TerrainRendererUnavailableError(
+                "the 'route-story-3d' extra (Playwright) is not installed"
+            ) from exc
+
+        def capture_factory(root: Path, width: int, height: int) -> ContextManager[object]:
+            from .scene.capture import SceneCapture
+
+            return SceneCapture(root, width, height)
+
+    try:
+        with capture_factory(Path(bundle_root), PROBE_WIDTH, PROBE_HEIGHT):
+            pass
+    except Exception as exc:  # noqa: BLE001 -- any launch/scene failure means no 3D renderer
+        raise TerrainRendererUnavailableError(f"{type(exc).__name__}: {exc}") from exc
 
 
 class RoutePreflightError(RuntimeError):

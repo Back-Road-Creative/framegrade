@@ -8,8 +8,10 @@ tests never open a browser or hit a real Google endpoint.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
+from gomoveshift.cli.handlers import youtube_auth
 from gomoveshift.cli.handlers.youtube_auth import run_youtube_auth
 from gomoveshift.pipeline.drive_phases.youtube_uploader import (
     YOUTUBE_COMMENT_SCOPE,
@@ -260,6 +262,57 @@ def test_missing_config_names_the_launch_directory_not_a_download(tmp_path, monk
     assert str(Path.cwd()) in err
     assert f"cd {_SERVICE_DIR} && .venv/bin/gomoveshift youtube-auth" in err
     assert "console.cloud.google.com" not in err
+
+
+def _launch_directory_error(tmp_path, monkeypatch, capsys) -> str:
+    """The stderr of a run that loaded no config.yaml and found no credentials."""
+    monkeypatch.setattr(youtube_auth, "_resolve_client_secret_path", lambda: tmp_path / "cs.json")
+    monkeypatch.setattr(youtube_auth, "_load_shared_token", _no_shared_token)
+    monkeypatch.setattr(youtube_auth, "_config_manager_path_unset", lambda: True)
+    rc = run_youtube_auth(
+        brand=None, credentials_dir=tmp_path / "credentials", dry_run=False, flow_factory=_FakeFlow
+    )
+    assert rc == 2
+    return capsys.readouterr().err
+
+
+def _wheel_install(root: Path, monkeypatch) -> Path:
+    """Make the handler look installed as a wheel under ``root/.venv``; returns
+    the site-packages directory it then lives in."""
+    site = root / ".venv" / "lib" / "python3.12" / "site-packages"
+    handler = site / "gomoveshift" / "cli" / "handlers" / "youtube_auth.py"
+    handler.parent.mkdir(parents=True)
+    monkeypatch.setattr(youtube_auth, "__file__", str(handler))
+    monkeypatch.setattr(sys, "prefix", str(root / ".venv"))
+    return site
+
+
+def test_launch_directory_command_survives_a_wheel_install(tmp_path, monkeypatch, capsys):
+    """Installed as a wheel the handler lives under the venv's site-packages,
+    not the checkout. The command must still name the directory that holds
+    ``config.yaml`` -- ``cd .../site-packages`` sends the operator nowhere."""
+    service = tmp_path / "svc"
+    _wheel_install(service, monkeypatch)
+    (service / "config.yaml").write_text("seo: {}\n", encoding="utf-8")
+
+    err = _launch_directory_error(tmp_path, monkeypatch, capsys)
+
+    assert f"cd {service} && .venv/bin/gomoveshift youtube-auth" in err
+    assert "site-packages" not in err
+
+
+def test_launch_directory_error_never_invents_a_directory(tmp_path, monkeypatch, capsys):
+    """No ``config.yaml`` beside the code or beside the venv: the error names
+    the file to launch next to and gives no ``cd`` at all, rather than a path
+    that only looks like the service directory."""
+    _wheel_install(tmp_path / "elsewhere", monkeypatch)
+
+    err = _launch_directory_error(tmp_path, monkeypatch, capsys)
+
+    assert " cd " not in err
+    assert "site-packages" not in err
+    assert "config.yaml" in err
+    assert "gomoveshift youtube-auth" in err
 
 
 def test_config_manager_path_unset_follows_the_loaded_config(tmp_path, monkeypatch):

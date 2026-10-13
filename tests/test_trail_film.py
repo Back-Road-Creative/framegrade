@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,19 +19,47 @@ import pytest
 from gomoveshift.cli.parser import _build_parser
 from gomoveshift.pipeline import media_api
 from gomoveshift.pipeline.drive_phases import phase_bc_day_first, trail_film
-from gomoveshift.pipeline.media_api import Deliverables, TrailFilm
+from gomoveshift.pipeline.media_api import (
+    DayArtifacts,
+    Deliverables,
+    TrailFilm,
+    deliverables_to_state,
+)
 from gomoveshift.pipeline.route_story import proof
+from gomoveshift.pipeline.route_story.preflight import (
+    TerrainRendererUnavailableError,
+    probe_3d_renderer,
+)
 from gomoveshift.pipeline.route_story.verify import VerifyReport
 
 DAY = "2026-05-01"
+#: The fake GPX covers 14:00-20:00 UTC on DAY.
+SPAN = (
+    datetime(2026, 5, 1, 14, tzinfo=timezone.utc),
+    datetime(2026, 5, 1, 20, tzinfo=timezone.utc),
+)
 
 
 class _Steps:
     """Stand-ins for the four Route Story steps; ``calls`` records the order."""
 
-    def __init__(self, tmp_path: Path, *, bundle=True, verify_ok=True, film_rc=0):
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        bundle=True,
+        verify_ok=True,
+        film_rc=0,
+        photo_times=None,
+        probe_error=None,
+    ):
         self.calls: list[str] = []
+        #: bundles the 3D preflight probed, kept apart from ``calls`` (the step order).
+        self.probed: list[Path] = []
+        self._probe_error = probe_error
         self.film_argv: list[str] = []
+        #: photo file name -> zoned capture instant (absent = no zoned time).
+        self.photo_times: dict[str, datetime] = photo_times or {}
         self.bundle_dir = tmp_path / "bundle"
         self.bundle_dir.mkdir(exist_ok=True)
         self._bundle, self._verify_ok, self._film_rc = bundle, verify_ok, film_rc
@@ -63,17 +91,32 @@ class _Steps:
             out.write_bytes(b"film")
             return self._film_rc
 
+        def probe_3d(bundle_root):
+            self.probed.append(bundle_root)
+            if self._probe_error is not None:
+                raise self._probe_error
+
         return trail_film.TrailSteps(
-            find_bundle=find_bundle, render_proof=render_proof, verify=verify, film=film
+            find_bundle=find_bundle,
+            probe_3d=probe_3d,
+            render_proof=render_proof,
+            verify=verify,
+            film=film,
+            gpx_span=lambda gpx, recorded_on: SPAN,
+            capture_utc=lambda photo: self.photo_times.get(photo.name),
         )
 
 
-def _profile(tmp_path: Path) -> Path:
+def _profile(tmp_path: Path, photos_dir: "Path | None" = None, *, with_photos=True) -> Path:
     path = tmp_path / "trip.yaml"
+    photos = photos_dir if photos_dir is not None else tmp_path / "photos"
+    if photos_dir is None:
+        photos.mkdir(exist_ok=True)
     path.write_text(
         'national-credit: "NASA"\nlocal-credit: "USGS"\nlocal-bounds: [-83.6, 35.2, -83.3, 35.3]\n'
         'national-raster: "/r/n.jpg"\nlocal-raster: "/r/l.jpg"\n'
-        'photos-dir: "/p"\nrenderer: "scene"\n'
+        + (f'photos-dir: "{photos}"\n' if with_photos else "")
+        + 'renderer: "scene"\n'
     )
     return path
 
@@ -103,10 +146,163 @@ def _state(tmp_path: Path, *dates: str):
     )
 
 
-def _cfg(tmp_path: Path, *, trail=None, profile=True):
-    return SimpleNamespace(
-        drive=SimpleNamespace(trail=trail, trail_profile=str(_profile(tmp_path)) if profile else "")
+def _cfg(
+    tmp_path: Path, *, trail=None, profile=True, photos_dir: "Path | None" = None, set_profile=None
+):
+    path = set_profile or (_profile(tmp_path, photos_dir) if profile else "")
+    return SimpleNamespace(drive=SimpleNamespace(trail=trail, trail_profile=str(path)))
+
+
+def _argv_value(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+def _utc(hour: int, day: int = 1) -> datetime:
+    return datetime(2026, 5, day, hour, tzinfo=timezone.utc)
+
+
+def test_trail_film_gets_only_that_days_photos(tmp_path):
+    pool = tmp_path / "all_photos"
+    pool.mkdir()
+    times = {
+        "on_trail.jpg": _utc(15),
+        "at_summit.NEF": _utc(19),
+        "before_start.jpg": _utc(11),  # 3 h before: inside the film's bookend window
+        "pre_dawn.jpg": _utc(2),  # 12 h before: a different part of the trip
+        "next_day.jpg": _utc(15, day=2),
+        "last_week.jpg": _utc(15) - timedelta(days=7),
+    }
+    for name in [*times, "undated.jpg", "notes.txt"]:
+        (pool / name).write_bytes(name.encode())
+    fake = _Steps(tmp_path, photo_times=times)
+    d = _day(tmp_path)
+
+    trail_film.attach_trail_film(
+        d, _state(tmp_path), _cfg(tmp_path, photos_dir=pool), steps=fake.steps()
     )
+
+    assert d.trail_skips == [] and len(d.trail_films) == 1
+    staged = Path(_argv_value(fake.film_argv, "--photos-dir"))
+    # The film is not pointed at the drive-wide folder, but at this day's slice of it.
+    assert staged != pool
+    assert staged == d.trail_films[0].path.parent / f"photos_{DAY}"
+    assert sorted(p.name for p in staged.iterdir()) == [
+        "at_summit.NEF",
+        "before_start.jpg",
+        "on_trail.jpg",
+    ]
+    assert (staged / "on_trail.jpg").read_bytes() == b"on_trail.jpg"
+
+
+def test_trail_film_photo_pool_defaults_to_the_drive_source_dir(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("mine.jpg", "other_day.jpg"):
+        (src / name).write_bytes(b"x")
+    fake = _Steps(tmp_path, photo_times={"mine.jpg": _utc(16), "other_day.jpg": _utc(16, day=3)})
+    cfg = _cfg(tmp_path, set_profile=_profile(tmp_path, with_photos=False))
+    d = _day(tmp_path)
+
+    trail_film.attach_trail_film(d, _state(tmp_path), cfg, steps=fake.steps())
+
+    staged = Path(_argv_value(fake.film_argv, "--photos-dir"))
+    assert [p.name for p in staged.iterdir()] == ["mine.jpg"]
+
+
+def test_trail_film_restages_on_a_retry_and_skips_a_missing_photo_dir(tmp_path):
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    (pool / "a.jpg").write_bytes(b"a")
+    fake = _Steps(tmp_path, photo_times={"a.jpg": _utc(16)})
+    d = _day(tmp_path)
+    cfg = _cfg(tmp_path, photos_dir=pool)
+    trail_film.attach_trail_film(d, _state(tmp_path), cfg, steps=fake.steps())
+    stage = Path(_argv_value(fake.film_argv, "--photos-dir"))
+    (stage / "stale.jpg").write_bytes(b"left by an earlier attempt")
+
+    again = _day(tmp_path)
+    trail_film.attach_trail_film(again, _state(tmp_path), cfg, steps=fake.steps())
+    assert [p.name for p in stage.iterdir()] == ["a.jpg"]
+
+    missing = _day(tmp_path, "2026-05-09")
+    state = _state(tmp_path, "2026-05-09")
+    trail_film.attach_trail_film(
+        missing, state, _cfg(tmp_path, photos_dir=tmp_path / "gone"), steps=fake.steps()
+    )
+    assert missing.trail_films == [] and "not found" in missing.trail_skips[0]
+
+
+def test_gpx_span_is_the_selected_days_first_and_last_fix(tmp_path):
+    gpx = tmp_path / "day.gpx"
+    pts = "".join(
+        f'<trkpt lat="35.{i}" lon="-83.{i}"><time>2026-05-01T{h}:00:00Z</time></trkpt>'
+        for i, h in enumerate(("14", "15", "20"))
+    )
+    gpx.write_text(
+        '<gpx version="1.1" creator="t" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>'
+        + pts
+        + "</trkseg></trk></gpx>"
+    )
+    assert trail_film._gpx_span(gpx, date(2026, 5, 1)) == SPAN
+
+
+def test_trail_skip_retried_on_resume(tmp_path):
+    day = _day(tmp_path)
+    reconstructed = DayArtifacts(
+        date=DAY, master_path=None,
+        regular_lf_paths=list(day.regular_lf_paths), regular_lf_indices=[1],
+    )  # fmt: skip
+    day.trail_skips = [f"trail film skipped for {DAY}: no prepared imagery bundle"]
+    state = _state(tmp_path)
+    state.per_day_completed = {
+        DAY: {"master_path": None, "deliverables": deliverables_to_state(day)}
+    }
+    saves: list[int] = []
+
+    def resume(fake, cfg):
+        return phase_bc_day_first._resume_trail_films(
+            state, cfg, [reconstructed], tmp_path, lambda st: saves.append(1), steps=fake.steps()
+        )
+
+    # Cause still present (no bundle): the recorded skip stands, nothing renders.
+    still = _Steps(tmp_path, bundle=False)
+    (d,) = resume(still, _cfg(tmp_path))
+    assert still.calls == [f"bundle:{DAY}.gpx:{DAY}"] and saves == []
+    assert d.trail_films == [] and "no prepared imagery bundle" in d.trail_skips[0]
+
+    # Cause resolved: only the trail step runs for the day (no encode, no LF render).
+    fixed = _Steps(tmp_path)
+    (d,) = resume(fixed, _cfg(tmp_path))
+    assert [c for c in fixed.calls if not c.startswith("bundle")] == ["proof", "verify", "film"]
+    assert d.trail_skips == [] and [f.lf_index for f in d.trail_films] == [1]
+    assert d.regular_lf_paths == day.regular_lf_paths  # the day itself is untouched
+    record = state.per_day_completed[DAY]
+    assert record["master_path"] is None  # the day's own entry is not rewritten
+    assert record["deliverables"]["trail_skips"] == []
+    assert record["deliverables"]["trail_films"][0]["path"] == str(d.trail_films[0].path)
+    assert saves == [1]
+
+    # The film is now recorded: a further resume restores it and renders nothing.
+    settled = _Steps(tmp_path)
+    (d,) = resume(settled, _cfg(tmp_path))
+    assert settled.calls == [] and len(d.trail_films) == 1 and d.trail_skips == []
+
+
+def test_resume_leaves_a_no_trail_day_and_a_vanished_film_alone(tmp_path):
+    day = _day(tmp_path)
+    day.trail_skips = ["trail film skipped: whatever"]
+    day.trail_films = [TrailFilm(lf_index=1, path=tmp_path / "gone.mp4")]
+    state = _state(tmp_path)
+    state.per_day_completed = {
+        DAY: {"master_path": None, "deliverables": deliverables_to_state(day)}
+    }
+    off = _Steps(tmp_path)
+    (d,) = phase_bc_day_first._resume_trail_films(
+        state, _cfg(tmp_path, trail=False), [day], tmp_path, None, steps=off.steps()
+    )
+    assert off.calls == []
+    # The vanished film is not restored; the recorded skip is.
+    assert d.trail_films == [] and d.trail_skips == ["trail film skipped: whatever"]
 
 
 def test_drive_trail_renders_film_per_lf_day(tmp_path):
@@ -139,6 +335,71 @@ def test_drive_trail_renders_film_per_lf_day(tmp_path):
     assert argv[argv.index("--bundle") + 1] == str(fake.bundle_dir)
     # Imagery comes from the profile; the day's own values override it.
     assert argv[argv.index("--national-raster") + 1] == "/r/n.jpg"
+
+
+def test_trail_preflight_refuses_without_3d_renderer(tmp_path, caplog):
+    """No browser / no terrain tile: refuse before the proof or the film encode."""
+    fake = _Steps(
+        tmp_path, probe_error=TerrainRendererUnavailableError("playwright is not installed")
+    )
+    d = _day(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        trail_film.attach_trail_film(
+            d, _state(tmp_path), _cfg(tmp_path, trail=True), steps=fake.steps()
+        )
+
+    assert d.trail_films == []
+    assert fake.probed == [fake.bundle_dir]  # probed the day's own bundle
+    assert fake.calls == [f"bundle:{DAY}.gpx:{DAY}"]  # no proof, verify or film ran
+    (reason,) = d.trail_skips
+    assert "3D terrain renderer" in reason and "route-story-3d" in reason
+    assert "playwright is not installed" in reason
+    # --trail asked for the film: the refusal is an error, not a warning.
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+def test_trail_preflight_runs_once_before_encode_when_renderer_works(tmp_path):
+    fake = _Steps(tmp_path)
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=fake.steps())
+    assert fake.probed == [fake.bundle_dir]
+    assert len(d.trail_films) == 1
+
+
+def test_no_trail_does_not_probe_the_renderer(tmp_path):
+    fake = _Steps(tmp_path)
+    d = _day(tmp_path)
+    trail_film.attach_trail_film(
+        d, _state(tmp_path), _cfg(tmp_path, trail=False), steps=fake.steps()
+    )
+    assert fake.probed == []
+
+
+def test_probe_3d_renderer_wraps_any_launch_failure(tmp_path):
+    """The real probe: an injected capture factory stands in for the browser."""
+
+    class _Boom:
+        def __enter__(self):
+            raise RuntimeError("chromium missing")
+
+        def __exit__(self, *exc):
+            return False
+
+    with pytest.raises(TerrainRendererUnavailableError, match="chromium missing"):
+        probe_3d_renderer(tmp_path, capture_factory=lambda root, w, h: _Boom())
+
+    entered = []
+
+    class _Ok:
+        def __enter__(self):
+            entered.append(1)
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    probe_3d_renderer(tmp_path, capture_factory=lambda root, w, h: _Ok())
+    assert entered == [1]
 
 
 def test_drive_trail_skips_loudly_without_bundle(tmp_path, caplog):
@@ -212,7 +473,11 @@ def test_step_exception_is_recorded_not_raised(tmp_path):
         raise RuntimeError("no browser")
 
     steps = trail_film.TrailSteps(
-        find_bundle=steps.find_bundle, render_proof=boom, verify=steps.verify, film=steps.film
+        find_bundle=steps.find_bundle,
+        render_proof=boom,
+        verify=steps.verify,
+        film=steps.film,
+        probe_3d=steps.probe_3d,
     )
     d = _day(tmp_path)
     trail_film.attach_trail_film(d, _state(tmp_path), _cfg(tmp_path), steps=steps)

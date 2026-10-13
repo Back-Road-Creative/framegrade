@@ -60,7 +60,12 @@ from ..gps_enrichment import (
     validate_burned_ost_text,
 )
 from ..longform_assembler import LongFormAssembler
-from ..media_api import Deliverables, deliverables_to_state, lift_artifacts
+from ..media_api import (
+    Deliverables,
+    deliverables_from_state,
+    deliverables_to_state,
+    lift_artifacts,
+)
 from ..post_encoding_invariants import (
     _assert_mapping_complete,
     _assert_per_lf_distance_complete,
@@ -84,7 +89,7 @@ from ..state_invariants import (
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
 from ..title_builder import build_lf_title, ensure_unique_titles
-from .trail_film import attach_trail_film
+from .trail_film import attach_trail_film, retry_trail_skip
 
 # Re-export the moved helpers for backward compatibility — multiple
 # tests + downstream modules import these names from this module.
@@ -419,6 +424,11 @@ class PhaseBCDayFirst:
 
         recorded, skipped_artifacts, remaining_batches = self._partition_batches_by_resume_state(
             state, day_batches, stages_dir
+        )
+        # A resumed day keeps its recorded trail outcome, and a recorded skip whose
+        # cause is now resolved re-runs the trail step alone (never the day).
+        skipped_artifacts = _resume_trail_films(
+            state, self.config, skipped_artifacts, stages_dir, state_save_fn
         )
 
         # Snapshot the persisted (already-burned) OST text and the set of
@@ -2201,6 +2211,41 @@ def _deliverables_record(artifacts, state) -> dict:
         Path(getattr(state, "output_base", None) or ".") / "_stages"
     )
     return deliverables_to_state(lift_artifacts(artifacts, Path(stages)))
+
+
+def _resume_trail_films(
+    state, config, skipped_artifacts, stages_dir, state_save_fn, *, steps=None
+) -> list:
+    """Carry each resumed day's recorded trail outcome and retry resolved skips.
+
+    A resumed day is rebuilt from disk, which knows nothing of its trail film, so
+    the outcome persisted in the day's ``deliverables`` record is restored onto it
+    (a film whose file is gone is dropped). A day left with a trail skip is handed
+    to :func:`retry_trail_skip`, which re-runs the trail step only once the cause
+    is resolved; a retry's outcome is persisted at once, before later days encode.
+    """
+    recorded = state.per_day_completed if isinstance(state.per_day_completed, dict) else {}
+    out = []
+    for art in skipped_artifacts:
+        d = lift_artifacts(art, Path(stages_dir))
+        record = (recorded.get(d.date) or {}).get("deliverables")
+        if isinstance(record, dict):
+            prior = deliverables_from_state({**record, "date": d.date})
+            d.trail_films = [f for f in prior.trail_films if Path(f.path).is_file()]
+            d.trail_skips = list(prior.trail_skips)
+        if retry_trail_skip(d, state, config, steps=steps):
+            entry = recorded.get(d.date)
+            if isinstance(entry, dict):
+                entry["deliverables"] = _deliverables_record(d, state)
+            if state_save_fn is not None:
+                try:
+                    state_save_fn(state)
+                except Exception as exc:  # noqa: BLE001 — bookkeeping never blocks
+                    logger.warning(
+                        "  day-first: state save failed after day %s trail retry: %s", d.date, exc
+                    )
+        out.append(d)
+    return out
 
 
 def _record_day_and_save(artifacts, state, state_save_fn) -> None:

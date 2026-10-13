@@ -46,10 +46,18 @@ def _resolve_client_secret_path() -> Path:
     return client_secret_path
 
 
-#: The service directory: where the project ``config.yaml`` lives. A
-#: ``config.yaml`` under the config home is overlaid from any launch directory;
-#: relative credential paths resolve against the launch directory.
-_SERVICE_DIR = Path(__file__).resolve().parents[3]
+def _service_dir() -> Optional[Path]:
+    """The service directory holding the project ``config.yaml``, or None when it
+    cannot be found. A ``config.yaml`` under the config home is overlaid from any
+    launch directory; relative credential paths resolve against the launch
+    directory. An editable install has it three levels above this file; a wheel
+    install puts this file under the venv's site-packages, so the venv's parent is
+    tried next. Never a guess: a candidate counts only when ``config.yaml`` is
+    actually there."""
+    for candidate in (Path(__file__).resolve().parents[3], Path(sys.prefix).resolve().parent):
+        if (candidate / "config.yaml").is_file():
+            return candidate
+    return None
 
 
 def _config_manager_path_unset() -> bool:
@@ -177,12 +185,18 @@ def run_youtube_auth(
         except FileNotFoundError:
             if _config_manager_path_unset():
                 # The launch directory is the cause, not a missing download.
+                service_dir = _service_dir()
+                rerun = (
+                    f"Run from the service directory: cd {service_dir} && "
+                    ".venv/bin/gomoveshift youtube-auth"
+                    if service_dir is not None
+                    else "Run gomoveshift youtube-auth from the project directory, "
+                    "the one that holds config.yaml"
+                )
                 print(
                     f"Error: no config.yaml was loaded from {Path.cwd()} "
                     "(seo.manager_path is unset), so the client secret and the shared "
-                    "token were looked up relative to this directory. Run from the "
-                    f"service directory: cd {_SERVICE_DIR} && "
-                    ".venv/bin/gomoveshift youtube-auth",
+                    f"token were looked up relative to this directory. {rerun}",
                     file=err,
                 )
                 return 2
