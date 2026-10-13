@@ -324,7 +324,7 @@ def next_free_superlong_slot(
     (when ``project_name``/``title`` identify the part) the weekday of the most
     recent RELATED superlong part already booked, else ``None`` — meaning no
     fixed day; every weekday is searched for the next genuinely open slot —
-    rather than the region's regular ``long_form_publish_days``. ``project_name``/
+    rather than the region's regular Waypost long-form days. ``project_name``/
     ``title`` default to ``None``, the safe default for a caller with no
     per-video identity to give the resolver (falls back to the flat
     ``superlong_publish_day`` field, same as before this function grew rules
@@ -343,12 +343,12 @@ def next_free_superlong_slot(
     on a day already booked by a regular LF.
 
     The slot TIME is the day's own designed ``publish_slots[day].lf_time``
-    (falling back to the flat ``long_form_publish_time``, via
+    (falling back to Waypost's ``long_form_time``, via
     ``schedule_constants.resolve_lf_time``) — passed into the search as
     ``slot_time`` rather than stamped on afterward, so the search validates
     the datetime it actually returns. When no fixed day applies (rule 4 — an
     ``any_day`` search), a single ``slot_time`` can't track each candidate
-    day's own designed slot, so the flat ``long_form_publish_time`` is used
+    day's own designed slot, so Waypost's ``long_form_time`` is used
     uniformly (``resolve_lf_time`` with a ``None`` day already falls back to
     it) — a documented simplification for the undesigned-day case.
     """

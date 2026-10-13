@@ -1,11 +1,11 @@
 """Regression test: orchestrator publish_day default must come from
 config, not a stale ``"sat"``/``"wed"`` literal.
 
-Config sets Wed for BOTH regions (``long_form_publish_days=[2]``) and
+Waypost's cadence (seed: Tue, Fri, Sun) decides the days, and
 state-invariant Rule 2 rejects any weekday not in ``LONG_FORM_DAYS``. The old
 default ``"sat" if region == "usa" else "wed"`` therefore resolved a USA drive
 started without ``--lf-day`` to ``"sat"`` (dow=5), which is not in
-``LONG_FORM_DAYS={2}`` — a ``StateInvariantError`` waiting to fire (masked only
+``LONG_FORM_DAYS`` — a ``StateInvariantError`` waiting to fire (masked only
 because operators always pass ``--lf-day``).
 
 This mirrors the existing source-of-truth pattern already used in
@@ -60,12 +60,13 @@ class TestDefaultPublishDayFromConfig:
         pd_int = _DAY_NAME_TO_INT[day.lower()[:3]]
         assert pd_int in long_form_days(config)
 
-    def test_usa_default_is_wed_not_sat(self):
-        """USA must default to Wed under the current cadence, never the
-        pre-fix Sat literal (dow=5 ∉ LONG_FORM_DAYS={2})."""
+    def test_usa_default_is_a_waypost_day_not_sat(self):
+        """USA must default to Waypost's earliest day (the seed's Tuesday), never the
+        pre-fix Sat literal (dow=5 is not a long-form day)."""
         config = Config()
-        assert config.drive.long_form_publish_days == [2]
-        assert default_publish_day(config) == "wed"
+        config.seo.storage_path = "/nonexistent/seo"  # no decisions: the packaged seed answers
+        assert config.drive.long_form_publish_days == []
+        assert default_publish_day(config) == "tue"
 
     def test_honors_min_of_configured_days(self):
         """When config carries multiple long-form days, the default is the
@@ -87,7 +88,7 @@ class TestOrchestratorResolution:
         LONG_FORM_DAYS (was "sat" -> StateInvariantError)."""
         orch = DrivePipelineOrchestrator()
         resolved = _resolved_publish_day(orch, region="usa", publish_day=None, tmp_path=tmp_path)
-        assert resolved == "wed"
+        assert resolved == "tue"
         assert _DAY_NAME_TO_INT[resolved] in long_form_days(orch.config)
 
     def test_explicit_publish_day_still_wins(self, tmp_path):

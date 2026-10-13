@@ -40,14 +40,24 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
 RETIRED_CONFIG_KEYS = ("shorts_per_lf_count", "lf_length_min_n", "lf_length_bucket_edges_sec")
 
 
+#: ``drive:`` keys whose FIELD survives as the per-run ``--lf-day`` / ``--lf-time``
+#: transport, so pydantic would accept a file value; the loader drops it instead.
+WAYPOST_OWNED_DRIVE_KEYS = ("long_form_publish_days", "long_form_publish_time")
+
+
 def _warn_on_retired_keys(raw: dict) -> None:
-    """Warn once per leftover retired key under ``drive:`` (never raises)."""
+    """Warn once per leftover retired key under ``drive:`` (never raises), and remove the
+    Waypost-owned transport keys so a file value cannot set the cadence."""
     drive = raw.get("drive")
     if not isinstance(drive, dict):
         return
     for key in RETIRED_CONFIG_KEYS:
         if key in drive:
             logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+    for key in WAYPOST_OWNED_DRIVE_KEYS:
+        if key in drive:
+            logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+            del drive[key]
 
 
 def _warn_on_stop_knob_drift(raw: dict) -> None:
@@ -1753,16 +1763,19 @@ class DriveConfig(BaseModel):
     # override via ``~/.config/gomoveshift/config.yaml``:
     #
     #   drive:
-    #     long_form_publish_days: [4]       # Fri (0=Mon .. 6=Sun)
-    #     long_form_publish_time: "11:00"   # HH:MM 24h, EST assumed
+    # (A config-file value for either is dropped at load: Waypost decides the days.)
     #
-    # Consumed by ``pipeline/schedule_constants.long_form_days`` /
-    # ``long_form_time`` accessors and wired through
-    # ``PipelineScheduler.from_config``. The module-level ``LONG_FORM_DAYS`` / ``LONG_FORM_TIME``
-    # constants are computed from *these* defaults at import time and
-    # remain the fallback for call sites that lack a config reference.
-    long_form_publish_days: list[int] = Field(default_factory=lambda: [2])
-    long_form_publish_time: str = "11:00"
+    # The per-run transport (``--lf-day`` / ``--lf-time``) is read by
+    # ``pipeline/schedule_constants.long_form_days`` / ``long_form_time``, which answer
+    # from Waypost's cadence when it is unset, and wired through
+    # ``PipelineScheduler.from_config``. The module-level ``LONG_FORM_DAYS`` /
+    # ``LONG_FORM_TIME`` constants come from the packaged brand seed at import time.
+    # Waypost decides the long-form days and times (seo_slots.waypost_cadence). These two
+    # fields are only the per-run ``--lf-day`` / ``--lf-time`` transport: empty / unset by
+    # default, never read from a config file (the loader drops one, RETIRED_CONFIG_KEY), and
+    # read through ``schedule_constants.long_form_days`` / ``long_form_time``.
+    long_form_publish_days: list[int] = Field(default_factory=list)
+    long_form_publish_time: Optional[str] = None
     # Per-LF-day designed long-form publish times (the cadence table). Keyed by 3-letter weekday. --lf-day <day>
     # derives lf_time from the matching slot; --lf-time overrides; days without
     # a slot fall back to long_form_publish_time. Shorts times are NOT here —
@@ -2126,8 +2139,6 @@ class DriveConfig(BaseModel):
     @field_validator("long_form_publish_days")
     @classmethod
     def _validate_long_form_publish_days(cls, v: list[int]) -> list[int]:
-        if not v:
-            raise ValueError("long_form_publish_days must contain at least one day")
         for d in v:
             if not isinstance(d, int) or d < 0 or d > 6:
                 raise ValueError(
@@ -2137,7 +2148,9 @@ class DriveConfig(BaseModel):
 
     @field_validator("long_form_publish_time")
     @classmethod
-    def _validate_long_form_publish_time(cls, v: str) -> str:
+    def _validate_long_form_publish_time(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         if not isinstance(v, str) or not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
             raise ValueError(f"long_form_publish_time must match HH:MM (24h), got {v!r}")
         return v

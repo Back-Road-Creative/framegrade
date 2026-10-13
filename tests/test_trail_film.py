@@ -252,6 +252,29 @@ def test_trail_film_restages_on_a_retry_and_skips_a_missing_photo_dir(tmp_path):
     assert missing.trail_films == [] and "not found" in missing.trail_skips[0]
 
 
+def test_trail_film_stages_a_copy_where_links_and_copystat_are_refused(tmp_path, monkeypatch):
+    """A Windows-mounted drive refuses a symlink and the stat update after a copy."""
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    (pool / "a.jpg").write_bytes(b"a")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("drvfs")
+
+    monkeypatch.setattr(trail_film.os, "symlink", refuse)
+    monkeypatch.setattr("shutil.copystat", refuse)
+    fake = _Steps(tmp_path, photo_times={"a.jpg": _utc(16)})
+    d = _day(tmp_path)
+
+    trail_film.attach_trail_film(
+        d, _state(tmp_path), _cfg(tmp_path, photos_dir=pool), steps=fake.steps()
+    )
+
+    assert d.trail_skips == [] and len(d.trail_films) == 1
+    staged = Path(_argv_value(fake.film_argv, "--photos-dir")) / "a.jpg"
+    assert staged.read_bytes() == b"a" and not staged.is_symlink()
+
+
 def test_gpx_span_is_the_selected_days_first_and_last_fix(tmp_path):
     gpx = tmp_path / "day.gpx"
     pts = "".join(

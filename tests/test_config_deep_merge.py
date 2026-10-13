@@ -7,7 +7,7 @@ Precedence (lowest → highest):
 
 Nested mappings merge key-by-key; non-mapping values (including lists)
 replace wholesale. Rationale: a partial user file that only sets
-``drive.long_form_publish_days`` must NOT wipe sibling keys like
+``drive.shorts_publish_times`` must NOT wipe sibling keys like
 ``drive.gps_quality`` — that was the prior bug that shadowed the
 user override entirely and forced operators to edit tracked config.
 """
@@ -32,10 +32,10 @@ def test_user_override_beats_project_config(tmp_path, monkeypatch):
     project.mkdir()
     home.mkdir()
 
-    _write(project / "config.yaml", {"drive": {"long_form_publish_days": [2]}})
+    _write(project / "config.yaml", {"drive": {"shorts_publish_times": ["09:00"]}})
     _write(
         home / ".config" / "gomoveshift" / "config.yaml",
-        {"drive": {"long_form_publish_days": [4]}},
+        {"drive": {"shorts_publish_times": ["10:00"]}},
     )
 
     monkeypatch.chdir(project)
@@ -44,14 +44,14 @@ def test_user_override_beats_project_config(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [4]
+    assert cfg.drive.shorts_publish_times == ["10:00"]
 
 
 def test_user_override_preserves_project_siblings(tmp_path, monkeypatch):
     """Partial user override must NOT wipe sibling keys under the same section.
 
     This is the regression guard: a user file that only flips
-    ``drive.long_form_publish_days`` to [4] must keep the project's
+    ``drive.shorts_publish_times`` to 10:00 must keep the project's
     ``drive.ost_title_crossfade_sec`` value (and any other sibling
     fields). A shallow dict replace would reset them to defaults.
     """
@@ -62,7 +62,7 @@ def test_user_override_preserves_project_siblings(tmp_path, monkeypatch):
         project / "config.yaml",
         {
             "drive": {
-                "long_form_publish_days": [2],
+                "shorts_publish_times": ["09:00"],
                 "ost_title_crossfade_sec": 0.75,
                 "montage_max_duration_sec": 15.0,
             }
@@ -70,14 +70,14 @@ def test_user_override_preserves_project_siblings(tmp_path, monkeypatch):
     )
     _write(
         home / ".config" / "gomoveshift" / "config.yaml",
-        {"drive": {"long_form_publish_days": [4]}},
+        {"drive": {"shorts_publish_times": ["10:00"]}},
     )
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [4]
+    assert cfg.drive.shorts_publish_times == ["10:00"]
     assert cfg.drive.ost_title_crossfade_sec == 0.75
     assert cfg.drive.montage_max_duration_sec == 15.0
 
@@ -88,13 +88,13 @@ def test_no_user_file_falls_back_to_project(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
 
-    _write(project / "config.yaml", {"drive": {"long_form_publish_days": [2]}})
+    _write(project / "config.yaml", {"drive": {"shorts_publish_times": ["09:00"]}})
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [2]
+    assert cfg.drive.shorts_publish_times == ["09:00"]
 
 
 def test_no_project_file_uses_user_alone(tmp_path, monkeypatch):
@@ -105,14 +105,14 @@ def test_no_project_file_uses_user_alone(tmp_path, monkeypatch):
 
     _write(
         home / ".config" / "gomoveshift" / "config.yaml",
-        {"drive": {"long_form_publish_days": [4]}},
+        {"drive": {"shorts_publish_times": ["10:00"]}},
     )
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [4]
+    assert cfg.drive.shorts_publish_times == ["10:00"]
 
 
 def test_lists_replace_wholesale_not_appended(tmp_path, monkeypatch):
@@ -120,17 +120,17 @@ def test_lists_replace_wholesale_not_appended(tmp_path, monkeypatch):
     project = tmp_path / "project"
     home = tmp_path / "home"
 
-    _write(project / "config.yaml", {"drive": {"long_form_publish_days": [2, 5]}})
+    _write(project / "config.yaml", {"drive": {"shorts_publish_times": ["08:00", "09:00"]}})
     _write(
         home / ".config" / "gomoveshift" / "config.yaml",
-        {"drive": {"long_form_publish_days": [4]}},
+        {"drive": {"shorts_publish_times": ["10:00"]}},
     )
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [4]
+    assert cfg.drive.shorts_publish_times == ["10:00"]
 
 
 def test_explicit_config_path_skips_user_merge(tmp_path, monkeypatch):
@@ -144,17 +144,17 @@ def test_explicit_config_path_skips_user_merge(tmp_path, monkeypatch):
     project.mkdir()
 
     explicit = project / "custom.yaml"
-    _write(explicit, {"drive": {"long_form_publish_days": [3]}})
+    _write(explicit, {"drive": {"shorts_publish_times": ["07:00"]}})
     _write(
         home / ".config" / "gomoveshift" / "config.yaml",
-        {"drive": {"long_form_publish_days": [4]}},
+        {"drive": {"shorts_publish_times": ["10:00"]}},
     )
 
     monkeypatch.chdir(project)
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load(explicit)
-    assert cfg.drive.long_form_publish_days == [3]
+    assert cfg.drive.shorts_publish_times == ["07:00"]
 
 
 def test_empty_user_file_is_noop(tmp_path, monkeypatch):
@@ -163,7 +163,7 @@ def test_empty_user_file_is_noop(tmp_path, monkeypatch):
     home = tmp_path / "home"
     project.mkdir()
 
-    _write(project / "config.yaml", {"drive": {"long_form_publish_days": [2]}})
+    _write(project / "config.yaml", {"drive": {"shorts_publish_times": ["09:00"]}})
     user_file = home / ".config" / "gomoveshift" / "config.yaml"
     user_file.parent.mkdir(parents=True, exist_ok=True)
     user_file.write_text("")  # empty → safe_load returns None
@@ -172,4 +172,4 @@ def test_empty_user_file_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     cfg = Config.load()
-    assert cfg.drive.long_form_publish_days == [2]
+    assert cfg.drive.shorts_publish_times == ["09:00"]

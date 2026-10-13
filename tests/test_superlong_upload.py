@@ -20,10 +20,10 @@ from _state_helpers import make_state
 # suite happens to run. Freeze it: with an EMPTY ledger and a project identity
 # supplied, ``resolve_superlong_publish_day`` finds no related history, returns
 # ``None`` ("search ANY weekday" — the rule is to be aware of the next open day when
-# there is no previous related video), and the slot is simply the NEXT CALENDAR
-# DAY at the configured superlong time. It is not pinned to Saturday.
+# there is no previous related video), and the slot is simply the NEXT OPEN
+# SLOT at Waypost's long-form time (the seed's 16:00). It is not pinned to Saturday.
 _FROZEN_NOW = datetime(2026, 3, 10, 9, 0, tzinfo=EST)  # a Tuesday
-_EXPECTED_SLOT = datetime(2026, 3, 11, 11, 0, tzinfo=EST)  # the next day, 11:00
+_EXPECTED_SLOT = datetime(2026, 3, 10, 16, 0, tzinfo=EST)  # the same day, at Waypost's seed time
 
 
 class _FrozenDatetime(datetime):

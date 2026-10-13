@@ -493,8 +493,8 @@ class TestSuperlongMinimumPublishLead:
     lead rather than return it."""
 
     def test_thin_lead_pushes_to_the_next_eligible_slot(self):
-        config = Config()  # default: sat, 11:00
-        anchor = datetime(2026, 8, 15, 9, 0, tzinfo=EST)  # a Saturday, 09:00 — 2h lead to 11:00
+        config = Config()  # no day searched: any weekday, at Waypost's seed time 16:00
+        anchor = datetime(2026, 8, 15, 14, 0, tzinfo=EST)  # a Saturday, 14:00 — 2h lead to 16:00
         slot = next_free_superlong_slot(ContentLedger(), config, "usa", after=anchor)
         assert slot.date() != anchor.date(), f"a 2h lead was returned as-is: {slot.isoformat()}"
-        assert slot.strftime("%H:%M") == "11:00"
+        assert slot.strftime("%H:%M") == "16:00"
