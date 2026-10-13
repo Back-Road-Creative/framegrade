@@ -111,8 +111,13 @@ class PipelineValidator:
         metadata_json: Optional[dict] = None,
         social_posts: Optional[list] = None,
         skip_audio: bool = False,
+        day_record: Optional[dict] = None,
+        claim_native_resolution_only: bool = True,
     ) -> PipelineValidationResult:
         """Run all validation gates on the final output.
+
+        ``day_record`` / ``claim_native_resolution_only`` feed the honest-
+        resolution claim check in the video-quality gate (defaults: no check).
 
         Takes no source bitrate: the ``bitrate_preservation`` floor is absolute
         and resolution-based, so that gate runs on every call rather than only
@@ -133,7 +138,14 @@ class PipelineValidator:
             # loud speech spike barely moves the integrated average but shows in
             # momentary loudness. See LongformValidator.check_momentary_loudness.
             gates.append(self._longform.check_momentary_loudness(video_path))
-        gates.append(self._longform.check_video_quality(video_path, skip_audio=skip_audio))
+        gates.append(
+            self._longform.check_video_quality(
+                video_path,
+                skip_audio=skip_audio,
+                day_record=day_record,
+                claim_native_resolution_only=claim_native_resolution_only,
+            )
+        )
         gates.append(self._check_file_integrity(video_path))
         if expected_duration is not None:
             gates.append(self._check_duration(video_path, expected_duration))

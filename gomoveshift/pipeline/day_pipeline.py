@@ -75,7 +75,7 @@ from .chapters.marker_merger import chapter_town_events
 from .cleanup import purge_day_intermediates
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
-from .ffmpeg_filters import shorten_ost_for_shorts
+from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
 from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
 from .montage_builder import (
     GOP_DURATION_SEC,
@@ -690,6 +690,14 @@ def _is_publish_run(state) -> bool:
     if isinstance(state, dict):
         return state.get("youtube_upload") is True
     return getattr(state, "youtube_upload", None) is True
+
+
+def _short_upscaled_from(master_path) -> Optional[list]:
+    """``[crop_w, crop_h]`` when the master is too small for a native 1080x1920 crop, else None."""
+    try:
+        return crop_upscaled_from(*get_video_dimensions(master_path))
+    except Exception:  # noqa: BLE001 — recording only; an unreadable master is gated elsewhere
+        return None
 
 
 def _render_day_shorts(
@@ -2528,6 +2536,8 @@ def run_day_pipeline(
     # here so per_day_completed can carry it for cached-master validation on
     # resume after the raw episodes are purged.
     master_record = build_master_record(day_batch, master_final_path)
+    # A master narrower than a 9:16 short's output makes every short an upscale.
+    master_record["short_upscaled_from"] = _short_upscaled_from(master_final_path)
     return DayArtifacts(
         date=date,
         master_path=master_final_path,

@@ -22,6 +22,7 @@ import math
 import statistics
 import subprocess
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -42,7 +43,92 @@ def aspect_of(width: int, height: int) -> tuple[int, int]:
     return (width // g, height // g) if g else (0, 0)
 
 
-__all__ = ["HONEST_RESOLUTION_RULE", "RENDITIONS", "Rendition", "aspect_of", "rendition_for"]
+__all__ = [
+    "HONEST_RESOLUTION_RULE",
+    "RENDITIONS",
+    "Rendition",
+    "UpscalePlan",
+    "UpscaleRefusedError",
+    "aspect_of",
+    "claim_native_resolution_allowed",
+    "rendition_for",
+    "upscale_plan",
+]
+
+#: The one resampling scaler every declared upscale (long-form and shorts) uses.
+UPSCALE_SCALER = "zscale"
+UPSCALE_KERNEL = "spline36"
+
+
+class UpscaleRefusedError(ValueError):
+    """The profile forbids upscaling and the source is below the rendition."""
+
+
+@dataclass(frozen=True)
+class UpscalePlan:
+    """A declared resampling upscale: one scaler, the source size, the target size.
+
+    ``crop`` is the centre-crop applied after scaling when the source is not the
+    rendition's aspect (cover-fit), else ``None``.
+    """
+
+    scaler: str
+    filter: str
+    source: tuple[int, int]
+    target: tuple[int, int]
+    crop: tuple[int, int] | None = None
+    note: str = ""
+
+
+def _even_up(n: float) -> int:
+    n = math.ceil(n)
+    return n + (n % 2)
+
+
+def upscale_plan(
+    source_w: int, source_h: int, rendition: Rendition, policy: str
+) -> UpscalePlan | None:
+    """The upscale a source needs to reach ``rendition``, or ``None`` if it already does.
+
+    ``resample`` scales with ``zscale`` (spline36). ``ml`` resolves to resample in
+    this unit (no ML scaler is wired). ``off`` raises ``UpscaleRefusedError``.
+    A non-rendition-aspect source is cover-fit (scaled until both sides cover the
+    target) and centre-cropped; the crop is recorded on the plan.
+    """
+    tw, th = rendition.width, rendition.height
+    if not tw or not th or (source_w >= tw and source_h >= th):
+        return None
+    if policy == "off":
+        raise UpscaleRefusedError(
+            f"source {source_w}x{source_h} is below the {tw}x{th} rendition and the media "
+            f"profile upscale policy is 'off' ({HONEST_RESOLUTION_RULE})"
+        )
+    if policy not in ("resample", "ml"):
+        raise UpscaleRefusedError(f"unknown upscale policy {policy!r}")
+    note = "ml resolves to resample in this release" if policy == "ml" else ""
+    kernel = f"filter={UPSCALE_KERNEL}"
+    if source_w * th == source_h * tw:
+        return UpscalePlan(
+            UPSCALE_SCALER,
+            f"{UPSCALE_SCALER}=w={tw}:h={th}:{kernel}",
+            (source_w, source_h),
+            (tw, th),
+            None,
+            note,
+        )
+    factor = max(tw / source_w, th / source_h)
+    sw, sh = _even_up(source_w * factor), _even_up(source_h * factor)
+    flt = f"{UPSCALE_SCALER}=w={sw}:h={sh}:{kernel},crop={tw}:{th}"
+    return UpscalePlan(UPSCALE_SCALER, flt, (source_w, source_h), (tw, th), (tw, th), note)
+
+
+def claim_native_resolution_allowed(profile, plan: UpscalePlan | None) -> bool:
+    """May the delivery label itself with the native resolution?
+
+    Always for a native source; for an upscaled one only when the profile does
+    not restrict the claim to native pixels (``claim_native_resolution_only``).
+    """
+    return plan is None or not getattr(profile, "claim_native_resolution_only", True)
 
 
 def rendition_for(name: str) -> Rendition:
@@ -276,7 +362,8 @@ def picture_inputs_from_state(state) -> tuple[float | None, dict[int, bool]]:
     changed: dict[int, bool] = {}
     for art in getattr(state, "day_artifacts", None) or []:
         master = getattr(art, "master_path", None)
-        day_changed = (
+        record = getattr(art, "master_record", None) or {}
+        day_changed = bool(record.get("upscaled_from")) or (
             picture_changed_for_day(Path(master).parent / f"day_{art.date}_color_cache.json")
             if master
             else False
