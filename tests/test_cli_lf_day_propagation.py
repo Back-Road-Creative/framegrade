@@ -333,12 +333,13 @@ class TestLfDaySetsPublishDayConsistency:
                 directory=str(tmp_path),
                 output_dir=str(tmp_path / "out"),
                 lf_day="tue",
-                publish="thu",
+                publish="fri",
+                region="usa",  # tue and fri are both Waypost days for usa
                 dry_run=False,
             ),
             cfg,
         )
-        assert kw["publish_day"] == "thu"
+        assert kw["publish_day"] == "fri"
 
     def test_neither_flag_refuses_launch(self, tmp_path, restore_schedule_module):
         """Neither flag present is no

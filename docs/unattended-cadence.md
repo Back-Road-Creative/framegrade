@@ -66,5 +66,12 @@ the upload (`external_systems_coordinator._upload_lfs_to_youtube`).
 - **USA** — `--lf-day tue` (LF ~16:00) / `--lf-day fri` (LF ~15:00) `--region usa`;
   shorts 14:00 + 18:00.
 
-The scheduled publisher reads the same cadence from the tenant `brand.yaml` (`seo: cadence:`). It is a copy of the table above and must match
-`seo_slots.cadence_for(config)`; `tests/test_brand_seo_cadence.py` pins a synthetic `brand.yaml` of that shape against the config, so change both together.
+**Waypost owns the days.** The tenant `brand.yaml` (`seo: cadence:`) is the SEED; the effective
+cadence is that seed overlaid with Waypost's `lf_days` decision rows (the decision store beside the
+SEO storage, `seo.storage_path`). The scheduled publisher, `seo_slots.cadence_for(config)`, the launch
+gate and `gomoveshift schedule` all read that one cadence (`seo_slots.waypost_cadence`), so a decided
+day moves them together and a replaced day stops being offered. A launch with no `--lf-publish-date`
+is also checked: `--publish`/`--lf-day` must be one of the region's Waypost days or the launch
+refuses and names them. An unreadable decision store halts planning with
+`CADENCE_SOURCE_UNREADABLE reason=... (planning halted)` rather than falling back to a guess.
+`tests/test_brand_seo_cadence.py` pins the seed's day times to `config.drive.publish_slots`.

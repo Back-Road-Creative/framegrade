@@ -29,7 +29,7 @@ def _drive_args(directory, output_dir):
         # cmd_drive now refuses when
         # neither --publish nor --lf-day is given, before the SEO gate this
         # file exercises — give it a harmless default publish day.
-        publish="mon",
+        publish="tue",
         location=None,
         start_date=None,
         shorts_per_day=None,
@@ -54,7 +54,7 @@ def _pipeline_args(video, output_dir):
     return SimpleNamespace(
         video=video,
         location=None,
-        publish="wed",
+        publish="tue",
         output_dir=output_dir,
         lut=None,
         crossfade=2.0,

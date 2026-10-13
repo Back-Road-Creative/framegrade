@@ -364,9 +364,10 @@ class TestScheduleValidation:
 class TestNextPublishSlot:
     """next_publish_slot must include today if today is a longform day."""
 
-    def test_ledger_saturday_returns_next_wednesday(self):
+    def test_ledger_saturday_returns_next_wednesday(self, waypost_lf_days):
         """Under Wed-only cadence, Saturday should route to next Wednesday
         regardless of time of day (Sat is no longer a longform day)."""
+        waypost_lf_days({"ireland": (2,), "usa": (2,)})  # the Wed-only cadence assumed
         ledger = ContentLedger()
         sat_morning = datetime(2026, 2, 28, 9, 0, 0, tzinfo=EST)
         slot = ledger.get_next_available_slot("longform", after=sat_morning)
@@ -374,8 +375,9 @@ class TestNextPublishSlot:
         assert slot["date"] == "2026-03-04"
         assert slot["day_name"] == "Wednesday"
 
-    def test_ledger_skips_today_if_past_publish_time(self):
+    def test_ledger_skips_today_if_past_publish_time(self, waypost_lf_days):
         """On Wednesday afternoon (after 11am), next slot is next Wednesday."""
+        waypost_lf_days({"ireland": (2,), "usa": (2,)})
         ledger = ContentLedger()
         wed_afternoon = datetime(2026, 3, 4, 14, 0, 0, tzinfo=EST)
         slot = ledger.get_next_available_slot("longform", after=wed_afternoon)
@@ -383,8 +385,9 @@ class TestNextPublishSlot:
         assert slot["date"] == "2026-03-11"
         assert slot["day_name"] == "Wednesday"
 
-    def test_ledger_includes_today_wednesday(self):
+    def test_ledger_includes_today_wednesday(self, waypost_lf_days):
         """On Wednesday morning, next longform slot should be today."""
+        waypost_lf_days({"ireland": (2,), "usa": (2,)})
         ledger = ContentLedger()
         wed_morning = datetime(2026, 3, 4, 8, 0, 0, tzinfo=EST)
         slot = ledger.get_next_available_slot("longform", after=wed_morning)

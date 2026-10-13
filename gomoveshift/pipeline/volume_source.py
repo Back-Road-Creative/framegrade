@@ -18,7 +18,7 @@ from ..config import get_config
 logger = logging.getLogger(__name__)
 
 KNOB = "shorts_per_lf"
-_DB_NAME = "cadence_decisions.sqlite3"
+DB_NAME = "cadence_decisions.sqlite3"
 
 
 class VolumeSourceUnreadableError(RuntimeError):
@@ -35,7 +35,7 @@ class ShortsDecision:
 def shorts_per_lf(db: Optional[Path] = None) -> ShortsDecision:
     """The SEO manager's current shorts-per-LF decision (``source="seed"`` when unset)."""
     if db is None:
-        db = Path(get_config().seo.storage_path) / _DB_NAME
+        db = Path(get_config().seo.storage_path) / DB_NAME
     try:
         stored = cadence_decisions.current(db, KNOB)
     except cadence_decisions.DecisionStoreUnreadable as exc:

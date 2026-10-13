@@ -49,18 +49,18 @@ def _report(ledger, config=None):
 
 class TestCapacity:
     @pytest.mark.parametrize(
-        "drop,capacity,days",
+        "decided,capacity,days",
         [
-            (None, 3, ["tue", "fri", "sun"]),  # Python weekday order, not prose order
-            ("fri", 2, ["tue", "sun"]),  # capacity follows config, never a hardcoded 3
+            (None, 3, ["tue", "fri", "sun"]),  # Waypost seed; Python weekday order
+            ({"usa": (1,)}, 2, ["tue", "sun"]),  # a decision drops usa's Friday; capacity follows
         ],
     )
-    def test_capacity_and_days_come_from_publish_slots(self, ledger, drop, capacity, days):
+    def test_capacity_and_days_come_from_waypost_cadence(
+        self, ledger, waypost_lf_days, decided, capacity, days
+    ):
         config = Config()
-        if drop:
-            config.drive.publish_slots = {
-                k: v for k, v in config.drive.publish_slots.items() if k != drop
-            }
+        if decided:
+            waypost_lf_days(decided, config)
         report = _report(ledger, config)
         assert report["weekly_longform_capacity"] == capacity
         assert report["designed_days"] == days

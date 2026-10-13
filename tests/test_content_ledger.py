@@ -104,11 +104,14 @@ class TestLedgerInstancePinnedPath:
         )
         orphan.save(path=path)
 
-    def test_reload_after_explicit_load_keeps_same_file(self, tmp_path, monkeypatch):
+    def test_reload_after_explicit_load_keeps_same_file(
+        self, tmp_path, monkeypatch, waypost_lf_days
+    ):
         """get_next_available_slot's no-arg reload must NOT merge the
         default store into an explicitly-loaded ledger."""
         from gomoveshift.pipeline import content_ledger as cl
 
+        waypost_lf_days({"ireland": (2,), "usa": (2,)})  # the Wednesday cadence this assumes
         orphan_path = tmp_path / "output" / ".content_ledger.json"
         explicit_path = tmp_path / "seo" / ".content_ledger.json"
         self._seed(orphan_path)

@@ -42,8 +42,10 @@ def test_longform_metadata_get_next_publish_slot_reflects_apply_config(monkeypat
     assert slot["day_name"] == "Monday", f"expected Monday, got {slot}"
 
 
-def test_content_ledger_get_next_available_slot_reflects_apply_config(monkeypatch):
-    """apply_config() with --lf-day mon must surface as Monday in ledger slot."""
+def test_content_ledger_get_next_available_slot_reflects_apply_config(monkeypatch, waypost_lf_days):
+    """A Monday long-form day must surface as Monday in the ledger slot. The day is
+    Waypost's now (``lf_days`` decisions); apply_config still carries the run's pick."""
+    waypost_lf_days({"ireland": (0,), "usa": (0,)})
     config = get_config()
     config.drive.long_form_publish_days = [0]  # Mon
     _schedule_constants.apply_config(config)

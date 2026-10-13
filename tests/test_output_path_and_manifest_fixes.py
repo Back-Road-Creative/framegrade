@@ -108,7 +108,7 @@ class TestCLIDrivePlanDict:
         mock_args.no_tmux = True
         mock_args.directory = src
         mock_args.region = "usa"
-        mock_args.publish = "wed"
+        mock_args.publish = "tue"
         mock_args.location = None
         mock_args.start_date = None
         mock_args.shorts_per_day = None
@@ -163,7 +163,7 @@ class TestCLIDrivePlanDict:
         mock_args.no_tmux = True
         mock_args.directory = src
         mock_args.region = "usa"
-        mock_args.publish = "wed"
+        mock_args.publish = "tue"
         mock_args.location = None
         mock_args.start_date = None
         mock_args.shorts_per_day = None

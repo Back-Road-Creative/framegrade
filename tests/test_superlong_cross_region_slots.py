@@ -72,12 +72,11 @@ class TestSuperlongSlotsAreASharedQueue:
         assert slot.date().isoformat() != "2026-08-15"
         assert slot.date().isoformat() == "2026-08-22"
 
-    def test_regular_longform_next_free_slot_is_unaffected(self):
+    def test_regular_longform_next_free_slot_is_unaffected(self, waypost_lf_days):
         """The disjoint-day premise still holds for regular LF cadence — a
         USA LF must remain free to take a day an Ireland LF holds."""
         config = Config()
-        config.drive.long_form_publish_days = [6]  # Sunday, shared for this check
-        config.drive.long_form_publish_time = "14:00"
+        waypost_lf_days({"ireland": (6,), "usa": (6,)}, config)  # Sunday, shared for this check
         ledger = ContentLedger()
         ledger.entries.append(_lf_entry("2026-08-16", "ireland"))  # a Sunday
         slot = next_free_slot(ledger, config, "usa", after=ANCHOR)

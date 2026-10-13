@@ -29,7 +29,7 @@ def _drive_args(**overrides):
         region="ireland",
         # cmd_drive now refuses when
         # neither --publish nor --lf-day is given.
-        publish="mon",
+        publish="sun",
         location="",
         start_date=None,
         shorts_per_day=None,
