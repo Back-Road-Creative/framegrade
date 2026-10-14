@@ -269,3 +269,18 @@ class TestRequiredShortsPerLf:
             shorts_per_day=1,
         )
         assert len(schedule.shorts_slots) == required_shorts_per_lf(cfg, shorts_per_day=1)
+
+
+def test_the_region_resolver_has_no_data_path():
+    """The per-platform reorder is retired: the resolver takes no spool connection,
+    ``best_slot_from_data`` is gone and phase D builds no per-platform window, so no GMS
+    ranking moves a posting slot."""
+    import inspect
+
+    from gomoveshift.pipeline import schedule_constants as sc
+    from gomoveshift.pipeline.drive_phases import phase_d_scheduling
+
+    params = list(inspect.signature(sc.resolve_shorts_times_for_region).parameters)
+    assert params == ["config", "region", "lf_day"]
+    assert not hasattr(sc, "best_slot_from_data")
+    assert not hasattr(phase_d_scheduling, "_shorts_times_by_platform")
