@@ -21,6 +21,7 @@ from gomoveshift.pipeline.photos.caption_generator import CaptionBatch, PhotoCap
 from gomoveshift.pipeline.photos.csv_generator import PhotoPost
 from gomoveshift.pipeline.photos.orchestrator import PhotoOrchestrator
 from gomoveshift.pipeline.uploader import VerificationResult
+from gomoveshift.publishing.photo_run_hooks import photo_run_hooks
 
 
 class TestPinterestDescriptionRetired:
@@ -134,8 +135,10 @@ class TestPhotoPathsRouting:
             )
             mock_uploader_cls.return_value = mock_uploader
 
-            with patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as _book:
-                orchestrator = PhotoOrchestrator(site_root=site_root, output_dir=tmp_path)
+            with patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload") as _book:
+                orchestrator = PhotoOrchestrator(
+                    site_root=site_root, output_dir=tmp_path, **photo_run_hooks()
+                )
                 resized = tmp_path / "photo_resized" / "2026-02-23" / "test-journey_photo-001.jpg"
                 resized.parent.mkdir(parents=True, exist_ok=True)
                 resized.write_bytes(b"fake resized")

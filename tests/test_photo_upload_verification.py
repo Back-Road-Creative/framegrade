@@ -16,6 +16,7 @@ import pytest
 
 from gomoveshift.pipeline.photos.caption_generator import CaptionBatch, PhotoCaption
 from gomoveshift.pipeline.photos.orchestrator import PhotoOrchestrator
+from gomoveshift.publishing.photo_run_hooks import photo_run_hooks
 from gomoveshift.pipeline.photos.scheduler import PhotoSlot
 from gomoveshift.pipeline.photos.selector import PhotoSelectionState
 from gomoveshift.pipeline.uploader import UploadManifest, VerificationResult
@@ -103,13 +104,13 @@ def make_env(tmp_path):
         site = _site(tmp_path)
         stack = [
             patch("gomoveshift.pipeline.photos.orchestrator.PipelineUploader"),
-            patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload"),
+            patch("gomoveshift.publishing.photo_run_hooks.record_confirmed_upload"),
         ]
         up_cls, _book = [s.start() for s in stack]
         uploader = FakeUploader(verify_script)
         up_cls.return_value = uploader
 
-        orch = PhotoOrchestrator(site_root=site, output_dir=tmp_path)
+        orch = PhotoOrchestrator(site_root=site, output_dir=tmp_path, **photo_run_hooks())
         (tmp_path / "resized").mkdir(exist_ok=True)
 
         def _resize(paths, week, journey_slugs=None):

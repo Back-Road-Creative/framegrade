@@ -82,10 +82,8 @@ def _selected(selections):
 @pytest.fixture
 def env(tmp_path, request):
     site = _site(tmp_path, getattr(request, "param", 2))
-    with (
-        patch("gomoveshift.pipeline.photos.orchestrator.PipelineUploader") as up_cls,
-        patch("gomoveshift.pipeline.photos.orchestrator.record_confirmed_upload") as led_cls,
-    ):
+    led_cls = MagicMock(return_value=True)  # the injected ledger_booker
+    with patch("gomoveshift.pipeline.photos.orchestrator.PipelineUploader") as up_cls:
 
         def _upload(paths, **kwargs):
             manifest = UploadManifest(project_name="test")
@@ -96,7 +94,7 @@ def env(tmp_path, request):
         uploader.upload_photos.side_effect = _upload
         uploader.verify_uploads.return_value = VerificationResult(verified=[], failed=[])
         up_cls.return_value = uploader
-        orch = PhotoOrchestrator(site_root=site, output_dir=tmp_path)
+        orch = PhotoOrchestrator(site_root=site, output_dir=tmp_path, ledger_booker=led_cls)
         (tmp_path / "resized").mkdir()
 
         def _resize(paths, week, journey_slugs=None):
@@ -141,9 +139,9 @@ def test_republish_reuses_slots_and_books_no_second_week(env):
     # literally "books no second week", strictly stronger than a call count.
     all_dates = set()
     for call in env.book.call_args_list:
-        entries = call.args[0]
-        assert {e.date for e in entries} == {"2026-02-23", "2026-02-24"}
-        all_dates.update(e.date for e in entries)
+        rows = call.args[0]
+        assert {row["date"] for row in rows} == {"2026-02-23", "2026-02-24"}
+        all_dates.update(row["date"] for row in rows)
     assert all_dates == {"2026-02-23", "2026-02-24"}
 
 
