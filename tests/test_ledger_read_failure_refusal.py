@@ -33,7 +33,7 @@ class TestPhaseDRefusesOnUnreadableLedger:
         scheduler_cls = MagicMock()
         scheduler_cls.from_config.return_value = scheduler
         config = SimpleNamespace(
-            drive=SimpleNamespace(shorts_publish_times=["15:00"], shorts_slot_pool_by_region={}),
+            drive=SimpleNamespace(shorts_publish_times=["15:00"]),
             seo=SimpleNamespace(storage_path=str(tmp_path)),
         )
         return _build_and_persist_drive_schedule(

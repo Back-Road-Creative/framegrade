@@ -68,7 +68,7 @@ def _extract_episode_ost_meta(gpx_path) -> dict:
     try:
         from gps_journey.core.gpx_parser import GPXParser
 
-        from .chapters._journey_filter import local_day
+        from .journey_filter import local_day
 
         parser = GPXParser()
         journey = parser.parse(Path(gpx_path))

@@ -2,9 +2,9 @@
 
 Single source of truth:
 - **LF time** is a property of the LF day → ``publish_slots[day].lf_time``.
-- **Shorts times** are a property of the REGION →
-  ``shorts_publish_times_by_region``. ``publish_slots`` does not carry (or
-  override) shorts times.
+- **Shorts times** are a property of the REGION (2026-05-30 shorts-timing
+  analysis) → Waypost's cadence ``shorts_times``. ``publish_slots`` no longer
+  carries (or overrides) shorts times.
 
 So ``--lf-day tue`` determines the long-form time; ``--region usa`` determines
 the shorts window; an explicit ``--shorts-times`` overrides the region.

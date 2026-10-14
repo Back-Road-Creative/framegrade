@@ -34,10 +34,16 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
     return result
 
 
-#: ``drive:`` keys that once hand-set the shorts volume. Waypost decides it now
-#: (``pipeline/volume_source.py``); a leftover key is dropped by pydantic, so the
+#: ``drive:`` keys that once hand-set the shorts volume or hours. Waypost decides them now
+#: (``pipeline/volume_source.py``, the cadence's ``shorts_times``); a leftover key is dropped by pydantic, so the
 #: loader names it instead of letting an owner believe it still has an effect.
-RETIRED_CONFIG_KEYS = ("shorts_per_lf_count", "lf_length_min_n", "lf_length_bucket_edges_sec")
+RETIRED_CONFIG_KEYS = (
+    "shorts_per_lf_count",
+    "lf_length_min_n",
+    "lf_length_bucket_edges_sec",
+    "shorts_publish_times_by_region",
+    "shorts_slot_pool_by_region",
+)
 
 
 #: ``drive:`` keys whose FIELD survives as the per-run ``--lf-day`` / ``--lf-time``
@@ -1327,9 +1333,8 @@ class PublishSlot(BaseModel):
 
     ``--lf-day tue`` alone determines the long-form publish time via the
     matching slot. Shorts times are NOT a property of the LF day — they are
-    determined per-REGION by a shorts-timing analysis and live in
-    ``shorts_publish_times_by_region`` (the single source of truth for shorts).
-    A prior ``shorts_times`` field on this model duplicated that with
+    decided per region by Waypost (the cadence's ``shorts_times``), never by GMS
+    config. A prior ``shorts_times`` field on this model duplicated that with
     contradictory numbers and was removed.
     """
 
@@ -1779,7 +1784,7 @@ class DriveConfig(BaseModel):
     # Per-LF-day designed long-form publish times (the cadence table). Keyed by 3-letter weekday. --lf-day <day>
     # derives lf_time from the matching slot; --lf-time overrides; days without
     # a slot fall back to long_form_publish_time. Shorts times are NOT here —
-    # they are determined per-region in shorts_publish_times_by_region.
+    # they are Waypost's per-region ``shorts_times``.
     publish_slots: dict[str, PublishSlot] = Field(
         default_factory=lambda: {
             "sun": PublishSlot(lf_time="14:00"),
@@ -1804,47 +1809,6 @@ class DriveConfig(BaseModel):
     # Irish-evening 12:00 EST for Ireland, US-afternoon 14:00 + 18:00 EST for
     # USA — NOT a v/day ranking winner. Operators still override per-run via
     # ``--shorts-times`` (which takes precedence).
-    # A region's value is EITHER a flat ``list[str]`` (one window for every
-    # drive of that region) OR a per-LF-day ``dict[str, list[str]]`` keyed by
-    # 3-letter weekday with a ``"_default"`` fallback — used when a region runs
-    # MULTIPLE concurrent LF days that must NOT share a shorts slot (the USA
-    # Tue+Fri anti-cannibalization case, a 6-slot
-    # map). USA: Tue (and a lone USA drive) → 14:00/18:00 (the two strongest US
-    # hours); the second concurrent USA day, Fri → 10:00/16:00, so the 6 daily
-    # shorts (2 IE + 4 US) land at 08/10/12/14/16/18 EST with no collision.
-    shorts_publish_times_by_region: dict[str, list[str] | dict[str, list[str]]] = Field(
-        default_factory=lambda: {
-            "ireland": ["08:00", "12:00"],
-            "usa": {
-                "tue": ["14:00", "18:00"],
-                # 12:00 belongs to Ireland, not a USA slot. USA Friday's
-                # 2nd slot is 16:00 (USA shorts post at 16:00 EDT, and
-                # Ireland vacates 16:00), so USA keeps 2 shorts/day. Never reuse a
-                # slot Ireland holds: 08:00/12:00.
-                "fri": ["10:00", "16:00"],
-                "_default": ["14:00", "18:00"],
-            },
-        }
-    )
-    # Region slot POOL — the full candidate shorts times a region may draw from
-    # when a default slot (above) is already booked by another drive. The
-    # per-LF-day map picks a drive's PREFERRED times; this pool is the fallback
-    # set the scheduler substitutes from (skipping occupied slots via the shared
-    # content ledger) so concurrent drives that still collide — two _default USA
-    # drives, ad-hoc runs, overlapping multi-week queues — interleave instead of
-    # double-booking. Each region's pool is REGION-FENCED: it may only contain
-    # that region's own slots, never another region's default windows (enforced
-    # in model_post_init). USA owns 10/14/16/18; Ireland owns 08/12 (16:00 is a
-    # USA slot — USA shorts + long-forms publish there). A region absent here falls back to its own default
-    # times (no extra pool).
-    shorts_slot_pool_by_region: dict[str, list[str]] = Field(
-        default_factory=lambda: {
-            # Ireland posts at 08:00 + 12:00 (Ireland and USA slots must not
-            # collide on a shared day, and 16:00 is left to the USA slots).
-            "ireland": ["08:00", "12:00"],
-            "usa": ["14:00", "18:00", "10:00", "16:00"],
-        }
-    )
     # Region → active journey slug for journal auto-publish. When a drive run's
     # region matches a key here and the operator did NOT pass an explicit
     # ``--auto-publish-journal SLUG``, the post-upload hook merges the run's
@@ -1977,8 +1941,7 @@ class DriveConfig(BaseModel):
     superlong_publish_day: str = "sat"
     # Region → superlong publish weekday, the location-aware override that
     # mirrors every other per-region drive setting
-    # (``shorts_publish_times_by_region``, ``shorts_slot_pool_by_region``,
-    # ``active_journey_by_region``). A region present here wins; a region
+    # (``active_journey_by_region``). A region present here wins; a region
     # absent (or a run with no ``--region``) falls back to the flat
     # ``superlong_publish_day`` above — the same precedence
     # ``resolve_shorts_times_for_region`` uses. EMPTY by default so behaviour
@@ -2168,39 +2131,10 @@ class DriveConfig(BaseModel):
                 )
         return v
 
-    @field_validator("shorts_publish_times_by_region")
-    @classmethod
-    def _validate_shorts_publish_times_by_region(cls, v: dict) -> dict:
-        pat = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
-
-        def _check_window(label: str, times) -> None:
-            if not times:
-                raise ValueError(
-                    f"{label} must contain at least one HH:MM entry "
-                    "(drop the key to fall back to shorts_publish_times)"
-                )
-            for entry in times:
-                if not isinstance(entry, str) or not pat.fullmatch(entry):
-                    raise ValueError(f"{label} entries must match HH:MM (24h), got {entry!r}")
-
-        for region, val in v.items():
-            base = f"shorts_publish_times_by_region[{region!r}]"
-            if isinstance(val, dict):
-                # Per-LF-day map: every value is a window; a "_default" is
-                # required so an undesigned day still resolves.
-                if "_default" not in val:
-                    raise ValueError(f"{base} (per-day map) must define a '_default' window")
-                for day, times in val.items():
-                    _check_window(f"{base}[{day!r}]", times)
-            else:
-                _check_window(base, val)
-        return v
-
     def model_post_init(self, __context) -> None:
         """Validate config invariants after construction."""
         self.validate_weights()
         self.check_shorts_consistency()
-        self.validate_shorts_pool_region_fence()
         if self.min_lf_duration > self.max_lf_duration:
             raise ValueError(
                 f"min_lf_duration ({self.min_lf_duration}) must be <= "
@@ -2258,40 +2192,6 @@ class DriveConfig(BaseModel):
         total = sum(self.scoring_weights.values())
         if abs(total - 1.0) > 0.01:
             raise ValueError(f"Drive scoring weights must sum to 1.0, got {total:.3f}")
-
-    def validate_shorts_pool_region_fence(self) -> None:
-        """Reject a region slot-pool that contains ANOTHER region's default window.
-
-        Robust-by-construction guard: a USA pool holding an Ireland
-        window would let a contended USA drive substitute into Ireland's slot.
-        A region's pool may only draw
-        from its OWN slots — never a window another region posts at by default —
-        so cross-region double-booking is structurally impossible.
-        """
-
-        def _windows(val) -> set:
-            if isinstance(val, dict):
-                return {t for times in val.values() for t in times}
-            return set(val)
-
-        defaults_by_region = {
-            region: _windows(val) for region, val in self.shorts_publish_times_by_region.items()
-        }
-        for region, pool in self.shorts_slot_pool_by_region.items():
-            foreign = {
-                t
-                for other, windows in defaults_by_region.items()
-                if other != region
-                for t in windows
-            }
-            collide = sorted(set(pool) & foreign)
-            if collide:
-                raise ValueError(
-                    f"shorts_slot_pool_by_region[{region!r}] contains "
-                    f"{collide} — those are another region's default shorts "
-                    "window. A region's pool must be region-fenced (own slots "
-                    "only) so a contended drive can't book a foreign region's slot."
-                )
 
     def check_shorts_consistency(self) -> None:
         """Log a warning if shorts_target_count < min_shorts_per_lf.
