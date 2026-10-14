@@ -82,3 +82,6 @@ D:*
 .ruff_cache/
 .mypy_cache/
 coverage.xml
+
+# Vendored ML-upscale ONNX weights (hash-pinned in quality.py; never committed).
+models/*.onnx
