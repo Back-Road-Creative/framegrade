@@ -224,6 +224,26 @@ def pin_free_ram_probe(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def pin_lf_insert_clock(request, monkeypatch):
+    """Pin the long-form insert loop's clock to 2000-01-01 UTC.
+
+    The loop refuses a pending LF whose slot has passed
+    (``LF_SLOT_PASSED``). Fixtures across the suite carry literal 2026 slot
+    dates that are real past dates by the time the tests run, so on the real
+    clock they would all refuse. A module that sets ``REAL_LF_INSERT_CLOCK =
+    True`` (``test_lf_insert_slot_guard``) runs on the real clock; any test
+    may still patch ``_utc_now`` or pass ``clock=``.
+    """
+    if not HAS_GOMOVESHIFT or getattr(request.module, "REAL_LF_INSERT_CLOCK", False):
+        return
+    from datetime import datetime, timezone
+
+    from gomoveshift.pipeline.drive_phases import external_systems_coordinator as esc
+
+    monkeypatch.setattr(esc, "_utc_now", lambda: datetime(2000, 1, 1, tzinfo=timezone.utc))
+
+
+@pytest.fixture(autouse=True)
 def pin_blur_session_probe(monkeypatch):
     """Pin the blur preflight's real-session probe to "CUDA bound".
 
