@@ -751,8 +751,7 @@ def _upload_lfs_to_youtube(
     A pending LF whose slot has passed (``publish_at <= clock()``) is never
     inserted: ``reschedule(now)`` — Phase D's re-resolve through seo_manager —
     is asked for a fresh schedule, and a slot that is still passed (no
-    resolver, or it declined because an LF of the run is live) raises
-    ``LF_SLOT_PASSED``. An LF that already holds a video id is not checked.
+    resolver, or it declined) raises ``LF_SLOT_PASSED``. An LF that already holds a video id is not checked.
     """
     if skip_youtube_upload or not youtube_upload_enabled:
         if not youtube_upload_enabled:
@@ -843,8 +842,9 @@ def _upload_lfs_to_youtube(
                         f"LF_SLOT_PASSED lf={lf.index} publish_at={planned.isoformat()} "
                         f"now={now.isoformat()} — refusing videos.insert with a publish "
                         "time that has passed; nothing was uploaded for this LF. The "
-                        "slot was not re-resolved (an LF of this run is already live, "
-                        "or the re-resolved slot has passed too)."
+                        "slot was not re-resolved (no --publish day to re-resolve on, "
+                        "a live LF of this run has no readable publish time, or the "
+                        "re-resolved slot has passed too)."
                     )
         try:
             record = _upload_lf_to_youtube(

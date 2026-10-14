@@ -128,8 +128,14 @@ def run_preflight_and_prompt(
     record = _calibration_for_plan(
         dry_run=dry_run, source_dir=source_dir, stages_dir=stages_dir, config=config
     )
+    fast_skipped = getattr(getattr(config, "drive", None), "fast_skipped", None)
     # No record -> print_plan's own default (load; none -> reference model).
-    print_plan(state, stages_dir, **({"calibration": record} if record is not None else {}))
+    plan_kwargs: dict = {}
+    if record is not None:
+        plan_kwargs["calibration"] = record
+    if fast_skipped:
+        plan_kwargs["fast_skipped"] = fast_skipped
+    print_plan(state, stages_dir, **plan_kwargs)
     if dry_run:
         logger.info("--dry-run: plan rendered, exiting before any phase work")
         emit_summary(

@@ -230,6 +230,7 @@ def next_free_slot(
     slot_time: Optional[dt_time] = None,
     min_lead: Optional[timedelta] = None,
     any_day: bool = False,
+    project: Optional[str] = None,
 ) -> datetime:
     """Return the next FREE long-form publish slot for ``region`` — the
     operator contract ("publish to the next free Ireland Sunday") as one
@@ -262,7 +263,8 @@ def next_free_slot(
     ``any_day=True`` searches every weekday (candidate days are unnarrowed) —
     used when no fixed publish day applies (see
     ``schedule_constants.resolve_superlong_publish_day``'s rule 4); it takes
-    precedence over ``publish_day``/cadence-config narrowing.
+    precedence over ``publish_day``/cadence-config narrowing. ``project`` exempts
+    that project's own bookings (a run re-asking for one of its own long-forms).
     """
     if content_type != "longform":
         raise ValueError(f"next_free_slot implements long-form slots only, got {content_type!r}")
@@ -291,6 +293,7 @@ def next_free_slot(
         block_cross_region=block_cross_region,
         horizon_days=horizon_days,
         min_lead=min_lead,
+        project=project,
     )
 
 

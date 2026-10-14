@@ -353,3 +353,23 @@ def test_publish_runs_preflight_before_upload(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="disk space"):
             orch.publish_batch(str(yaml_path))
         up.assert_not_called()
+
+
+def test_photo_preflight_warns_advisory_when_ml_upscaler_unusable(tmp_path, monkeypatch, caplog):
+    _plenty(monkeypatch)
+    monkeypatch.setattr(
+        photo_preflight,
+        "check_ml_upscale",
+        lambda profile_upscale: drive_preflight.MlUpscaleCheck(False, True, "weights: missing"),
+    )
+    with caplog.at_level(logging.WARNING):
+        preflight_photo_run(tmp_path, upscale="ml", blur_enabled=False)
+    assert "weights: missing" in caplog.text
+    assert "resampled frame" in caplog.text
+
+
+def test_photo_preflight_silent_when_upscale_off(tmp_path, monkeypatch, caplog):
+    _plenty(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        preflight_photo_run(tmp_path, upscale="off", blur_enabled=False)
+    assert "upscal" not in caplog.text.lower()

@@ -866,3 +866,35 @@ class TestSiteRootNotConfigured:
         orchestrator = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
         assert orchestrator.selector.site_root == tmp_path / "site"
         assert orchestrator.selector.state_path == tmp_path / ".photo_selection_state.json"
+
+
+class TestMediaProfileUpscaleWiring:
+    """The brand's upscale policy reaches the resizer through the publish-side hooks;
+    an unreadable profile fails closed."""
+
+    def test_upscale_reaches_resizer(self, tmp_path):
+        orch = PhotoOrchestrator(upscale="ml", output_dir=tmp_path, site_root=tmp_path)
+        assert orch.upscale == "ml"
+        assert orch.resizer.upscale == "ml"
+
+    def test_default_is_off(self, tmp_path):
+        orch = PhotoOrchestrator(output_dir=tmp_path, site_root=tmp_path)
+        assert orch.resizer.upscale == "off"
+
+    def test_hooks_read_the_brand_profile(self, monkeypatch):
+        from gomoveshift.publishing.brand_policy import MediaProfile
+
+        monkeypatch.setattr(
+            "gomoveshift.publishing.brand_policy.load_media_profile",
+            lambda _slug: MediaProfile(upscale="ml"),
+        )
+        assert photo_run_hooks()["upscale"] == "ml"
+
+    def test_unreadable_profile_fails_closed_with_warning(self, monkeypatch, caplog):
+        def _boom(_slug):
+            raise OSError("profile unreadable")
+
+        monkeypatch.setattr("gomoveshift.publishing.brand_policy.load_media_profile", _boom)
+        with caplog.at_level(logging.WARNING):
+            assert photo_run_hooks()["upscale"] == "off"
+        assert "media profile unreadable" in caplog.text
