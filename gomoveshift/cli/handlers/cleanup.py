@@ -26,7 +26,11 @@ def cmd_cleanup(args, config):
 
     if args.project:
         candidates = [output_base / args.project, stage_cache_base / args.project]
-        projects = [p for p in candidates if p.exists()][:1]
+        existing = [p for p in candidates if p.exists()]
+        # A published drive has both: its publish records under the output
+        # dir and _stages (state + renders) in the stage cache. The one
+        # holding _stages is the project, as in discover_projects.
+        projects = ([p for p in existing if (p / "_stages").exists()] or existing)[:1]
         if not projects:
             print(f"Error: Project not found: {candidates[0]}", file=sys.stderr)
             return 1
@@ -41,6 +45,13 @@ def cmd_cleanup(args, config):
 
     if not plan.files:
         print("Nothing to clean up.")
+        if args.project and plan.skipped:
+            # A named project that was skipped reclaimed nothing: say why and
+            # exit non-zero so `cleanup <project> --confirm && ...` cannot
+            # report a reclaim that did not happen.
+            for s in plan.skipped:
+                print(f"  SKIP: {s['path']} \u2014 {s['reason']}")
+            return 2
         return 0
 
     # Display plan

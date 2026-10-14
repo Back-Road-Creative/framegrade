@@ -72,7 +72,7 @@ from ..publishing.brand_policy import load_brand_policy, load_media_profile
 from . import volume_source
 from .blur_gate import BlurGateError
 from .chapters.marker_merger import chapter_town_events
-from .cleanup import purge_day_intermediates
+from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
@@ -100,7 +100,7 @@ from .ost_audit_sidecar import (
     write_shorts_ost_audit,
 )
 from .ost_validator import validate_ost
-from .preflight import check_superlong_output_space
+from .preflight import check_lf_work_space, check_superlong_output_space
 from .regular_lf_planner import (
     DEFAULT_MIN_DURATION_SEC as DEFAULT_REGULAR_LF_MIN_DURATION_SEC,
 )
@@ -1760,6 +1760,9 @@ def run_day_pipeline(
     # ── Step 2: assemble regular LFs ──────────────────────────────
     lf_dir = day_dir / "regular_lfs"
     lf_dir.mkdir(parents=True, exist_ok=True)
+    # --keep-intermediates: read once, used by the per-LF purge in the loop
+    # below and by the day-end sweep.
+    keep_intermediates = bool(state.get("keep_intermediates")) if state is not None else False
     regular_lf_paths: list = []
     # Parallel to ``regular_lf_paths``: the authoritative LF index for each
     # rendered path, so a mid-day render skip leaves an index-keyed gap the
@@ -2183,6 +2186,19 @@ def run_day_pipeline(
             regular_lf_indices.append(idx)
             continue
 
+        # Upstream of the stream copy + montage prepend + OST re-encode: this
+        # LF's three coexisting artifacts must fit on the cache volume now.
+        # The day's length is the end of its last file boundary.
+        check_lf_work_space(
+            master_source_for_extract,
+            lf_dir,
+            sum(
+                float(getattr(s, "end_time", 0.0)) - float(getattr(s, "start_time", 0.0))
+                for s in segments
+            ),
+            float(file_boundaries[-1][1]) if file_boundaries else 0.0,
+            lf_index=idx,
+        )
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"
         concatenated = extract_and_concat_segments(
@@ -2243,6 +2259,14 @@ def run_day_pipeline(
         fp_path.write_text(ost_fingerprint)
         regular_lf_paths.append(ost_result)
         regular_lf_indices.append(idx)
+        # Release this LF's work files now, not at day end: a multi-part day
+        # otherwise carries every finished part's segments + with_montage
+        # while the next part burns.
+        if not keep_intermediates:
+            try:
+                purge_lf_intermediates(day_dir, idx)
+            except Exception as exc:  # noqa: BLE001 — never block the pipeline on cleanup
+                logger.warning("Day %s: LF %d work-file purge failed: %s", date, idx, exc)
 
     # ── Step 4: plan shorts from the same day scores ──────────────
     # Shorts budget is per-LF: plan `<decided per-LF count> * len(lf_plans)`
@@ -2525,7 +2549,8 @@ def run_day_pipeline(
     # short_XX_raw) once their final OST-applied outputs exist. Gate is
     # per-LF/short so a partial day is safe. The master + finals are
     # never touched here — those are Phase D's responsibility.
-    keep_intermediates = bool(state.get("keep_intermediates")) if state is not None else False
+    # (LF work files already went per LF above; this sweeps shorts, superlong
+    # and any LF whose per-LF purge failed.)
     if not keep_intermediates:
         try:
             purge_day_intermediates(day_dir)

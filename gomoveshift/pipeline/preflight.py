@@ -253,6 +253,73 @@ def check_superlong_output_space(
         )
 
 
+# One long-form holds three artifacts on the cache volume while it burns: the
+# stream-copied concat (``lf_NN_segments.mp4``), the montage-prepended copy
+# (``lf_NN_with_montage.mp4``) and the final. Measured 2026-10-08 on a 30-minute
+# LF: a 16.78 GB share of the day master peaked at 51.78 GB (x3.09).
+_LF_WORK_FACTOR = 3.1
+_LF_WORK_SAFETY_FACTOR = 1.1  # margin over the sizing estimate itself
+
+
+def check_lf_work_space(
+    master_path: Path,
+    output_dir: Path,
+    lf_duration_sec: float,
+    master_duration_sec: float,
+    *,
+    lf_index: int | None = None,
+    safety_factor: float = _LF_WORK_SAFETY_FACTOR,
+) -> None:
+    """Raise RuntimeError if *output_dir* lacks room for one long-form's work
+    files plus its final.
+
+    Sized from the ACTUAL day master on disk (size / duration), like
+    ``check_superlong_output_space``, never an assumed bitrate. Called per LF
+    right before its concat, upstream of the stream copy, the montage prepend
+    and the OST re-encode: a shortfall fails here with the numbers instead of
+    as a half-written concat or a montage step that only logs "skipping".
+
+    ``master_duration_sec`` comes from the day's file boundaries (the caller
+    already holds them), so nothing is probed. Inputs that cannot price
+    anything log a warning and skip: a master that cannot be read (the concat
+    then fails on its own, having written nothing), or a size or day length
+    that is not positive. A part with no length prices at zero and passes.
+    """
+    try:
+        master_bytes = Path(master_path).stat().st_size
+    except OSError as exc:
+        logger.warning(
+            "LF work-space gate: cannot read %s (%s) - skipping the space estimate.",
+            master_path,
+            exc,
+        )
+        return
+    if master_duration_sec <= 0 or master_bytes <= 0:
+        logger.warning(
+            "LF work-space gate: no usable size/duration for %s (%d bytes, %.2fs) "
+            "- skipping the space estimate.",
+            master_path,
+            master_bytes,
+            master_duration_sec,
+        )
+        return
+
+    share_bytes = master_bytes / float(master_duration_sec) * float(lf_duration_sec)
+    needed_gb = share_bytes * _LF_WORK_FACTOR * safety_factor / _GB
+    free_gb = shutil.disk_usage(output_dir).free / _GB
+    if free_gb < needed_gb:
+        label = f"LF {lf_index}" if lf_index is not None else "a long-form"
+        raise RuntimeError(
+            f"Insufficient work space for {label} at {output_dir}: "
+            f"{free_gb:.1f} GB free, need ~{needed_gb:.1f} GB (shortfall "
+            f"{needed_gb - free_gb:.1f} GB) - its {share_bytes / _GB:.1f} GB share of "
+            f"the day master x {_LF_WORK_FACTOR} (stream copy + montage copy + final "
+            f"coexist) x {safety_factor} margin. Free space on the cache volume "
+            f"(`gomoveshift cleanup <published-project> --confirm`), then resume: "
+            f"finished long-forms are kept."
+        )
+
+
 _WSL_HOST_MIN_FREE_GB = 25.0  # absolute floor for the host volume even on resume
 
 

@@ -111,6 +111,20 @@ Symlinked episodes, the blur mask,
 (default 7 days, by `_stages` mtime) still applies; pass `--min-age 0` to
 reclaim a drive published this week.
 
+A named `project` that exists in both places (a published drive leaves its
+publish records under the output dir) resolves to the one holding `_stages`. A named
+project that is skipped (too recent, pipeline not complete) prints the reason
+and exits `2`, so `cleanup <project> --confirm && ...` never reports a reclaim
+that did not happen; a project with nothing left to reclaim exits `0`.
+
+During a drive, each long-form's work files (`lf_NN_segments.mp4`,
+`lf_NN_with_montage.mp4`, `.lf_NN_work/`) are released as soon as that
+long-form's final is burned and fingerprinted, so a multi-part day holds one
+part's working set at a time; `--keep-intermediates` retains them. Before each
+long-form starts, the cache volume must have about 3.4x that part's share of
+the day master free (stream copy, montage copy and final coexist); a shortfall
+stops the day with the numbers, and a resume keeps the finished parts.
+
 ### `gomoveshift cleanup --archive-base PATH`
 
 Opts a `cleanup` run into archive-backed reclamation: `PATH` is a distinct directory
