@@ -31,6 +31,7 @@ import os
 import shutil
 import stat
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -1448,3 +1449,38 @@ def check_drive_credentials() -> None:
             + ". Set the env var to a valid path, or pass an empty string "
             "to disable the check."
         )
+
+
+@dataclass(frozen=True)
+class MlUpscaleCheck:
+    ok: bool
+    checked: bool
+    reason: str = ""
+
+
+def check_ml_upscale(profile_upscale: str, weights_path=None, providers=None) -> MlUpscaleCheck:
+    """Probe the ML upscaler only when the profile asks for ``ml``. Never raises.
+
+    A failure is advisory: stills fall back to the resampled frame, so this is
+    for the run summary, not a gate. Call it where ``check_blur_inference_provider``
+    runs, with ``profile.media.upscale``.
+    """
+    if profile_upscale != "ml":
+        return MlUpscaleCheck(True, False)
+    from . import quality
+
+    problems = []
+    try:
+        quality.verify_ml_upscale_weights(
+            weights_path if weights_path is not None else quality.ml_upscale_weights_path()
+        )
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"weights: {exc}")
+    try:
+        if providers is None:
+            providers = list(_import_onnxruntime().get_available_providers())
+        if _CUDA_PROVIDER not in providers:
+            problems.append(f"CUDA provider unavailable (providers: {', '.join(providers)})")
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"CUDA provider unavailable: {exc}")
+    return MlUpscaleCheck(not problems, True, "; ".join(problems))
