@@ -162,11 +162,11 @@ def test_the_fingerprint_reads_the_accessors(waypost_lf_days):
 
 _FIELDS = ("long_form_publish_days", "long_form_publish_time")
 # The per-run transport is the field's only job: the drive handler writes it, Phase D reads
-# the run's one picked day, and schedule_constants' accessors read it first.
+# the run's one picked day (the drive scheduler), and schedule_constants' accessors read it
+# first.
 _READERS = {
     "cli/handlers/drive.py",
     "pipeline/schedule_constants.py",
-    "pipeline/drive_phases/phase_d_scheduling.py",
 }
 
 

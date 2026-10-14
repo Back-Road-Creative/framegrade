@@ -19,82 +19,15 @@ from pathlib import Path
 from typing import Optional
 
 from ...config import Config
-from ...publishing.queue import open_queue_db
 from .._atomic_write import atomic_write_json
 from ..schedule_constants import (
     EST,
     _parse_hhmm,
     resolve_shorts_pool_for_region,
-    resolve_shorts_times_for_region,
 )
 from ..social_generator import TitleFacts, day_title_ordinals
 
 logger = logging.getLogger("gomoveshift.pipeline.drive_phases.phase_d")
-
-# ``--lf-day`` writes ``config.drive.long_form_publish_days = [<index>]`` (drive
-# handler); this is the inverse, the 3-letter key the per-LF-day region map and
-# the resolver take.
-_LF_DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-
-
-def _lf_day_key(config) -> Optional[str]:
-    days = list(getattr(getattr(config, "drive", None), "long_form_publish_days", None) or [])
-    if len(days) == 1 and isinstance(days[0], int) and 0 <= days[0] <= 6:
-        return _LF_DAY_KEYS[days[0]]
-    return None
-
-
-def _shorts_times_by_platform(config, region: Optional[str], platforms) -> dict:
-    """The shorts window per first-party platform, listing ONLY
-    the platforms whose window the data path moved off the slot.
-
-    Opens the spool (``<seo.storage_path>/social_queue.sqlite3`` -- where
-    ``metrics ingest`` writes ``slot_performance``) and asks
-    ``resolve_shorts_times_for_region`` once per platform. A platform whose
-    resolved window equals the configured one is left out, so the sidecar
-    never restates the slot. Returns ``{}`` -- every platform keeps the slot
-    -- when there is no region, no ``seo`` config, the spool cannot be opened,
-    or the flat window no longer equals the region spec (an explicit
-    ``--shorts-times`` mutated it upstream: the operator's window is never
-    reordered by data, same precedence as the drive handler). Never raises.
-    """
-    storage_path = getattr(getattr(config, "seo", None), "storage_path", None)
-    if region is None or not storage_path or not platforms:
-        return {}
-    lf_day = _lf_day_key(config)
-    configured = list(resolve_shorts_times_for_region(config, region, lf_day))
-    flat = list(getattr(config.drive, "shorts_publish_times", None) or [])
-    if configured != flat:
-        logger.info(
-            "  D-publish-plan: per-platform hours skipped -- shorts window %s is not the "
-            "region %r spec %s (explicit --shorts-times?); every platform keeps the slot",
-            flat,
-            region,
-            configured,
-        )
-        return {}
-    try:
-        conn = open_queue_db(Path(storage_path))
-    except Exception as exc:  # noqa: BLE001 - the spool is optional input here
-        logger.info(
-            "  D-publish-plan: per-platform hours skipped -- spool unavailable (%s); "
-            "every platform keeps the slot",
-            exc,
-        )
-        return {}
-    try:
-        out = {}
-        for platform in platforms:
-            window = list(
-                resolve_shorts_times_for_region(
-                    config, region, lf_day, conn=conn, platform=platform
-                )
-            )
-            if window != configured:
-                out[platform] = window
-        return out
-    finally:
-        conn.close()
 
 
 def _build_readonly_youtube_service(credentials_dir=None):
