@@ -629,6 +629,7 @@ def cmd_drive(args, config):
     # config-file values; we mutate config.drive then re-apply so the
     # CLI flags win.
     from ...pipeline import schedule_constants as _sched
+    from ...pipeline.seo_slots import CadenceSourceUnreadableError
 
     dow = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
     cadence_dirty = False
@@ -658,48 +659,56 @@ def cmd_drive(args, config):
         config.drive.long_form_publish_time = _sched.resolve_lf_time(config, _lf_day_key, _lf_time)
         cadence_dirty = True
 
-    # Shorts times: single precedence point — explicit --shorts-times →
-    # shorts_publish_times_by_region (per --lf-day when the region maps to a
-    # per-day window) → flat list. Shorts are determined per-REGION, never by a per-day publish_slots source.
-    if isinstance(_shorts_times_arg, str) or _lf_day_key is not None:
-        config.drive.shorts_publish_times = _sched.resolve_shorts_times(
-            config, _lf_day_key, _shorts_times_arg, args.region
-        )
-        cadence_dirty = True
-    elif isinstance(args.region, str):
-        # No explicit --shorts-times and no LF-day slot: region-aware default
-        # only. Deliberately NOT cadence_dirty — the region map's values are
-        # validated at Config construction, and shorts scheduling reads
-        # config.drive.shorts_publish_times directly (scheduler.from_config +
-        # phase_d_scheduling), not module-level SHORTS_TIMES.
-        config.drive.shorts_publish_times = _sched.resolve_shorts_times(
-            config, None, None, args.region
-        )
-    if cadence_dirty:
-        # Pydantic re-validates on assignment only when validate_assignment
-        # is set; force a fresh model_validate to surface bad input early.
-        config.drive.__class__.model_validate(config.drive.model_dump())
-        _sched.apply_config(config)
-
-    # ── Single-source drift gate ──────────────────────────────────────────
-    # Shorts times come from ONE place: shorts_publish_times_by_region
-    # or an explicit --shorts-times. When neither an
-    # explicit flag was given NOR the resolved window equals the region's
-    # determined spec, a SECOND source has drifted back in (the
-    # publish_slots-override regression class) — fail loud before any encode or
-    # upload rather than publishing off-spec. Tautological by construction
-    # today; the point is to make the single-source invariant ENFORCED so it
-    # cannot silently regress.
-    if not isinstance(_shorts_times_arg, str) and isinstance(args.region, str):
-        _spec = _sched.resolve_shorts_times_for_region(config, args.region, _lf_day_key)
-        if list(config.drive.shorts_publish_times) != list(_spec):
-            raise SystemExit(
-                "SCHEDULE-SPEC-DRIFT: resolved shorts window "
-                f"{list(config.drive.shorts_publish_times)} != region "
-                f"{args.region!r} spec {list(_spec)} (lf_day={_lf_day_key!r}, no "
-                "--shorts-times). A schedule source has drifted from "
-                "shorts_publish_times_by_region."
+    # Shorts times: single precedence point — explicit --shorts-times → the
+    # region's Waypost windows (this --lf-day's share of its list) → flat list
+    # when there is no region. Shorts are determined per-REGION by Waypost
+    # (seo_slots.shorts_windows), never by a per-day publish_slots source. An
+    # unreadable Waypost source, or a region it has no hours for, stops here.
+    try:
+        if isinstance(_shorts_times_arg, str) or _lf_day_key is not None:
+            config.drive.shorts_publish_times = _sched.resolve_shorts_times(
+                config, _lf_day_key, _shorts_times_arg, args.region
             )
+            cadence_dirty = True
+        elif isinstance(args.region, str):
+            # No explicit --shorts-times and no LF-day slot: region-aware default
+            # only. Deliberately NOT cadence_dirty — the hours are Waypost's
+            # (seo_manager validates them when it reads the cadence), and shorts
+            # scheduling reads config.drive.shorts_publish_times directly
+            # (scheduler.from_config + phase_d_scheduling), not module-level
+            # SHORTS_TIMES.
+            config.drive.shorts_publish_times = _sched.resolve_shorts_times(
+                config, None, None, args.region
+            )
+        if cadence_dirty:
+            # Pydantic re-validates on assignment only when validate_assignment
+            # is set; force a fresh model_validate to surface bad input early.
+            config.drive.__class__.model_validate(config.drive.model_dump())
+            _sched.apply_config(config)
+
+        # ── Single-source drift gate ──────────────────────────────────────────
+        # Shorts times come from ONE place: Waypost's cadence
+        # (seo_slots.shorts_windows) or an explicit --shorts-times. When neither an
+        # explicit flag was given NOR the resolved window equals the region's
+        # determined spec, a SECOND source has drifted back in (the
+        # publish_slots-override regression class) — fail loud before any encode or
+        # upload rather than publishing off-spec. Tautological by construction
+        # today; the point is to make the single-source invariant ENFORCED so it
+        # cannot silently regress.
+        if not isinstance(_shorts_times_arg, str) and isinstance(args.region, str):
+            _spec = _sched.resolve_shorts_times_for_region(config, args.region, _lf_day_key)
+            if list(config.drive.shorts_publish_times) != list(_spec):
+                raise SystemExit(
+                    "SCHEDULE-SPEC-DRIFT: resolved shorts window "
+                    f"{list(config.drive.shorts_publish_times)} != region "
+                    f"{args.region!r} spec {list(_spec)} (lf_day={_lf_day_key!r}, no "
+                    "--shorts-times). A schedule source has drifted from "
+                    "Waypost's shorts hours — see "
+                    "docs/pipeline/79-publish-cadence-resolution.md."
+                )
+    except CadenceSourceUnreadableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     orchestrator = DrivePipelineOrchestrator(config)
 

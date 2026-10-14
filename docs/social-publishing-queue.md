@@ -356,8 +356,9 @@ short's ordinal **within its own publish day** (slots ranked by time). A window 
 day's short count leaves the overflow shorts on the slot.
 
 **No producer remains.** Phase D used to resolve the window per platform against the spool's
-`slot_performance`/`audience_online` rows (the data path); that path is retired, GMS moves no slot from a
-ranking, and `_emit_publish_plan_sidecar` passes no map: every platform stays on the slot. The field and the reader below stay for a sidecar that
+`slot_performance`/`audience_online` rows (the data path); Waypost now decides the region's shorts
+hours (`shorts_times`), GMS moves no slot from a ranking, and `_emit_publish_plan_sidecar` passes no
+map: every platform stays on the slot. The field and the reader below stay for a sidecar that
 carries one.
 
 `enqueue_from_plan_sidecar` reads the map per row and falls back to `scheduled_at_utc` for any

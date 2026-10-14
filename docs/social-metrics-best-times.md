@@ -1,7 +1,7 @@
 # Best-time table — report-only
 
 `gomoveshift metrics best-times` prints, per `(region, platform)`, the top-3 `slot_performance`
-slots and the platform's own audience-online hours. It fetches nothing and writes nothing — no config,
+slots and the hours Waypost has decided for the region. It fetches nothing and writes nothing — no config,
 no schedule. Empty store or no ranked rows prints one plain line saying so and exits 0.
 
 `slot_performance` is keyed by `(region, platform, weekday, hour_local)`, aggregated from
@@ -9,20 +9,27 @@ collected metrics (`gomoveshift metrics collect`, see `docs/social-metrics-decli
 doc for how a row gets there). `slots_ranked(conn, min_n=--min-n)` (default 5) ranks by mean
 views then mean engagement, descending; a slot below `--min-n` samples never appears.
 
-**No verdict.** The report used to print which source "agreed" on the winner
-(`schedule_constants.best_slot_from_data`, the data path); that path is retired and GMS moves no
-slot from this ranking. Where the platform has `audience_online` rows, its own top-3 hours (summed
-`n_online` across every recorded weekday) print on an `audience_online top-3:` line so a reader can
-compare the platform's curve with the ranking. A platform without rows (YouTube by design) prints
-no such line.
+**Decided hours.** Waypost decides every region's shorts hours (`shorts_times` in its cadence: the
+packaged `brand.yaml` seed, replaced by the latest `shorts_times` decision). The `decided hours:` line
+prints that whole list for the group's region (`seo_slots.shorts_pool`); a region Waypost has no hours
+for, or an unreadable decision store, prints `decided hours: unavailable (<reason>)` and the report
+still exits 0. The ranking informs Waypost's decision; GMS moves no slot from it (the old
+`best_slot_from_data` source-agreement check is gone).
+
+Where the platform has `audience_online` rows, its own top-3 hours (summed `n_online` across every
+recorded weekday) print on an `audience_online top-3:` line, so a reader can compare the platform's
+curve with the ranking and the decided hours. A platform without rows (YouTube by design) prints no
+such line.
 
 ```
 ireland / instagram:
   #1 12:00 -- n=8 mean_views=500.0 mean_engagement=0.120
   #2 08:00 -- n=8 mean_views=100.0 mean_engagement=0.040
+  decided hours: 08:00, 12:00
   audience_online top-3: 12:00, 09:00, 20:00
 usa / youtube:
   #1 14:00 -- n=10 mean_views=1000.0 mean_engagement=0.080
+  decided hours: 10:00, 14:00, 16:00, 18:00
 ```
 
 **`--trend`.** Also prints, per group's rank-#1 slot, the last 4 `slot_performance_history`
@@ -35,6 +42,7 @@ passed, and silently skipped for a slot with no history yet (a fresh install, or
 ```
 ireland / instagram:
   #1 12:00 -- n=8 mean_views=500.0 mean_engagement=0.120
+  decided hours: 08:00, 12:00
   trend (12:00, last 3 fold(s)):
     2030-01-07T00:00:00+00:00: n=4 mean_views=200.0
     2030-01-14T00:00:00+00:00: n=6 mean_views=350.0

@@ -99,3 +99,16 @@ short side on true-vignette fixtures); a dark, textured scene corner -- trees or
 extent (around 0.40). Past `_CORNER_CROP_MAX_FRACTION` the read is treated as scene content, not vignetting, and
 the frame is returned uncropped rather than clamped to the bound: clamping a 40%-extent read as if
 it were a small real margin would still discard real content.
+
+## One developed still for the reel, the cards and the inserts
+
+`photos reel` (`photos/reel.py`) takes each still from `hud._load_still` -- the same
+graded, disk-cached pixels `assembly`/`still_card_frame` and the insert engine
+(`inserts._load_still_default`) use -- instead of a private `develop.decode`. A photo is
+graded once per machine, and a reel looks like the film it sits beside. A Pillow-readable still is
+loaded inside that shared loader: a suffix in `develop.SUPPORTED_EXTENSIONS` goes through
+`develop.decode`; any other Pillow-readable suffix (an insert's `.webp`) is oriented by EXIF,
+flattened to RGB and passed through the same `develop._srgb_from_icc` step. Either way every
+consumer gets EXIF orientation and ICC colour management, and an unusable ICC profile (or an
+unreadable still) raises -- `ReelError` from the reel.
+Pinned by `test_reel_and_still_card_share_developed_frame`.

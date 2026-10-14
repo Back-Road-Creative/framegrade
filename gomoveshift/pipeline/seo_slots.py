@@ -46,6 +46,7 @@ from seo_manager.core.profile import (
     parse_weekday,
 )
 from seo_manager.scheduling import slots
+from seo_manager.scheduling.shorts_times import drive_share
 from seo_manager.scheduling.store import Booking, ScheduleStore, SlotTaken
 
 from .schedule_constants import EST, long_form_days
@@ -96,6 +97,36 @@ def cadence_for(config, region: Optional[str] = None) -> Cadence:
     if region:
         cadence.region(region)
     return cadence
+
+
+def _shorts_hours(config, region: str) -> list[dt_time]:
+    """The region's Waypost shorts hours; a region without any is refused, never borrowed."""
+    try:
+        hours = list(waypost_cadence(config).region(region).shorts_times)
+    except ValueError:
+        hours = []
+    if not hours:
+        reason = f"region {region} has no shorts hours"
+        logger.error("CADENCE_SOURCE_UNREADABLE reason=%s (planning halted)", reason)
+        raise CadenceSourceUnreadableError(
+            f"CADENCE_SOURCE_UNREADABLE reason={reason} (planning halted)"
+        )
+    return sorted(hours)
+
+
+def shorts_pool(config, region: str) -> list[str]:
+    """Every ``HH:MM`` the region's shorts post at (Waypost's whole list, sorted)."""
+    return [t.strftime("%H:%M") for t in _shorts_hours(config, region)]
+
+
+def shorts_windows(config, region: str, lf_day: Optional[str] = None) -> list[str]:
+    """The ``HH:MM`` windows the drive of ``lf_day`` posts its shorts at: its share of the
+    region's Waypost list (``drive_share``). ``lf_day`` is a 3-letter weekday key;
+    ``None`` or a day off the cadence takes the first long-form day's share."""
+    hours = _shorts_hours(config, region)
+    day = parse_weekday("lf_day", lf_day) if lf_day else None
+    share = drive_share(hours, waypost_cadence(config).days(region), day)
+    return [t.strftime("%H:%M") for t in share]
 
 
 def _day_names(days: Iterable[int]) -> list[str]:
