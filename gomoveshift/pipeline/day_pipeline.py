@@ -77,6 +77,13 @@ from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
 from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
+from .inserts import (
+    InsertError,
+    insert_label,
+    insert_records,
+    plan_drive_inserts,
+    splice_day_lf_inserts,
+)
 from .montage_builder import (
     GOP_DURATION_SEC,
     lf_reencode_args,
@@ -420,6 +427,10 @@ class DayArtifacts:
     # recognize a correctly per-LF-capacity-capped day instead of re-deriving
     # the pre-cap total from the CURRENT target and reading it as short.
     shorts_target_in_force: Optional[int] = None
+    # The inserts each rendered LF carries, ``{lf_index: [record, ...]}``
+    # (``inserts.insert_records``). Phase D reads the count for the description's
+    # ``📸`` line and the chapter markers; empty when the run asked for none.
+    inserts: dict = field(default_factory=dict)
 
 
 def _enforce_shorts_contract(
@@ -1603,6 +1614,7 @@ def run_day_pipeline(
     short_ost_text_fn: Optional[Callable] = None,
     short_regions_fn: Optional[Callable] = None,
     state=None,
+    inserts_by_lf: Optional[dict] = None,
 ) -> Optional[DayArtifacts]:
     """Run the full day-first pipeline for a single day.
 
@@ -2010,7 +2022,13 @@ def run_day_pipeline(
         # per-LF burn loop's resolved ``lf_location`` — review-text
         # == burn-text even for a GPS-less drive whose only label is
         # ``--location``.
-        payload = format_ost_audit(date, _ost_audit_state, _gate_lf_indices, location=location)
+        payload = format_ost_audit(
+            date,
+            _ost_audit_state,
+            _gate_lf_indices,
+            location=location,
+            inserts=insert_records(inserts_by_lf or {}),
+        )
         current_hash = compute_ost_audit_hash(payload)
         _gate_lf_text = {int(e["lf_index"]): e["ost_text"] for e in payload.get("lfs", [])}
 
@@ -2170,6 +2188,11 @@ def run_day_pipeline(
         ost_fingerprint = _lf_ost_fingerprint(
             lf_location, montage_duration, ost_crossfade_sec, segments
         )
+        _lf_inserts = list((inserts_by_lf or {}).get(idx) or [])
+        if _lf_inserts:  # a changed insert list re-burns, so a stale final never ships
+            ost_fingerprint = hashlib.sha256(
+                (ost_fingerprint + repr(insert_records({idx: _lf_inserts}))).encode()
+            ).hexdigest()
         fp_path = lf_dir / f"lf_{idx:02d}.ost.sha256"
         if (
             final_lf.is_file()
@@ -2253,6 +2276,18 @@ def run_day_pipeline(
             raise RuntimeError(
                 f"OST application failed for LF {idx} ({lf_location}). "
                 f"Input: {prepended}, Output: {final_lf}"
+            )
+        if _lf_inserts:
+            splice_day_lf_inserts(
+                ost_result,
+                _lf_inserts,
+                config=config,
+                label=insert_label(per_lf_locations, idx, lf_location),
+                profile=media_profile,
+                work_dir=work_dir,
+                montage_planned_s=montage_duration,
+                prepended=prepended,
+                concatenated=concatenated,
             )
         # Persist the burned-OST fingerprint so a later resume can detect this
         # final is fresh and skip the re-burn.
@@ -2564,6 +2599,9 @@ def run_day_pipeline(
     # A master narrower than a 9:16 short's output makes every short an upscale.
     master_record["short_upscaled_from"] = _short_upscaled_from(master_final_path)
     return DayArtifacts(
+        inserts=insert_records(
+            {i: v for i, v in (inserts_by_lf or {}).items() if i in regular_lf_indices}
+        ),
         date=date,
         master_path=master_final_path,
         regular_lf_paths=regular_lf_paths,
@@ -2640,6 +2678,8 @@ def run_all_days(
     state=None,
     on_day_complete: Optional[Callable] = None,
     state_save_fn: Optional[Callable] = None,
+    all_day_batches: Optional[list] = None,
+    all_gps_points_by_date: Optional[dict] = None,
 ) -> list:
     """Run the day-first pipeline for every day in `day_batches`.
 
@@ -2691,6 +2731,11 @@ def run_all_days(
             The callable turns the trimmed points (which describe
             what's on-screen, not the source footage) into a short-
             specific OST string.
+        all_day_batches / all_gps_points_by_date: On a resume, EVERY day of
+            the drive (finished ones too) and their GPS. Inserts are placed
+            against all of them (a photo of a finished day is still placed,
+            the clip stays on the drive's first day) and gated only for the
+            days in `day_batches`. Omitted: `day_batches` is the whole drive.
 
     Returns:
         List of `DayArtifacts`, one per successful day.
@@ -2717,6 +2762,20 @@ def run_all_days(
 
     per_day_map = per_day_locations or {}
 
+    # Place AND gate every requested insert BEFORE the first encode (a photo that fits
+    # no day, a county outside the LF label, an unblurred clip all refuse here), so the
+    # audit below covers them and nothing is burned for a run that cannot finish.
+    _inserts_by_date = plan_drive_inserts(
+        config,
+        all_day_batches or day_batches,
+        lf_plans_by_date=lf_plans_by_date,
+        gps_points_by_date=all_gps_points_by_date or gps_points_by_date,
+        render_dates={b.date for b in day_batches},
+        label_of=lambda d, i: insert_label(
+            (per_lf_locations_by_date or {}).get(d), i, per_day_map.get(d, location)
+        ),
+    )
+
     # ── Front-load every day's LF OST audit before the first encode ──
     # Every day's per-LF burn text is already resolved (``per_lf_ost_text_by_date``
     # / pre-seeded state) BEFORE any master encode, so run the LF OST-audit gate
@@ -2741,6 +2800,7 @@ def run_all_days(
                 location=per_day_map.get(_fl_batch.date, location),
                 per_lf_ost_text=(per_lf_ost_text_by_date or {}).get(_fl_batch.date),
                 per_lf_locations=(per_lf_locations_by_date or {}).get(_fl_batch.date),
+                inserts=insert_records(_inserts_by_date.get(_fl_batch.date) or {}),
             )
         except OstAuditPendingError:
             _pending_ost_days.append(_fl_batch.date)
@@ -2828,6 +2888,7 @@ def run_all_days(
                     short_ost_text_fn=short_ost_text_fn,
                     short_regions_fn=short_regions_fn,
                     state=state,
+                    inserts_by_lf=_inserts_by_date.get(day_batch.date) or None,
                 )
             )
         except OstAuditPendingError:
@@ -2843,7 +2904,7 @@ def run_all_days(
             # wrap — every other exception keeps the existing
             # "log + skip the day + continue" behaviour below.
             raise
-        except (BlurGateError, OstPostBurnError):
+        except (BlurGateError, OstPostBurnError, InsertError):
             # Privacy hard-fail (blur required but the master isn't provably blurred),
             # or a short whose burned title is provably absent from its pixels:
             # like OstAuditPendingError, these are pipeline-control signals, NOT a

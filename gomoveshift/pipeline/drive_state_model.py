@@ -526,6 +526,9 @@ class PipelineState:
     # field). `from_dict` returns None for missing entries, which the
     # skip logic treats as "not recorded → fall through".
     per_day_completed: Optional[dict] = None
+    # The insert flags the finished days were rendered with (``inserts.insert_request``); the
+    # flags themselves stay per-invocation, a resume is refused if they differ. Bookkeeping.
+    insert_request: Optional[dict] = None
     _per_day_skip_indices: Optional[set] = None
     # ``{date: {"part_count": int, "records": [...]}}``; gates
     # ``cleanup.drop_day_master`` and skips already-final parts on resume.

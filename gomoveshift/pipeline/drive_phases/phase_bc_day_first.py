@@ -59,6 +59,7 @@ from ..gps_enrichment import (
     derive_per_lf_locations,
     validate_burned_ost_text,
 )
+from ..inserts import insert_request, reconcile_insert_request
 from ..longform_assembler import LongFormAssembler
 from ..media_api import (
     Deliverables,
@@ -549,6 +550,12 @@ class PhaseBCDayFirst:
         _assert_sign_verify(state, self.config)
 
         if remaining_batches:
+            # The insert flags are per-invocation, so a resume must carry the ones its
+            # finished days were rendered with (refused otherwise), and the inserts are
+            # planned against EVERY day while only the remaining ones are rendered.
+            reconcile_insert_request(state, self.config.drive, [a.date for a in skipped_artifacts])
+            _inserts_wanted = insert_request(self.config.drive) is not None
+
             # Per-day write-through callback: record the day in
             # ``per_day_completed`` and persist state to disk BEFORE the
             # next day starts. A mid-phase crash (e.g. day N master
@@ -575,6 +582,15 @@ class PhaseBCDayFirst:
                 remaining_batches,
                 episode_files=state.episode_files or [],
                 gps_per_episode=state.gps_per_episode,
+            )
+            all_gps_points_by_date = (
+                _build_gps_points_by_date(
+                    day_batches,
+                    episode_files=state.episode_files or [],
+                    gps_per_episode=state.gps_per_episode,
+                )
+                if _inserts_wanted
+                else None
             )
             short_ost_text_fn = _make_short_ost_text_fn(geocoder, places_fn=_forward_geocode_places)
             # Regions closure for the cross-surface shorts location gate
@@ -615,6 +631,8 @@ class PhaseBCDayFirst:
                 # Persist the front-load OST hash markers before the first
                 # master encode so a mid-encode kill can't lose them.
                 state_save_fn=state_save_fn,
+                all_day_batches=day_batches if _inserts_wanted else None,
+                all_gps_points_by_date=all_gps_points_by_date or None,
             )
         else:
             fresh_artifacts = []
@@ -1269,6 +1287,7 @@ class PhaseBCDayFirst:
                     day_dir=day_dir,
                 )
                 self._enforce_reconstructed_shortfall(state, reconstructed, entry)
+                reconstructed.inserts = _recorded_inserts(entry)
                 skipped_artifacts.append(reconstructed)
             elif entry and _day_dir_has_finals(day_dir):
                 # Fast-path #2: master was dropped post-run but the
@@ -1287,6 +1306,7 @@ class PhaseBCDayFirst:
                     day_dir=day_dir,
                 )
                 self._enforce_reconstructed_shortfall(state, reconstructed, entry)
+                reconstructed.inserts = _recorded_inserts(entry)
                 skipped_artifacts.append(reconstructed)
             else:
                 remaining_batches.append(batch)
@@ -2209,6 +2229,16 @@ def _synthesize_ingest_plan_from_state(state):
         len(episodes),
     )
     return plan
+
+
+def _recorded_inserts(entry) -> dict:
+    """The inserts a finished day's ``per_day_completed`` entry recorded, ``{lf_index: [record]}``.
+
+    A reconstruction from disk cannot see them, and the end-of-phase deliverables record would
+    otherwise overwrite them with ``{}`` (Phase D would lose the chapter markers and the count).
+    """
+    recorded = ((entry or {}).get("deliverables") or {}).get("inserts") or {}
+    return {int(i): recs for i, recs in recorded.items()}
 
 
 def _deliverables_record(artifacts, state) -> dict:

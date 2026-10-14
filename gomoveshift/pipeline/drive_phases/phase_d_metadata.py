@@ -26,6 +26,13 @@ from ..title_builder import append_full_drive_part_suffix, ensure_unique_titles
 logger = logging.getLogger("gomoveshift.pipeline.drive_phases.phase_d")
 
 
+def _lf_inserts(state) -> dict[int, list[dict]]:
+    """``{lf_index: [insert record, ...]}`` the drive run spliced (``Deliverables.inserts``)."""
+    from ..media_api import deliverables_for_publish
+
+    return {i: r for d in deliverables_for_publish(state) for i, r in d.inserts.items() if r}
+
+
 def _rescope_arc_to_lf(profile: dict, resolved) -> None:
     """Window a day-aggregated route profile's journey arc + towns to ONE LF.
 
@@ -261,6 +268,7 @@ def _build_metadata_per_lf(
     per_lf_regions = state.per_lf_regions or {}
     per_lf_gpx_path_map = state.per_lf_gpx_path or {}
 
+    lf_inserts = _lf_inserts(state)
     metadata_per_lf: dict[int, dict] = {}
     for lf, _lf_path in zip(drive_plan.regular_lfs, regular_lf_paths):
         project_name = f"{project_base}_lf{lf.index:02d}"
@@ -421,6 +429,7 @@ def _build_metadata_per_lf(
             has_gps=lf_has_gps,
             resolved_location=lf_resolved,
             full_drive_stats=lf_full_drive_stats,
+            insert_count=len(lf_inserts.get(lf.index, [])),
         )
         if (getattr(lf, "part_count", None) or 1) > 1 and metadata.get("title"):
             metadata["title"] = append_full_drive_part_suffix(
@@ -510,6 +519,7 @@ def _generate_chapters_all_lfs(
     per_lf_gpx_path = state.per_lf_gpx_path or {}
     per_lf_locations_override = state.per_lf_locations or {}
     per_lf_resolved = state.per_lf_resolved_location or {}
+    lf_inserts = _lf_inserts(state)
     if not (per_lf_gpx_path or gpx_files):
         logger.info("  D1.5: No GPX files — skipping chapter generation")
         return
@@ -576,6 +586,12 @@ def _generate_chapters_all_lfs(
             logger.error("CHAPTER-GATE: LF %d chapter generation failed: %s", lf.index, e)
             chapters = []
             chapter_text = ""
+
+        if chapters and lf_inserts.get(lf.index):
+            from ..chapters.marker_merger import add_insert_markers
+
+            chapters = add_insert_markers(chapters, [r["at_s"] for r in lf_inserts[lf.index]])
+            chapter_text = "\n".join(f"{c['timestamp']} {c['title']}" for c in chapters)
 
         meta["chapters"] = chapters
         meta["chapter_text"] = chapter_text
