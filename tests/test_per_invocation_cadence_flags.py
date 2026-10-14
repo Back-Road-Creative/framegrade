@@ -44,53 +44,24 @@ class TestDriveConfigShortsPublishTimes:
             DriveConfig(shorts_publish_times=["14:00", 1800])  # type: ignore[list-item]
 
 
-class TestShortsPublishTimesByRegion:
-    def test_default_spread(self):
-        cfg = DriveConfig()
-        # Ireland is a flat window; USA is a per-LF-day map (Tue/Fri stagger so
-        # the two concurrent USA drives don't share a slot) with a _default.
-        assert cfg.shorts_publish_times_by_region == {
-            "ireland": ["08:00", "12:00"],
-            "usa": {
-                "tue": ["14:00", "18:00"],
-                "fri": ["10:00", "16:00"],
-                "_default": ["14:00", "18:00"],
-            },
-        }
+class TestShortsHoursAreWaypostsNotConfigs:
+    """The per-region hour tables left DriveConfig: Waypost's cadence owns them."""
 
-    def test_accepts_custom_map(self):
-        cfg = DriveConfig(shorts_publish_times_by_region={"usa": ["10:00", "18:00"]})
-        assert cfg.shorts_publish_times_by_region == {"usa": ["10:00", "18:00"]}
+    def test_default_spread_is_the_waypost_seed(self):
+        from gomoveshift.pipeline.seo_slots import shorts_pool
 
-    def test_empty_map_is_valid(self):
-        cfg = DriveConfig(shorts_publish_times_by_region={})
-        assert cfg.shorts_publish_times_by_region == {}
+        cfg = Config()
+        assert shorts_pool(cfg, "ireland") == ["08:00", "12:00"]
+        assert shorts_pool(cfg, "usa") == ["10:00", "14:00", "16:00", "18:00"]
 
-    def test_rejects_empty_region_list(self):
-        with pytest.raises(ValueError, match="at least one"):
-            DriveConfig(shorts_publish_times_by_region={"usa": []})
+    def test_drive_config_has_no_region_hour_table(self):
+        for name in ("shorts_publish_times_by_region", "shorts_slot_pool_by_region"):
+            assert name not in DriveConfig.model_fields
+            assert not hasattr(DriveConfig(), name)
 
-    def test_rejects_malformed_entry(self):
-        with pytest.raises(ValueError, match="HH:MM"):
-            DriveConfig(shorts_publish_times_by_region={"usa": ["14:00", "26:00"]})
-
-    def test_accepts_per_day_map(self):
-        cfg = DriveConfig(
-            shorts_publish_times_by_region={
-                "usa": {"tue": ["14:00", "18:00"], "_default": ["14:00", "18:00"]}
-            }
-        )
-        assert cfg.shorts_publish_times_by_region["usa"]["tue"] == ["14:00", "18:00"]
-
-    def test_per_day_map_requires_default(self):
-        with pytest.raises(ValueError, match="_default"):
-            DriveConfig(shorts_publish_times_by_region={"usa": {"tue": ["14:00", "18:00"]}})
-
-    def test_per_day_map_validates_each_window(self):
-        with pytest.raises(ValueError, match="HH:MM"):
-            DriveConfig(
-                shorts_publish_times_by_region={"usa": {"tue": ["26:00"], "_default": ["14:00"]}}
-            )
+    def test_a_table_passed_to_drive_config_is_ignored(self):
+        cfg = DriveConfig(shorts_publish_times_by_region={"usa": ["10:00"]})
+        assert not hasattr(cfg, "shorts_publish_times_by_region")
 
 
 class TestResolveShortsTimesForRegion:
