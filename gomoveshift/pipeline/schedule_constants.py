@@ -29,7 +29,6 @@ Two access patterns live side-by-side:
 """
 
 import logging
-import sqlite3
 from datetime import datetime as dt_datetime
 from datetime import time as dt_time
 from typing import Optional
@@ -218,76 +217,8 @@ def shorts_times(config: Optional[object] = None) -> list:
     return [_parse_hhmm(t) for t in config.drive.shorts_publish_times]
 
 
-def _configured_shorts_times_for_region(
-    config, region: Optional[str], lf_day: Optional[str] = None
-) -> list:
-    """The config-only resolution: config precedence only, no data path."""
-    by_region = getattr(config.drive, "shorts_publish_times_by_region", None) or {}
-    if region is not None and region in by_region:
-        val = by_region[region]
-        if isinstance(val, dict):
-            return list(val.get(lf_day) or val.get("_default") or config.drive.shorts_publish_times)
-        return list(val)
-    return list(config.drive.shorts_publish_times)
-
-
-def best_slot_from_data(
-    conn: "sqlite3.Connection", region: str, platform: str, pool: list, min_n: int
-) -> "tuple[Optional[str], str]":
-    """Resolve Source B (our ranking) gated by Source A (platform-native
-    audience-online) where Source A exists for ``platform``.
-
-    Returns ``(best_hhmm, reason)``; ``best_hhmm`` is ``None`` when the
-    slot cannot be moved and ``reason`` explains why (logged by the caller).
-    Never raises — any DB error is the caller's problem to catch.
-    """
-    from gomoveshift.tracking.slot_performance import ensure_audience_online_schema, slots_ranked
-
-    ranked = slots_ranked(conn, region=region, platform=platform, min_n=min_n)
-    if not ranked:
-        return None, (
-            f"no ranked slot_performance rows for region={region} platform={platform} "
-            f"with n>=min_n={min_n}"
-        )
-    top = ranked[0]
-    candidate = f"{top.hour_local:02d}:00"
-    if candidate not in pool:
-        return None, (
-            f"top slot {candidate} for platform={platform} is not in the region's "
-            f"configured shorts_slot_pool_by_region"
-        )
-
-    ensure_audience_online_schema(conn)
-    online_rows = conn.execute(
-        "SELECT hour_local, SUM(n_online) AS total FROM audience_online "
-        "WHERE platform = ? GROUP BY hour_local ORDER BY total DESC",
-        (platform,),
-    ).fetchall()
-    if not online_rows:
-        # Source A doesn't exist for this platform (e.g. youtube) — B alone
-        # decides. Not a fault.
-        return (
-            candidate,
-            f"resolved from slot_performance alone (no audience_online for {platform})",
-        )
-
-    top3_hours = {row[0] for row in online_rows[:3]}
-    if top.hour_local not in top3_hours:
-        return None, (
-            f"sources disagree: slot_performance top hour {top.hour_local} for "
-            f"platform={platform} is not in audience_online's top-3 {sorted(top3_hours)}"
-        )
-    return candidate, "resolved: slot_performance and audience_online agree"
-
-
 def resolve_shorts_times_for_region(
-    config,
-    region: Optional[str],
-    lf_day: Optional[str] = None,
-    *,
-    conn: "Optional[sqlite3.Connection]" = None,
-    platform: Optional[str] = None,
-    min_n: int = 5,
+    config, region: Optional[str], lf_day: Optional[str] = None
 ) -> list:
     """Return the region-aware shorts HH:MM strings for ``region`` + ``lf_day``.
 
@@ -306,59 +237,17 @@ def resolve_shorts_times_for_region(
     handler only calls this when no ``--shorts-times`` was given — the
     explicit flag always wins.
 
-    Data path: when ``conn`` and ``platform`` are both given, the best
-    configured slot for ``(region, platform)`` is moved to the front of the
-    returned list when our own ranking (``slots_ranked``, Source B) agrees
-    with the platform's audience-online curve (Source A) where Source A
-    exists for that platform (Meta only today — YouTube has no hour
-    dimension by design, TikTok pending). The data only ever picks WHICH
-    already-configured slot to prefer; it never invents an hour, and a
-    missing/broken/absent database keeps the configured window and logs why
-    — it never raises. Every existing caller (``conn=None``) is unaffected.
+    No data path: the resolver once moved the best-ranked configured slot to the front
+    per platform (``best_slot_from_data``); that is retired, and no GMS ranking
+    moves a posting slot.
     """
-    configured = _configured_shorts_times_for_region(config, region, lf_day)
-    if conn is None or platform is None or region is None:
-        return configured
-
-    pool = (getattr(config.drive, "shorts_slot_pool_by_region", None) or {}).get(
-        region
-    ) or configured
-
-    try:
-        best, reason = best_slot_from_data(conn, region, platform, pool, min_n)
-    except Exception as exc:  # noqa: BLE001 - any DB failure keeps the configured window
-        logger.info(
-            "resolve_shorts_times_for_region: data path failed for region=%s "
-            "platform=%s (%s) — keeping configured window %s",
-            region,
-            platform,
-            exc,
-            configured,
-        )
-        return configured
-
-    if best is None:
-        logger.info(
-            "resolve_shorts_times_for_region: keeping configured window %s for "
-            "region=%s platform=%s — %s",
-            configured,
-            region,
-            platform,
-            reason,
-        )
-        return configured
-
-    logger.info(
-        "resolve_shorts_times_for_region: moving best slot %s to front for "
-        "region=%s platform=%s — %s",
-        best,
-        region,
-        platform,
-        reason,
-    )
-    if best in configured:
-        return [best] + [t for t in configured if t != best]
-    return [best] + configured
+    by_region = getattr(config.drive, "shorts_publish_times_by_region", None) or {}
+    if region is not None and region in by_region:
+        val = by_region[region]
+        if isinstance(val, dict):
+            return list(val.get(lf_day) or val.get("_default") or config.drive.shorts_publish_times)
+        return list(val)
+    return list(config.drive.shorts_publish_times)
 
 
 # The DriveConfig field default (config.py). Compared against verbatim to

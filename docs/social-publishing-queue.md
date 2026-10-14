@@ -347,26 +347,23 @@ blackout wins when both apply.
 
 ### One slot, four platforms, four publish times
 
-Instagram's best hour is not YouTube's — `resolve_shorts_times_for_region` resolves the
-window per `(region, platform)`, and the plan carried ONE `scheduled_at_utc` every row copied.
-`ScheduleWindow.scheduled_at_utc_by_platform` carries the difference: a platform appears **only
-when its resolved hour differs** from the slot, so the map never restates the slot in every record.
+Instagram's best hour is not YouTube's, and the plan carried ONE `scheduled_at_utc` every row
+copied. `ScheduleWindow.scheduled_at_utc_by_platform` carries the difference: a platform appears
+**only when its hour differs** from the slot, so the map never restates the slot in every record.
 
 `build_publish_plan(shorts_times_by_platform=…)` fills it, indexing each platform's window by the
-short's ordinal **within its own publish day** (slots ranked by time) — the scheduler fills a day
-from that window in order, so a platform's best hour moving to the front moves that day's first short.
-A window shorter than the day's short count leaves the overflow shorts on the slot.
+short's ordinal **within its own publish day** (slots ranked by time). A window shorter than the
+day's short count leaves the overflow shorts on the slot.
 
-Phase D is the producer: `_emit_publish_plan_sidecar(region=…)` resolves the window once per
-first-party platform against the spool's `slot_performance`/`audience_online` rows (the same
-database `enqueue-plan` and `metrics ingest` use) and passes only the platforms the data moved. No
-rows, no region, an unopenable spool, or an explicit `--shorts-times` all write the older single-slot shape —
-every platform on the slot — and say so in the phase-D log; none of them fail the drive.
+**No producer remains.** Phase D used to resolve the window per platform against the spool's
+`slot_performance`/`audience_online` rows (the data path); that path is retired, GMS moves no slot from a
+ranking, and `_emit_publish_plan_sidecar` passes no map: every platform stays on the slot. The field and the reader below stay for a sidecar that
+carries one.
 
 `enqueue_from_plan_sidecar` reads the map per row and falls back to `scheduled_at_utc` for any
 platform it does not name — never to `NULL`, which `_select_due` reads as "due now". A malformed
-entry is refused, not dropped. A sidecar written before per-platform times loads with an empty map. The slot never leaves the
-region's configured grid: the best-time resolution picks *which* configured hour, this only carries it to the row.
+entry is refused, not dropped. An older sidecar loads with an empty map. The map only carries
+a platform's hour to its row; it decides nothing.
 
 ## The queue must be the same database `enqueue-plan` wrote to
 
