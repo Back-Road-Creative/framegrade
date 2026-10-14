@@ -208,6 +208,64 @@ def test_discarded_steps_do_not_count(tmp_path):
     assert picture_changed_for_day(cache) is False
 
 
+def test_fast_drops_opt_in_steps_and_says_so(capsys):
+    from types import SimpleNamespace
+
+    from gomoveshift.cli.handlers.drive import apply_picture_flags
+    from gomoveshift.cli.parser import _build_parser
+    from gomoveshift.pipeline.preflight_plan import print_plan
+
+    cfg = Config()
+    cfg.drive.stabilize = True  # a saved opt-in
+    cfg.drive.deflicker = True
+    apply_picture_flags(cfg, Namespace(stabilize=None, deflicker=None, fast=True))
+    assert cfg.drive.stabilize is False and cfg.drive.deflicker is False
+    assert cfg.drive.fast_skipped == ["sharpen", "stabilize", "deflicker"]
+    # without --fast nothing is recorded and a saved opt-in survives
+    keep = Config()
+    keep.drive.stabilize = True
+    apply_picture_flags(keep, Namespace(stabilize=None, deflicker=None, fast=False))
+    assert keep.drive.stabilize is True and keep.drive.fast_skipped == []
+    # the flag is a plain store_true
+    assert _build_parser().parse_args(["drive", "/tmp/x"]).fast is False
+    assert _build_parser().parse_args(["drive", "/tmp/x", "--fast"]).fast is True
+    # the plan prints one line naming each dropped step
+    print_plan(SimpleNamespace(), Path("/nonexistent"), fast_skipped=cfg.drive.fast_skipped)
+    out = capsys.readouterr().out
+    assert out.count("fast mode: skipped") == 1
+    assert "fast mode: skipped sharpen, stabilize, deflicker" in out
+
+
+def test_preflight_hands_fast_skipped_to_the_plan(monkeypatch, tmp_path):
+    """A real ``drive --fast`` run reaches the plan through
+    ``run_preflight_and_prompt``: the orchestrator must pass the config's
+    ``fast_skipped`` on, or the ``fast mode:`` line never prints."""
+    from gomoveshift.pipeline import orchestrator_preflight
+
+    seen = []
+    monkeypatch.setattr(
+        orchestrator_preflight,
+        "print_plan",
+        lambda state, stages_dir, out=None, fast_skipped=None: seen.append(fast_skipped),
+    )
+    cfg = Config()
+    cfg.drive.fast_skipped = ["sharpen", "stabilize"]
+    result = orchestrator_preflight.run_preflight_and_prompt(
+        state=MagicMock(),
+        stages_dir=tmp_path,
+        dry_run=True,
+        force=True,
+        source_dir=tmp_path,
+        project_dir=tmp_path,
+        start_time=0.0,
+        stages_completed=[],
+        config=cfg,
+        emit_summary=MagicMock(),
+    )
+    assert result is not None  # dry-run exits after the plan
+    assert seen == [["sharpen", "stabilize"]]
+
+
 def test_only_a_literal_true_flag_turns_a_step_on():
     """A stand-in args object (MagicMock) answers every attribute with a truthy
     mock; that must not read as ``--stabilize``/``--deflicker`` supplied."""

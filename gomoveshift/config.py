@@ -1445,6 +1445,8 @@ class DriveConfig(BaseModel):
     # gated on measured luma jitter (pipeline/stabilize.py).
     stabilize: bool = False
     deflicker: bool = False
+    # Picture steps dropped by ``drive --fast`` this run (shown in the preflight plan).
+    fast_skipped: list[str] = Field(default_factory=list)
     # Route Story trail film beside each LF day (--trail / --no-trail). None is
     # auto: on when the day has a GPX and a prepared imagery bundle. The profile
     # (--trail-profile) supplies the imagery rasters and credits.

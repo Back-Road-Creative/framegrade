@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Optional
@@ -192,15 +192,28 @@ def _reresolve_passed_lf_slots(
     a fresh run makes, from ``now`` — keeping ``current``'s locked shorts
     posting times. Returns the new schedule, also set on ``state``.
 
-    An LF of the run already live: returns ``None`` and touches nothing. Its
-    remaining LFs follow the live one's date, so a rebuild cannot move them.
+    An LF of the run already live: each live LF keeps its real publish date and
+    every pending LF whose slot has passed (or no longer sits behind the LF
+    before it) gets seo_manager's next free slot on the run's LF day. The
+    anchor stays, since it still names the live LF's date, and the run's
+    unconfirmed ``schedule.sqlite3`` rows follow the new dates.
+
+    Returns ``None`` and touches nothing when the heal has nothing sound to
+    stand on: no ``publish_day`` (the next free slot could land on another
+    weekday than the live LF's), a live LF with no readable publish time, or
+    a sidecar that holds uploads ``state`` does not.
     """
     from ..youtube_sidecar import load_sidecar
 
-    if (getattr(state, "youtube_uploads", None) or {}) or load_sidecar(Path(output_base)):
-        return None
-    state.lf_publish_date = None
-    state.start_date = None
+    uploads = getattr(state, "youtube_uploads", None) or {}
+    partly_live = bool(uploads or load_sidecar(Path(output_base)))
+    if partly_live:
+        records = [r for r in uploads.values() if (r or {}).get("video_id")]
+        if not (state.publish_day and records and all(_upload_day(r) for r in records)):
+            return None
+    else:
+        state.lf_publish_date = None
+        state.start_date = None
     state.drive_schedule = current  # the rebuild reads the shorts-time lock off it
     fresh = _build_and_persist_drive_schedule(
         scheduler_cls=scheduler_cls,
@@ -210,17 +223,144 @@ def _reresolve_passed_lf_slots(
         region=region,
         stages_dir=stages_dir,
         now=now,
-        rebased=True,
+        rebased=not partly_live,
+        reresolve_passed=partly_live,
         project=project,
     )
     state.drive_schedule = fresh
+    if partly_live and project:
+        from ..seo_slots import move_claims
+
+        move_claims(
+            Path(config.seo.storage_path) / ".content_ledger.json",
+            config,
+            project=project,
+            region=region,
+            slots={
+                lf.index: datetime.fromisoformat(slot.datetime_est)
+                for lf, slot in zip(drive_plan.regular_lfs, fresh.lf_slots)
+                if not _upload_record(uploads, lf.index).get("video_id")
+            },
+        )
     log.warning(
-        "LF_SLOT_RERESOLVED planned=%s new=%s now=%s reason=slot_passed_before_insert",
+        "LF_SLOT_RERESOLVED planned=%s new=%s now=%s reason=%s",
         [s.datetime_est for s in current.lf_slots],
         [s.datetime_est for s in fresh.lf_slots],
         now.isoformat(),
+        "slot_passed_run_partly_live" if partly_live else "slot_passed_before_insert",
     )
     return fresh
+
+
+def _upload_record(uploads, lf_index) -> dict:
+    """An LF's upload record; state keys are ints, a reloaded sidecar's are text."""
+    return uploads.get(lf_index) or uploads.get(str(lf_index)) or {}
+
+
+def _upload_day(record) -> Optional[date]:
+    """The EST date a live LF really publishes on; ``None`` when it is not live or
+    its record carries no readable ``publish_at`` (naive text is UTC)."""
+    if not (record or {}).get("video_id") or not record.get("publish_at"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(record["publish_at"]))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(EST).date()
+
+
+def _lf_days_around_live(
+    *,
+    ledger,
+    config,
+    region,
+    drive_plan,
+    state,
+    slot_time,
+    base_date: str,
+    now: Optional[datetime],
+    reresolve_passed: bool,
+    project: Optional[str],
+) -> Optional[list]:
+    """Per-LF publish dates for a run with a live long-form, else ``None``.
+
+    ``None`` means the plain series from ``base_date`` stands, which is every run that
+    was never healed. A live LF keeps its real date. A pending LF keeps the date the
+    run's own persisted schedule gave it while that date is still behind every earlier
+    LF's; with ``reresolve_passed`` it must also still be ahead of ``now``. A pending
+    LF that lost its date gets seo_manager's next free slot on the run's LF day
+    (``reresolve_passed``), searched from the later of ``now`` and the latest earlier
+    LF, with the run's own bookings exempt. Without ``reresolve_passed`` nothing is
+    asked of seo_manager: the date is one series step behind the latest earlier LF.
+
+    Without ``reresolve_passed`` this only speaks for a schedule the run itself
+    persisted on this base date; an operator who moved the anchor gets the series.
+    """
+    from ..content_ledger import next_free_slot
+    from ..seo_slots import lf_series
+
+    lfs = drive_plan.regular_lfs
+    uploads = getattr(state, "youtube_uploads", None) or {}
+    live = {i: _upload_day(_upload_record(uploads, lf.index)) for i, lf in enumerate(lfs)}
+    live = {i: day for i, day in live.items() if day is not None}
+    persisted = getattr(getattr(state, "drive_schedule", None), "lf_slots", None) or []
+    kept: list = []
+    for slot in persisted:
+        try:
+            kept.append(date.fromisoformat(str(getattr(slot, "date", ""))))
+        except ValueError:
+            kept.append(None)
+    series = lf_series(base_date, len(lfs))
+    if not live:
+        return None
+    if not reresolve_passed and (not kept or kept[0] != series[0]):
+        return None
+
+    def slot_of(day: date) -> datetime:
+        return datetime.combine(day, slot_time, tzinfo=EST)
+
+    days: list = []
+    used = set(live.values())
+    for i in range(len(lfs)):
+        latest = max(days, default=None)
+        day = live.get(i)
+        if day is None:
+            day = kept[i] if i < len(kept) else None
+            if day is not None and (
+                day in used
+                or (latest is not None and day <= latest)
+                or (reresolve_passed and slot_of(day) <= now)
+            ):
+                day = None
+        if day is None and not reresolve_passed:
+            day = lf_series(latest, 2)[1] if latest is not None else series[i]
+        after = max(now, slot_of(latest)) if latest is not None and now else now
+        for _ in range(len(lfs) + 1):
+            if day is not None:
+                break
+            slot = next_free_slot(
+                ledger,
+                config,
+                region,
+                publish_day=state.publish_day,
+                include_today=False,
+                after=after.astimezone(EST),
+                project=project,
+            )
+            if slot.date() in used:
+                after = slot  # one of this run's own LFs holds it: look past it
+            else:
+                day = slot.date()
+        if day is None:
+            raise RuntimeError(
+                f"LF {i + 1} of {len(lfs)}: no free {region} slot behind this run's own "
+                f"long-form dates {sorted(d.isoformat() for d in used)}"
+            )
+        used.add(day)
+        days.append(day)
+    return None if days == series else days
 
 
 def _assert_lf_dates_free(
@@ -270,6 +410,7 @@ def _build_and_persist_drive_schedule(
     now: Optional[datetime] = None,
     rebased: bool = False,
     project: Optional[str] = None,
+    reresolve_passed: bool = False,
 ):
     """Build the ``DriveSchedule`` and persist it to ``stages_dir/drive_schedule.json``.
 
@@ -291,6 +432,11 @@ def _build_and_persist_drive_schedule(
 
     ``project`` is the run's project name (the source stem Phase D books under); the
     LF 2..N guard exempts that project's own claimed rows.
+
+    ``reresolve_passed`` is the insert loop's heal for a run with a live LF
+    (``_reresolve_passed_lf_slots``): pending LFs whose slot is ``<= now`` are
+    re-resolved. With or without it, a run that already holds a live LF off the plain
+    series keeps that LF's real date (``_lf_days_around_live``).
     """
     _shorts_per_day = state.shorts_per_day
     custom_shorts_times = None
@@ -460,7 +606,20 @@ def _build_and_persist_drive_schedule(
             _prev_identity,
         )
 
+    _lf_days = _lf_days_around_live(
+        ledger=ledger,
+        config=config,
+        region=region,
+        drive_plan=drive_plan,
+        state=state,
+        slot_time=scheduler.long_form_time,
+        base_date=resolved_start_date,
+        now=now,
+        reresolve_passed=reresolve_passed,
+        project=project,
+    )
     drive_schedule = scheduler.generate_drive_schedule(
+        **({"lf_dates": _lf_days} if _lf_days is not None else {}),
         regular_lfs=drive_plan.regular_lfs,
         region=region,
         start_date=resolved_start_date,

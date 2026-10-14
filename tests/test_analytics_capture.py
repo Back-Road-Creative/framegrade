@@ -111,6 +111,29 @@ class TestAnalyticsCapture:
         assert data["ctr"] == 0.05
         assert data["subscribers_gained"] == 3
 
+    def test_analytics_query_ends_today_not_in_the_future(self, generator_with_store):
+        """endDate=2100-01-01 drew HTTP 400 on every call (Ireland drive, 10-11).
+
+        05:00 UTC is still the previous day in YouTube's Pacific reporting day.
+        """
+        from freezegun import freeze_time
+
+        gen, _ = generator_with_store
+        mock_sync = MagicMock()
+        mock_sync.youtube_data.videos().list().execute.return_value = _make_yt_api_response(
+            ["vid_A"]
+        )
+        mock_sync.youtube_analytics.reports().query().execute.return_value = (
+            _make_analytics_response()
+        )
+
+        with freeze_time("2026-10-12T05:00:00Z"):
+            gen._batch_sync_stats(mock_sync, {"vid_A": "content-a"})
+
+        _, kwargs = mock_sync.youtube_analytics.reports().query.call_args
+        assert kwargs["endDate"] == "2026-10-11"
+        assert kwargs["startDate"] == "2005-01-01"
+
     def test_analytics_failure_does_not_block_data_api_sync(self, generator_with_store):
         gen, _ = generator_with_store
         video_mapping = {"vid_B": "content-b"}

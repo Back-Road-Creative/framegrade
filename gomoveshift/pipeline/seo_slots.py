@@ -478,6 +478,36 @@ def book_in_store(
         )
 
 
+def move_claims(ledger_path: Path, config, *, project: str, region: Optional[str], slots) -> None:
+    """Move a project's unconfirmed ``schedule.sqlite3`` rows to re-resolved slots.
+
+    ``slots`` maps ``lf_index`` to the new slot. Only rows the store already holds for
+    ``project`` without a video id move, latest slot first so a row never lands on a date
+    a sibling row is about to leave. Best effort like :func:`book_in_store`: no store, no
+    row or a refused booking never fails the run (``SCHEDULE-STORE-UNBOOKED``).
+    """
+    db = Path(ledger_path).parent / STORE_FILENAME
+    if not db.exists():
+        return
+    try:
+        store = ScheduleStore(db, EST, cadence_for(config, region).regions)
+        held = {b.lf_index for b in store.bookings() if b.project == project and not b.video_id}
+    except Exception as exc:  # noqa: BLE001 -- the mirror never fails a run
+        logger.error("SCHEDULE-STORE-UNBOOKED: %s claims not moved in %s: %s", project, db, exc)
+        return
+    for lf_index, slot_at in sorted(slots.items(), key=lambda kv: kv[1], reverse=True):
+        if lf_index in held:
+            book_in_store(
+                ledger_path,
+                config,
+                project=project,
+                lf_index=lf_index,
+                region=region,
+                slot_at=slot_at,
+                video_id=None,
+            )
+
+
 __all__ = [
     "Occupancy",
     "anchor_errors",

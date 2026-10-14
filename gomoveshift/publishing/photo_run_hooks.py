@@ -7,7 +7,6 @@ wires them with ``PhotoOrchestrator(..., **photo_run_hooks())``.
 from __future__ import annotations
 
 import logging
-from typing import Callable
 
 from ..pipeline.content_ledger import ContentEntry, record_confirmed_upload
 from ..pipeline.photos.voice_styles import VoiceStyle
@@ -99,9 +98,22 @@ def record_photo_theme_usage(voice_style: str, week_start: str) -> None:
         logger.warning(f"Theme usage recording failed ({type(e).__name__}): {e}")
 
 
-def photo_run_hooks() -> dict[str, Callable]:
-    """Keyword arguments that wire a ``PhotoOrchestrator`` to the ledger and rotator."""
+def photo_upscale_policy() -> str:
+    """The brand's still-upscale policy, or ``"off"`` (today's behaviour) if unreadable."""
+    from ..console.settings import current_brand
+    from .brand_policy import load_media_profile
+
+    try:
+        return load_media_profile(current_brand()).upscale
+    except Exception:  # noqa: BLE001 — fail closed: no ML upscale
+        logger.warning("photo run: media profile unreadable -- ML upscale off")
+        return "off"
+
+
+def photo_run_hooks() -> dict[str, object]:
+    """Keyword arguments that wire a ``PhotoOrchestrator`` to the ledger, rotator and upscale policy."""
     return {
+        "upscale": photo_upscale_policy(),
         "ledger_booker": book_photo_slots,
         "voice_source": next_photo_voice_style,
         "theme_recorder": record_photo_theme_usage,

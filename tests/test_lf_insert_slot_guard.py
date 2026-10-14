@@ -8,7 +8,10 @@ against the clock right before the insert:
 
 * nothing of the run live -> the slots are re-resolved through the same
   Waypost resolver a fresh run uses (``LF_SLOT_RERESOLVED``);
-* otherwise -> ``LF_SLOT_PASSED`` and no insert.
+* an LF of the run live -> it keeps its real date and the passed ones are
+  re-resolved behind it (``LF_SLOT_RERESOLVED``);
+* the resolver declines, or its slot has passed too -> ``LF_SLOT_PASSED`` and
+  no insert.
 
 This module runs on the real clock (the suite-wide pin in ``conftest`` skips
 it) and injects ``clock=`` where a test needs a fixed time.
@@ -31,10 +34,13 @@ from gomoveshift.pipeline.drive_phases.phase_d_scheduling import (
     _build_and_persist_drive_schedule,
     _reresolve_passed_lf_slots,
 )
+from gomoveshift.pipeline.schedule_constants import EST
 from gomoveshift.pipeline.scheduler import PipelineScheduler
 from gomoveshift.pipeline.youtube_sidecar import save_sidecar
+from seo_manager.scheduling.store import ScheduleStore
 
 from _state_helpers import make_state
+from test_phase_d_base_date_lock import _book_longform
 from test_phase_d_split_skip_upload import _build_state, _run_phase_d
 
 REAL_LF_INSERT_CLOCK = True
@@ -290,3 +296,155 @@ def test_phase_d_reresolves_and_carries_the_new_schedule_forward(tmp_path, monke
     assert [state["youtube_uploads"][i]["publish_at"].year for i in (1, 2)] == [2999, 2999]
     # Everything after the loop (shorts CSV, publish plan, state) uses it too.
     assert state.drive_schedule is fresh
+
+
+# ─── an LF of the run is live: the pending ones heal ────────────────────
+
+LIVE_1 = "2030-01-08T21:00:00+00:00"  # Tue 2030-01-08 16:00 EST
+LIVE_2 = "2030-01-22T21:00:00+00:00"  # Tue 2030-01-22 16:00 EST
+AFTER_LF2 = datetime(2030, 1, 16, 12, 0, tzinfo=timezone.utc)  # LF 2's 01-15 slot passed
+
+
+def _n_lf_kwargs(tmp_path, state, n):
+    kwargs = _builder_kwargs(tmp_path, state)
+    kwargs["drive_plan"] = SimpleNamespace(regular_lfs=[SimpleNamespace(index=i) for i in range(n)])
+    return kwargs
+
+
+def _partly_live_run(tmp_path, n=2):
+    """LF 1 (index 0) aired Tue 2030-01-08; the rest were planned weekly behind it."""
+    state = make_state(
+        publish_day="tue",
+        shorts_per_day=2,
+        no_ledger_reconcile=True,
+        lf_publish_date="2030-01-08",
+        start_date="2030-01-08",
+    )
+    current = _build_and_persist_drive_schedule(**_n_lf_kwargs(tmp_path, state, n))
+    assert [s.date for s in current.lf_slots] == ["2030-01-08", "2030-01-15", "2030-01-22"][:n]
+    state.drive_schedule = current
+    state.youtube_uploads = {0: {"video_id": "live0", "publish_at": LIVE_1}}
+    return state, current
+
+
+def _heal(tmp_path, state, current, n, now=AFTER_LF2, project=None):
+    return _reresolve_passed_lf_slots(
+        current=current,
+        output_base=tmp_path,
+        now=now,
+        project=project,
+        **_n_lf_kwargs(tmp_path, state, n),
+    )
+
+
+def test_live_lf_keeps_its_date_and_the_passed_one_is_reresolved(tmp_path, caplog):
+    state, current = _partly_live_run(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="gomoveshift.pipeline.drive_phases.phase_d"):
+        fresh = _heal(tmp_path, state, current, 2)
+
+    assert [s.date for s in fresh.lf_slots] == ["2030-01-08", "2030-01-22"]
+    assert _utc(fresh.lf_slots[1].datetime_est) > AFTER_LF2
+    assert fresh.identity_times == current.identity_times
+    # The anchor still names the live LF's date, so it stays.
+    assert state.lf_publish_date == "2030-01-08"
+    assert state.start_date == "2030-01-08"
+    assert state.drive_schedule is fresh
+    on_disk = json.loads((tmp_path / "drive_schedule.json").read_text())
+    assert [s["date"] for s in on_disk["lf_slots"]] == ["2030-01-08", "2030-01-22"]
+    marker = [r.getMessage() for r in caplog.records if "LF_SLOT_RERESOLVED" in r.getMessage()]
+    assert len(marker) == 1
+    assert "reason=slot_passed_run_partly_live" in marker[0]
+    assert "2030-01-15" in marker[0] and "2030-01-22" in marker[0]
+
+
+def test_heal_skips_a_date_another_project_holds(tmp_path):
+    state, current = _partly_live_run(tmp_path)
+    _book_longform(tmp_path, "2030-01-22")
+
+    fresh = _heal(tmp_path, state, current, 2)
+
+    assert [s.date for s in fresh.lf_slots] == ["2030-01-08", "2030-01-29"]
+
+
+def _claim_store(tmp_path, project, days):
+    store = ScheduleStore(
+        tmp_path / seo_slots.STORE_FILENAME, EST, seo_slots.cadence_for(_cfg(tmp_path)).regions
+    )
+    for lf_index, day in enumerate(days):
+        store.book(project, lf_index, "usa", datetime.fromisoformat(f"{day}T16:00:00-05:00"))
+    return store
+
+
+def test_heal_moves_later_lfs_behind_and_ignores_the_runs_own_claims(tmp_path):
+    """The run's own claim rows (01-15, 01-22) are not rivals: no free week is skipped,
+    LF 3 moves behind the healed LF 2, and the claim rows follow the new dates."""
+    state, current = _partly_live_run(tmp_path, n=3)
+    store = _claim_store(tmp_path, "drive_a", ["2030-01-08", "2030-01-15", "2030-01-22"])
+
+    fresh = _heal(tmp_path, state, current, 3, project="drive_a")
+
+    assert [s.date for s in fresh.lf_slots] == ["2030-01-08", "2030-01-22", "2030-01-29"]
+    rows = {b.lf_index: b.slot_at.astimezone(EST).date().isoformat() for b in store.bookings()}
+    assert rows == {0: "2030-01-08", 1: "2030-01-22", 2: "2030-01-29"}
+
+
+def test_resume_after_a_heal_keeps_the_healed_dates(tmp_path):
+    """LF 2 went live on its healed date: a later build must not put it back on the
+    old series date, and no short lands between the old date and its real one."""
+    state, current = _partly_live_run(tmp_path, n=3)
+    state.drive_schedule = _heal(tmp_path, state, current, 3)
+    state.youtube_uploads = {
+        0: {"video_id": "live0", "publish_at": LIVE_1},
+        1: {"video_id": "live1", "publish_at": LIVE_2},
+    }
+
+    resumed = _build_and_persist_drive_schedule(
+        now=datetime(2030, 1, 23, 12, 0, tzinfo=timezone.utc), **_n_lf_kwargs(tmp_path, state, 3)
+    )
+
+    assert [s.date for s in resumed.lf_slots] == ["2030-01-08", "2030-01-22", "2030-01-29"]
+    gap = [
+        s.datetime_est
+        for s in resumed.shorts_slots
+        if "2030-01-15T16:00:00-05:00" <= s.datetime_est < "2030-01-22T16:00:00-05:00"
+    ]
+    assert gap == []
+
+
+def test_heal_declines_without_a_publish_day(tmp_path):
+    """No pinned LF day: the next free slot could land on another weekday than the
+    live LF's, so the heal declines and the loop raises ``LF_SLOT_PASSED``."""
+    state, current = _partly_live_run(tmp_path)
+    state.publish_day = None
+
+    assert _heal(tmp_path, state, current, 2) is None
+    assert state.drive_schedule is current
+
+
+def test_loop_inserts_the_pending_lf_on_its_healed_slot(tmp_path):
+    state = make_state(youtube_uploads={1: {"video_id": "live1"}})
+    late = datetime(2030, 1, 16, 12, 0, tzinfo=timezone.utc)
+    healed = "2030-01-22T16:00:00-05:00"
+
+    insert = _run_loop(
+        tmp_path,
+        _schedule(PASSED, LATER),
+        state=state,
+        clock=lambda: late,
+        reschedule=lambda now: _schedule(PASSED, healed),
+    )
+
+    assert insert.call_args.kwargs["publish_at"] == _utc(healed)
+
+
+def test_scheduler_refuses_lf_dates_of_the_wrong_length(tmp_path):
+    scheduler = PipelineScheduler.from_config(_cfg(tmp_path))
+    with pytest.raises(ValueError, match="lf_dates"):
+        scheduler.generate_drive_schedule(
+            regular_lfs=[SimpleNamespace(index=0), SimpleNamespace(index=1)],
+            region="usa",
+            start_date="2030-01-08",
+            publish_day="tue",
+            lf_dates=[date(2030, 1, 8)],
+        )

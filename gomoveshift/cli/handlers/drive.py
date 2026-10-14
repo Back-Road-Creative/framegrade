@@ -347,6 +347,10 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
 def apply_picture_flags(config, args) -> None:
     """Merge ``--stabilize`` / ``--deflicker`` onto ``config.drive``.
 
+    ``--fast`` wins over everything: it forces ``no_sharpen``, clears a saved
+    ``stabilize`` / ``deflicker`` opt-in, and records each dropped step in
+    ``config.drive.fast_skipped`` for the preflight plan.
+
     Sentinel rule: the flags default to ``None`` ("not supplied"); only a
     supplied flag overrides, so a value already on the config survives a run
     that omits the flag.
@@ -355,6 +359,15 @@ def apply_picture_flags(config, args) -> None:
         config.drive.stabilize = True
     if getattr(args, "deflicker", None) is True:
         config.drive.deflicker = True
+    config.drive.fast_skipped = []
+    if getattr(args, "fast", False):
+        if not config.drive.no_sharpen:
+            config.drive.fast_skipped.append("sharpen")
+        config.drive.no_sharpen = True
+        for step in ("stabilize", "deflicker"):
+            if getattr(config.drive, step):
+                config.drive.fast_skipped.append(step)
+                setattr(config.drive, step, False)
 
 
 def cmd_drive(args, config):

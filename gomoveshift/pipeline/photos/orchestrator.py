@@ -76,10 +76,14 @@ class PhotoOrchestrator:
         output_dir: Optional[Path] = None,
         social_aspect: Optional[str] = None,
         cull_floors: Optional[CullFloors] = None,
+        upscale: str = "off",
         ledger_booker: Optional[Callable[[list[dict]], bool]] = None,
         voice_source: Optional[Callable[[], VoiceStyle]] = None,
         theme_recorder: Optional[Callable[[str, str], None]] = None,
     ):
+        # upscale: the brand's still-upscale policy ("off" / "resample" / "ml"),
+        # read by ``photo_run_hooks`` so the engine imports no publishing code.
+        self.upscale = upscale
         # Publish-side seams, wired by the caller (see
         # ``publishing.photo_run_hooks.photo_run_hooks``) so the engine imports
         # no ledger or seo_manager code:
@@ -108,7 +112,9 @@ class PhotoOrchestrator:
         self.csv_gen = PhotoCSVGenerator()
         # None = take photos.social_aspect ("" = the source's own aspect).
         self.resizer = PhotoResizer(
-            output_base=self.output_dir / "photo_resized", social_aspect=social_aspect
+            output_base=self.output_dir / "photo_resized",
+            social_aspect=social_aspect,
+            upscale=self.upscale,
         )
         self.cleanup_handler = PhotoCleanup(
             caption_dir=self.output_dir / "photo_captions",
@@ -401,7 +407,7 @@ class PhotoOrchestrator:
         # Upstream resource gate: fail loud on exhausted disk/RAM BEFORE the
         # first irreversible step (resize copies, Drive upload), and surface any
         # leftover unbooked-ledger marker, rather than dying with photos shipped.
-        preflight_photo_run(self.output_dir)
+        preflight_photo_run(self.output_dir, upscale=self.upscale)
 
         # Resolve against the tree the selector selected from — the module
         # default would publish a different checkout than the one reviewed.
