@@ -7,6 +7,7 @@ splitting the motion out of the renderer. Only the last test shells out.
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -115,8 +116,9 @@ def test_render_actually_converts_to_the_range_it_tags(tmp_path):
     """Verify the conversion, not just the tag: a black/white still must come out
     coded 16-235. A tag that disagrees with the pixels is worse than no tag."""
     still = tmp_path / "split.png"
-    frame = np.zeros((2000, 1000, 3), np.uint8)
-    frame[1000:, :, :] = 255
+    # White rims: the developed still crops a black border, so black must be inside.
+    frame = np.full((2000, 1000, 3), 255, np.uint8)
+    frame[500:1500, 100:900, :] = 0
     cv2.imwrite(str(still), frame)
 
     out = render_reel([still], tmp_path / "reel.mp4", seconds=0.4, fps=10)
@@ -158,3 +160,153 @@ def test_render_writes_a_deterministic_vertical_mp4(tmp_path):
     probe = subprocess.run(["ffprobe", *args.split(), str(outs[0])], capture_output=True, text=True)
     assert probe.stdout.strip() == "1080,1920,8"
     assert outs[0].read_bytes() == outs[1].read_bytes()
+
+
+def test_reel_and_still_card_share_developed_frame(tmp_path, monkeypatch):
+    """The reel takes its pixels from ``hud._load_still`` -- the one graded,
+    cached still the route-story cards and inserts use -- not a private decode."""
+    from PIL import Image
+
+    from gomoveshift.pipeline import inserts
+    from gomoveshift.pipeline.photos import reel
+    from gomoveshift.pipeline.route_story import hud
+
+    developed = Image.new("RGB", (400, 300), (10, 200, 30))
+    loads = []
+
+    def fake_load(path, *, source="developed"):
+        loads.append(Path(path))
+        return developed
+
+    monkeypatch.setattr(hud, "_load_still", fake_load)
+    monkeypatch.setattr(
+        reel, "decode", lambda *_a, **_k: pytest.fail("reel decoded itself"), raising=False
+    )
+
+    class _Sink:
+        def __init__(self):
+            self.data = bytearray()
+
+        def write(self, b):
+            self.data += b
+
+        def close(self):
+            pass
+
+    class _Proc:
+        def __init__(self, cmd, stdin=None, stderr=None):
+            self.stdin = _Sink()
+            procs.append(self)
+            Path(cmd[-1]).write_bytes(b"x")
+
+        def wait(self, timeout=None):
+            return 0
+
+    procs = []
+    monkeypatch.setattr(reel.subprocess, "Popen", _Proc)
+    still = tmp_path / "a.jpg"
+    still.write_bytes(b"x")
+    reel.render_reel([still], tmp_path / "o.mp4", seconds=0.2, fps=10, size=(90, 160))
+
+    assert loads == [still]
+    first = np.frombuffer(bytes(procs[0].stdin.data[: 90 * 160 * 3]), np.uint8)
+    assert set(first.reshape(-1, 3)[0]) == {10, 200, 30}
+    assert inserts._load_still_default(still) is developed
+
+
+def _gradient_jpeg(path, *, orientation=None, icc=None):
+    from PIL import Image
+
+    ramp = np.linspace(40, 215, 600, dtype=np.uint8)
+    frame = np.stack([np.tile(ramp, (300, 1))] * 3, axis=2)
+    exif = Image.Exif()
+    if orientation:
+        exif[274] = orientation
+    kwargs = {"exif": exif}
+    if icc is not None:
+        kwargs["icc_profile"] = icc
+    Image.fromarray(frame).save(path, "JPEG", **kwargs)
+
+
+def test_shared_developed_still_is_upright_for_exif_oriented_photos(tmp_path):
+    """Every consumer of the shared loader gets the decode()'s orientation: a
+    phone photo tagged Orientation=6 comes out portrait, not sideways."""
+    from gomoveshift.pipeline.route_story import hud
+
+    still = tmp_path / "phone.jpg"
+    _gradient_jpeg(still, orientation=6)
+
+    graded = hud._grade_still_from_file(still, "developed")
+
+    assert graded.height > graded.width
+
+
+def test_shared_developed_still_refuses_an_unusable_icc_profile(tmp_path):
+    """...and its ICC gate: a profile ImageCms cannot convert is refused, never
+    passed through as sRGB numbers."""
+    from gomoveshift.pipeline.photos.develop import UnusableColorProfileError
+    from gomoveshift.pipeline.route_story import hud
+
+    still = tmp_path / "bad.jpg"
+    _gradient_jpeg(still, icc=b"not an icc profile")
+
+    with pytest.raises(UnusableColorProfileError):
+        hud._grade_still_from_file(still, "developed")
+
+
+def test_route_story_card_renders_an_exif_rotated_still_upright(tmp_path, monkeypatch):
+    """The route-story card path takes its still from the shared loader, so a
+    phone photo tagged Orientation=6 reaches the card portrait, not sideways."""
+    from gomoveshift.pipeline.route_story import assembly
+
+    still = tmp_path / "phone.jpg"
+    _gradient_jpeg(still, orientation=6)
+    seen = []
+
+    def capture(card_still, width, height, progress):
+        seen.append(card_still)
+        return card_still.resize((width, height))
+
+    monkeypatch.setattr(assembly, "still_card_frame", capture)
+    monkeypatch.setattr(assembly, "_save_frame", lambda *_a, **_k: None)
+
+    assembly._append_photo(tmp_path, 0, SimpleNamespace(source=still), 2, 0.5, 90, 160, mapped=True)
+
+    assert seen and seen[0].height > seen[0].width
+
+
+def test_insert_engine_still_loader_keeps_webp_upright(tmp_path):
+    """.webp is an accepted insert still suffix: it must still load, with its
+    EXIF orientation applied, through the shared loader."""
+    from PIL import Image
+
+    from gomoveshift.pipeline import inserts
+
+    assert ".webp" in inserts.STILL_SUFFIXES
+    ramp = np.linspace(40, 215, 600, dtype=np.uint8)
+    frame = np.stack([np.tile(ramp, (300, 1))] * 3, axis=2)
+    exif = Image.Exif()
+    exif[274] = 6
+    still = tmp_path / "phone.webp"
+    Image.fromarray(frame).save(still, "WEBP", exif=exif)
+
+    loaded = inserts._load_still_default(still)
+
+    assert loaded.height > loaded.width
+
+
+def test_shared_loader_refuses_an_unusable_icc_profile_on_a_webp(tmp_path):
+    """A suffix outside develop.SUPPORTED_EXTENSIONS (an insert's .webp) takes the
+    Pillow branch of the loader; it must hold the same ICC gate, not pass raw numbers."""
+    from PIL import Image
+
+    from gomoveshift.pipeline.photos.develop import UnusableColorProfileError
+    from gomoveshift.pipeline.route_story import hud
+
+    ramp = np.linspace(40, 215, 600, dtype=np.uint8)
+    frame = np.stack([np.tile(ramp, (300, 1))] * 3, axis=2)
+    still = tmp_path / "bad.webp"
+    Image.fromarray(frame).save(still, "WEBP", icc_profile=b"not an icc profile")
+
+    with pytest.raises(UnusableColorProfileError):
+        hud._grade_still_from_file(still, "developed")
