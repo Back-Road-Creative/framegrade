@@ -32,7 +32,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 from ._atomic_write import atomic_write_json
 from .blur_gate import _gray_frames
@@ -137,6 +137,7 @@ def format_ost_audit(
     state: dict,
     lf_indices: Iterable[int],
     location: str = "",
+    inserts: Optional[dict] = None,
 ) -> dict:
     """Build the audit payload for one day.
 
@@ -148,6 +149,11 @@ def format_ost_audit(
             ``per_lf_locations``.
         lf_indices: The LF indices on this day. Order is normalised
             (sorted ascending) so the operator-visible JSON is stable.
+        inserts: Optional ``{lf_index: [record, ...]}`` from
+            ``inserts.insert_records`` — every photo/clip the LF will carry
+            (``--insert-photos`` / ``--insert-clip``). Listed on that LF's entry,
+            so it is part of what the operator confirms (and of the hash); an LF
+            with none keeps the entry it always had.
         location: The drive-wide ``--location`` default — the final tier
             of the burn cascade. Threaded through so the audited
             ``ost_text`` equals the text the per-LF burn loop composites
@@ -169,17 +175,18 @@ def format_ost_audit(
     lfs: list[dict] = []
     for idx in indices_sorted:
         ost_text = _resolve_ost_text(state, idx, location)
-        lfs.append(
-            {
-                "lf_index": idx,
-                "ost_text": ost_text,
-                "youtube_title": str(titles.get(idx, "") or ""),
-                # Real resolved burn text (= ost_text), not a proxy: the
-                # same canonical string is what the thumbnail surfaces.
-                "thumbnail_text": ost_text,
-                "recording_date": str(recording.get(idx, "") or ""),
-            }
-        )
+        entry = {
+            "lf_index": idx,
+            "ost_text": ost_text,
+            "youtube_title": str(titles.get(idx, "") or ""),
+            # Real resolved burn text (= ost_text), not a proxy: the
+            # same canonical string is what the thumbnail surfaces.
+            "thumbnail_text": ost_text,
+            "recording_date": str(recording.get(idx, "") or ""),
+        }
+        if (inserts or {}).get(idx):
+            entry["inserts"] = list(inserts[idx])
+        lfs.append(entry)
     return {
         "date": str(date),
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -332,6 +339,7 @@ def lf_gate_or_raise(
     location: str = "",
     per_lf_ost_text=None,
     per_lf_locations=None,
+    inserts=None,
 ) -> None:
     """Pre-burn OST review gate for long-form LFs — LF analog of
     :func:`shorts_gate_or_raise`, extracted from ``run_day_pipeline`` so the
@@ -355,7 +363,7 @@ def lf_gate_or_raise(
         "per_lf_recording_date": _state_field(state, "per_lf_recording_date") or {},
         "per_lf_locations": _state_field(state, "per_lf_locations") or per_lf_locations or {},
     }
-    payload = format_ost_audit(date, audit_state, lf_indices, location=location)
+    payload = format_ost_audit(date, audit_state, lf_indices, location=location, inserts=inserts)
     current_hash = compute_ost_audit_hash(payload)
 
     passed_map = _state_field(state, "ost_audit_passed") or {}

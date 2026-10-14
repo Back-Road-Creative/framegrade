@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..models import DrivePipelineResult
+from .inserts import describe_drive_inserts
 from .preflight import run_preflight
 from .preflight_plan import print_plan
 
@@ -135,6 +136,9 @@ def run_preflight_and_prompt(
         plan_kwargs["calibration"] = record
     if fast_skipped:
         plan_kwargs["fast_skipped"] = fast_skipped
+    insert_lines = describe_drive_inserts(config.drive)
+    if insert_lines:
+        plan_kwargs["insert_lines"] = insert_lines
     print_plan(state, stages_dir, **plan_kwargs)
     if dry_run:
         logger.info("--dry-run: plan rendered, exiting before any phase work")
