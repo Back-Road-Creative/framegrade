@@ -430,15 +430,56 @@ def test_plan_drive_inserts_gates_only_the_days_being_rendered(tmp_path):
     assert placed["2026-10-03"] == {1: [stray]}
 
 
-def test_drive_refuses_inserts_until_the_splice_is_wired(tmp_path, capsys):
-    """Inserts are planning only: a run that asked for inserts must not render without them."""
-    from test_drive_skip_flags_rejected import _drive_args
-
-    from gomoveshift.cli.handlers.drive import cmd_drive
-
+def _photo_cfg(tmp_path, taken):
     photos = tmp_path / "photos"
     photos.mkdir()
     (photos / "a.jpg").write_bytes(b"x")
-    args = _drive_args(insert_photos=str(photos), insert_clip=None)
-    assert cmd_drive(args, _config()) == 2
-    assert "not spliced yet" in capsys.readouterr().err
+    config = _config()
+    config.drive.insert_photos = str(photos)
+    exif = "gomoveshift.pipeline.photos.exif_gps"
+    return config, (
+        patch(f"{exif}.extract_exif_capture_timestamp", return_value=taken),
+        patch(f"{exif}.extract_exif_gps", return_value=None),
+    )
+
+
+def _plan_photos(config, patches, batches, **kw):
+    from gomoveshift.pipeline.inserts import plan_drive_inserts
+
+    with patches[0], patches[1]:
+        return plan_drive_inserts(
+            config,
+            batches,
+            lf_plans_by_date=kw.pop("lf_plans_by_date", {}),
+            gps_points_by_date=kw.pop("gps_points_by_date", {}),
+            label_of=lambda d, i: "Colleton County, SC",
+            **kw,
+        )
+
+
+def test_plan_drive_inserts_refuses_a_photo_no_day_of_the_drive_holds(tmp_path):
+    config, patches = _photo_cfg(tmp_path, datetime(2026, 11, 1, 9, 5, 0))
+    with pytest.raises(InsertError, match=r"no day of this drive holds a\.jpg"):
+        _plan_photos(config, patches, [_two_ep_batch()], place=lambda *a, **k: {})
+
+
+def test_plan_drive_inserts_resume_places_a_finished_days_photo_not_lost(tmp_path):
+    config, patches = _photo_cfg(tmp_path, datetime(2026, 10, 3, 9, 31, 0))
+    day1 = _two_ep_batch("2026-10-03")
+    day2 = _two_ep_batch("2026-10-04", datetime(2026, 10, 4, 9, 0, 0))
+    gps = {"2026-10-03": [(float(t), 32.9 + t * 1e-5, -80.6) for t in range(0, 1201, 5)]}
+    lf = {
+        "2026-10-03": [
+            SimpleNamespace(index=2, segments=[_seg(0, 100.0, 200.0), _seg(1, 50.0, 80.0)])
+        ]
+    }
+    out = _plan_photos(
+        config,
+        patches,
+        [day1, day2],
+        lf_plans_by_date=lf,
+        gps_points_by_date=gps,
+        render_dates={"2026-10-04"},  # only day 2 is left to render
+    )
+    assert [i.media.name for i in out["2026-10-03"][2]] == ["a.jpg"]  # placed on its own day
+    assert out["2026-10-04"] == {}

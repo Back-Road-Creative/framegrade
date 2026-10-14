@@ -347,3 +347,34 @@ def chapter_town_events(chapters: Optional[list]) -> list[tuple[str, float]]:
             continue
         events.append((label, seconds))
     return events
+
+
+# YouTube drops a chapter list whose entries sit closer than this.
+MIN_CHAPTER_GAP_S = 10
+INSERT_MARKER_TITLE = "\U0001f4f8 Photo stop"
+
+
+def _timestamp_seconds(stamp: str) -> int:
+    seconds = 0
+    for part in str(stamp).split(":"):
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
+def add_insert_markers(chapters: list[dict], insert_times_s: list[float]) -> list[dict]:
+    """``chapters`` plus a marker at each insert, in time order.
+
+    A marker is skipped when it would sit within ``MIN_CHAPTER_GAP_S`` of any chapter
+    or earlier marker (YouTube would drop the whole list), so a burst of photos shows
+    as one stop. ``chapters`` is not mutated.
+    """
+    out = [dict(c) for c in chapters]
+    taken = [_timestamp_seconds(c["timestamp"]) for c in out]
+    for at in sorted(float(t) for t in insert_times_s):
+        sec = int(at)
+        if all(abs(sec - t) >= MIN_CHAPTER_GAP_S for t in taken):
+            out.append(
+                {"timestamp": MarkerMerger.format_timestamp(sec), "title": INSERT_MARKER_TITLE}
+            )
+            taken.append(sec)
+    return sorted(out, key=lambda c: _timestamp_seconds(c["timestamp"]))
