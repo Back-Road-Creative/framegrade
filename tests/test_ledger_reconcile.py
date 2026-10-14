@@ -115,7 +115,6 @@ class TestReconcileCallSite:
         config = SimpleNamespace(
             drive=SimpleNamespace(
                 shorts_publish_times=["15:00"],
-                shorts_slot_pool_by_region={},
                 long_form_publish_days=[1],
                 long_form_publish_time="16:00",
             ),

@@ -362,7 +362,7 @@ class TestLfDaySetsPublishDayConsistency:
 class TestScheduleSpecDriftGate:
     """Single-source drift gate: when no explicit --shorts-times, the resolved
     shorts window MUST equal the region's determined spec
-    (``shorts_publish_times_by_region``). A divergence = a second source crept
+    (Waypost's ``shorts_times`` for the region). A divergence = a second source crept
     back in (a second source of truth) → SystemExit before any work.
     """
 

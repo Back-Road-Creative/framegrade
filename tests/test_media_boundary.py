@@ -70,9 +70,6 @@ FORBIDDEN_PREFIXES = (
 # Engine cross-imports still to cut: path relative to gomoveshift/ -> reason.
 # Shrinking this is the goal; growing it needs a reviewer.
 ALLOWLIST: dict[str, str] = {
-    "pipeline/_drive_helpers.py": (
-        "imports pipeline.chapters._journey_filter; cut by moving the journey filter into the GPS library"
-    ),
     "pipeline/day_pipeline.py": (
         "imports console.settings, pipeline.chapters.generator, pipeline.chapters.marker_merger, pipeline.title_builder, publishing.brand_policy; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
     ),

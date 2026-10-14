@@ -278,12 +278,12 @@ def test_photo_post_hour_does_not_collide_with_video_slots():
     drive = DriveConfig()
     photo_hhmm = schedule_constants.PHOTO_POST_TIME.strftime("%H:%M")
     booked = set(drive.shorts_publish_times) | {drive.long_form_publish_time}
-    for value in (drive.shorts_publish_times_by_region or {}).values():
-        windows = value.values() if isinstance(value, dict) else [value]
-        for window in windows:
-            booked |= set(window)
-    for pool in (drive.shorts_slot_pool_by_region or {}).values():
-        booked |= set(pool)
+    from gomoveshift.config import Config
+    from gomoveshift.pipeline import seo_slots
+
+    config = Config()
+    for region in seo_slots.waypost_cadence(config).regions:
+        booked |= set(seo_slots.shorts_pool(config, region))
     assert photo_hhmm not in booked
 
 
