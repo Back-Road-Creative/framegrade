@@ -167,6 +167,62 @@ def _maybe_rebase_drive_schedule(
     return info
 
 
+def _reresolve_passed_lf_slots(
+    *,
+    current,
+    scheduler_cls,
+    config: Config,
+    drive_plan,
+    state,
+    region: str,
+    stages_dir: Path,
+    output_base: Path,
+    now: datetime,
+    project: Optional[str] = None,
+    log=logger,
+):
+    """Rebuild the schedule when an LF slot passed before its insert.
+
+    Phase D hands this to the long-form upload loop. ``current`` is the
+    schedule built at Phase D's start, whose pending LF slot is ``<= now``.
+
+    Nothing of the run live (no ``state.youtube_uploads``, empty sidecar): the
+    passed anchor (``lf_publish_date`` / ``start_date``) is dropped from state
+    and the schedule is rebuilt as a rebase — the same ``next_free_slot`` call
+    a fresh run makes, from ``now`` — keeping ``current``'s locked shorts
+    posting times. Returns the new schedule, also set on ``state``.
+
+    An LF of the run already live: returns ``None`` and touches nothing. Its
+    remaining LFs follow the live one's date, so a rebuild cannot move them.
+    """
+    from ..youtube_sidecar import load_sidecar
+
+    if (getattr(state, "youtube_uploads", None) or {}) or load_sidecar(Path(output_base)):
+        return None
+    state.lf_publish_date = None
+    state.start_date = None
+    state.drive_schedule = current  # the rebuild reads the shorts-time lock off it
+    fresh = _build_and_persist_drive_schedule(
+        scheduler_cls=scheduler_cls,
+        config=config,
+        drive_plan=drive_plan,
+        state=state,
+        region=region,
+        stages_dir=stages_dir,
+        now=now,
+        rebased=True,
+        project=project,
+    )
+    state.drive_schedule = fresh
+    log.warning(
+        "LF_SLOT_RERESOLVED planned=%s new=%s now=%s reason=slot_passed_before_insert",
+        [s.datetime_est for s in current.lf_slots],
+        [s.datetime_est for s in fresh.lf_slots],
+        now.isoformat(),
+    )
+    return fresh
+
+
 def _assert_lf_dates_free(
     ledger, config, region, base_date: str, n_lfs: int, *, project: Optional[str] = None
 ) -> None:

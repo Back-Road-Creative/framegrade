@@ -710,6 +710,19 @@ def _refuse_if_over_youtube_quota_budget(*, pending_inserts: int, config: Config
     )
 
 
+def _utc_now() -> datetime:
+    """The insert loop's clock (tests pin it; see ``tests/conftest.py``)."""
+    return datetime.now(timezone.utc)
+
+
+def _lf_publish_times(drive_schedule) -> list:
+    """Each LF slot of ``drive_schedule`` as an aware UTC ``publishAt``."""
+    return [
+        datetime.fromisoformat(s.datetime_est).astimezone(timezone.utc)
+        for s in drive_schedule.lf_slots
+    ]
+
+
 def _upload_lfs_to_youtube(
     *,
     drive_plan,
@@ -724,6 +737,8 @@ def _upload_lfs_to_youtube(
     skip_youtube_upload: bool,
     youtube_upload_enabled: bool,
     project_base: str | None = None,
+    clock=None,
+    reschedule=None,
 ):
     """Drive the per-LF YouTube upload loop. Returns ``(yt_instance_or_None, youtube_uploads)``.
 
@@ -732,6 +747,12 @@ def _upload_lfs_to_youtube(
     batch-paused banner, re-raises so the orchestrator records a
     graceful exit. Other per-LF failures are logged and skipped
     (handled inside ``_upload_lf_to_youtube``).
+
+    A pending LF whose slot has passed (``publish_at <= clock()``) is never
+    inserted: ``reschedule(now)`` — Phase D's re-resolve through seo_manager —
+    is asked for a fresh schedule, and a slot that is still passed (no
+    resolver, or it declined because an LF of the run is live) raises
+    ``LF_SLOT_PASSED``. An LF that already holds a video id is not checked.
     """
     if skip_youtube_upload or not youtube_upload_enabled:
         if not youtube_upload_enabled:
@@ -749,10 +770,7 @@ def _upload_lfs_to_youtube(
             "a made-up publish date. Phase D builds lf_slots from seo_manager before "
             "any upload; re-run Phase D."
         )
-    schedule_dates = [
-        datetime.fromisoformat(s.datetime_est).astimezone(timezone.utc)
-        for s in drive_schedule.lf_slots
-    ]
+    schedule_dates = _lf_publish_times(drive_schedule)
 
     # Operate on state's OWN youtube_uploads dict. ``upload_if_needed``
     # writes each LF record directly into ``state.youtube_uploads``; a
@@ -810,6 +828,24 @@ def _upload_lfs_to_youtube(
         description = meta.get("description", "")
         tags = meta.get("tags", [])
         publish_at = schedule_dates[i] if i < len(schedule_dates) else None
+        if publish_at is not None and not (youtube_uploads.get(lf.index) or {}).get("video_id"):
+            # A past ``publishAt`` cannot be taken back once inserted: check the
+            # slot against the clock here, as late as the loop allows.
+            now = (clock or _utc_now)()
+            if publish_at <= now:
+                planned = publish_at
+                fresh = reschedule(now) if reschedule is not None else None
+                if fresh is not None:
+                    schedule_dates = _lf_publish_times(fresh)
+                    publish_at = schedule_dates[i] if i < len(schedule_dates) else None
+                if publish_at is None or publish_at <= now:
+                    raise RuntimeError(
+                        f"LF_SLOT_PASSED lf={lf.index} publish_at={planned.isoformat()} "
+                        f"now={now.isoformat()} — refusing videos.insert with a publish "
+                        "time that has passed; nothing was uploaded for this LF. The "
+                        "slot was not re-resolved (an LF of this run is already live, "
+                        "or the re-resolved slot has passed too)."
+                    )
         try:
             record = _upload_lf_to_youtube(
                 yt=yt,

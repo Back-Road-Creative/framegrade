@@ -30,6 +30,14 @@ executes; it never decides.
   The message names the next free date over the same allowed days, or says there is no
   LF day when `--publish` is not one of the configured LF days. A date without leading
   zeros is refused as not `YYYY-MM-DD`.
+- An LF is never inserted with a publish time that has passed. The launch gate above
+  checks the date once; Phase D checks each not-yet-uploaded LF's slot again right
+  before its `videos.insert`, because a long encode (or the shorts upload) can outlast
+  the date the run started with. When nothing of the run is live yet, Phase D drops the
+  passed date and asks seo_manager for the next free slot, the same call a fresh run
+  makes, and logs `LF_SLOT_RERESOLVED` with the old and new dates. When an LF of the run
+  is already live, the run stops with `LF_SLOT_PASSED` before the insert, since the
+  remaining LFs follow the live one's date.
 - A confirmed LF upload is booked in the ledger and mirrored into `schedule.sqlite3`
   when that file exists (never created by GMS), even when the ledger write failed (`LEDGER-UNBOOKED`). A failed mirror logs
   `SCHEDULE-STORE-UNBOOKED` and never fails the upload.
