@@ -736,6 +736,23 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Do not sharpen the LF day master (the measured unsharp amount is forced to 0).",
     )
     p.add_argument(
+        "--stabilize",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Stabilise the LF day master (vidstab two-pass, gated on measured luma "
+        "jitter). Refused at start-up when this ffmpeg lacks libvidstab. Opt-in; "
+        "argparse-sentinel (default None) so a resume that omits the flag keeps it.",
+    )
+    p.add_argument(
+        "--deflicker",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Deflicker the LF day master (gated on measured luma jitter). Opt-in; "
+        "argparse-sentinel (default None) so a resume that omits the flag keeps it.",
+    )
+    p.add_argument(
         "--no-denoise",
         action="store_true",
         help="Do not denoise the LF day master (hqdn3d strength is forced to 0).",

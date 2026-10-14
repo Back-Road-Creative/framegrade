@@ -472,6 +472,27 @@ def check_tools(tools: Iterable[str]) -> None:
         )
 
 
+def check_picture_filters(*, stabilize: bool, deflicker: bool, capabilities=None) -> None:
+    """Raise RuntimeError when a requested picture step's ffmpeg filter is absent.
+
+    Nothing is probed unless a flag is set. ``--stabilize`` needs libvidstab
+    (``StabilizeUnavailableError`` carries ``VIDSTAB_MISSING_REASON``);
+    ``--deflicker`` needs the ``deflicker`` filter.
+    """
+    if not (stabilize or deflicker):
+        return
+    from . import stabilize as _stab
+
+    caps = capabilities if capabilities is not None else _stab.probe_ffmpeg_filters()
+    if stabilize:
+        try:
+            _stab.require_vidstab(caps)
+        except _stab.StabilizeUnavailableError as exc:
+            raise RuntimeError(f"--stabilize refused: {exc}") from exc
+    if deflicker and not caps.has_deflicker:
+        raise RuntimeError("--deflicker refused: ffmpeg has no 'deflicker' filter")
+
+
 def check_ost_font() -> None:
     """Raise RuntimeError if the canonical OST burn font is missing.
 
