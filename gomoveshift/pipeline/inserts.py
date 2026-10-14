@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Collection, Optional, Sequence
 
 from keycut import probe_keyframes
 from PIL import Image
 
 from .blur_gate import BlurGateError, blur_required, master_blur_proven
+from .encoding_constants import RENDITIONS
 from .geo_constants import US_STATE_ABBREVS
 from .montage_builder import (
     GOP_DURATION_SEC,  # noqa: F401  (nominal GOP; the cut uses probed keyframes)
@@ -424,3 +428,408 @@ def apply_inserts(
     if res.returncode != 0:
         raise InsertError("ffmpeg concat failed")
     return result
+
+
+# ── The drive run ────────────────────────────────────────────────────────────
+# ``--insert-photos <dir>`` and ``--insert-clip <path>@<mm:ss>`` become Inserts
+# per long-form before any encode (placement, the audit sidecar and the
+# preflight print all read the same list), and the splice after the OST burn
+# ALWAYS carries a real InsertGate: a drive run has no "ungated" mode.
+
+_CLIP_AT_RE = re.compile(r"(\d+):([0-5]\d)")
+INSERT_HOLD_S = 4.0
+
+
+def parse_insert_clip(spec: str) -> tuple[Path, float]:
+    """``"PATH@MM:SS"`` -> ``(PATH, seconds)``; the LAST ``@`` splits, so a path may hold one."""
+    path, sep, at = str(spec).rpartition("@")
+    m = _CLIP_AT_RE.fullmatch(at.strip())
+    if not sep or not path.strip() or not m:
+        raise InsertError(f"--insert-clip {spec!r}: expected PATH@MM:SS")
+    return Path(path), float(int(m[1]) * 60 + int(m[2]))
+
+
+def photo_files(directory) -> list[Path]:
+    """The still files directly inside ``directory``, sorted by name."""
+    d = Path(directory)
+    if not d.is_dir():
+        raise InsertError(f"--insert-photos {directory}: not a directory")
+    found = sorted(p for p in d.iterdir() if p.suffix.lower() in STILL_SUFFIXES)
+    if not found:
+        raise InsertError(f"--insert-photos {directory}: no photos in it")
+    return found
+
+
+@dataclass(frozen=True)
+class DriveInserts:
+    """The drive's requested inserts. Clips land in the first LF of ``clip_date``."""
+
+    photos: tuple[Path, ...] = ()
+    clips: tuple[tuple[Path, float], ...] = ()
+    clip_date: str = ""
+
+    @classmethod
+    def from_drive(cls, drive, *, clip_date: str = "") -> Optional["DriveInserts"]:
+        raw_photos = getattr(drive, "insert_photos", "")
+        raw_clips = getattr(drive, "insert_clips", [])
+        photos = (
+            tuple(photo_files(raw_photos)) if isinstance(raw_photos, str) and raw_photos else ()
+        )
+        clips = (
+            tuple(parse_insert_clip(c) for c in raw_clips) if isinstance(raw_clips, list) else ()
+        )
+        for path, _ in clips:
+            if not path.is_file():
+                raise InsertError(f"--insert-clip {path}: no such file")
+        return cls(photos, clips, clip_date) if photos or clips else None
+
+
+def apply_insert_flags(args, config) -> None:
+    """Mirror the drive flags onto ``config.drive`` (per invocation, like ``--skip-blur``)."""
+    # Only real flag values mirror: argparse gives a str and a list, while a
+    # stand-in ``args`` (handler unit tests) answers every attribute with a non-path.
+    photos = getattr(args, "insert_photos", None)
+    if photos and isinstance(photos, (str, Path)):
+        config.drive.insert_photos = str(photos)
+    clips = getattr(args, "insert_clip", None)
+    if clips and isinstance(clips, (list, tuple)):
+        config.drive.insert_clips = list(clips)
+
+
+def describe_drive_inserts(drive) -> list[str]:
+    """One preflight line per requested insert; raises on media that is not there."""
+    di = DriveInserts.from_drive(drive)
+    if di is None:
+        return []
+    lines = [f"photo  {p.name}  (placed by capture clock against the day's GPX)" for p in di.photos]
+    for path, at in di.clips:
+        lines.append(
+            f"clip   {path.name}  at {int(at) // 60:02d}:{int(at) % 60:02d} of the first long-form"
+        )
+    return lines
+
+
+def master_to_lf_seconds(
+    master_s: float, ranges: Sequence[tuple[float, float]], lead_s: float
+) -> Optional[float]:
+    """Day-master second -> second in the LF built from ``ranges`` behind a ``lead_s`` montage.
+
+    Approximate to about one GOP: the extractor merges sub-GOP gaps and snaps cuts
+    to keyframes. ``None`` when the LF does not contain that second.
+    """
+    acc = lead_s
+    for start, end in ranges:
+        if start <= master_s < end:
+            return acc + (master_s - start)
+        acc += end - start
+    return None
+
+
+def lf_to_master_seconds(
+    lf_s: float, ranges: Sequence[tuple[float, float]], lead_s: float
+) -> Optional[float]:
+    """Inverse of :func:`master_to_lf_seconds`; the montage lead maps to the first range's start."""
+    acc = lead_s
+    for start, end in ranges:
+        if lf_s < acc + (end - start):
+            return start + max(0.0, lf_s - acc)
+        acc += end - start
+    return None
+
+
+MAX_TRACK_GAP_S = 60.0
+
+
+def _track_position(points, master_s: Optional[float]) -> Optional[tuple[float, float]]:
+    """The day-track fix nearest ``master_s``; ``None`` past ``MAX_TRACK_GAP_S`` (fail closed)."""
+    if master_s is None or not points:
+        return None
+    t, lat, lon = min(points, key=lambda p: abs(float(p[0]) - master_s))
+    return (float(lat), float(lon)) if abs(float(t) - master_s) <= MAX_TRACK_GAP_S else None
+
+
+def _photo_capture(photo: Path) -> Optional[datetime]:
+    from .photos.exif_gps import extract_exif_capture_timestamp
+
+    return extract_exif_capture_timestamp(photo)
+
+
+def _photo_gps(photo: Path) -> Optional[tuple[float, float]]:
+    from .photos.exif_gps import extract_exif_gps
+
+    return extract_exif_gps(photo)
+
+
+def _master_seconds_of(capture: datetime, episodes, boundaries) -> Optional[float]:
+    """Master second of a camera-clock capture time; ``None`` outside every episode.
+
+    Photos and episodes share the camera's naive wall clock, so the match is on
+    that clock and never on a guessed zone.
+    """
+    capture = capture.replace(tzinfo=None)
+    for ep, (start, end) in zip(episodes, boundaries):
+        began = getattr(ep, "creation_time", None)
+        if began is None:
+            continue
+        off = (capture - began.replace(tzinfo=None)).total_seconds()
+        if 0.0 <= off < float(end) - float(start):
+            return float(start) + off
+    return None
+
+
+def day_photo_master_seconds(
+    photos: Sequence[Path], episodes, boundaries, *, capture_of=_photo_capture
+) -> dict[Path, Optional[float]]:
+    """Each photo's master second on this day (``None`` = not on this day)."""
+    out: dict[Path, Optional[float]] = {}
+    for photo in photos:
+        capture = capture_of(photo)
+        if capture is None:
+            raise InsertError(f"{Path(photo).name}: no capture time, cannot place it")
+        out[photo] = _master_seconds_of(capture, episodes, boundaries)
+    return out
+
+
+def place_day_inserts(
+    *,
+    di: DriveInserts,
+    date: str,
+    episodes,
+    boundaries,
+    gps_points,
+    lf_ranges: dict[int, list[tuple[float, float]]],
+    lead_s: float,
+    capture_of=_photo_capture,
+    gps_of=_photo_gps,
+) -> dict[int, list[Insert]]:
+    """``{lf_index: [Insert, ...]}`` for one day, at LF time; raises on anything unplaceable.
+
+    A photo on this day is anchored on the day's track (``anchor_photo_insert``),
+    then moved onto the LF that holds that second; one no LF holds, or one the
+    track cannot place, is refused rather than guessed. A photo on no episode of
+    this day belongs to another day and is left alone (the run checks that every
+    photo lands on some day before it encodes). Clips go to the first LF of
+    ``di.clip_date`` at their ``@mm:ss``.
+    """
+    placed: dict[int, list[Insert]] = {}
+    on_day = {
+        p: s
+        for p, s in day_photo_master_seconds(
+            di.photos, episodes, boundaries, capture_of=capture_of
+        ).items()
+        if s is not None
+    }
+    if on_day:
+        started = episodes[0].creation_time.replace(tzinfo=timezone.utc)
+        track = [[RoutePoint(float(t), float(la), float(lo)) for t, la, lo in (gps_points or [])]]
+        total = float(boundaries[-1][1])
+        for photo, master_s in on_day.items():
+            anchored = anchor_photo_insert(
+                photo,
+                captured_at_utc=started + timedelta(seconds=master_s),
+                track_started_at_utc=started,
+                segments=track,
+                lf_start_s=0.0,
+                lf_duration_s=total,
+                gps=gps_of(photo),
+                hold_s=INSERT_HOLD_S,
+            )
+            for idx in sorted(lf_ranges):
+                lf_s = master_to_lf_seconds(anchored.at_s, lf_ranges[idx], lead_s)
+                if lf_s is not None:
+                    placed.setdefault(idx, []).append(replace(anchored, at_s=lf_s))
+                    break
+            else:
+                raise InsertError(
+                    f"{Path(photo).name}: captured at master {anchored.at_s:.0f}s of {date}, "
+                    "inside no long-form of the day"
+                )
+    if di.clips and date == di.clip_date and lf_ranges:
+        first = min(lf_ranges)
+        length = lead_s + sum(e - s for s, e in lf_ranges[first])
+        for path, at in di.clips:
+            if at >= length:
+                raise InsertError(
+                    f"{path.name}: @{int(at) // 60:02d}:{int(at) % 60:02d} is past the end of "
+                    f"long-form {first} ({length:.0f}s)"
+                )
+            # A clip has no capture position of its own: it is where the track was at
+            # the cut point it was asked to sit at, so the county gate can run on it.
+            spot = _track_position(gps_points, lf_to_master_seconds(at, lf_ranges[first], lead_s))
+            placed.setdefault(first, []).append(Insert(at, path, style="full", capture=spot))
+    return {i: sorted(v, key=lambda x: x.at_s) for i, v in sorted(placed.items())}
+
+
+def insert_records(placed: dict[int, list[Insert]]) -> dict[int, list[dict]]:
+    """JSON-safe audit records per LF: what each insert is and where it cuts in."""
+    out = {}
+    for idx, items in placed.items():
+        out[idx] = [
+            {
+                "kind": "still" if Path(i.media).suffix.lower() in STILL_SUFFIXES else "clip",
+                "media": Path(i.media).name,
+                "at_s": round(float(i.at_s), 3),
+                "style": i.style,
+                **(
+                    {"hold_s": float(i.hold_s)}
+                    if Path(i.media).suffix.lower() in STILL_SUFFIXES
+                    else {}
+                ),
+            }
+            for i in items
+        ]
+    return out
+
+
+def splice_lf_inserts(
+    lf_path: Path,
+    inserts: Sequence[Insert],
+    *,
+    config,
+    label: Optional[str],
+    profile,
+    work_dir: Path,
+    plan: Callable[..., list[InsertPlan]] = plan_inserts,
+    apply: Callable[..., InsertResult] = apply_inserts,
+) -> InsertResult:
+    """Splice ``inserts`` into the finished LF in place, behind an always-present gate.
+
+    The gate is built here, never taken from the caller: with no ``config`` it is
+    the closed one (a clip is unproven-blurred, a still goes through the privacy
+    gate under the run's default), so nothing reaches the encode ungated.
+    """
+    lf_path = Path(lf_path)
+    gate = (
+        InsertGate.from_config(config, label)
+        if config is not None
+        else InsertGate(label_counties(label))
+    )
+    plans = plan(
+        lf_path,
+        list(inserts),
+        profile=profile,
+        rendition=RENDITIONS["youtube_longform"],
+        work_dir=Path(work_dir),
+        gate=gate,
+    )
+    out = lf_path.with_name(f"{lf_path.stem}.inserted{lf_path.suffix}")
+    result = apply(lf_path, plans, out)
+    os.replace(out, lf_path)
+    shutil.rmtree(out.parent / f"{out.stem}_inserts", ignore_errors=True)
+    return result
+
+
+def plan_day_from_batch(
+    di: DriveInserts,
+    day_batch,
+    lf_plans,
+    gps_points,
+    *,
+    lead_s: float,
+    capture_of=_photo_capture,
+    gps_of=_photo_gps,
+) -> dict[int, list[Insert]]:
+    """``place_day_inserts`` for one ``DayBatch``: derives the boundaries and each LF's master ranges."""
+    from keycut import boundaries_from_durations, segments_to_master_ranges
+
+    from .montage_builder import to_cut_segment
+
+    episodes = list(getattr(day_batch, "episodes", None) or [])
+    boundaries = boundaries_from_durations(
+        float(getattr(e, "total_duration", 0.0) or 0.0) for e in episodes
+    )
+    lf_ranges: dict[int, list[tuple[float, float]]] = {}
+    for i, plan in enumerate(lf_plans or []):
+        segs = list(getattr(plan, "segments", []) or [])
+        if segs:
+            idx = int(getattr(plan, "index", i + 1))
+            lf_ranges[idx] = [
+                (float(s), float(e))
+                for s, e in segments_to_master_ranges((to_cut_segment(s) for s in segs), boundaries)
+            ]
+    return place_day_inserts(
+        di=di,
+        date=day_batch.date,
+        episodes=episodes,
+        boundaries=boundaries,
+        gps_points=gps_points,
+        lf_ranges=lf_ranges,
+        lead_s=lead_s,
+        capture_of=capture_of,
+        gps_of=gps_of,
+    )
+
+
+def photos_unplaced(di: DriveInserts, day_batches, *, capture_of=_photo_capture) -> list[str]:
+    """Names of requested photos that fall on no episode of any day (checked before any encode)."""
+    from keycut import boundaries_from_durations
+
+    left = {p: False for p in di.photos}
+    for batch in day_batches:
+        eps = list(getattr(batch, "episodes", None) or [])
+        bounds = boundaries_from_durations(
+            float(getattr(e, "total_duration", 0.0) or 0.0) for e in eps
+        )
+        for p, s in day_photo_master_seconds(di.photos, eps, bounds, capture_of=capture_of).items():
+            if s is not None:
+                left[p] = True
+    return [Path(p).name for p, hit in left.items() if not hit]
+
+
+def insert_label(
+    per_lf_locations: Optional[dict], idx: int, fallback: Optional[str]
+) -> Optional[str]:
+    """The county label the gate checks an LF against (``per_lf_locations``, not the OST text)."""
+    return (per_lf_locations or {}).get(idx) or fallback
+
+
+def plan_drive_inserts(
+    config,
+    day_batches,
+    *,
+    lf_plans_by_date: Optional[dict],
+    gps_points_by_date: Optional[dict],
+    label_of: Callable[[str, int], Optional[str]],
+    place: Callable[..., dict[int, list[Insert]]] = plan_day_from_batch,
+    gate_kw: Optional[dict] = None,
+    render_dates: Optional[Collection[str]] = None,
+) -> dict[str, dict[int, list[Insert]]]:
+    """Place every requested insert on the whole drive, gate the days being rendered, before any encode.
+
+    ``day_batches`` is EVERY day of the drive, finished or not (a resume must still place a
+    photo of a finished day, and ``clip_date`` is the drive's first day, not the first one left
+    to render). ``render_dates`` names the days this run renders; only their inserts are gated
+    (county, blur, GPS-strip), because a finished day already carries its inserts. ``None``
+    gates every day, as a fresh run does.
+
+    ``{date: {lf_index: [Insert, ...]}}``. Raises ``InsertError``/``BlurGateError`` on the
+    first insert that is unplaceable or refused, so a refusal costs no OST burn or master.
+    The splice gates again (it must stay safe alone); stills' gated copies made here are dropped.
+    """
+    di = DriveInserts.from_drive(
+        getattr(config, "drive", None), clip_date=str(min(b.date for b in day_batches))
+    )
+    if di is None:
+        return {}
+    lost = photos_unplaced(di, day_batches) if di.photos else []
+    if lost:
+        raise InsertError(f"--insert-photos: no day of this drive holds {', '.join(lost)}")
+    lead = float(getattr(config.drive, "montage_max_duration_sec", 15.0))
+    out: dict[str, dict[int, list[Insert]]] = {}
+    with tempfile.TemporaryDirectory(prefix="insert_gate_") as tmp:
+        for batch in day_batches:
+            placed = place(
+                di,
+                batch,
+                (lf_plans_by_date or {}).get(batch.date) or [],
+                (gps_points_by_date or {}).get(batch.date),
+                lead_s=lead,
+            )
+            if render_dates is None or batch.date in render_dates:
+                for idx, items in placed.items():
+                    gate = InsertGate.from_config(
+                        config, label_of(batch.date, idx), **(gate_kw or {})
+                    )
+                    gate_inserts(items, gate, work_dir=Path(tmp) / f"{batch.date}_{idx}")
+            out[batch.date] = placed
+    return out
