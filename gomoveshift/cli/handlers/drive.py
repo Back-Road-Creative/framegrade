@@ -344,6 +344,19 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
         logger.exception("auto-publish-journal crashed; uploads succeeded, journal not updated.")
 
 
+def apply_picture_flags(config, args) -> None:
+    """Merge ``--stabilize`` / ``--deflicker`` onto ``config.drive``.
+
+    Sentinel rule: the flags default to ``None`` ("not supplied"); only a
+    supplied flag overrides, so a value already on the config survives a run
+    that omits the flag.
+    """
+    if getattr(args, "stabilize", None) is True:
+        config.drive.stabilize = True
+    if getattr(args, "deflicker", None) is True:
+        config.drive.deflicker = True
+
+
 def cmd_drive(args, config):
     """Run Drive Pipeline on a GoPro directory."""
     from ...config import ConfigError
@@ -513,6 +526,18 @@ def cmd_drive(args, config):
     config.drive.no_denoise = bool(getattr(args, "no_denoise", False))
     config.drive.trail = getattr(args, "trail", None)
     config.drive.trail_profile = getattr(args, "trail_profile", "") or ""
+    apply_picture_flags(config, args)
+    # Refuse upstream of any work when this ffmpeg cannot do what was asked.
+    want_stabilize = config.drive.stabilize is True
+    want_deflicker = config.drive.deflicker is True
+    if want_stabilize or want_deflicker:
+        from ...pipeline.preflight import check_picture_filters
+
+        try:
+            check_picture_filters(stabilize=want_stabilize, deflicker=want_deflicker)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     # CLI override beats config.
     _ingest_mode = getattr(args, "ingest_mode", None)
     if _ingest_mode in ("gopro", "generic"):
