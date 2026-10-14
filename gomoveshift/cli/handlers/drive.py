@@ -628,6 +628,17 @@ def cmd_drive(args, config):
         config.drive.skip_stop_verify = True
     if getattr(args, "skip_blur", False):
         config.drive.skip_blur = True
+    from ...pipeline.inserts import InsertError, apply_insert_flags, describe_drive_inserts
+
+    apply_insert_flags(args, config)
+    try:
+        _insert_lines = describe_drive_inserts(config.drive)  # media must exist before any phase
+    except InsertError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if _insert_lines:  # planned and audited only; removed once the splice lands
+        print("error: --insert-photos/--insert-clip are not spliced yet", file=sys.stderr)
+        return 2
     if getattr(args, "skip_validation", False):
         config.drive.skip_validation = True
     if getattr(args, "allow_cross_fs_source", False):

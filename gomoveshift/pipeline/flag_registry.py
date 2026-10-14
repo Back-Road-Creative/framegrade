@@ -113,6 +113,8 @@ FLAG_REGISTRY: tuple[FlagRule, ...] = (
     FlagRule("day_gpx", None, Semantic.NOT_PERSISTED, "day-GPX slicer input: writes <stem>.gpx sidecars before ingest; the sidecars, not the flag, are the persisted contract"),
     FlagRule("camera_utc_offset_hours", None, Semantic.NOT_PERSISTED, "day-GPX slicer camera clock offset; required with --day-gpx"),
     FlagRule("skip_blur", None, Semantic.NOT_PERSISTED, "blur-detection stage bypass (config.drive mirror set in the drive handler)"),
+    FlagRule("insert_photos", None, Semantic.NOT_PERSISTED, "photo inserts: config.drive.insert_photos mirror set in the drive handler; each day's placement is recomputed (and hashed into the OST audit) every run"),
+    FlagRule("insert_clip", None, Semantic.NOT_PERSISTED, "clip inserts: config.drive.insert_clips mirror set in the drive handler"),
 )
 # fmt: on
 

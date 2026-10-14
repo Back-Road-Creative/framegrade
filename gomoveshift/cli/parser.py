@@ -56,6 +56,17 @@ def _per_lf_location_kv(raw: str) -> tuple[int, str]:
     return (idx, value)
 
 
+def _insert_clip_arg(raw: str) -> str:
+    """argparse ``type=`` for ``--insert-clip``: validate ``PATH@MM:SS``, keep the raw spec."""
+    from ..pipeline.inserts import InsertError, parse_insert_clip
+
+    try:
+        parse_insert_clip(raw)
+    except InsertError:
+        raise argparse.ArgumentTypeError(f"{raw!r}: expected PATH@MM:SS (e.g. clip.mp4@01:30)")
+    return raw
+
+
 def _comma_components(s: str) -> list[str]:
     """Split a label on commas, strip whitespace, drop empties."""
     return [c.strip() for c in s.split(",") if c.strip()]
@@ -952,6 +963,28 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "stage (runs on the stops-cut file before the irreversible encode). "
         "When blur is enabled this lets identifiable faces/plates ship "
         "unredacted — never use for published footage.",
+    )
+    p.add_argument(
+        "--insert-photos",
+        metavar="DIR",
+        default=None,
+        help="INSERTS: show every photo in DIR as a still card inside the long-form it "
+        "was taken during. Each photo is placed by its EXIF capture clock against the "
+        "day's GPX, must pass the county gate (taken inside the LF's labelled counties) "
+        "and the blur + EXIF/GPS-strip gates, and is listed in the preflight print and "
+        "the OST audit sidecar. A photo the track cannot place is refused. "
+        "See docs/pipeline/153-insert-engine.md.",
+    )
+    p.add_argument(
+        "--insert-clip",
+        metavar="PATH@MM:SS",
+        action="append",
+        default=None,
+        type=_insert_clip_arg,
+        help="INSERTS: cut the clip into the first long-form of the drive's first day "
+        "at MM:SS of that long-form (repeatable). The clip must carry the .blurred "
+        "marker when the run requires blur; it is fitted to the LF frame through the "
+        "upscale policy and listed in the preflight print and the OST audit sidecar.",
     )
     # --sign-verify / --no-sign-verify / --sign-verify-strict share the
     # argparse-sentinel contract: ``default=None`` on ALL THREE is

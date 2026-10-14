@@ -1660,6 +1660,10 @@ class DriveConfig(BaseModel):
     skip_blur: bool = (
         False  # DIAGNOSTIC: bypass blur detection (config.drive mirror, like skip_audio)
     )
+    # INSERTS (--insert-photos / --insert-clip): per-invocation mirrors set by the drive
+    # handler (``inserts.apply_insert_flags``); never persisted to PipelineState.
+    insert_photos: str = ""
+    insert_clips: list[str] = Field(default_factory=list)  # raw "PATH@MM:SS" specs
     # ROAD-SIGN GPS VERIFICATION (--sign-verify). Master switch for the whole
     # feature: the Phase A per-day sign OCR pass AND the advisory per-LF
     # comparison of what the signs say against the LF's resolved location.

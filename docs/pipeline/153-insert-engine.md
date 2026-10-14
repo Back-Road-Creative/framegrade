@@ -34,6 +34,13 @@ Run inside `plan_inserts(..., gate=...)`, before any card is drawn or ffmpeg cal
 
 `InsertGate.from_config(config, label)` builds the gate for one LF. `plan_inserts` without a gate is unchanged; the drive wiring must always pass one.
 
-## Not here
+## Drive run
 
-No CLI flag or config surface and no Phase D wiring yet; that is a follow-on change.
+`gomoveshift drive --insert-photos <dir> --insert-clip <path>@<mm:ss>` (clip flag repeatable). Both are per-invocation (`NOT_PERSISTED` in `flag_registry`), mirrored onto `config.drive.insert_photos` / `insert_clips` by `apply_insert_flags`.
+
+- **Preflight.** `describe_drive_inserts` prints one line per insert in the plan; a missing directory, an empty one, a clip path that is not a file, or a clip that is not `PATH@MM:SS` exits 2 before any work.
+- **Placement and gate, before the first encode.** `plan_drive_inserts` (to be called from `run_all_days` once the splice lands) places every insert (`plan_day_from_batch` -> `place_day_inserts`) and then runs the whole `InsertGate` on it (county, blur, GPS-strip) against the LF's county label (`per_lf_locations`, via `insert_label`; never the OST text), so a refusal costs no OST burn and no encode. A clip has no capture position of its own: it takes the day track's fix nearest its cut point (within 60 s, else none, and the county gate refuses it). A photo is matched by its camera-clock EXIF time to an episode's `creation_time`, anchored on the day's track (`anchor_photo_insert`), then moved onto the long-form whose source ranges hold that master second plus the montage lead. A photo on no day, or in no long-form, refuses (`InsertError`). Clips land in the first long-form of the drive's first day at their `@mm:ss`. Placement is approximate to about one GOP.
+- **All days, rendered days gated.** `plan_drive_inserts` takes every day of the drive and a `render_dates` set. Placement runs on all of them (so a photo of a finished day still resolves and `clip_date` is the drive's first day); the gate runs only on the days being rendered, since a finished day already carries its inserts.
+- **OST audit sidecar.** Each LF entry carries `inserts` (kind, media name, `at_s`, style, hold), and the audit hash covers LF entries, so the operator confirms the inserts with the burn text.
+- **Splice gate.** `splice_lf_inserts` builds the `InsertGate` itself and always passes it to `plan_inserts` (fail closed; no config gives the closed gate).
+- **Status.** This change is planning only: the day pipeline does not splice yet, so `drive` exits 2 when inserts are requested. The splice, the resume guard and Phase D are a follow-on change.
