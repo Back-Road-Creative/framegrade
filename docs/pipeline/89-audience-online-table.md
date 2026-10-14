@@ -17,11 +17,12 @@ collector imports this module, so the fetch and the persistence stay independent
 treated as a fault), and upserts any non-empty histogram — same swallow-and-warn failure
 contract as the fold, since the refresh runs after collection is already persisted. An empty
 histogram (expected when the token lacks the insights scopes) writes zero rows and is
-reported as such, not as an error. `metrics best-times` prints this curve's top hours beside the ranking; no GMS resolver
-reads it to move a posting slot.
+reported as such, not as an error. `metrics best-times` prints the ranking beside Waypost's decided hours; no GMS resolver
+reads this curve to move a posting slot.
 
 **The data path is retired.** `resolve_shorts_times_for_region` once moved `slot_performance`'s
 top slot to the front of a region's shorts window where `audience_online` agreed, and phase D's
-`_shorts_times_by_platform` carried a per-platform result into the publish plan. Both are gone with
-`best_slot_from_data`: GMS reorders nothing from this table. `audience_online` is still collected;
-`metrics best-times` prints its top hours beside the ranking.
+`_shorts_times_by_platform` carried a per-platform result into the publish plan. Waypost now decides
+every region's shorts hours (`seo_slots.shorts_windows`; `seo_manager` `shorts_times` decisions), so
+GMS reorders nothing from this table and `best_slot_from_data` is gone. `audience_online` is still
+collected; `metrics best-times` prints the ranking beside the hours Waypost decided.

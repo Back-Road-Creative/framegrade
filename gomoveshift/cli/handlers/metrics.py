@@ -444,11 +444,13 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
 
 def _cmd_metrics_best_times(args, config) -> int:
     """``metrics best-times``: print the region x platform x top-3
-    ``slot_performance`` table, with the platform's audience-online hours.
+    ``slot_performance`` table, with the hours Waypost has decided for the region.
 
     Report-only and always exits 0 — thin data is the normal case and a
-    cron must not go red for it. GMS moves no slot from the ranking.
+    cron must not go red for it. The ranking informs Waypost's own decision
+    (``shorts_times``); GMS moves no slot from it.
     """
+    from ...pipeline.seo_slots import CadenceSourceUnreadableError, shorts_pool
     from ...tracking.slot_performance import (
         ensure_audience_online_schema,
         slot_performance_trend,
@@ -485,6 +487,12 @@ def _cmd_metrics_best_times(args, config) -> int:
                     f"  #{rank} {row.hour_local:02d}:00 -- n={row.n} "
                     f"mean_views={row.mean_views:.1f} mean_engagement={row.mean_engagement:.3f}"
                 )
+
+            try:
+                decided = ", ".join(shorts_pool(config, region))
+            except CadenceSourceUnreadableError as exc:
+                decided = f"unavailable ({exc})"
+            print(f"  decided hours: {decided}")
 
             if show_trend:
                 top = top3[0]

@@ -7,8 +7,9 @@ rather than using the ``zoompan`` filter, which keeps the easing ours and
 reproducible from the planner alone. ``assembly.encoder.VideoEncoder`` is not
 reused: every one of its methods takes a video *file*, never a raw stream; only
 its invocation style (and ShortsRenderer's) carries over. Local working output
-like ``photos develop`` — not the blur-gated publish path, and it touches no
-part of the develop/grade chain.
+like ``photos develop`` — not the blur-gated publish path. Each still is the
+route-story developed still (``hud._load_still``): one grade for the reel, the
+still cards and the inserts.
 """
 
 import logging
@@ -30,7 +31,7 @@ from ..encoding_constants import (
     SHORTS_HEIGHT,
     SHORTS_WIDTH,
 )
-from .develop import PhotoDecodeError, decode
+from .develop import PhotoDecodeError
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,13 @@ REEL_RANGE_FILTER = (
     f",setparams=range={LONGFORM_COLOR_RANGE}:colorspace={LONGFORM_COLORSPACE}"
     f":color_primaries={LONGFORM_COLOR_PRIMARIES}:color_trc={LONGFORM_COLOR_TRC}"
 )
+
+
+def _load_still(path: Path):
+    """``route_story.hud._load_still``, imported late (hud imports this package)."""
+    from ..route_story import hud
+
+    return hud._load_still(path)
 
 
 class ReelError(RuntimeError):
@@ -173,9 +181,9 @@ def render_reel(
             # whole render, exactly as the Mertens fuse does.
             cv2.setNumThreads(1)
             for index, path in enumerate(stills):
-                rgb = decode(path).rgb
-                if rgb.dtype == np.uint16:
-                    rgb = (rgb >> 8).astype(np.uint8)
+                # The one developed still: the same graded, disk-cached pixels the
+                # route-story cards and the insert engine hold, never a private decode.
+                rgb = np.asarray(_load_still(path))
                 logger.info("Reel still %d/%d: %s", index + 1, len(stills), path.name)
                 for rect in plan_motion((rgb.shape[1], rgb.shape[0]), size, seconds, fps, index):
                     proc.stdin.write(_frame(rgb, rect, size).tobytes())

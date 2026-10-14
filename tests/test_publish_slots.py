@@ -88,9 +88,20 @@ def test_shorts_no_region_falls_back_to_flat():
     cfg = _cfg()
     cfg.drive.shorts_publish_times = ["12:00"]
     out = schedule_constants.resolve_shorts_times(
-        cfg, lf_day="wed", shorts_times_arg=None, region="atlantis"
+        cfg, lf_day="wed", shorts_times_arg=None, region=None
     )
     assert out == ["12:00"]
+
+
+def test_shorts_region_waypost_has_no_hours_for_halts():
+    from gomoveshift.pipeline.seo_slots import CadenceSourceUnreadableError
+
+    cfg = _cfg()
+    cfg.drive.shorts_publish_times = ["12:00"]
+    with pytest.raises(CadenceSourceUnreadableError, match="region atlantis has no shorts hours"):
+        schedule_constants.resolve_shorts_times(
+            cfg, lf_day="wed", shorts_times_arg=None, region="atlantis"
+        )
 
 
 # --- resolve_lf_time: precedence (unchanged) --------------------------
