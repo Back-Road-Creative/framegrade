@@ -494,6 +494,7 @@ from .phase_d_scheduling import (  # noqa: E402,F401
     _build_and_persist_drive_schedule,
     _build_social_posts_per_lf,
     _maybe_rebase_drive_schedule,
+    _reresolve_passed_lf_slots,
     assert_all_places_verified,
 )
 
@@ -1354,6 +1355,27 @@ class PhaseD:
             no_youtube_upload=bool(getattr(state, "no_youtube_upload", False)),
             publish_set=bool(state.publish_day),
         )
+
+        def _reschedule_passed_lfs(now):
+            # Everything below this call (shorts CSV, publish plan, state) must
+            # see the rebuilt schedule, so rebind the local.
+            nonlocal drive_schedule
+            fresh = _reresolve_passed_lf_slots(
+                current=drive_schedule,
+                scheduler_cls=PipelineScheduler,
+                config=self.config,
+                drive_plan=drive_plan,
+                state=state,
+                region=region,
+                stages_dir=stages_dir,
+                output_base=output_base,
+                now=now,
+                project=project_base,
+            )
+            if fresh is not None:
+                drive_schedule = fresh
+            return fresh
+
         yt, youtube_uploads = _upload_lfs_to_youtube(
             drive_plan=drive_plan,
             regular_lf_paths=regular_lf_paths,
@@ -1367,6 +1389,7 @@ class PhaseD:
             skip_youtube_upload=skip_youtube_upload,
             youtube_upload_enabled=youtube_upload_enabled,
             project_base=project_base,
+            reschedule=_reschedule_passed_lfs,
         )
 
         # ── 5. Consolidated shorts CSV ─────────────────────────────────────
