@@ -25,17 +25,19 @@ from .drive_phases.phase_a import PhaseA
 from .drive_phases.phase_b_preview import PhaseBPreview
 from .drive_phases.phase_bc_day_first import PhaseBCDayFirst, _day_dir_has_finals
 from .drive_phases.phase_d import PUBLISH_DAYS, PhaseD
+from .drive_phases.phase_d_fingerprint import (
+    invalidate_phase_d_if_fingerprint_stale,
+    persist_phase_d_fingerprint,
+)
 from .drive_state_model import PER_LF_OVERRIDE_MIRROR_FIELDS, PipelineState
 from .exceptions import PipelineValidationError
 from .flag_registry import apply_cli_to_state, merge_on_resume
 from .orchestrator_fingerprint import (
     invalidate_phase_bc_if_superlong_incomplete,
-    invalidate_phase_d_if_fingerprint_stale,
     invalidate_phase_d_if_outputs_missing,
     invalidate_phase_d_if_schedule_region_stale,
     invalidate_phases_if_code_version_stale,
     persist_phase_code_version,
-    persist_phase_d_fingerprint,
 )
 from .orchestrator_preflight import run_preflight_and_prompt
 from .ost_audit_sidecar import OstAuditPendingError

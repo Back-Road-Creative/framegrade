@@ -16,9 +16,11 @@ width, height, aspect, codec and bitrate floor are written down.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
+import os
 import statistics
 import subprocess
 from collections.abc import Mapping
@@ -52,6 +54,7 @@ __all__ = [
     "aspect_of",
     "claim_native_resolution_allowed",
     "rendition_for",
+    "ml_upscale_still",
     "upscale_plan",
 ]
 
@@ -103,6 +106,7 @@ def upscale_plan(
             f"source {source_w}x{source_h} is below the {tw}x{th} rendition and the media "
             f"profile upscale policy is 'off' ({HONEST_RESOLUTION_RULE})"
         )
+    # ``ml`` stays resample for VIDEO: the ML scaler is stills-only (ml_upscale_still).
     if policy not in ("resample", "ml"):
         raise UpscaleRefusedError(f"unknown upscale policy {policy!r}")
     note = "ml resolves to resample in this release" if policy == "ml" else ""
@@ -371,6 +375,169 @@ def picture_inputs_from_state(state) -> tuple[float | None, dict[int, bool]]:
         for idx in getattr(art, "regular_lf_indices", None) or []:
             changed[idx] = day_changed
     return sharpness, changed
+
+
+logger = logging.getLogger(__name__)
+
+
+# ── ML upscale for stills (Real-ESRGAN-class ONNX, opt-in via upscale: ml) ──
+#: Weight pin: the one home for the vendored model's name and sha256 (no
+#: pyproject.toml mirror; that file is human-gated). Vendor by hand into
+#: ``<service>/models/`` or point ``GMS_ML_UPSCALE_WEIGHTS`` at it; the service
+#: never downloads it, and a sha256 mismatch refuses the model.
+ML_UPSCALE_WEIGHTS_FILE = "realesrgan-x4plus.onnx"
+ML_UPSCALE_WEIGHTS_SHA256 = "0cef97684bdf383b2cfa6b5222bbf69449afa808c5069e7b7f37f0542fe787ce"  # pragma: allowlist secret (public model checksum, not a credential)
+ML_UPSCALE_WEIGHTS_ENV = "GMS_ML_UPSCALE_WEIGHTS"
+ML_UPSCALE_PROVIDERS = ["CUDAExecutionProvider"]
+#: Tiled inference: the x4 model on a whole still saturates an 8 GB card from
+#: ~960 px and time explodes after (measured RTX 4070: 960x540 35 s, 1280x720
+#: 157 s, 1920x1080 409 s). Each tile is ``ML_UPSCALE_TILE`` px square plus
+#: ``ML_UPSCALE_TILE_PAD`` px of context per side; the pad is cropped after x4.
+ML_UPSCALE_TILE = 256
+ML_UPSCALE_TILE_PAD = 16
+_ML_SCALE = 4
+#: Mean SSIM (luma, 256 px view) of the ML frame against the resampled one that
+#: still counts as "the same picture". Derivation: a faithful 4x enhancement keeps
+#: low-frequency structure, so SSIM to a spline resample stays near 0.9; 0.80
+#: leaves room for added texture while rejecting a hallucinated or recoloured
+#: frame. PROVISIONAL: tune on real stills.
+ML_UPSCALE_SSIM_FLOOR = 0.80
+_SSIM_VIEW = 256
+
+
+class MlUpscaleRefused(RuntimeError):  # noqa: N818 -- name fixed by the unit spec
+    """The ML scaler cannot run (weights absent or unpinned, no CUDA); the resample ships."""
+
+
+@dataclass(frozen=True)
+class MlUpscaleReport:
+    used: bool
+    reason: str
+    sharpness_ml: float | None = None
+    sharpness_resampled: float | None = None
+    ringing_ml: float | None = None
+    ssim_to_resampled: float | None = None
+
+
+def ml_upscale_weights_path() -> Path:
+    env = os.environ.get(ML_UPSCALE_WEIGHTS_ENV)
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "models" / ML_UPSCALE_WEIGHTS_FILE
+
+
+def verify_ml_upscale_weights(path: Path) -> None:
+    """Raise ``MlUpscaleRefused`` unless ``path`` exists and hashes to the pin."""
+    path = Path(path)
+    if not path.is_file():
+        raise MlUpscaleRefused(f"weights missing: {path}")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != ML_UPSCALE_WEIGHTS_SHA256:
+        raise MlUpscaleRefused(f"weights sha256 mismatch for {path}: got {digest}")
+
+
+def load_ml_upscaler(path: Path | None = None, *, providers=None, onnxruntime=None):
+    """A verified ONNX session, CUDA only. Raises ``MlUpscaleRefused``."""
+    path = Path(path) if path is not None else ml_upscale_weights_path()
+    verify_ml_upscale_weights(path)
+    if onnxruntime is None:
+        import onnxruntime  # noqa: PLC0415 -- heavy, GPU-only
+    # The CUDA libs are pip wheels that must be on the loader path first, else
+    # the provider fails to bind (libcublasLt.so.12 not found) and the resample ships.
+    if hasattr(onnxruntime, "preload_dlls"):
+        onnxruntime.preload_dlls()
+    wanted = list(providers or ML_UPSCALE_PROVIDERS)
+    session = onnxruntime.InferenceSession(str(path), providers=wanted)
+    bound = list(session.get_providers())
+    if not bound or bound[0] != wanted[0]:
+        raise MlUpscaleRefused(f"CUDA provider not bound (got {bound})")
+    return session
+
+
+def ssim_luma(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean SSIM of two same-sized images on a bounded luma view (numpy/cv2 only)."""
+    x = _bounded_luma(a, _SSIM_VIEW).astype(np.float64)
+    y = cv2.resize(_luma(b), (x.shape[1], x.shape[0]), interpolation=cv2.INTER_AREA)
+    y = y.astype(np.float64)
+    c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
+
+    def blur(v):
+        return cv2.GaussianBlur(v, (0, 0), 1.5)
+
+    mx, my = blur(x), blur(y)
+    vx, vy = blur(x * x) - mx * mx, blur(y * y) - my * my
+    cxy = blur(x * y) - mx * my
+    num = (2 * mx * my + c1) * (2 * cxy + c2)
+    den = (mx * mx + my * my + c1) * (vx + vy + c2)
+    return float((num / den).mean())
+
+
+def _run_tile(session, name: str, tile: np.ndarray) -> np.ndarray:
+    feed = np.ascontiguousarray(tile.astype(np.float32).transpose(2, 0, 1)[None] / 255.0)
+    out = np.asarray(session.run(None, {name: feed})[0])
+    return np.clip(out[0].transpose(1, 2, 0) * 255.0 + 0.5, 0, 255).astype(np.uint8)
+
+
+def _run_model(session, image: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    name = session.get_inputs()[0].name if hasattr(session, "get_inputs") else "input"
+    h, w = image.shape[:2]
+    if max(h, w) <= ML_UPSCALE_TILE:
+        rgb = _run_tile(session, name, image)
+    else:
+        s, pad = _ML_SCALE, ML_UPSCALE_TILE_PAD
+        rgb = np.zeros((h * s, w * s, 3), np.uint8)
+        for y0 in range(0, h, ML_UPSCALE_TILE):
+            for x0 in range(0, w, ML_UPSCALE_TILE):
+                y1, x1 = min(y0 + ML_UPSCALE_TILE, h), min(x0 + ML_UPSCALE_TILE, w)
+                py0, px0 = max(y0 - pad, 0), max(x0 - pad, 0)
+                py1, px1 = min(y1 + pad, h), min(x1 + pad, w)
+                up = _run_tile(session, name, image[py0:py1, px0:px1])
+                rgb[y0 * s : y1 * s, x0 * s : x1 * s] = up[
+                    (y0 - py0) * s : (y1 - py0) * s, (x0 - px0) * s : (x1 - px0) * s
+                ]
+    if rgb.shape[:2] != (target_h, target_w):  # model scale is fixed; land on the target
+        rgb = cv2.resize(rgb, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    return rgb
+
+
+def ml_upscale_still(
+    image: np.ndarray,
+    target_w: int,
+    target_h: int,
+    *,
+    resampled: np.ndarray,
+    session_factory=None,
+) -> tuple[np.ndarray, MlUpscaleReport]:
+    """The ML-upscaled still if it measures at least as good as ``resampled``, else ``resampled``.
+
+    Accepts only when sharpness >= the resample's, ringing <= ``RINGING_MAX`` and
+    SSIM to the resample >= ``ML_UPSCALE_SSIM_FLOOR``. Never raises: any miss or
+    model failure returns the caller's resampled frame and logs the numbers.
+    """
+    sharp_res = sharp_ml = ring = ssim = None
+    try:
+        session = (session_factory or load_ml_upscaler)()
+        candidate = _run_model(session, image, target_w, target_h)
+        sharp_res = sharpness_score(resampled)
+        sharp_ml = sharpness_score(candidate)
+        ring = ringing_score(candidate)
+        ssim = ssim_luma(candidate, resampled)
+        misses = []
+        if sharp_ml < sharp_res:
+            misses.append(f"sharpness {sharp_ml:.1f} < resampled {sharp_res:.1f}")
+        if ring > RINGING_MAX:
+            misses.append(f"ringing {ring:.4f} > {RINGING_MAX}")
+        if ssim < ML_UPSCALE_SSIM_FLOOR:
+            misses.append(f"ssim {ssim:.3f} < {ML_UPSCALE_SSIM_FLOOR}")
+        if misses:
+            reason = "; ".join(misses)
+            logger.warning("ML upscale rejected, resampled frame ships: %s", reason)
+            return resampled, MlUpscaleReport(False, reason, sharp_ml, sharp_res, ring, ssim)
+        return candidate, MlUpscaleReport(True, "accepted", sharp_ml, sharp_res, ring, ssim)
+    except Exception as exc:  # noqa: BLE001 -- the resample is always a valid answer
+        reason = str(exc) or type(exc).__name__
+        logger.warning("ML upscale unavailable, resampled frame ships: %s", reason)
+        return resampled, MlUpscaleReport(False, reason, sharp_ml, sharp_res, ring, ssim)
 
 
 # --- Thumbnail finish (image quality) -----------------------------------------

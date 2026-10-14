@@ -35,11 +35,11 @@ from gomoveshift.pipeline._phase_d_fingerprint import (
 )
 from gomoveshift.pipeline.drive_orchestrator import DrivePipelineOrchestrator
 from gomoveshift.pipeline.drive_phases import phase_d as phase_d_mod
-from gomoveshift.pipeline.orchestrator_fingerprint import (
-    build_phase_d_fingerprint_inputs,
+from gomoveshift.pipeline.drive_phases.phase_d_fingerprint import (
     invalidate_phase_d_if_fingerprint_stale,
     persist_phase_d_fingerprint,
 )
+from gomoveshift.pipeline.orchestrator_fingerprint import build_phase_d_fingerprint_inputs
 from gomoveshift.pipeline.drive_state_model import PipelineState
 
 

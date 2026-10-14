@@ -69,3 +69,40 @@ CLI's `--look` handler resolves against (`cli/handlers/photos.py::_cmd_photos_de
 source of truth, so an operator-configured look appears without a console change, and a name
 outside that merged set is refused with a 400 before it ever reaches the subprocess argv. An
 unrecognized `action` is a 400, not a silent no-op.
+
+## ML upscale for stills (`MediaProfile.upscale: ml`)
+
+`ml` applies to stills only: `PhotoResizer(upscale="ml")` enlarges a photo narrower than the
+target width. The Lanczos resample is always computed first and is the fallback. Video keeps
+resolving `ml` to the spline36 resample (`quality.upscale_plan`). Nothing else changes: an
+export that is not an upscale is byte-identical to before. `photos/develop.py` has no
+upscale path (gallery masters ship at native size), so it is untouched.
+
+`quality.ml_upscale_still` accepts the ML frame only when sharpness >= the resample's,
+ringing <= `RINGING_MAX` and SSIM-to-resample >= `ML_UPSCALE_SSIM_FLOOR` (provisional). Any miss,
+missing/mismatched weights or model error ships the resample and logs the numbers. The
+provenance entry gains `upscale: {scaler: "ml"|"resample", upscaled_from, reason, sharpness_ml,
+sharpness_resampled, ringing_ml, ssim_to_resampled}`.
+
+The weights are vendored by hand (the service never downloads). The pinned file is
+`realesrgan-x4plus.onnx` (sha256 in `quality.ML_UPSCALE_WEIGHTS_SHA256`, the one home for the pin);
+`tools/export_realesrgan_onnx.py` builds it from the upstream `.pth`. Point `GMS_ML_UPSCALE_WEIGHTS` at it
+or copy it to `<service>/models/` (`models/*.onnx` is gitignored, never commit it). A sha256
+mismatch refuses the model and the resample ships. I/O: input `input` float32 NCHW RGB 0..1,
+output `output` float32 NCHW RGB 0..1 at 4x, dynamic N/H/W.
+
+`quality.load_ml_upscaler` calls `onnxruntime.preload_dlls()` (when present) before building the
+session: the CUDA libs are pip wheels, and without it CUDA fails to bind
+(`libcublasLt.so.12 not found`) and the resample silently ships. `_run_model` runs the still in
+`ML_UPSCALE_TILE` (256 px) tiles with `ML_UPSCALE_TILE_PAD` (16 px) of context per side, cropped
+after x4 and stitched; a still no larger than one tile runs whole. Whole-still inference on the
+8 GB RTX 4070 saturated memory from 960 px (960x540 35 s, 1280x720 157 s, 1920x1080 409 s).
+
+Regenerate: fetch upstream `RealESRGAN_x4plus.pth` (xinntao/Real-ESRGAN v0.1.0 release, BSD-3-Clause;
+sha256 `4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1`) by hand, then
+`.venv/bin/python tools/export_realesrgan_onnx.py RealESRGAN_x4plus.pth out.onnx` (needs the
+`onnx` package, absent from the service venv; install it into a scratch `--target` dir on
+`PYTHONPATH`). It prints the sha256; two exports on torch 2.10 / onnx 1.23 were byte-identical. A
+different torch/onnx may change the bytes: re-pin the constant if so.
+`preflight.check_ml_upscale(profile.media.upscale)` reports weights and CUDA state without
+raising; it is not yet called from the run preflight (the caller that has the profile does).
