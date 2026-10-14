@@ -496,6 +496,37 @@ def apply_insert_flags(args, config) -> None:
         config.drive.insert_clips = list(clips)
 
 
+def insert_request(drive) -> Optional[dict]:
+    """The insert flags as a JSON-safe record (``None`` when none were given).
+
+    Persisted on the state as ``insert_request`` so a resume can tell whether it carries the
+    flags the finished days were rendered with.
+    """
+    photos = getattr(drive, "insert_photos", "")
+    clips = getattr(drive, "insert_clips", [])
+    photos = photos if isinstance(photos, str) else ""
+    clips = sorted(str(c) for c in clips) if isinstance(clips, list) else []
+    return {"photos": photos, "clips": clips} if photos or clips else None
+
+
+def reconcile_insert_request(state, drive, completed_dates) -> None:
+    """Refuse a resume whose insert flags differ from those its finished days were rendered with.
+
+    The flags are not restored from state (they stay per-invocation); a finished day is never
+    re-rendered, so a changed request could only leave the drive half with, half without the
+    inserts. With nothing finished the request is free to change. Records the current request.
+    """
+    current = insert_request(drive)
+    saved = getattr(state, "insert_request", None) or None
+    if completed_dates and saved != current:
+        raise InsertError(
+            f"resume: day(s) {', '.join(sorted(str(d) for d in completed_dates))} were rendered "
+            f"with insert flags {saved or 'none'}, this run has {current or 'none'}. "
+            "Re-run with the original --insert-photos/--insert-clip flags, or pass --fresh."
+        )
+    state.insert_request = current
+
+
 def describe_drive_inserts(drive) -> list[str]:
     """One preflight line per requested insert; raises on media that is not there."""
     di = DriveInserts.from_drive(drive)
@@ -681,6 +712,19 @@ def insert_records(placed: dict[int, list[Insert]]) -> dict[int, list[dict]]:
     return out
 
 
+def shift_photo_inserts(inserts: Sequence[Insert], delta_s: float) -> list[Insert]:
+    """Move the footage-anchored stills by ``delta_s`` (the montage's real minus planned length).
+
+    A clip's ``@mm:ss`` is a time on the finished LF, so it stays where it was asked.
+    """
+    return [
+        replace(i, at_s=max(0.0, i.at_s + delta_s))
+        if Path(i.media).suffix.lower() in STILL_SUFFIXES
+        else i
+        for i in inserts
+    ]
+
+
 def splice_lf_inserts(
     lf_path: Path,
     inserts: Sequence[Insert],
@@ -717,6 +761,31 @@ def splice_lf_inserts(
     os.replace(out, lf_path)
     shutil.rmtree(out.parent / f"{out.stem}_inserts", ignore_errors=True)
     return result
+
+
+def splice_day_lf_inserts(
+    lf_path: Path,
+    inserts: Sequence[Insert],
+    *,
+    config,
+    label: Optional[str],
+    profile,
+    work_dir: Path,
+    montage_planned_s: float,
+    prepended: Path,
+    concatenated: Path,
+    probe: Callable[[Path], MediaInfo] = probe_media,
+) -> InsertResult:
+    """Splice a day LF's inserts after its OST burn, moving stills by the montage's real lead.
+
+    The lead is the probed length the montage added (``prepended`` minus
+    ``concatenated``); stills were placed against ``montage_planned_s``.
+    """
+    lead = float(probe(Path(prepended)).duration) - float(probe(Path(concatenated)).duration)
+    shifted = shift_photo_inserts(inserts, lead - float(montage_planned_s))
+    return splice_lf_inserts(
+        lf_path, shifted, config=config, label=label, profile=profile, work_dir=work_dir
+    )
 
 
 def plan_day_from_batch(
