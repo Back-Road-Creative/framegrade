@@ -32,6 +32,7 @@ class RunSpec:
     short_ost_text_fn: Optional[Callable] = None
     short_regions_fn: Optional[Callable] = None
     state: Any = None
+    inserts_by_lf: Optional[dict] = None
 
 
 @dataclass
@@ -114,6 +115,7 @@ def render_day(spec: RunSpec) -> Optional[Deliverables]:
         short_ost_text_fn=spec.short_ost_text_fn,
         short_regions_fn=spec.short_regions_fn,
         state=spec.state,
+        inserts_by_lf=spec.inserts_by_lf,
     )
     if artifacts is None:
         return None
@@ -157,6 +159,7 @@ def deliverables_to_state(d: Deliverables) -> dict:
         "planned_shorts_count": d.planned_shorts_count,
         "shorts_target_in_force": d.shorts_target_in_force,
         "sidecars": {k: str(v) for k, v in d.sidecars.items()},
+        "inserts": {str(i): recs for i, recs in d.inserts.items()},
         "measurements": asdict(d.measurements),
         "trail_films": [
             {
@@ -190,6 +193,7 @@ def deliverables_from_state(record: dict) -> Deliverables:
         shorts_target_in_force=record.get("shorts_target_in_force"),
         sidecars={k: Path(v) for k, v in (record.get("sidecars") or {}).items()},
         measurements=Measurements(**(record.get("measurements") or {})),
+        inserts={int(i): recs for i, recs in (record.get("inserts") or {}).items()},
         trail_films=[
             TrailFilm(
                 lf_index=int(f["lf_index"]),
