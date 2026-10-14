@@ -1441,6 +1441,10 @@ class DriveConfig(BaseModel):
     # color-analysis cache (and a resume) carries the choice.
     no_sharpen: bool = False
     no_denoise: bool = False
+    # Opt-in picture steps on the day master (--stabilize / --deflicker); each is
+    # gated on measured luma jitter (pipeline/stabilize.py).
+    stabilize: bool = False
+    deflicker: bool = False
     # Route Story trail film beside each LF day (--trail / --no-trail). None is
     # auto: on when the day has a GPX and a prepared imagery bundle. The profile
     # (--trail-profile) supplies the imagery rasters and credits.

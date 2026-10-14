@@ -1,6 +1,6 @@
 ## Stabilise / deflicker pass (`pipeline/stabilize.py`) <a id="stabilise-and-deflicker"></a>
 
-Standalone module, not yet wired into the render path or CLI (named follow-up below). It owns
+Wired into the drive day master by `--stabilize` / `--deflicker` (see "Wiring" below). It owns
 three independent pieces: a capability probe, argv builders for two ffmpeg passes, and a quality
 gate that decides whether either pass's output is worth keeping.
 
@@ -43,7 +43,30 @@ tiny synthetic alternating-brightness clip built from a numpy array piped into
 `ffmpeg -f rawvideo`, and asserts the gate's measured output jitter is lower than its input
 jitter; it's skipped, not xfailed, when ffmpeg is genuinely absent from the box.
 
-**Follow-up, named and not yet done:** wiring either pass into the drive pipeline's render path
-(`pipeline/single_pass.py`) and/or a `gomoveshift` CLI flag is out of scope for this module --
-`pipeline/color_correction.py`, `pipeline/color_filters.py`, `cli/parser.py` and `cli/handlers/*`
-are all owned by other in-flight work and this change does not touch them.
+### Wiring
+
+* **Flags.** `gomoveshift drive --deflicker` and `--stabilize` (opt-in, both default `None` --
+  an unset argparse sentinel -- so a flag already on `config.drive.stabilize` / `.deflicker` is
+  never cleared by a run that omits it; `cli/handlers/drive.py::apply_picture_flags`). Neither is
+  persisted in drive state: a resumed run that must keep them re-passes the flags.
+* **Preflight refusal.** `preflight.check_picture_filters` runs in `cmd_drive` before any work:
+  `--stabilize` without libvidstab exits 2 with `--stabilize refused: ffmpeg built without
+  libvidstab` (`VIDSTAB_MISSING_REASON`); `--deflicker` needs the `deflicker` filter. No flag set
+  means nothing is probed.
+* **Where it runs.** `encode_day_master`, on the raw concat before the grade, blur mask and
+  encode: `apply_picture_steps` deflickers, then stabilises (vidstabdetect, vidstabtransform).
+  Intermediates sit next to the raw concat under the day's output dir and are removed afterwards.
+  The colour cache is keyed on the raw concat, so it is neither seeded nor saved for a day whose
+  picture steps were kept (the grade re-analyses the changed frames).
+* **The gate.** Each step is measured: `measure_luma_jitter` on input and output, kept only when
+  jitter dropped. A discarded or failed step deletes its output, logs both numbers at WARNING and
+  the chain continues with its input; it never raises.
+* **Record.** `day_<date>_picture_steps.json` beside the master holds `deflicker_applied`,
+  `stabilize_applied` (bool) and per-step `input_jitter` / `output_jitter` / `kept`.
+* **Phase A.** `quality.flicker_score(frames)` (mean absolute frame-to-frame luma-mean change)
+  exists, but Phase A does not record `source_flicker`: the Phase A sharpness loop samples one frame
+  at evenly spaced timestamps, not consecutive frames, so reusing it would measure scene change,
+  not flicker, and a consecutive-frame sample needs its own decode. A `shake_score` needs
+  `vidstabdetect` and is out of scope until a build has it.
+* **Host dependency.** This box's ffmpeg (git-2026-04-10) has `deflicker` but not libvidstab, so
+  `--stabilize` refuses here. The rebuild is a `bin/host-reconcile.sh` step for a later PR.
