@@ -24,7 +24,7 @@ ROWS = [
 
 def test_hooks_dict_names_the_three_engine_seams():
     h = hooks.photo_run_hooks()
-    assert set(h) == {"ledger_booker", "voice_source", "theme_recorder"}
+    assert set(h) == {"ledger_booker", "voice_source", "theme_recorder", "upscale"}
     assert h["ledger_booker"] is hooks.book_photo_slots
     assert h["voice_source"] is hooks.next_photo_voice_style
     assert h["theme_recorder"] is hooks.record_photo_theme_usage
@@ -62,7 +62,7 @@ def test_engine_hands_rows_to_the_injected_booker(tmp_path):
 
 
 def test_missing_booker_marks_the_slots_unbooked(tmp_path):
-    orch = PhotoOrchestrator(output_dir=tmp_path)
+    orch = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
     slots = [SimpleNamespace(date="2026-02-23", time="09:00")]
     with patch.object(orch, "_mark_ledger_unbooked") as mark:
         orch._book_slots(slots, [], tmp_path / "p.csv")
@@ -70,7 +70,7 @@ def test_missing_booker_marks_the_slots_unbooked(tmp_path):
 
 
 def test_engine_defaults_without_hooks(tmp_path):
-    orch = PhotoOrchestrator(output_dir=tmp_path)
+    orch = PhotoOrchestrator(site_root=tmp_path / "site", output_dir=tmp_path)
     assert orch._get_voice_style_from_rotator() == VoiceStyle.FIRST_PERSON
     orch._record_theme_usage(SimpleNamespace(voice_style="voice_first_person", week_start="w"))
 
@@ -96,3 +96,13 @@ def test_engine_survives_a_failing_voice_source_and_recorder(tmp_path):
     orch = PhotoOrchestrator(output_dir=tmp_path, voice_source=boom, theme_recorder=boom)
     assert orch._get_voice_style_from_rotator() == VoiceStyle.FIRST_PERSON
     orch._record_theme_usage(SimpleNamespace(voice_style="v", week_start="w"))  # must not raise
+
+
+def test_upscale_policy_fails_closed_to_off(monkeypatch):
+    from gomoveshift.publishing import brand_policy
+
+    def unreadable(slug):
+        raise OSError("brand.yaml unreadable")
+
+    monkeypatch.setattr(brand_policy, "load_media_profile", unreadable)
+    assert hooks.photo_run_hooks()["upscale"] == "off"

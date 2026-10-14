@@ -23,7 +23,7 @@ Usage:
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -616,6 +616,7 @@ class PipelineScheduler:
         shorts_per_day: Optional[int] = None,
         shorts_counts: Optional[List[int]] = None,
         locked_identity_times: Optional[List[dt_time]] = None,
+        lf_dates: Optional[List[date]] = None,
     ) -> "DriveReleaseSchedule":
         """Generate a schedule for a drive pipeline output set.
 
@@ -655,6 +656,11 @@ class PipelineScheduler:
                           and identity-time slots are excluded from the
                           collision set so a resumed run keeps its own booked
                           times. ``None`` resolves the identity fresh.
+            lf_dates: Optional publish date per LF, parallel to ``regular_lfs``,
+                          for a run whose LFs no longer sit one series apart
+                          (a live LF plus slots re-resolved behind it). Each
+                          LF's shorts window still ends one series step after
+                          its own date. ``None`` = the series from ``start_date``.
 
         Returns:
             DriveReleaseSchedule with all slots. ``identity_times`` echoes the
@@ -755,10 +761,15 @@ class PipelineScheduler:
         # (the final shorts window's end); GMS does no date arithmetic of its own.
         from .seo_slots import lf_series
 
-        lf_dates = lf_series(base_date, len(regular_lfs) + 1)
+        if lf_dates is not None and len(lf_dates) != len(regular_lfs):
+            raise ValueError(
+                f"generate_drive_schedule: lf_dates has {len(lf_dates)} dates for "
+                f"{len(regular_lfs)} long-forms"
+            )
+        series = lf_series(base_date, len(regular_lfs) + 1)
 
         for i, lf in enumerate(regular_lfs):
-            lf_date = lf_dates[i]
+            lf_date = lf_dates[i] if lf_dates is not None else series[i]
             lf_dt = datetime.combine(lf_date, self.long_form_time, tzinfo=EST)
 
             lf_slots.append(
@@ -772,7 +783,7 @@ class PipelineScheduler:
             )
 
             # Generate shorts slots between this LF and next LF
-            next_lf_date = lf_dates[i + 1]
+            next_lf_date = lf_series(lf_date, 2)[1] if lf_dates is not None else series[i + 1]
             next_lf_dt = datetime.combine(next_lf_date, self.long_form_time, tzinfo=EST)
 
             # Shorts start same day after LF or next day at 8am

@@ -49,6 +49,10 @@ jitter; it's skipped, not xfailed, when ffmpeg is genuinely absent from the box.
   an unset argparse sentinel -- so a flag already on `config.drive.stabilize` / `.deflicker` is
   never cleared by a run that omits it; `cli/handlers/drive.py::apply_picture_flags`). Neither is
   persisted in drive state: a resumed run that must keep them re-passes the flags.
+* **`--fast`.** A plain `store_true` (never an opt-in). It forces `no_sharpen`, clears
+  `stabilize` / `deflicker` even when saved on the config, and records each dropped step in
+  `config.drive.fast_skipped`; the preflight plan prints one `fast mode: skipped ...` line. The
+  honest-resolution upscale rule and every gate are untouched.
 * **Preflight refusal.** `preflight.check_picture_filters` runs in `cmd_drive` before any work:
   `--stabilize` without libvidstab exits 2 with `--stabilize refused: ffmpeg built without
   libvidstab` (`VIDSTAB_MISSING_REASON`); `--deflicker` needs the `deflicker` filter. No flag set

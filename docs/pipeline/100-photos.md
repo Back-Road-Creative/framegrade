@@ -104,5 +104,9 @@ sha256 `4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1`) by ha
 `onnx` package, absent from the service venv; install it into a scratch `--target` dir on
 `PYTHONPATH`). It prints the sha256; two exports on torch 2.10 / onnx 1.23 were byte-identical. A
 different torch/onnx may change the bytes: re-pin the constant if so.
-`preflight.check_ml_upscale(profile.media.upscale)` reports weights and CUDA state without
-raising; it is not yet called from the run preflight (the caller that has the profile does).
+
+`PhotoOrchestrator` loads the brand `MediaProfile` once (fail-closed to `upscale="off"` with a
+warning if unreadable) and passes `profile.media.upscale` to `PhotoResizer` and to
+`preflight_photo_run(upscale=...)`. That preflight calls `preflight.check_ml_upscale`, which
+reports weights and CUDA state; a failure is advisory (a warning, never a raise) because stills
+fall back to the resampled frame. The video-side `run_preflight` does not check it.

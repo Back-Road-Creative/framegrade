@@ -736,6 +736,13 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Do not sharpen the LF day master (the measured unsharp amount is forced to 0).",
     )
     p.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast run: force --no-sharpen and drop the opt-in --stabilize/--deflicker "
+        "steps (a saved opt-in included); the preflight plan names each skipped step. "
+        "Not persisted as an opt-in. Upscale honesty and every gate are unchanged.",
+    )
+    p.add_argument(
         "--stabilize",
         action="store_const",
         const=True,

@@ -16,7 +16,12 @@ import json
 import logging
 from pathlib import Path
 
-from ..preflight import check_blur_inference_provider, check_disk_space, check_ram
+from ..preflight import (
+    check_blur_inference_provider,
+    check_disk_space,
+    check_ml_upscale,
+    check_ram,
+)
 from . import face_filter
 
 logger = logging.getLogger(__name__)
@@ -176,6 +181,7 @@ def preflight_photo_run(
     min_free_gb: int = _PHOTO_MIN_FREE_GB,
     min_ram_gb: float = _PHOTO_MIN_RAM_GB,
     blur_enabled: bool | None = None,
+    upscale: str = "off",
 ) -> None:
     """Gate disk/RAM (reusing the drive preflight primitives, same
     raise-on-shortfall semantics) and warn on a leftover unbooked-ledger marker,
@@ -194,6 +200,14 @@ def preflight_photo_run(
     check_disk_space(output_dir, min_free_gb=min_free_gb)
     check_ram(min_free_gb=min_ram_gb)
     warn_if_unbooked_marker(output_dir)
+    # Advisory only: the ML upscaler is a stills feature, so the video-side run_preflight
+    # does not check it (the video chain's upscale is the declared upscale plan).
+    ml = check_ml_upscale(upscale)
+    if ml.checked and not ml.ok:
+        logger.warning(
+            "ML upscale unavailable (%s): stills will fall back to the resampled frame",
+            ml.reason,
+        )
 
 
 def preflight_photo_ingest(
