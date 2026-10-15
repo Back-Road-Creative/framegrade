@@ -32,6 +32,13 @@ The suite is hermetic by design (`tests/conftest.py`):
 - Network access is blocked unless a test carries `@pytest.mark.allow_network`.
 - No test encodes with a hardware encoder. Tests that need `ffmpeg` use
   software encoding and skip when `ffmpeg` is missing.
+- One test runs a real clip through the whole grading path
+  (`tests/test_grading_path_real_clip.py`): frame sampling, analysis, the
+  correction, the baked LUT and a libx265 Main 10 encode, then reads the
+  encoded pixels back and requires the fixture's blue cast to be cut. It does
+  not skip in CI: with `CI` set, a missing `ffmpeg`, `ffprobe` or `libx265`
+  fails it. Only the sampling decode differs from a GPU host (software instead
+  of CUDA), and the encode is libx265, not NVENC.
 - The NVENC availability probe is stubbed: the exact `ffmpeg` probe command
   that `detect_nvenc` runs is answered as "available" without launching it, and
   every other subprocess runs for real. Tests that patch `subprocess.run` or

@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- CI runs a real clip through the grading path, from frame sampling through the
+  LUT-baked libx265 encode, and checks the encoded pixels
+  (`tests/test_grading_path_real_clip.py`). A missing `ffmpeg` or `libx265`
+  fails it in CI instead of skipping it.
+
 ### Changed
 
 - Default locations are per-user instead of host-specific. Inputs, outputs,
