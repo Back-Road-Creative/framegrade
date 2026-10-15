@@ -41,3 +41,10 @@ All notable changes to this project are recorded here. The format follows
 
 - Monorepo-specific helper scripts, the multi-tenant console overlay and its
   reprovisioning script, and internal governance documents.
+
+### Fixed
+
+- `docs/pipeline/96-packaging.md` linked the install guide as `install.md`,
+  which resolves to `docs/pipeline/install.md` and 404s; it now links
+  `../install.md`. `tests/test_docs_relative_links.py` fails any relative
+  Markdown link in the repo root or `docs/` that does not resolve.
