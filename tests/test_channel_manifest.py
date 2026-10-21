@@ -441,7 +441,7 @@ def test_frozen_seed_is_a_unique_list_of_video_ids():
 def test_manifest_defaults_known_ids_to_the_frozen_seed(monkeypatch):
     from gomoveshift.pipeline.site_sync import channel_manifest as cm
 
-    monkeypatch.setattr(cm, "FROZEN_KNOWN_IDS", ("p",))
+    monkeypatch.setattr(cm, "load_known_ids", lambda: ("p",))
     held = {
         **_owned("p"),
         "contentDetails": {"duration": "PT30S"},
@@ -459,7 +459,7 @@ def test_manifest_defaults_known_ids_to_the_frozen_seed(monkeypatch):
 def test_manifest_explicit_known_ids_replace_the_seed(monkeypatch):
     from gomoveshift.pipeline.site_sync import channel_manifest as cm
 
-    monkeypatch.setattr(cm, "FROZEN_KNOWN_IDS", ("p",))
+    monkeypatch.setattr(cm, "load_known_ids", lambda: ("p",))
     service = _ListingService(_all_listings(["a"]), {"a": _video("a", "PT30S", "public")})
 
     build_channel_manifest(service, now=datetime(2026, 10, 5, tzinfo=timezone.utc), known_ids=[])

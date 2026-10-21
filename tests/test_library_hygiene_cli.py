@@ -366,7 +366,7 @@ def test_list_uploads_unions_the_ledger_with_the_frozen_seed(tmp_path, monkeypat
     """Ids the ledgers never recorded (a private short from before the ledger existed)
     still resolve: the frozen seed is always asked for alongside the ledger ids."""
     monkeypatch.setenv("GMS_OUTPUT_DIR", str(tmp_path / "nowhere"))
-    monkeypatch.setattr(lh, "FROZEN_KNOWN_IDS", ("seeded",))
+    monkeypatch.setattr(lh, "load_known_ids", lambda: ("seeded",))
     asked = {}
 
     def fake_enumerate(service, *, known_ids=()):
