@@ -5,6 +5,7 @@
 - {name: GMS_CONFIG_HOME, default: null, description: "Root for config.yaml and credential, token, key and SOPS-config files; unset falls back to $XDG_CONFIG_HOME/gomoveshift, else ~/.config/gomoveshift."}
 - {name: GMS_STAGING_DIR, default: "<data home>/input", description: "Video staging/input dir."}
 - {name: GMS_OUTPUT_DIR, default: "<data home>/output", description: "Pipeline output dir; also backs the content ledger."}
+- {name: GMS_INPUTS_DIR, default: "<data home>/operator-inputs", description: "Operator's own inputs dir (Route Story launch profiles); if set it must be an existing directory."}
 - {name: GMS_INTERMEDIATE_DIR, default: null, description: "Override for the ext4-backed _stages dir."}
 - {name: GMS_ROUTE_STORY_CACHE_DIR, default: "<cache home>/route-story", description: "Route Story offline map-bundle cache (tiles, terrain, labels)."}
 - {name: GMS_GEOCODING_CACHE_DIR, default: "<cache home>/geocoding", description: "Geocode-cache namespace."}
