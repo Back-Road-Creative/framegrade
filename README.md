@@ -24,8 +24,8 @@ after collection has already imported everything, including code paths like
 `gomoveshift/pipeline/longform_metadata.py` that read `Config.load()` at
 import time). The session-scoped `isolate_home_from_operator_config` fixture
 mirrors that same fake home onto `Path.home` for code that reads it directly.
-The same block drops `GMS_DATA_HOME`, `GMS_CACHE_HOME`, `GMS_CONFIG_HOME` and
-the XDG data/cache/config home variables so the per-user defaults cannot resolve into a real
+The same block drops `GMS_DATA_HOME`, `GMS_CACHE_HOME`, `GMS_CONFIG_HOME`,
+`GMS_INPUTS_DIR` and the XDG data/cache/config home variables so the per-user defaults cannot resolve into a real
 user directory. The fake home sits under `~/.cache/gms-test-homes/` (removed at
 exit), never `/tmp`: defaults such as `paths._DEFAULT_INTERMEDIATE_DIR` resolve
 under the home directory and are pinned by tests to stay off tmpfs.
@@ -144,7 +144,7 @@ Defaults are per user and follow three roots, each resolved the same way (the fi
 
 | Root | Resolution | Holds |
 | --- | --- | --- |
-| data home | `GMS_DATA_HOME`, else `$XDG_DATA_HOME/gomoveshift`, else `~/.local/share/gomoveshift` | inputs (`input/`), outputs and exports (`output/`), photo state (`photos/`), the comments ledger |
+| data home | `GMS_DATA_HOME`, else `$XDG_DATA_HOME/gomoveshift`, else `~/.local/share/gomoveshift` | inputs (`input/`, `operator-inputs/`), outputs and exports (`output/`), photo state (`photos/`), the comments ledger |
 | cache home | `GMS_CACHE_HOME`, else `$XDG_CACHE_HOME/gomoveshift`, else `~/.cache/gomoveshift` | stage caches, geocode, Overpass and Route Story caches, lock files |
 | config home | `GMS_CONFIG_HOME`, else `$XDG_CONFIG_HOME/gomoveshift`, else `~/.config/gomoveshift` | `config.yaml`, credential, token, key and SOPS-config files |
 
@@ -154,6 +154,7 @@ The helpers are `gms_data_home`, `gms_cache_home` and `gms_config_home` in `gomo
 | --- | --- | --- |
 | `GMS_STAGING_DIR` | `<data home>/input` | Video staging/input dir (`gomoveshift/paths.py`). `assert_required_paths_exist` raises if the resolved path is missing. |
 | `GMS_OUTPUT_DIR` | `<data home>/output` | Pipeline output dir (`paths.py`); also backs the content ledger path (`pipeline/content_ledger.py`). Final deliverables land under the default. |
+| `GMS_INPUTS_DIR` | `<data home>/operator-inputs` | The operator's own inputs, kept outside the code tree: today the Route Story launch profiles in `route_story_profiles/` (`paths.py` `gms_inputs_dir`, read by `console/route_story.py`). Not the same as the video staging dir (`input/`, `GMS_STAGING_DIR`). An empty or whitespace-only value counts as unset and `~` is expanded. The default need not exist (no inputs yet); a value that is set must be an existing directory, otherwise the code raises `InputsDirError` (a `ValueError`) naming the variable and the path, and the console answers 422/400 with that message. |
 | `GMS_INTERMEDIATE_DIR` | (none — falls through to the cache home when output is on `/mnt/`) | Absolute override for the ext4-backed `_stages` dir (`paths.py`). Without it, heavy intermediates use the cache home on drvfs output or the output dir itself on ext4. |
 | `GMS_ROUTE_STORY_CACHE_DIR` | `<cache home>/route-story` | Route Story map-bundle cache (`paths.py` `gms_route_story_cache_dir`). Kept on ext4 so tile writes are fast; a missing dir is created, a cleared cache just re-fetches. |
 | `GMS_OVERPASS_CACHE_DIR` | `<cache home>/overpass` | Overpass response cache (`paths.py` `gms_overpass_cache_dir`). Set to the empty string to never cache. |

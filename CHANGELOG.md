@@ -7,6 +7,13 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `GMS_INPUTS_DIR` names the operator's own inputs directory
+  (`paths.gms_inputs_dir()`), default `operator-inputs/` under the data home.
+  The console reads Route Story launch profiles from its `route_story_profiles/`
+  subdirectory, ahead of the existing locations. An empty value counts as unset;
+  a value that is not an existing directory raises `InputsDirError` (a
+  `ValueError`) naming the variable and the path, and the console answers 422 on
+  `GET /route-stories/profiles` and 400 on a film launch with that message.
 - CI runs a real clip through the grading path, from frame sampling through the
   LUT-baked libx265 encode, and checks the encoded pixels
   (`tests/test_grading_path_real_clip.py`). A missing `ffmpeg` or `libx265`

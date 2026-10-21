@@ -85,6 +85,7 @@ for _home_var in (
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
+    "GMS_INPUTS_DIR",
 ):
     os.environ.pop(_home_var, None)
 

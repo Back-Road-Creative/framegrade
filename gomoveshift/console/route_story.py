@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from ..paths import InputsDirError, gms_inputs_dir
 from ..pipeline.route_story.gpx import load_gpx_segments
 from ..pipeline.route_story.metrics import summarize_track
 from ..pipeline.route_story.opening import SatelliteOpening
@@ -135,11 +136,13 @@ def project_opening(project: str) -> dict[str, object]:
         raise HTTPException(422, str(exc)) from exc
 
 
-#: Profile directories: a ``route_story_profiles/`` directory beside the package
+#: Profile directories: ``route_story_profiles/`` in the operator's inputs dir
+#: (``GMS_INPUTS_DIR``), a ``route_story_profiles/`` directory beside the package
 #: (if present) and ``route-story-profiles/`` under the console data dir.
 def profile_dirs() -> list[Path]:
     service_root = Path(__file__).resolve().parent.parent.parent
     return [
+        gms_inputs_dir() / "route_story_profiles",
         service_root / "route_story_profiles",
         settings.console_data_dir() / "route-story-profiles",
     ]
@@ -171,4 +174,7 @@ def resolve_profile(name: str) -> Path:
 
 @router.get("/profiles")
 def route_story_profiles() -> list[str]:
-    return list_profiles()
+    try:
+        return list_profiles()
+    except InputsDirError as exc:
+        raise HTTPException(422, str(exc)) from exc
