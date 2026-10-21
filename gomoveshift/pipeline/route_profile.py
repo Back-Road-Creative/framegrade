@@ -10,6 +10,8 @@ import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from seo_manager.core.locality import dedupe_places, viewer_localities
+
 from gomoveshift.pipeline.ingest.ost_formatter import (
     _endpoint_anchor_from_waypoint,
     _haversine_km,
@@ -27,6 +29,32 @@ from gomoveshift.pipeline.title_builder import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _locality_records(named_towns: list[dict], geocoder) -> list[dict]:
+    """Town dicts + the geocoder facts Waypost's locality rule judges by.
+
+    Re-reads the reverse geocode at each town's entry fix (the exact coords
+    ``get_towns_passed_through`` already sampled, so a cache hit, no new call)
+    for ``match_type`` / ``addresstype`` / ``full_address``. No geocoder or a
+    failed lookup leaves the town's own fields only (kept, never guessed).
+    """
+    records: list[dict] = []
+    for t in named_towns:
+        rec = {"name": t.get("name"), "place_class": t.get("place_class")}
+        lat, lon = t.get("entry_latitude"), t.get("entry_longitude")
+        if geocoder is not None and lat is not None and lon is not None:
+            try:
+                geo = geocoder.reverse_geocode_detailed(lat, lon)
+            except Exception:
+                geo = None
+            if isinstance(geo, dict):
+                for key in ("match_type", "addresstype", "full_address"):
+                    rec[key] = geo.get(key)
+                rec["place_class"] = geo.get("place_class") or rec["place_class"]
+        records.append(rec)
+    return records
+
 
 # Via-road span: endpoints farther apart than this are a transit, not a local loop.
 _ENDPOINTS_FAR_APART_KM = 50.0
@@ -137,6 +165,9 @@ class RouteProfile:
     features: list[str] = field(default_factory=list)
     is_cross_state: bool = False
     is_cross_county: bool = False
+    # Waypost locality rule: {unreliable name dropped from towns_traversed: the
+    # island that replaced it, or "" when nothing did}.
+    locality_substitutions: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Serialize to a plain dict for JSON persistence."""
@@ -161,6 +192,7 @@ class RouteProfile:
             features=d.get("features", []),
             is_cross_state=d.get("is_cross_state", False),
             is_cross_county=d.get("is_cross_county", False),
+            locality_substitutions=d.get("locality_substitutions", {}),
         )
 
     def _endpoints_far_apart(self) -> bool:
@@ -388,13 +420,11 @@ def build_route_profile(
             counties_traversed.append(c)
             seen_counties.add(c)
 
-    towns_traversed: list[str] = []
-    seen_towns: set[str] = set()
-    for t in named_towns:
-        name = t.get("name", "")
-        if name and name not in seen_towns:
-            towns_traversed.append(name)
-            seen_towns.add(name)
+    # Waypost owns which locality names reach viewer text: a tract/vicinity name
+    # is dropped (an island it lies on stands in). The facts come from the
+    # reverse geocode already made at each town's entry fix (cache hit).
+    localities = viewer_localities(_locality_records(named_towns, geocoder))
+    towns_traversed = localities.names
 
     is_cross_state = len(states_traversed) >= 2
     is_cross_county = len(counties_traversed) >= 2
@@ -420,6 +450,7 @@ def build_route_profile(
         features=[],
         is_cross_state=is_cross_state,
         is_cross_county=is_cross_county,
+        locality_substitutions=localities.substitutions,
     )
 
 
@@ -499,7 +530,10 @@ def build_lf_profile(
 
     states_traversed = _merge_ordered([ep.states_traversed for ep in episode_profiles])
     counties_traversed = _merge_ordered([ep.counties_traversed for ep in episode_profiles])
-    towns_traversed = _merge_ordered([ep.towns_traversed for ep in episode_profiles])
+    towns_traversed = dedupe_places(_merge_ordered([ep.towns_traversed for ep in episode_profiles]))
+    locality_substitutions: dict[str, str] = {}
+    for ep in episode_profiles:
+        locality_substitutions.update(ep.locality_substitutions)
     roads_traversed = _merge_ordered([ep.roads_traversed for ep in episode_profiles])
     features = _merge_ordered([ep.features for ep in episode_profiles])
 
@@ -524,4 +558,5 @@ def build_lf_profile(
         features=features,
         is_cross_state=is_cross_state,
         is_cross_county=is_cross_county,
+        locality_substitutions=locality_substitutions,
     )

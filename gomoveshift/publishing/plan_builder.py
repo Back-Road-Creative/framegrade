@@ -251,6 +251,7 @@ def build_publish_plan(
                     recording_date=recording_date,
                     sampled_regions=tuple(getattr(post, "sampled_regions", None) or ()),
                     sampled_roads=tuple(getattr(post, "sampled_roads", None) or ()),
+                    route_record=getattr(post, "route_record", None) or None,
                     parent_lf_video_id=parent_id,
                     parent_lf_publish_at=parent_publish_at,
                     payloads=payloads,

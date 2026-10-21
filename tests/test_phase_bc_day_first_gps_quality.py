@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from _state_helpers import make_state
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 
 class _Loc:
@@ -77,6 +78,7 @@ def _write_drive_plan(stages_dir: Path, lfs: list) -> Path:
         "total_highlight_duration": 0.0,
         "highlight_ratio": 0.0,
         "best_moments_filtered": False,
+        "plan_code_version": PHASE_BC_CODE_VERSION,
     }
     path = stages_dir / "drive_plan.json"
     path.write_text(json.dumps(payload))

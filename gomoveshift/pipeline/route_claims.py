@@ -777,9 +777,13 @@ def make_short_route_fn(geocoder):
             short_range.rank, float(short_range.start_sec), float(short_range.end_sec), day_points
         )
         ev = measure_route([w], geocoder, bin_s=GAP_S, min_place_s=_SHORT_FLOOR_S)
+        # Read straight after the call: the Short's title, description and tags are
+        # composed later and are gated against this record before upload.
+        check.last_record = ev.record()
         return select_supported_label(text, ev, unknown_floor_s=_SHORT_FLOOR_S)
 
     check.geocoder = geocoder
+    check.last_record = None
     return check
 
 

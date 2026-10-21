@@ -385,14 +385,14 @@ def _place_gate(context: dict, lf_idx, title, description, tags) -> None:
     """Zero tolerance before upload: every text that names a place must hold every
     retained second (title, description and the tags as one text)."""
     record = context.get("route_record")
-    if not record:
+    if not record and not context.get("place_record_required"):
         return
     texts = {"title": title, "description": description, "tags": ", ".join(tags or [])}
     issues = [
         f"{surface}: {issue}"
         for surface, text in texts.items()
         if text
-        for issue in recheck_place_text(record, text)
+        for issue in recheck_place_text(record or {}, text)
     ]
     if issues:
         logger.error("FINAL-TEXT E: LF %s place gate: %s", lf_idx, "; ".join(issues))

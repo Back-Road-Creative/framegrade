@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from _state_helpers import make_state
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 DATE = "2026-02-20"
 EP_DURATION = 1200.0
@@ -96,6 +97,7 @@ def _build_resume_state(tmp_path: Path):
         "total_source_duration": EP_DURATION,
         "total_highlight_duration": 0.0,
         "best_moments_filtered": False,
+        "plan_code_version": PHASE_BC_CODE_VERSION,
     }
     (stages_dir / "drive_plan.json").write_text(json.dumps(plan_dict))
 

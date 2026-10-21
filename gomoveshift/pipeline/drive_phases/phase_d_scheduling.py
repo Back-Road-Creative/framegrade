@@ -712,6 +712,30 @@ def _per_short_sidecar_roads(lf_shorts: list) -> list:
     return out
 
 
+def _per_short_sidecar_route_records(lf_shorts: list) -> list:
+    """Per-short measured route record from the day's sidecar, PARALLEL to
+    ``lf_shorts``; ``None`` for a legacy sidecar, an unreadable entry or a short
+    measured before the zero-tolerance place gate (the upload then refuses it)."""
+    out: list = []
+    cache: dict = {}
+    for short in lf_shorts:
+        ref = _short_sidecar_ref(short)
+        if ref is None:
+            out.append(None)
+            continue
+        sidecar, _date, rank = ref
+        if ("routes_by_rank", sidecar) not in cache:
+            by_rank: dict = {}
+            for entry in _load_day_sidecar_entries(sidecar, cache):
+                try:
+                    by_rank[int(entry["rank"])] = entry.get("route_record") or None
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    continue
+            cache[("routes_by_rank", sidecar)] = by_rank
+        out.append(cache[("routes_by_rank", sidecar)].get(rank))
+    return out
+
+
 def _short_sidecar_ref(short) -> Optional[tuple]:
     """``(sidecar path, date, rank)`` for ``<stages>/day_<DATE>/shorts/short_<rank>.mp4``,
     or ``None`` when the path or filename does not parse."""
@@ -1009,6 +1033,7 @@ def _build_social_posts_per_lf(
             ],
             per_short_regions=[regs for _, regs, _ in sidecar],
             per_short_roads=_per_short_sidecar_roads(lf_shorts),
+            per_short_route_records=_per_short_sidecar_route_records(lf_shorts),
         )
         social_posts_per_lf[lf.index] = posts
         global_index_offset += len(posts)

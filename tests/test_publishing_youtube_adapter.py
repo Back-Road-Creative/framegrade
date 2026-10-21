@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import dataclasses
 import pytest
 from test_publishing_models import _record as _base_record
 
@@ -79,6 +80,16 @@ def queue_conn(tmp_path):
         conn.close()
 
 
+def _measured_route_record():
+    from gomoveshift.pipeline.route_claims import RouteEvidence, _Bin
+
+    bins = [_Bin(60.0, "County Kerry", "Munster", None)]
+    return RouteEvidence(
+        retained_seconds=60.0, gaps=[], places=[], unsettled_seconds=0.0, bins=bins,
+        boundary_proofs={}, windows_key="k",
+    ).record()  # fmt: skip
+
+
 def _setup(mock_service, queue_conn, tmp_path, *, cfg=None):
     creds = {
         "refresh_token": "1//fake",
@@ -95,6 +106,9 @@ def _setup(mock_service, queue_conn, tmp_path, *, cfg=None):
         up._build_service()
     adapter = YouTubeShortsAdapter(up, cfg or Config())
     record = _titled(_base_record(routes=("youtube",)), SHORT_TITLE)
+    # A GPS-bearing Short ships only with its measured route persisted (place gate);
+    # this one's retained seconds all lie in the county its region label names.
+    record = dataclasses.replace(record, route_record=_measured_route_record())
     delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "youtube", "hash")
     video_path = tmp_path / "short_00.mp4"
     video_path.write_bytes(b"\x00\x00\x00\x20ftypiso5")

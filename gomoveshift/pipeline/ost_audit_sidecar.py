@@ -249,6 +249,10 @@ def format_shorts_ost_audit(date: str, entries: Iterable[dict]) -> dict:
                 # not burned text, so excluded from the audit hash below).
                 "roads": [str(r).strip() for r in (e.get("roads") or []) if str(r).strip()],
                 "median_speed_mps": _num_or_none(e.get("median_speed_mps")),
+                # The clip's measured route (RouteEvidence.record(): bins, gaps, proofs,
+                # windows_key) for the place gate on the Short's title/description/tags.
+                # Not burned text, so excluded from the audit hash below.
+                "route_record": e.get("route_record") or None,
                 # Which source won this short's burned text — "clip_gps"
                 # (the clip's OWN GPS vote) or "lf_label" (inherited from the
                 # parent LF / drive-wide fallback). Legacy entries predating
@@ -303,6 +307,7 @@ _HASH_EXCLUDED_ENTRY_KEYS = (
     "path",
     "place_source",
     "roads",
+    "route_record",
 )
 
 

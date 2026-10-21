@@ -23,6 +23,7 @@ from _state_helpers import make_state
 
 # Reuse the drive_plan / segment fixture shape from the phase's own suite.
 from test_phase_bc_day_first import _detailed_by_lat, _make_real_lf_dict, _seg_dict
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 BURNED_SENTINEL = "Killarney to Dingle via N86, Kerry"
 
@@ -37,6 +38,7 @@ def _write_drive_plan(stages_dir: Path, lfs: list) -> Path:
         "total_highlight_duration": 0.0,
         "highlight_ratio": 0.0,
         "best_moments_filtered": False,
+        "plan_code_version": PHASE_BC_CODE_VERSION,
     }
     path = stages_dir / "drive_plan.json"
     path.write_text(json.dumps(payload))

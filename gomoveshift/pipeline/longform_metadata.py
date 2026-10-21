@@ -24,6 +24,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from seo_manager.core.locality import dedupe_places
+
 from gomoveshift.config import get_config as _get_config
 
 from . import schedule_constants as _schedule_constants
@@ -1770,7 +1772,7 @@ class LongFormMetadataGenerator:
                 body_lines.append(f"Roads traveled: {', '.join(roads[:5])}.")
         elif towns:
             # Fallback to legacy "Driving through {towns} on {roads}." form.
-            line = f"Driving through {', '.join(towns)}"
+            line = f"Driving through {', '.join(dedupe_places(towns))}"
             if roads:
                 line += f" on {', '.join(roads[:5])}"
             line += "."

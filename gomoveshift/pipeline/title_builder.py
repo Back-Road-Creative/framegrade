@@ -32,6 +32,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from seo_manager.core.locality import viewer_localities
+
 if TYPE_CHECKING:
     from .validation.place_corrections import PlaceCorrections
 
@@ -632,6 +634,13 @@ def dominant_location(
         if cand is not None:
             name_cands_by_key.setdefault(key, []).append((cand[0], cand[1], weight))
         place = cand[0] if cand is not None else county
+        if cand is not None:
+            # Waypost's viewer-locality rule: a tract/vicinity name never joins
+            # the sequence; the island named in its own address stands in, else it is skipped.
+            kept = viewer_localities(
+                [{**detailed, "name": place, "latitude": lat, "longitude": lon}]
+            )
+            place = kept.names[0] if kept.names else None
         if place and (not ordered_places or ordered_places[-1] != place):
             ordered_places.append(place)
     if not votes:
