@@ -54,6 +54,7 @@ from ...publishing.media_fingerprint import MediaVerificationError, verify_media
 from ...publishing.models import PayloadLimitError, validate_payloads
 from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
 from ...publishing.queue import get_platform_daily_cap, open_queue_db
+from .pub_status import VALIDATE_COMMAND, gating_problems, record_ignore_validate
 
 #: Deliberately NOT ``TERMINAL_STATUSES``: a cadence ceiling counts the slots a
 #: window has spent, and a ``published`` delivery spent one. Only a delivery
@@ -223,6 +224,49 @@ def _payload_limit_violations(sidecars: List[Path], max_shorts: int | None = Non
             except PayloadLimitError as exc:
                 errors.append(f"  {path.name} short_index={record.short_index}: {exc}")
     return errors
+
+
+def _validate_gate_refuses(conn, args, config, sidecars, max_shorts) -> bool:
+    """U-R2: refuse to spool onto a (platform, project) pair that
+    ``publishing-status --validate`` names a problem on. Only the pairs this
+    plan would write are judged, so one broken pair never blocks the rest.
+    ``--ignore-validate --reason`` lets it through and audits the override.
+    The drive's automatic enqueue passes no escape flag, so it always gates."""
+    ignore = getattr(args, "ignore_validate", False)
+    reason = (getattr(args, "reason", None) or "").strip()
+    if ignore and not reason:
+        print(
+            "Error: --ignore-validate needs --reason '<why>' (written to the audit log); "
+            "nothing was written to the queue."
+        )
+        return True
+    planned = {
+        (platform, project) for platform, project, _, _ in _planned_deliveries(sidecars, max_shorts)
+    }
+    credentials_dir = getattr(getattr(config, "seo", None), "credentials_dir", None)
+    problems = [
+        p
+        for p in gating_problems(
+            conn,
+            credentials_dir,
+            storage_path=getattr(getattr(config, "seo", None), "storage_path", None),
+        )
+        if (p.platform, p.project) in planned
+    ]
+    if not problems:
+        return False
+    if ignore:
+        record_ignore_validate(conn, problems, reason=reason, command="enqueue-plan")
+        print(f"warning: --ignore-validate: {len(problems)} validate problem(s) overridden")
+        return False
+    print(
+        "Error: publishing-status --validate names a problem on a platform/project this "
+        "plan would publish to; nothing was written to the queue:"
+    )
+    for problem in problems:
+        print(problem.line())
+    print(f"See: {VALIDATE_COMMAND}. Override only with --ignore-validate --reason '<why>'.")
+    return True
 
 
 def _planned_deliveries(
@@ -397,6 +441,16 @@ def cmd_enqueue_plan(args, config) -> int:
     for path in sidecars:
         print(f"  {path.name}")
 
+    # GMS-17a: a dry run is the operator's check, so it reads every sidecar
+    # too -- a publish preview copied over a plan's name is refused here,
+    # not reported as ready to spool.
+    try:
+        for path in sidecars:
+            load_publish_plan(path)
+    except PublishPlanFormatError as exc:
+        print(f"Error: {exc}")
+        return 1
+
     max_shorts = getattr(args, "max_shorts", None)
     if max_shorts is not None:
         # The cap is applied in memory over the approved sidecar; the file is
@@ -445,6 +499,8 @@ def cmd_enqueue_plan(args, config) -> int:
 
     conn = open_queue_db(config.seo.storage_path)
     try:
+        if not shadow and _validate_gate_refuses(conn, args, config, sidecars, max_shorts):
+            return 1
         ceiling = getattr(
             getattr(config, "seo", None),
             "rolling_week_ceiling_per_platform",

@@ -26,6 +26,7 @@ from gomoveshift.publishing.models import MediaFingerprint
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from gomoveshift.pipeline.title_decision import decide_title
 from test_phase_d import (  # noqa: E402
     _install_fake_youtube_uploader,
     _phase_d_patches,
@@ -33,6 +34,14 @@ from test_phase_d import (  # noqa: E402
     get_config,
 )
 from test_phase_d import phase_d_state as phase_d_state  # noqa: E402,F401 -- fixture re-export
+
+
+def _decided_post(short_index):
+    return SimpleNamespace(
+        short_index=short_index,
+        title_decision=decide_title("short", "", None, suffix=""),
+    )
+
 
 FP = MediaFingerprint(
     path="/x/short_01.mp4",
@@ -64,7 +73,7 @@ def _base_kwargs(media_dir, **route):
     return dict(
         project_base="p",
         drive_plan=SimpleNamespace(regular_lfs=[SimpleNamespace(index=1)]),
-        social_posts_per_lf={1: [SimpleNamespace(short_index=10)]},
+        social_posts_per_lf={1: [_decided_post(10)]},
         drive_schedule=SimpleNamespace(shorts_slots=[_slot()]),
         youtube_uploads={1: {"video_id": "vid-1", "publish_at": "2026-03-14T08:00:00-05:00"}},
         per_lf_recording_date={1: "2026-03-14"},
@@ -168,7 +177,7 @@ class TestCsvSuppressesFlippedRoutePlatform:
         seo = SimpleNamespace(storage_path=str(tmp_path))
         common = dict(
             drive_plan=SimpleNamespace(regular_lfs=[SimpleNamespace(index=1)]),
-            social_posts_per_lf={1: [SimpleNamespace(short_index=10)]},
+            social_posts_per_lf={1: [_decided_post(10)]},
             upload_manifests={1: manifest},
             drive_schedule=SimpleNamespace(shorts_slots=[_slot()]),
             youtube_uploads={1: {"video_id": "vid-1"}},

@@ -149,6 +149,10 @@ class TestSuffixRoadQualityFilter:
 
     def test_route_ref_suffix_road_kept(self):
         title = build_lf_title(
-            [], _MissGeo(), "Macon County, North Carolina (US 64)", gps_points=_GPS
+            [],
+            _MissGeo(),
+            "Macon County, North Carolina (US 64)",
+            gps_points=_GPS,
+            road_coverage_measured=True,
         )
         assert "US 64" in title

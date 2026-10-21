@@ -65,6 +65,10 @@ def _ffmpeg_argv(source: Path, target: Path) -> List[str]:
         "error",
         "-i",
         str(source),
+        # Masters published before the crop chain forced square pixels probe
+        # SAR 1214:1215; the variants must not inherit it.
+        "-vf",
+        "setsar=1",
         "-c:v",
         "libx264",
         "-preset",

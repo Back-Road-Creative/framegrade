@@ -685,6 +685,33 @@ def _per_short_sidecar_labels(lf_shorts: list) -> list:
     return out
 
 
+def _per_short_sidecar_roads(lf_shorts: list) -> list:
+    """Per-short clip-GPS road names from the day's sidecar, PARALLEL to
+    ``lf_shorts``; ``[]`` for a short whose clip voted no road, a legacy sidecar
+    or an unreadable entry. Read from the same artefact as
+    :func:`_per_short_sidecar_labels`."""
+    out: list = []
+    cache: dict = {}
+    for short in lf_shorts:
+        ref = _short_sidecar_ref(short)
+        if ref is None:
+            out.append([])
+            continue
+        sidecar, _date, rank = ref
+        if ("roads_by_rank", sidecar) not in cache:
+            by_rank: dict = {}
+            for entry in _load_day_sidecar_entries(sidecar, cache):
+                try:
+                    by_rank[int(entry["rank"])] = [
+                        str(r).strip() for r in (entry.get("roads") or []) if str(r).strip()
+                    ]
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    continue
+            cache[("roads_by_rank", sidecar)] = by_rank
+        out.append(cache[("roads_by_rank", sidecar)].get(rank, []))
+    return out
+
+
 def _short_sidecar_ref(short) -> Optional[tuple]:
     """``(sidecar path, date, rank)`` for ``<stages>/day_<DATE>/shorts/short_<rank>.mp4``,
     or ``None`` when the path or filename does not parse."""
@@ -981,6 +1008,7 @@ def _build_social_posts_per_lf(
                 lab if live else (lab or lf_location) for (lab, _, _), live in zip(sidecar, posted)
             ],
             per_short_regions=[regs for _, regs, _ in sidecar],
+            per_short_roads=_per_short_sidecar_roads(lf_shorts),
         )
         social_posts_per_lf[lf.index] = posts
         global_index_offset += len(posts)

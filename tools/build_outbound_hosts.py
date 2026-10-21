@@ -304,6 +304,12 @@ INVENTORY: dict[str, tuple[str, str, str, str]] = {
         "GET-only",
         "default",
     ),
+    "www2.census.gov": (
+        "Pinned 2026 TIGER county/state ZIPs, SHA-256 verified before caching",
+        "Retained-route boundary proof",
+        "GET-only",
+        "default",
+    ),
     "youtu.be": (
         "Video permalink text built into descriptions, chapters and CSV rows (not fetched)",
         "YouTube metadata / shorts CSV",

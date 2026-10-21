@@ -1,9 +1,9 @@
 """A rejected drive form keeps what you typed.
 
 `POST /drives/run` answered every rejected field with a 400 error page. The
-form has thirteen inputs -- two directory paths, a region, a publish day, a
+form has fourteen inputs -- two directory paths, a region, a publish day, a
 long-form day and mode, a target duration, two shorts numbers and three
-checkboxes -- and an operator who mistyped one of them got a page with the
+checkboxes plus the upload hold -- and an operator who mistyped one of them got a page with the
 error on it and no way back to the other twelve but the browser's history,
 which does not reliably restore a POSTed form and never restores one after a
 redirect.
@@ -79,6 +79,18 @@ def test_a_ticked_checkbox_is_still_ticked(client):
     assert response.text.count("checked") >= 2
 
 
+def test_system_review_choice_survives_a_form_refusal(client):
+    response = _submit(client, ost_system_review="on", shorts_target="seven")
+    assert response.status_code == 400
+    assert 'name="ost_system_review" checked' in response.text
+
+
+def test_plan_confirmation_survives_a_form_refusal(client):
+    response = _submit(client, confirm_plan="on", shorts_target="seven")
+    assert response.status_code == 400
+    assert 'name="confirm_plan" checked' in response.text
+
+
 def test_an_unticked_checkbox_is_still_unticked(client):
     """Dry run defaults ON. An operator who deliberately cleared it must not
     get it back ticked -- that turns a refused form into a live run."""
@@ -91,6 +103,13 @@ def test_an_unticked_checkbox_is_still_unticked(client):
     response = client.post("/drives/run", data=form, follow_redirects=False)
 
     assert 'name="dry_run" checked' not in response.text
+
+
+def test_skip_upload_choice_survives_form_correction(client):
+    response = _submit(client, skip_upload="on", shorts_target="seven")
+
+    assert response.status_code == 400
+    assert 'name="skip_upload" checked' in response.text
 
 
 def test_the_message_names_the_field_that_was_wrong(client):

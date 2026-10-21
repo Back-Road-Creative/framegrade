@@ -85,3 +85,6 @@ coverage.xml
 
 # Vendored ML-upscale ONNX weights (hash-pinned in quality.py; never committed).
 models/*.onnx
+
+# Local tool and session state (hook logs, caches); never published.
+.data/

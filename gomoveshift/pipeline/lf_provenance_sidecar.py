@@ -8,16 +8,20 @@ read from state earlier stages populated; anything unavailable at write time is
 changes label/route logic.
 
 Schema of ``lf_provenance.json`` (``PROVENANCE_SCHEMA_VERSION``); top level
-``{schema_version, generated_at, lfs: [<lf>...]}``, each ``<lf>``::
+``{schema_version, generated_at, code_sha, lfs: [<lf>...]}`` (``code_sha`` is
+the git revision of the code that wrote the file, ``null`` with a top-level
+``null_reasons.code_sha`` when no git metadata is reachable), each ``<lf>``::
 
     lf_index          int
     burned_ost_text   str|null     # canonical per_lf_ost_text — what was BURNED
     source            {gpx_path: <abs>|null,          # single-rep GPX
                        episode_paths: [<abs>...]|null} # every episode spanned
     footage_window    {start_sec: float|null, end_sec: float|null}  # in-video s
-    gps_coverage_pct  float|null   # 0-100, from the pre-encode ladder award
+    fix_density_pct   float|null   # 0-100 locked-GPS share, from the pre-encode ladder award
     endpoints         {start: {lat,lon,label}|null, end: {lat,lon,label}|null}
     road_vote         {member: count, ...}|null  # ResolvedLocation.road_votes tally
+    road_coverage_measured  bool   # always false: no retained-time road coverage is measured
+    road_vote_basis   str          # "reverse_geocode_votes_untimed": how road_vote was counted
     awarded_tier      str|null     # from the pre-encode ladder award
     tier_evidence     dict|list|null             # from the pre-encode ladder award
     cut_from_master_fingerprint  str|null  # per_day_completed[date].master_fingerprint
@@ -40,11 +44,14 @@ mismatch; it decides no enforcement policy (that is a publication-time call).
 ``burned_ost_text`` (the single burn source, ``per_lf_ost_text``) and
 ``road_vote`` (``ResolvedLocation.road_votes``, threaded from ``build_lf_title``
 — the only road-vote source) are read from persisted state, so the record can
-prove what was actually burned. ``gps_coverage_pct`` / ``awarded_tier`` /
+prove what was actually burned. ``fix_density_pct`` / ``awarded_tier`` /
 ``tier_evidence`` come from ``per_lf_gps_coverage_pct`` / ``per_lf_awarded_tier``
 / ``per_lf_tier_evidence``, recorded by the pre-encode specificity-ladder
 demotion pass; an LF that pass never evaluated (no GPS evidence, or an
-authoritative operator override) is null-with-reason.
+authoritative operator override) is null-with-reason. ``fix_density_pct`` is
+the share of the LF's duration with a locked fix, not retained-time coverage;
+that is the route-claims record's ``coverage_pct`` (``route_claims.py``). The
+state field keeps its old name so saved runs resume.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ..health.store import code_sha
 from .cache import load_cached_json
 
 logger = logging.getLogger(__name__)
@@ -66,6 +74,7 @@ LF_PROVENANCE_FILENAME = "lf_provenance.json"
 #: "which master did THIS short come from" should not mean walking an LF list.
 SHORTS_PROVENANCE_FILENAME = "shorts_provenance.json"
 PROVENANCE_SCHEMA_VERSION = 1
+ROAD_VOTE_BASIS = "reverse_geocode_votes_untimed"
 
 
 def build_lf_provenance_payload(state) -> dict:
@@ -96,7 +105,7 @@ def build_lf_provenance_payload(state) -> dict:
         road_vote = _build_road_vote(loc, reasons)
         coverage_pct = _coerce_float(coverage, idx)
         if coverage_pct is None:
-            reasons["gps_coverage_pct"] = (
+            reasons["fix_density_pct"] = (
                 "no locked-GPS coverage recorded; the pre-encode "
                 "specificity-ladder pass did not evaluate this LF"
             )
@@ -111,9 +120,13 @@ def build_lf_provenance_payload(state) -> dict:
                 "burned_ost_text": _build_burned_ost_text(ost_text, idx, reasons),
                 "source": _build_source(gpx_path, episode_paths, idx, reasons),
                 "footage_window": _build_window(episode_paths, idx, reasons),
-                "gps_coverage_pct": coverage_pct,
+                "fix_density_pct": coverage_pct,
                 "endpoints": _build_endpoints(resolved, idx, reasons),
                 "road_vote": road_vote,
+                # The tally counts untimed reverse-geocode samples. It is
+                # not retained-time coverage, so it backs no "via <road>" claim.
+                "road_coverage_measured": False,
+                "road_vote_basis": ROAD_VOTE_BASIS,
                 "awarded_tier": str(awarded_tier) if awarded_tier is not None else None,
                 "tier_evidence": _lookup(tier_evidence, idx),
                 "cut_from_master_fingerprint": _build_cut_from_master_fingerprint(
@@ -140,6 +153,16 @@ def build_lf_provenance_payload(state) -> dict:
     }
 
 
+def _stamp_code_sha(payload: dict) -> None:
+    """Record which code revision wrote ``payload`` (null-with-reason if unknown)."""
+    sha = code_sha(Path(__file__).resolve().parent)
+    payload["code_sha"] = sha
+    if sha is None:
+        payload.setdefault("null_reasons", {})["code_sha"] = (
+            "no git metadata reachable from the package"
+        )
+
+
 def write_lf_provenance_sidecar(output_base: Path, state) -> Optional[Path]:
     """Write ``<output_base>/lf_provenance.json``; best-effort, never raises.
 
@@ -161,6 +184,7 @@ def write_lf_provenance_sidecar(output_base: Path, state) -> Optional[Path]:
     for lf in payload["lfs"]:
         date = _lookup(recording_dates, lf["lf_index"])
         _attach_master_attestation_verdict(lf, stages_base, date)
+    _stamp_code_sha(payload)
     try:
         output_base.mkdir(parents=True, exist_ok=True)
         path = output_base / LF_PROVENANCE_FILENAME
@@ -263,6 +287,7 @@ def write_shorts_provenance_sidecar(output_base: Path, state) -> Optional[Path]:
     if not payload.get("shorts"):
         logger.debug("shorts_provenance_sidecar: no shorts to serialise (skipping write)")
         return None
+    _stamp_code_sha(payload)
     output_base = Path(output_base)
     try:
         output_base.mkdir(parents=True, exist_ok=True)

@@ -187,6 +187,24 @@ def _segment_indexes(
     return indexes
 
 
+# The whole track's distance, cached under the same identity rule as
+# ``_INDEX_CACHE``: it is the same number for every frame of a leg, and
+# re-summarizing a 14,001-point track per frame cost ~0.17 s a frame.
+_TOTAL_CACHE: dict[int, tuple[Sequence[Sequence[RoutePoint]], float]] = {}
+
+
+def _track_total_m(segments: Sequence[Sequence[RoutePoint]], moving_speed_mps: float) -> float:
+    key = id(segments)
+    cached = _TOTAL_CACHE.get(key)
+    if cached is not None and cached[0] is segments:
+        return cached[1]
+    total = summarize_track(segments, moving_speed_mps=moving_speed_mps).distance_m
+    if key not in _TOTAL_CACHE and len(_TOTAL_CACHE) >= _INDEX_CACHE_MAX:
+        _TOTAL_CACHE.pop(next(iter(_TOTAL_CACHE)))
+    _TOTAL_CACHE[key] = (segments, total)
+    return total
+
+
 def _windowed_value(
     xs: list[float], ys: list[float], hi: int, current_x: float, window: float
 ) -> tuple[float, float] | None:
@@ -224,7 +242,7 @@ def dashboard_state_at(
     frame = (frame // cadence_frames) * cadence_frames
     state = frame_state_at(timeline, frame, segments)
     at_s = state.recording_time_s
-    total = summarize_track(segments, moving_speed_mps=moving_speed_mps).distance_m
+    total = _track_total_m(segments, moving_speed_mps)
 
     indexes = _segment_indexes(segments, moving_speed_mps)
     traveled = elapsed = moving = moving_distance = ascent = descent = 0.0

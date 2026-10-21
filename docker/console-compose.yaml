@@ -14,7 +14,8 @@
 #   console-extra-output.yaml  GMS_VID_OUTPUT_DIR
 #
 # NVENC: run with `--gpus all` (or the compose `deploy.resources` equivalent)
-# to pass a GPU through; omitted, ffmpeg falls back to CPU encode.
+# to pass a GPU through. Omitted, the container has no GPU and a console-launched
+# drive fails the NVENC check -- CPU fallback is forbidden by policy, not available.
 
 services:
   # `deploy.replicas: 0` makes this un-startable BY CONSTRUCTION: a bare
@@ -69,8 +70,18 @@ services:
       - ${GMS_SEO_STORAGE_DIR:?set GMS_SEO_STORAGE_DIR to the host directory for the SEO storage}:/app/waypost/data/seo
       - ${GMS_SEO_CREDENTIALS_DIR:?set GMS_SEO_CREDENTIALS_DIR to the host directory for the SEO credentials}:/app/waypost/credentials:ro
       - ${GMS_SEO_YT_TOKEN_ENC:?set GMS_SEO_YT_TOKEN_ENC to the encrypted YouTube token file}:/app/waypost/youtube_upload_token.json.enc:ro
+      # The operator's own inputs (route-story profiles, playlist overrides,
+      # known video ids) sit outside the image, so they are mounted, not baked
+      # in. Fixed container target, like the secrets; GMS_INPUTS_DIR below
+      # points the app at it. An empty directory is a valid inputs directory.
+      - ${GMS_INPUTS_HOST_DIR:?set GMS_INPUTS_HOST_DIR to the host directory holding the operator inputs}:/inputs:ro
+      # Spool shared with the host GPU worker (gomoveshift.hostworker): the console writes
+      # requests, the worker writes status/heartbeat/logs. The console has no GPU and never
+      # runs a GPU subcommand itself. Fixed container target, like the mounts above.
+      - ${GMS_HOST_SPOOL_HOST_DIR:?set GMS_HOST_SPOOL_HOST_DIR to the host directory shared with the GPU worker}:/host-spool
     environment:
       - GMS_CONSOLE_DATA_DIR=/data
+      - GMS_INPUTS_DIR=/inputs
       - GMS_STAGING_DIR=${GMS_STAGING_DIR}
       - GMS_OUTPUT_DIR=${GMS_OUTPUT_DIR}
       # Fixed literals, matching the mount targets above: the app looks
@@ -80,6 +91,7 @@ services:
       - GMS_AGE_KEY_FILE=/secrets/age.key
       - GMS_SOPS_CONFIG=/secrets/.sops.yaml
       - GMS_GPU_LOCK_PATH=${GMS_GPU_LOCK_PATH:-/data/gpu.lock}
+      - GMS_HOST_SPOOL_DIR=/host-spool
       - GMS_COMMENTS_PATH=${GMS_COMMENTS_PATH:-/data/comments.jsonl}
       - GMS_CONSOLE_TICKER=1
       - GMS_CONSOLE_TOKEN=${GMS_CONSOLE_TOKEN:-}

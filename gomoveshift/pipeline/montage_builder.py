@@ -438,8 +438,6 @@ def prepend_montage(
     work_dir: Path,
     master_path: Optional[Path] = None,
     file_boundaries: Optional[list] = None,
-    title: str = "",
-    date_str: str = "",
 ) -> Optional[Path]:
     """Prepend a capped-duration montage built from `peaks` to `raw_lf_path`.
 
@@ -457,6 +455,9 @@ def prepend_montage(
             raw LF is returned unchanged (peak source unavailable).
         file_boundaries: Day-local file_boundaries for peak
             translation. Required when `master_path` is provided.
+
+    Takes no text: the montage's only place text is the LF's checked OST,
+    which ``apply_ost`` overlays afterwards (D8b).
 
     Returns the concatenated output path on success, None on failure.
     """

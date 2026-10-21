@@ -149,6 +149,10 @@ def rendition_for(name: str) -> Rendition:
 # SHARPEN_DETAIL_CRISP (log10 3.0 -> 1000) it is already crisp: amount is 0.
 # Between, the amount falls linearly from SHARPEN_MAX_AMOUNT (softest) to 0.
 SHARPEN_MAX_AMOUNT = 0.8
+# Below this the ramp's unsharp is invisible but not free: at 0.01 an 11x11
+# unsharp on a 4K LF master scored 63.8 dB PSNR against none while taking ~42%
+# of the filter chain's CPU (ENC-1 A/B), so smaller amounts are dropped.
+SHARPEN_MIN_AMOUNT = 0.05
 SHARPEN_DETAIL_FLOOR = 0.5
 SHARPEN_DETAIL_CRISP = 3.0
 SHARPEN_RADIUS = 1.2
@@ -237,6 +241,8 @@ def sharpen_amount_for(detail_score: float, width: int, *, disabled: bool) -> tu
         return 0.0, 0.0
     t = (log_detail - SHARPEN_DETAIL_FLOOR) / (SHARPEN_DETAIL_CRISP - SHARPEN_DETAIL_FLOOR)
     amount = round(SHARPEN_MAX_AMOUNT * (1.0 - t), 3)
+    if amount < SHARPEN_MIN_AMOUNT:
+        return 0.0, 0.0
     radius = SHARPEN_RADIUS * max(1.0, width / SHARPEN_REFERENCE_WIDTH)
     return amount, round(radius, 3)
 
@@ -272,6 +278,20 @@ RINGING_MAX = 0.01
 # false-fail; 25% leaves room for that while a rendition step that smeared the
 # picture (denoise too hard, bad scale) loses far more. Tune on real footage.
 DELIVERED_SHARPNESS_TOLERANCE = 0.25
+
+# Frames per side of the picture gate. Source and delivery are sampled the same
+# way, at gate time, so the comparison is like for like. Measured on the
+# Kingsport 2026-03-04 drive: one GoPro clip's per-frame sharpness spans 993 to
+# 2807, so 5 frames put the source at 2056 where 25 frames put it at 1450, and a
+# faithful encode (1290 at 25 frames) failed a floor built from the 5-frame figure.
+PICTURE_GATE_SAMPLES = 25
+
+# Ringing is judged against the source's own ringing, not only RINGING_MAX: the
+# untouched Kingsport GoPro clips ring 0.014 to 0.016 before any rendition step,
+# above the synthetic 0.01. The delivery may ring this fraction above its source
+# (or RINGING_MAX, whichever is higher) before the gate calls it a halo.
+# PROVISIONAL, like the two above.
+RINGING_SOURCE_MARGIN = 0.25
 
 
 def ringing_score(gray_or_rgb: np.ndarray) -> float:
@@ -381,17 +401,43 @@ def picture_changed_for_day(cache_path) -> bool:
     return any(picture_changed(c) for c in corrections)
 
 
-def picture_inputs_from_state(state) -> tuple[float | None, dict[int, bool]]:
-    """``(source_sharpness, {lf_index: picture_changed})`` for the post-rendition gate.
+def sample_source_picture(files, durations, n: int = PICTURE_GATE_SAMPLES):
+    """Median ``(sharpness, ringing)`` of the drive's source files, or ``None``.
 
-    ``state.source_sharpness`` is per source file with no LF->source mapping, so
-    the sharpness is the median over every measured source (``None`` when none
-    was measured). TODO(later unit): map each LF to its day's sources.
+    Frames are shared out by duration (every file gets at least one), so a long
+    clip weighs what it runs. ``None`` when a file is missing, the lists do not
+    line up, or nothing decodes: the caller then falls back to the recorded figure.
+    """
+    files, durations = list(files or []), list(durations or [])
+    if not files or len(files) != len(durations) or not all(Path(f).is_file() for f in files):
+        return None
+    total = sum(max(float(d), 0.0) for d in durations)
+    if total <= 0:
+        return None
+    sharp: list[float] = []
+    ring: list[float] = []
+    for f, d in zip(files, durations):
+        share = max(1, math.ceil(n * max(float(d), 0.0) / total))
+        s, r = sample_delivered_picture(f, float(d), share)
+        sharp.extend(s)
+        ring.extend(r)
+    if not sharp:
+        return None
+    return float(statistics.median(sharp)), float(statistics.median(ring))
+
+
+def picture_inputs_from_state(state) -> tuple[float | None, float | None, dict[int, bool]]:
+    """``(source_sharpness, source_ringing, {lf_index: picture_changed})`` for the gate.
+
+    When any LF's picture changed, the source is re-measured here from
+    ``state.episode_files`` with the gate's own sampler and frame count, so both
+    sides of the comparison are measured the same way. Phase A's 5-frame
+    ``state.source_sharpness`` is the fallback (median over every measured
+    source, ringing ``None``) when the episodes are gone. TODO(later unit): map
+    each LF to its day's sources.
     ``picture_changed`` is per day (``DayArtifacts.regular_lf_indices`` -> that
     day's colour cache next to the day master), fanned out to the day's LFs.
     """
-    measured = [v for v in (getattr(state, "source_sharpness", None) or []) if v is not None]
-    sharpness = float(statistics.median(measured)) if measured else None
     changed: dict[int, bool] = {}
     for art in getattr(state, "day_artifacts", None) or []:
         master = getattr(art, "master_path", None)
@@ -403,7 +449,15 @@ def picture_inputs_from_state(state) -> tuple[float | None, dict[int, bool]]:
         )
         for idx in getattr(art, "regular_lf_indices", None) or []:
             changed[idx] = day_changed
-    return sharpness, changed
+    if any(changed.values()):
+        measured_now = sample_source_picture(
+            getattr(state, "episode_files", None), getattr(state, "file_durations", None)
+        )
+        if measured_now is not None:
+            return measured_now[0], measured_now[1], changed
+    measured = [v for v in (getattr(state, "source_sharpness", None) or []) if v is not None]
+    sharpness = float(statistics.median(measured)) if measured else None
+    return sharpness, None, changed
 
 
 logger = logging.getLogger(__name__)

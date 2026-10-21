@@ -29,6 +29,13 @@ PHASE_CODE_VERSIONS: dict[str, int] = {
     "phase_bc_day_first": PHASE_BC_CODE_VERSION,
 }
 
+# Phases built from a phase's checkpointed output: re-running that phase means
+# re-running these too. phase_d reads phase_bc's route record and plan, and its
+# own fingerprint holds neither.
+_REBUILT_WITH: dict[str, tuple[str, ...]] = {
+    "phase_bc_day_first": ("phase_d",),
+}
+
 
 def persist_phase_code_version(state, phase_name: str) -> None:
     """Stamp the completed ``phase_name``'s current code version onto ``state``.
@@ -60,13 +67,14 @@ def invalidate_phases_if_code_version_stale(saved: dict, resumed_phases: list[st
     isn't needlessly re-encoded. The concrete pre-fix artifacts a rule change
     produces are still caught downstream — the LF/short render fingerprints
     (segment windows + audio policy) and the cached-master encode-algo version
-    both re-derive a stale render/master when phase_bc re-enters. Returns the
-    trimmed list; logs each drop.
+    both re-derive a stale render/master when phase_bc re-enters. A dropped
+    phase also drops the phases in ``_REBUILT_WITH`` (phase_bc → phase_d).
+    Returns the trimmed list; logs each drop.
     """
     saved_versions = (saved or {}).get("phase_code_versions") or {}
     if not isinstance(saved_versions, dict):
         return resumed_phases
-    kept: list[str] = []
+    dropped: set[str] = set()
     for phase in resumed_phases:
         current = PHASE_CODE_VERSIONS.get(phase)
         stamped = saved_versions.get(phase)
@@ -78,9 +86,9 @@ def invalidate_phases_if_code_version_stale(saved: dict, resumed_phases: list[st
                 stamped,
                 current,
             )
-            continue
-        kept.append(phase)
-    return kept
+            dropped.add(phase)
+            dropped.update(_REBUILT_WITH.get(phase, ()))
+    return [p for p in resumed_phases if p not in dropped]
 
 
 def build_phase_d_fingerprint_inputs(state, *, config) -> dict:

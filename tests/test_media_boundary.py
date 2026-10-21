@@ -30,6 +30,9 @@ PHASE_D_FILES: dict[str, str] = {
         "title_builder.py",
         "content_ledger.py",
         "auto_enqueue.py",
+        "title_decision.py",
+        "final_text_record.py",
+        "drive_text_adapter.py",
     )
 }
 PHASE_D_DIRS = ("chapters/", "site_sync/")
@@ -70,20 +73,17 @@ FORBIDDEN_PREFIXES = (
 # Engine cross-imports still to cut: path relative to gomoveshift/ -> reason.
 # Shrinking this is the goal; growing it needs a reviewer.
 ALLOWLIST: dict[str, str] = {
-    "pipeline/day_pipeline.py": (
-        "imports console.settings, pipeline.chapters.generator, pipeline.chapters.marker_merger, pipeline.title_builder, publishing.brand_policy; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
-    ),
-    "pipeline/drive_phases/phase_bc_day_first.py": (
-        "imports pipeline.chapters.nominatim_source, pipeline.longform_metadata, pipeline.title_builder; cut by the RunSpec split (RunSpec carries the title, chapter and brand inputs; MediaProfile alone does not)"
-    ),
     "pipeline/volume_source.py": (
         "imports seo_manager.analytics (the shorts count is Waypost's decision, read never computed); cut by the RunSpec split (RunSpec carries Waypost's decided count, so the engine stops importing analytics)"
     ),
     "pipeline/route_story/metadata.py": (
         "imports pipeline.longform_metadata; cut by moving the metadata step out of the engine"
     ),
-    "pipeline/route_story/sources.py": (
-        "imports pipeline.chapters.overpass_source; cut by moving the overpass source into the GPS library"
+    "pipeline/trail_opening.py": (
+        "imports console.settings, publishing.brand_policy (the opening burn loads the brand's MediaProfile when the phases pass none); cut by the RunSpec split (the phases hand the opening a MediaProfile)"
+    ),
+    "pipeline/drive_phases/phase_bc_day_first.py": (
+        "imports phase_d_metadata.assert_chapter_floor_before_encode (a trace too sparse for Phase D's chapter floor fails before the encode, not after it); cut by the RunSpec split (the chapter-floor rule moves engine-side and Phase D imports it from there)"
     ),
 }
 

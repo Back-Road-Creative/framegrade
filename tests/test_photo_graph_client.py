@@ -192,3 +192,12 @@ def test_site_root_unset_everywhere_raises_a_config_error_naming_the_key():
 
     with pytest.raises(ConfigError, match="photos.site_root"):
         MetaPhotoGraphClient(CREDS, session=_FakeSession([]))
+
+
+def test_photo_graph_error_leads_with_code_subcode_and_fbtrace():
+    from gomoveshift.publishing.photo_graph_client import _raise_for_photo_graph_error
+
+    body = {"error": {"code": 100, "error_subcode": 7, "message": "m", "fbtrace_id": "SYNTHph01"}}
+    with pytest.raises(PhotoPermanentError) as exc_info:
+        _raise_for_photo_graph_error(400, body)
+    assert str(exc_info.value).startswith("[graph http=400 code=100 subcode=7 fbtrace=SYNTHph01] ")

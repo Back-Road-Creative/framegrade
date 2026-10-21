@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..paths import gms_config_home
+from ..paths import gms_inputs_dir
 from .region_resolver import derive_region, derive_short_title_region
 from .site_sync.channel_manifest import build_channel_manifest, classify
 from .title_builder import state_full_name
@@ -184,14 +184,14 @@ def target_playlists(
 
 def resolve_overrides_path(path) -> Optional[Path]:
     """A configured overrides path -> absolute ``Path``. A relative path
-    resolves against the config home (``gms_config_home()``, where
-    ``config.yaml`` lives), never the cwd, so a scheduled job and an
-    interactive shell read the same file. ``""``/None -> None."""
+    resolves against the operator's private inputs dir (``paths.gms_inputs_dir``),
+    never the cwd, so cron and an interactive shell read the same file.
+    ``""``/None -> None."""
     if not path:
         return None
     resolved = Path(path)
     if not resolved.is_absolute():
-        resolved = gms_config_home() / resolved
+        resolved = gms_inputs_dir() / resolved
     return resolved
 
 

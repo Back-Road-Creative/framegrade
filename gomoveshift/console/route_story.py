@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ..paths import InputsDirError, gms_inputs_dir
+from ..paths import InputsDirError, gms_inputs_dir, gms_route_story_cache_dir
 from ..pipeline.route_story.gpx import load_gpx_segments
 from ..pipeline.route_story.metrics import summarize_track
 from ..pipeline.route_story.opening import SatelliteOpening
@@ -178,3 +180,67 @@ def route_story_profiles() -> list[str]:
         return list_profiles()
     except InputsDirError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+#: The modules ``drive_phases/trail_film.py::default_steps`` imports to run a film,
+#: and the third-party imports ``route_story/proof.py`` and ``film.py`` make at load.
+_TRAIL_MODULES = (
+    *(
+        f"gomoveshift.pipeline.route_story.{name}"
+        for name in ("prepare", "proof", "verify", "film")
+    ),
+    "numpy",
+    "PIL",
+)
+#: What ``pipeline/inserts.py`` imports at module level, beyond the module itself.
+_INSERT_MODULES = ("gomoveshift.pipeline.inserts", "keycut", "PIL")
+
+
+def _missing_modules(modules: tuple[str, ...]) -> list[str]:
+    missing = []
+    for module in modules:
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.append(module)
+    return missing
+
+
+def trail_film_unavailable() -> str:
+    """Why ``gomoveshift drive --trail`` cannot render a film here, or ``""``.
+
+    Measured, not asserted: the route-story modules the trail step imports, then the
+    prepared-bundle cache the step looks in (it never fetches inside a drive). A bundle
+    is keyed by a day's GPX, so a populated cache is necessary, not sufficient: a day
+    with no matching bundle still records a ``trail_skips`` reason at run time.
+    """
+    missing = _missing_modules(_TRAIL_MODULES)
+    if missing:
+        return f"route-story dependency not installed: {', '.join(missing)}"
+    cache = gms_route_story_cache_dir()
+    try:
+        # A bundle is a dir holding ``manifest.json`` (``bundle.verify_bundle``); the
+        # cache also keeps ``shared/`` and ``gnis/`` and any interrupted fetch's dir.
+        has_bundle = cache.is_dir() and any(
+            (entry / "manifest.json").is_file() for entry in cache.iterdir() if entry.is_dir()
+        )
+    except OSError as exc:
+        return f"prepared imagery bundle cache {cache} is unreadable: {exc}"
+    if not has_bundle:
+        return (
+            f"no prepared imagery bundle in {cache}; "
+            "run the Route Story prepare step for the trip's GPX first"
+        )
+    return ""
+
+
+def inserts_unavailable() -> str:
+    """Why ``--insert-photos`` / ``--insert-clip`` cannot run here, or ``""``."""
+    missing = _missing_modules(_INSERT_MODULES)
+    if missing:
+        return f"insert dependency not installed: {', '.join(missing)}"
+    if shutil.which("ffmpeg") is None:
+        return "ffmpeg is not on PATH, so the insert splice cannot encode"
+    return ""

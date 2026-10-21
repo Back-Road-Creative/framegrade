@@ -210,8 +210,14 @@ def resolve_destination(
     poi_source: Optional[POISource] = None,
     bbox_margin_deg: float = 0.02,
     require_sample_quorum: bool = False,
+    outcome: Optional[dict] = None,
 ) -> Optional[str]:
     """Most-specific destination POI enclosing the featured (peak) footage.
+
+    ``outcome`` (optional out-dict) receives ``"source"``: ``"overpass"`` when a
+    destination was returned, ``"failed"`` when the POI source raised, else
+    ``"none"`` (no usable peaks, or no enclosing candidate). The return value
+    is unchanged.
 
     ``featured_segments`` are the LF's montage peaks (each carrying
     ``gps_center_lat``/``gps_center_lon`` and ``composite_score``).
@@ -229,6 +235,8 @@ def resolve_destination(
     footage only grazed. With the flag off (the LF path) an unmet bar falls back
     to the plain highest-vote winner, so a scattered montage still resolves.
     """
+    if outcome is not None:
+        outcome["source"] = "none"
     segs = [
         s
         for s in (featured_segments or [])
@@ -243,6 +251,8 @@ def resolve_destination(
         elements = list(source(_segments_bbox(segs, bbox_margin_deg)))
     except Exception as exc:  # noqa: BLE001 — degrade to the caller's cascade
         logger.warning("destination_resolver POI source failed: %s", exc)
+        if outcome is not None:
+            outcome["source"] = "failed"
         return None
 
     # Prominence vote: each featured segment adds its composite_score to every
@@ -266,6 +276,11 @@ def resolve_destination(
                     getattr(s, "composite_score", 0.0) or 0.0
                 )
 
+    def _won(name: str) -> str:
+        if outcome is not None:
+            outcome["source"] = "overpass"
+        return name
+
     enclosing = {n: v for n, v in votes.items() if v > 0.0}
     if not enclosing:
         return None
@@ -279,7 +294,7 @@ def resolve_destination(
     total_mass = sum(float(getattr(s, "composite_score", 0.0) or 0.0) for s in segs) or 1.0
     eligible = [n for n, v in enclosing.items() if v >= MIN_PEAK_MASS_SHARE * total_mass]
     if eligible:
-        return min(eligible, key=lambda n: (meta[n][0], meta[n][1], -enclosing[n], n))
+        return _won(min(eligible, key=lambda n: (meta[n][0], meta[n][1], -enclosing[n], n)))
     if require_sample_quorum:
         # Shorts quorum: no POI encloses enough of the clip's own fixes —
         # a centroid-of-arc match with too little in-polygon footage. Do NOT
@@ -288,7 +303,7 @@ def resolve_destination(
     # LF fallback: nothing dominates the scattered montage — keep the
     # highest-prominence enclosing POI (pre-fix behaviour), never promote a
     # tiny grazed polygon just because it is the smallest.
-    return min(enclosing, key=lambda n: (-enclosing[n], meta[n][0], meta[n][1], n))
+    return _won(min(enclosing, key=lambda n: (-enclosing[n], meta[n][0], meta[n][1], n)))
 
 
 def _default_poi_source(bbox: tuple[float, float, float, float]) -> list[dict]:

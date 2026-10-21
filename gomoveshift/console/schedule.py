@@ -13,6 +13,7 @@ from typing import Any, Optional
 from ..config import Config
 from ..pipeline.content_ledger import ContentLedger
 from ..pipeline.schedule_report import build_schedule_report
+from ..publishing.title_kit import build_title_kit
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,9 @@ def schedule_view(config: Optional[Any] = None, *, journey: "str | None" = None)
     journey = journey or ""
     try:
         ledger = ContentLedger.load()
-        report = build_schedule_report(ledger, config)
+        report = build_schedule_report(
+            ledger, config, per_location_cap=build_title_kit().per_location_cap()
+        )
     except Exception as exc:  # noqa: BLE001 -- any ledger/config failure degrades to empty+hint
         logger.warning("console schedule tab: report unavailable: %s", exc)
         report = dict(_EMPTY_REPORT)

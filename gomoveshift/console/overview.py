@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..publishing.handlers import STATUS_AWAITING_MANUAL_PUBLISH
+from ..publishing.queue import STATUS_MISSING_REMOTE
 from . import jobs, pubqueue
 
 #: Job statuses worth surfacing on "Needs attention".
@@ -36,7 +37,11 @@ _IN_PROGRESS_JOB_STATUSES = ("queued", "running")
 #: vocabulary ``notify.check_queue_regressions`` watches (its
 #: ``_WATCHED_STATUSES``), read directly here rather than through that
 #: function: ``notify()`` POSTs a webhook, and a GET must never start work.
-_ATTENTION_DELIVERY_STATUSES = ("failed_permanent", STATUS_AWAITING_MANUAL_PUBLISH)
+_ATTENTION_DELIVERY_STATUSES = (
+    "failed_permanent",
+    STATUS_AWAITING_MANUAL_PUBLISH,
+    STATUS_MISSING_REMOTE,
+)
 
 #: Delivery statuses worth surfacing on "Coming up" -- still on their way
 #: through the queue, as opposed to ``TERMINAL_STATUSES``.

@@ -241,7 +241,13 @@ def build_crop_filter(
     # that goes through the same filter. No dither flag is needed: shorts
     # encode 10-bit end-to-end (SHORTS_PIX_FMT p010le), so no 10→8-bit depth
     # reduction remains here.
-    return f"crop={crop_w}:{crop_h},{UPSCALE_SCALER}=w={dst_w}:h={dst_h}:filter={UPSCALE_KERNEL}"
+    # setsar=1 last: scaling an even-rounded 1214x2160 window to 1080x1920 makes
+    # ffmpeg set SAR 1214:1215 to preserve display aspect, so every Short probed
+    # non-square. Forcing 1:1 trades a sub-0.1% aspect error for square pixels.
+    return (
+        f"crop={crop_w}:{crop_h},{UPSCALE_SCALER}=w={dst_w}:h={dst_h}:filter={UPSCALE_KERNEL},"
+        "setsar=1"
+    )
 
 
 def measure_text_width(

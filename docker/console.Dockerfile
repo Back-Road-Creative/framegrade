@@ -30,8 +30,14 @@ COPY framegrade /app/framegrade
 # instead of failing the whole build.
 ENV PIP_DEFAULT_TIMEOUT=100 \
     PIP_RETRIES=10
-RUN pip install --no-cache-dir -e /app/gps-journey -e /app/waypost \
-    && pip install --no-cache-dir /app/framegrade
+# The BuildKit cache mount keeps downloaded wheels on the build host between
+# builds, outside the image: the COPY above changes on every commit, so without
+# the cache a flaky link re-downloads every large wheel (the GPU onnxruntime
+# wheel is hundreds of MB) on each build. Needs BuildKit (the default builder
+# in current Docker; `DOCKER_BUILDKIT=1` on older installs).
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install -e /app/gps-journey -e /app/waypost \
+    && pip install /app/framegrade
 
 RUN mkdir -p /data && chown console:console /data
 VOLUME ["/data"]
@@ -47,6 +53,10 @@ RUN chown -R console:console /home/console/.config
 USER console
 WORKDIR /app/framegrade
 EXPOSE 8787
+
+# The compose healthcheck (console-compose.yaml) overrides this; it is here so a
+# bare `docker run` of the image reports health too.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -f http://localhost:8787/healthz || exit 1
 
 # NVENC: run with `--gpus all` to pass the host GPU through; omitted, ffmpeg
 # falls back to CPU encode -- no image change either way.

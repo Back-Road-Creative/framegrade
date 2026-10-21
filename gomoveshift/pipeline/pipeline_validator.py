@@ -293,11 +293,19 @@ class PipelineValidator:
         return self._shorts.validate_shorts(shorts_dir)
 
     def validate_short_files(
-        self, short_files, *, source_sharpness=None, picture_changed: bool = False
+        self,
+        short_files,
+        *,
+        source_sharpness=None,
+        picture_changed: bool = False,
+        source_ringing=None,
     ) -> PipelineValidationResult:
         """Validate a specific list of short files (day-first paths)."""
         return self._shorts.validate_short_files(
-            list(short_files), source_sharpness=source_sharpness, picture_changed=picture_changed
+            list(short_files),
+            source_sharpness=source_sharpness,
+            picture_changed=picture_changed,
+            source_ringing=source_ringing,
         )
 
     # ── Backward-compat private method delegates ──────────────────────────

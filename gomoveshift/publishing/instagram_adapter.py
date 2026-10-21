@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import requests
 
 from gomoveshift.publishing.first_comment import post_graph_comment
-from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION
+from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, graph_error_tag
 from gomoveshift.publishing.models import InstagramPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
@@ -80,14 +80,15 @@ def _raise_for_graph_error(status_code: int, body: dict) -> None:
     error = (body or {}).get("error") or {}
     code, subcode = error.get("code"), error.get("error_subcode")
     message = str(error.get("message") or "unknown Graph API error")
+    tag = graph_error_tag(status_code, error)
     if code in _AUTH_ERROR_CODES or subcode in _AUTH_ERROR_SUBCODES:
-        raise InstagramAuthBlockedError("Meta access token expired or revoked; reauthorize")
+        raise InstagramAuthBlockedError(f"{tag} Meta access token expired or revoked; reauthorize")
     if (code, subcode) == _MEDIA_NOT_READY:
-        raise InstagramRetryableError(f"media container not ready for publishing: {message}")
+        raise InstagramRetryableError(f"{tag} media container not ready for publishing: {message}")
     if code in _RATE_LIMIT_CODES or status_code >= 500:
-        raise InstagramRetryableError(f"transient Graph API error: {message}")
+        raise InstagramRetryableError(f"{tag} transient Graph API error: {message}")
     raise InstagramPermanentError(
-        f"Graph API permanently rejected the request: {message} — not "
+        f"{tag} Graph API permanently rejected the request: {message} — not "
         "automatically retryable; this can mean a content/account rejection "
         "or a request bug (e.g. an invalid/nonexistent field), verify before "
         "resubmitting"
@@ -266,6 +267,16 @@ class InstagramReelsAdapter:
         # permalink is fetched separately, on the published media id.
         permalink = self._fetch_permalink(media_id) if media_id else None
         return {"media_id": media_id, "permalink": permalink}
+
+    def list_recent_media(self, limit: int = 50) -> list:
+        """Read-only: the account's most recent media (newest first), for the
+        remote duplicate scan in ``queue recover-terminal``. Publishes nothing."""
+        body = self._get(
+            f"{self._base}/{self._ig_user_id}/media",
+            params={"fields": "id,caption,permalink,timestamp,media_product_type", "limit": limit},
+            headers=self._auth_headers,
+        )
+        return list(body.get("data") or [])
 
     def check_container_status(self, container_id: str) -> dict:
         """Live read of a container's publish state — used to reconcile after

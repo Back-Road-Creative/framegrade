@@ -101,7 +101,8 @@ def test_launch_passes_env_kwarg_through_to_popen(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs.subprocess, "Popen", _FakePopen)
     jobs.launch(store, "status", ["a"], tmp_path / "logs", env={"GMS_OUTPUT_DIR": "/override"})
 
-    assert captured["env"] == {"GMS_OUTPUT_DIR": "/override"}
+    # The override passes through; the console also stamps the run origin on every child.
+    assert captured["env"] == {"GMS_OUTPUT_DIR": "/override", "GMS_RUN_ORIGIN": "console"}
 
 
 def test_jobs_routes_launch_status_and_rerun(tmp_path, monkeypatch):
@@ -615,7 +616,7 @@ def test_run_due_passes_brand_launch_env_so_scheduled_jobs_see_brand_overrides(
 
     jobs.run_due(store, datetime.now(timezone.utc), tmp_path / "logs")
 
-    assert captured["env"] == {"GMS_OUTPUT_DIR": "/branded"}
+    assert captured["env"] == {"GMS_OUTPUT_DIR": "/branded", "GMS_RUN_ORIGIN": "console"}
     assert jobs.list_schedules(store)[0]["id"] == sched_id
 
 
@@ -949,3 +950,46 @@ def test_jobs_list_and_detail_pages_show_no_liveness_text_for_a_finished_job(tmp
     resp = client.get(f"/jobs/{job_id}")
     assert "working (log updated" not in resp.text
     assert "may be stalled" not in resp.text
+
+
+def test_add_schedule_refuses_an_exact_duplicate(tmp_path):
+    store = _store(tmp_path)
+    jobs.add_schedule(store, "hourly status", "dispatch-queue", interval_minutes=60)
+    with pytest.raises(ValueError, match="already"):
+        jobs.add_schedule(store, "hourly status", "dispatch-queue", interval_minutes=60)
+    assert len(jobs.list_schedules(store)) == 1
+
+
+def test_add_schedule_allows_a_same_name_with_another_interval_or_subcommand(tmp_path):
+    store = _store(tmp_path)
+    jobs.add_schedule(store, "status", "dispatch-queue", interval_minutes=60)
+    jobs.add_schedule(store, "status", "dispatch-queue", interval_minutes=30)
+    jobs.add_schedule(store, "status", "publishing-status", interval_minutes=60)
+    assert len(jobs.list_schedules(store)) == 3
+
+
+def test_posting_the_same_schedule_twice_refuses_the_second(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    client = TestClient(create_app())
+    form = {"name": "nightly", "subcommand": "dispatch-queue", "interval_minutes": "60"}
+    first = client.post("/jobs/schedules", data=form, follow_redirects=False)
+    second = client.post("/jobs/schedules", data=form, follow_redirects=False)
+    assert first.status_code in (200, 303)
+    assert second.status_code == 400
+    assert "already" in second.text
+    assert len(jobs.list_schedules(store)) == 1
+
+
+def test_jobs_page_with_no_jobs_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+    resp = TestClient(create_app()).get("/jobs")
+    assert "No jobs yet." in resp.text
+
+
+def test_jobs_page_with_a_job_does_not_say_no_jobs(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+    JobStore(tmp_path / "jobs.sqlite3").create("dispatch-queue", ["true"], None)
+    html = TestClient(create_app()).get("/jobs").text
+    assert "dispatch-queue" in html
+    assert "No jobs yet." not in html

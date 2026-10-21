@@ -2,7 +2,7 @@
 {% block title %}Publishing - GoMoveShift Console{% endblock %}
 {% block content %}
   <h1>Publishing</h1>
-  <p><a href="/publishing/calendar">View as a calendar</a></p>
+  <p><a href="/publishing/calendar">View as a calendar</a> · <a href="/publishing/reconcile">Cross-platform reconciliation</a></p>
   <h2>Delivery queue</h2>
   {% if rows_by_state %}
   {% for status, rows in rows_by_state %}
@@ -10,10 +10,13 @@
   {% if status == "awaiting_manual_publish" %}
   <p>{{ awaiting_hint }}</p>
   {% endif %}
+  {% if status == "published" %}
+  <p><em>Queue-finished. The Status column says which rows the platform confirmed, which it has only scheduled, and which are unverified.</em></p>
+  {% endif %}
   <table border="1" class="delivery-table">
     <tr><th>Project</th><th>Short</th><th>Status</th><th>Platform</th><th>Scheduled</th><th>Title</th><th>Routes</th><th>Attempts</th><th>Last error</th>{% if status == "published" %}<th>Publishes at</th><th>Permalink</th>{% endif %}{% if status == "awaiting_manual_publish" %}<th>Action</th>{% endif %}</tr>
     {% for row in rows %}
-    <tr><td data-label="Project"><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td><td data-label="Short">{{ row.short_index }}</td><td data-label="Status">{{ status }}</td><td data-label="Platform">{{ row.platform }}</td>
+    <tr><td data-label="Project"><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td><td data-label="Short">{{ row.short_index }}</td><td data-label="Status">{{ row.delivery_state }}</td><td data-label="Platform">{{ row.platform }}</td>
     <td data-label="Scheduled">
       {% if row.scheduled_at_effective_local %}
       {{ row.scheduled_at_effective_local }}

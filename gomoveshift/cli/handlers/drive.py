@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+from ... import run_origin
 from ..logging_setup import configure_logging
 from ..tmux import is_in_tmux, launch_in_tmux, require_supervision, tmux_available
 
@@ -40,6 +41,38 @@ def _stages_base(args, config) -> Path:
         project_name,
         intermediate_folder=config.paths.intermediate_folder,
     )
+
+
+#: Runs that render nothing; ``health heal`` must never relaunch from one.
+_DISCOVERY_FLAGS = ("dry_run", "list_lfs", "label_dry_run")
+
+
+def _write_resume_recipe(args, config):
+    """Write ``<stages dir>/resume.json`` (what ``health heal`` re-launches from) and log its path.
+
+    A single ``--phase`` run writes nothing (it would overwrite the full recipe it was built
+    from) but still logs the line, so its log links to the same stages dir. A discovery-only run
+    (``--dry-run``/``--list-lfs``/``--label-dry-run``) renders nothing, so it neither writes nor
+    logs a recipe: it would replace the recipe of the run that did render. Never raises."""
+    if any(getattr(args, f, False) for f in _DISCOVERY_FLAGS):
+        return None
+    try:
+        from ...health import resume
+        from ...health.store import code_sha, utc_iso
+
+        path = _stages_base(args, config) / resume.RECIPE_NAME
+        if not getattr(args, "phase", None):
+            root = Path(__file__).resolve().parents[3]
+            written = resume.write_recipe(
+                path.parent, sys.argv[1:], cwd=os.getcwd(), sha=code_sha(root), now_iso=utc_iso()
+            )
+            if written is None:
+                return None
+        logging.getLogger(__name__).info(resume.recipe_line(path))
+        return path if path.exists() else None
+    except Exception as exc:  # noqa: BLE001 -- the recipe must never fail a drive
+        logging.getLogger(__name__).warning("resume recipe not written: %s", exc)
+        return None
 
 
 def _region_provenance(args, config) -> str:
@@ -370,7 +403,54 @@ def apply_picture_flags(config, args) -> None:
                 setattr(config.drive, step, False)
 
 
+# Why the run failed, set at the failure sites below so the closing
+# ``DRIVE FAILED: <reason>`` line is specific; falls back to the exit code.
+_FINAL_STATE: dict = {"reason": None, "launcher_only": False}
+
+
+# Exit code for a run that stopped at a human gate (OST audit pending) with the
+# work not done: neither success (0) nor a failure of the pipeline (1). Resume
+# after confirming the gate. 5 is unused by every other drive exit path.
+EXIT_WAITING_AT_GATE = 5
+
+
+def gate_wait_line(result, orchestrator) -> str | None:
+    """``DRIVE WAITING: ...`` when the run stopped at a human gate, else None.
+
+    The gate is never auto-confirmed; the line names the audit file, the
+    ``.confirmed`` marker or ``--ost-audit-confirmed``, and the next action.
+    """
+    detail = getattr(orchestrator, "waiting_gate", None)
+    if not (getattr(result, "success", False) and isinstance(detail, str) and detail):
+        return None
+    return (
+        f"DRIVE WAITING: ost_audit — {detail} — next: review the audit, "
+        "confirm it, then re-run the same command to resume"
+    )
+
+
+def drive_final_line(rc: int, reason: str | None = None) -> str:
+    """The explicit last line of every drive run (a log reader's answer to
+    "is it still going?"): ``DRIVE COMPLETED`` or ``DRIVE FAILED: <reason>``."""
+    if rc == EXIT_WAITING_AT_GATE and reason and reason.startswith("DRIVE WAITING:"):
+        return reason
+    if rc == 0:
+        return "DRIVE COMPLETED"
+    return f"DRIVE FAILED: {reason or f'exit code {rc} (see messages above)'}"
+
+
 def cmd_drive(args, config):
+    """Run the drive and end with an explicit final line (same exit code)."""
+    _FINAL_STATE.update(reason=None, launcher_only=False)
+    rc = _cmd_drive_impl(args, config)
+    if not _FINAL_STATE["launcher_only"]:  # the tmux parent only launched; the pane prints its own
+        line = drive_final_line(rc, _FINAL_STATE["reason"])
+        print(line, flush=True)
+        logging.getLogger(__name__).info(line)
+    return rc
+
+
+def _cmd_drive_impl(args, config):
     """Run Drive Pipeline on a GoPro directory."""
     from ...config import ConfigError
     from ...pipeline.drive_orchestrator import DrivePipelineOrchestrator
@@ -459,6 +539,7 @@ def cmd_drive(args, config):
             reexec_argv = list(sys.argv)
             if "--force" not in reexec_argv:
                 reexec_argv.append("--force")
+            _FINAL_STATE["launcher_only"] = True
             return launch_in_tmux(reexec_argv, session_name="gms-drive")
         else:
             print(
@@ -491,6 +572,9 @@ def cmd_drive(args, config):
     else:
         project_dir = output_base / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
+    if not getattr(args, "dry_run", False):
+        # Provenance for the console's backend-run registry: a CLI/cron drive is not a console job.
+        run_origin.write_sidecar(project_dir, sys.argv)
     configure_logging(
         log_file=project_dir / "drive.log",
         json_log=getattr(args, "log_json", False),
@@ -502,6 +586,7 @@ def cmd_drive(args, config):
     print(f"  Source:   {args.directory}")
     print(f"  Region:   {_region_provenance(args, config)}")
     print(f"  Publish:  {args.publish or '(earliest configured long-form day)'}")
+    print(f"  Log:      {project_dir / 'drive.log'}")
     if args.location:
         print(f"  Location: {args.location}")
     if args.start_date:
@@ -560,7 +645,13 @@ def cmd_drive(args, config):
     # is operator intent.
     _lf_mode = getattr(args, "lf_mode", None)
     if _lf_mode in ("best_moments", "full_drive"):
-        config.drive.lf_selection_mode = _lf_mode
+        config.drive.set_lf_mode(_lf_mode, "cli")
+    # The resolved LF policy, printed where the operator (and the log) sees it
+    # -- a config that quietly resolves to 8-12 min best_moments is visible here.
+    from ...config import lf_policy_banner
+
+    print(f"  {lf_policy_banner(config.drive)}")
+    logging.getLogger(__name__).info(lf_policy_banner(config.drive))
     # --lf-target-duration: clamp the best_moments filter to a single-LF
     # window of EXACTLY N minutes. Incompatible with full_drive (where the
     # output is bounded by full_drive_max_duration_sec, not a target).
@@ -581,6 +672,11 @@ def cmd_drive(args, config):
             )
             return 2
         target_sec = float(_lf_target_minutes) * 60.0
+        logging.getLogger(__name__).warning(
+            "LF-TARGET-OVERRIDE: --lf-target-duration=%s min (source=cli) forces "
+            "best_moments_mode and clamps best_moments_target_min/max and the LF duration bracket",
+            _lf_target_minutes,
+        )
         config.drive.best_moments_mode = True
         config.drive.best_moments_target_min = target_sec
         config.drive.best_moments_target_max = target_sec
@@ -769,6 +865,7 @@ def cmd_drive(args, config):
         phase_map = {"A": "phase_a", "BC": "phase_bc_day_first", "D": "phase_d"}
         phase = phase_map[args.phase]
 
+    _write_resume_recipe(args, config)
     try:
         result = orchestrator.run(
             source_dir=args.directory,
@@ -852,6 +949,8 @@ def cmd_drive(args, config):
             # None means "operator did NOT pass the flag" → state wins
             # on resume; True means "explicit" → CLI wins.
             ost_audit_confirmed=getattr(args, "ost_audit_confirmed", None),
+            # Opt-in system review at the OST gates; this run only.
+            ost_system_review=getattr(args, "ost_system_review", None),
             # --gate-cd-confirmed marker; argparse-sentinel.
             gate_cd_confirmed=getattr(args, "gate_cd_confirmed", None),
             # Explicit --no-youtube-upload (banner distinguishes
@@ -863,6 +962,7 @@ def cmd_drive(args, config):
             # survives resume; True = strip LF audio this run). The registry
             # mirrors it onto config.drive.skip_audio (the pipeline read path).
             skip_audio=getattr(args, "no_audio", None),
+            lf_mode=getattr(args, "lf_mode", None),
             # --sign-verify / --no-sign-verify / --sign-verify-strict
             # (argparse-sentinel: None = flag absent → saved intent survives
             # resume). Threaded through run() exactly like keep_masters /
@@ -991,6 +1091,11 @@ def cmd_drive(args, config):
         print(f"\n\nDrive pipeline terminated (exit code {e.code}).")
         return int(e.code) if e.code is not None else 143
 
+    waiting = gate_wait_line(result, orchestrator)
+    if waiting:
+        print(f"\n{waiting}", file=sys.stderr)
+        _FINAL_STATE["reason"] = waiting
+        return EXIT_WAITING_AT_GATE
     if result.success:
         print("\nDrive pipeline complete!")
         plan = result.drive_plan
@@ -1011,4 +1116,5 @@ def cmd_drive(args, config):
         print("\nDrive pipeline failed!")
         for error in result.errors:
             print(f"   Error: {error}", file=sys.stderr)
+        _FINAL_STATE["reason"] = "; ".join(str(e) for e in result.errors) or None
         return 1

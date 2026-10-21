@@ -41,6 +41,7 @@ class TestIrelandNonUSTitle:
             segs,
             geocoder,
             per_lf_location="Killarney, Kerry (N86)",
+            road_coverage_measured=True,
         )
         assert title == "Killarney to Dingle via N86, Kerry"
 
@@ -90,6 +91,7 @@ class TestUSBehaviorUnchanged:
             segs,
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 

@@ -26,6 +26,9 @@ def build_shorts_argv(
     output_dir: str,
     region: "str | None" = None,
     dry_run: bool = True,
+    confirm_plan: bool = False,
+    skip_upload: bool = False,
+    ost_system_review: bool = False,
     publish: "str | None" = None,
     lf_day: "str | None" = None,
     shorts_target: "int | None" = None,
@@ -37,12 +40,16 @@ def build_shorts_argv(
     pairs and validates them -- a shorts launch is a real ``drive`` run and
     is just as schedule-critical as one from the Drives tab.
     ``shorts_target``/``shorts_gap`` are the only shorts-specific knobs
-    ``drive`` exposes; forwarded verbatim too."""
+    ``drive`` exposes; forwarded verbatim too. Full-run safety choices use
+    the same drive argv builder as the Drives tab."""
     return build_drive_argv(
         directory,
         output_dir=output_dir,
         region=region,
         dry_run=dry_run,
+        confirm_plan=confirm_plan,
+        skip_upload=skip_upload,
+        ost_system_review=ost_system_review,
         publish=publish,
         lf_day=lf_day,
         shorts_target=shorts_target,

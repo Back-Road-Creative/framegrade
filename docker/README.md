@@ -18,6 +18,12 @@ parent/
   waypost/
 ```
 
+`console.Dockerfile.dockerignore` sits beside the Dockerfile and BuildKit reads
+it for this context. It keeps host virtualenvs and caches (`.venv`,
+`__pycache__`, test and lint caches) out of the image, which pip-installs its
+own packages: a checkout's multi-gigabyte `.venv` would otherwise ride in via
+`COPY framegrade`, bloating the image and slowing the layer export.
+
 ## Required host paths
 
 Every host path in `console-compose.yaml` is a required variable with no
@@ -40,9 +46,12 @@ created. Set each one to an existing path:
 | `GMS_SEO_STORAGE_DIR` | SEO storage directory (holds the publishing queue) |
 | `GMS_SEO_CREDENTIALS_DIR` | SEO credentials directory |
 | `GMS_SEO_YT_TOKEN_ENC` | encrypted YouTube token file |
+| `GMS_INPUTS_HOST_DIR` | the operator's own inputs directory (mounted read-only; an empty directory is valid) |
+| `GMS_HOST_SPOOL_HOST_DIR` | spool directory shared with the host GPU worker |
 
-The container-side targets are fixed (`/secrets/...`, `/app/waypost/...`), and
-the matching `GMS_*` variables inside the container point at them. A host
+The container-side targets are fixed (`/secrets/...`, `/app/waypost/...`,
+`/inputs`, `/host-spool`), and the matching `GMS_*` variables inside the
+container (`GMS_INPUTS_DIR`, `GMS_HOST_SPOOL_DIR`, ...) point at them. A host
 override therefore moves only the host source, never where the app looks.
 
 Optional variables: `GMS_HOST_GID` (default `1000`), `GMS_CONSOLE_BIND`
@@ -56,6 +65,19 @@ docker compose -f docker/console-compose.yaml up -d --build gomoveshift-console
 
 Always name the service: `console-base` is a shared template that is not meant
 to run on its own.
+
+The image declares a `/healthz` `HEALTHCHECK`, so a bare `docker run` reports
+health too; the compose healthcheck overrides it.
+
+## GPU work
+
+The container has no GPU unless it is started with `--gpus all`, and the drive
+pipeline requires NVENC with no CPU fallback, so a console-launched drive fails
+the NVENC check inside a GPU-less container. The compose file instead sets
+`GMS_HOST_SPOOL_DIR=/host-spool`: the console writes GPU job requests into the
+spool shared with the host worker (`docs/host-worker.md`), and the worker writes
+status, heartbeat and logs back. Point `GMS_HOST_SPOOL_HOST_DIR` at the
+directory the worker is started with.
 
 ## SEO paths
 
@@ -107,7 +129,9 @@ repeated `-f` options.
   the media library and night tabs stay "not configured" and rows under the
   second output root cannot be read.
 - Host paths in `console-compose.yaml` no longer have defaults; set every
-  variable in the table above before starting the console.
+  variable in the table above before starting the console. That includes
+  `GMS_INPUTS_HOST_DIR` and `GMS_HOST_SPOOL_HOST_DIR`, the inputs and
+  host-worker spool mounts added later.
 - The `GMS_HOST_GID` default is now `1000`. A deployment whose mounted
   directories are owned by another group must set `GMS_HOST_GID` explicitly,
   or the rebuilt container joins a different host group and loses write

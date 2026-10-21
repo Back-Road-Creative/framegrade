@@ -1131,6 +1131,7 @@ def apply_ost(
     lower_third_min_gap_sec: float = _LOWER_THIRD_MIN_GAP_SEC_DEFAULT,
     brand_kit: Optional[dict] = None,
     media_profile: Optional[object] = None,
+    website_cta: bool = True,
 ) -> Optional[Path]:
     """Burn an OST location overlay onto a video with layout-specific timing.
 
@@ -1156,6 +1157,8 @@ def apply_ost(
             and URL corner watermarks are full-video). When ``None`` (shorts or
             legacy callers), the layout's ``location_start_sec`` /
             ``location_duration_sec`` fields drive the window.
+        website_cta: ``False`` drops the closing website call-to-action (a burn of
+            only an LF's opening would otherwise print it at the opening's end).
         crossfade_sec: Linear fade-out duration (seconds) at the tail of
             the montage for the LOCATION title. Default ``0.5`` —
             override via ``config.drive.ost_title_crossfade_sec``.
@@ -1271,6 +1274,8 @@ def apply_ost(
         )
 
     layout_conf = LAYOUTS[layout]
+    if not website_cta:  # a lead-only burn: the closing CTA belongs to the LF's own tail
+        layout_conf = {**layout_conf, "show_website": False}
 
     vfilter = _build_drawtext_filter(
         location=location,

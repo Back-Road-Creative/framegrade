@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from gomoveshift.pipeline.csv_generator import build_consolidated_shorts_csv
+from gomoveshift.pipeline.title_decision import decide_title
 from gomoveshift.publishing.models import MediaFingerprint
 from gomoveshift.publishing.plan_builder import _slot_datetime_utc, build_publish_plan
 
@@ -37,6 +38,7 @@ def _post(short_index: int) -> SimpleNamespace:
         pinterest_board="drives",
         first_comment=f"#tag{short_index}",
         sampled_regions=["County Kerry, Munster"],
+        title_decision=decide_title("short", f"County Kerry Drive #{short_index}", None, suffix=""),
     )
 
 

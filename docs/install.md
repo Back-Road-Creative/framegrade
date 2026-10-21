@@ -128,6 +128,12 @@ decrypt anything. That is why the compose file requires each variable and stops 
 message naming the one that is missing. The container-side paths are fixed, so an
 override moves only which *host* file is bound.
 
+**Sealed seo tokens live in the operator's inputs directory.**
+`credential_paths.resolve_sops_file` reads `$SEO_INPUTS_DIR/<file>` first (default `seo` under `GMS_INPUTS_DIR`) for the
+configured `seo.credentials_dir` (when no brand-scoped dir applies), and falls back to
+`<file>` next to that credentials dir, so an install that has not moved its tokens yet
+keeps working.
+
 Two optional overlays add what the base file leaves out: `docker/console-site.yaml`
 (a site checkout and a camera-card root, for the media library and night-import tabs;
 without it they report "not configured") and `docker/console-extra-output.yaml`
@@ -166,16 +172,62 @@ header, which a client can set arbitrarily. `/healthz` stays reachable without a
 healthcheck can't carry one), but an unauthenticated `/healthz` response is minimal (`{"status":
 "ok"}`/`"degraded"`, same HTTP status code) -- pass the token to see brand slugs, ticker, and observer
 state. `GMS_CONSOLE_NOTIFY_URL` (and optionally `GMS_CONSOLE_URL`, used only to compose the link
-inside the notification payload) point the failure webhook at an endpoint of your choice; unset, it's
-a silent no-op. For phone pushes, run `python3 tools/phone_alerts_setup.py` from the checkout (system
+inside the notification payload) point the failure webhook at an endpoint of your choice. With no
+usable destination (unset, or an ntfy URL whose topic is invalid) nothing is sent and nothing is
+recorded as delivered: `/healthz` shows `notify_configured: false`, and every alert stays pending until
+a destination exists. An alert is recorded as seen only once it was delivered; a failed push is retried
+with bounded exponential backoff (`GMS_NOTIFY_MAX_ATTEMPTS`, default 6; `GMS_NOTIFY_BACKOFF_MIN`,
+default 2) from `notify_outbox.json` in the console data dir, so a restart loses nothing. The first scan
+notifies the currently actionable backlog once (at most 10 actual pushes per pass; rows that are out of
+attempts or backing off do not use up that cap). **Known, accepted limitation:** `job_failed` and
+`job_interrupted` alerts stay fire-and-forget (one push, no outbox retry), so a failed push for those is
+not covered by the retry guarantee above. `/healthz` reports the effective
+destination (`notify_source` env or file, never the topic), `notify_pending`, `notify_exhausted`,
+`notify_delivery_failures` and the ticker's `observer_failures`. For phone pushes, run `python3 tools/phone_alerts_setup.py` from the checkout (system
 python, no venv): it makes a private ntfy.sh topic in `notify_url` under the config home (used when the
 env var is unset), prints the phone steps, and `--test` sends one push. TikTok inbox drafts (with their
 caption), failed posts and missed slots then reach the phone. `--rotate` replaces the topic.
+
+In the container the home file is unreachable, so pass the destination as
+`GMS_CONSOLE_NOTIFY_URL` and compose forwards it to the console. An absent or empty value is not a
+failure -- the console starts unconfigured and `/healthz` reports `notify_configured: false`. The value
+is never printed.
+
+**Backend runs the console did not launch.** Review gates are discovered for every console job *and*
+for run dirs found under `GMS_OUTPUT_DIR` (the root, its children and grandchildren holding `_gates`),
+so a CLI or cron drive's gate lists on `/drives/gates/pending` and alerts the phone. Each run is kept
+in the `backend_runs` table of `jobs.sqlite3` with its origin: `console` (job row: argv and start
+time), `cli` / `cron` (from an optional `run_origin.json` in the run dir: `origin`, `argv`,
+`started_at`), or `unknown` -- never guessed. Known provenance is never overwritten; `unknown` is
+upgraded when a sidecar appears. Nothing outside the output root is scanned, and the scan writes nothing.
 
 ### 3. Run a dry drive
 
 Drives tab -> pick a source folder -> run a **dry** (non-uploading) drive.
 Proves the install end-to-end without shipping anything.
+For a full render that must remain local, run the dry drive first, review its
+plan, then clear **Dry run**, select **I reviewed the dry-run plan; proceed with
+a full render**, and select **Render without uploading to Drive or YouTube**.
+The confirmation is required for a full console run because the detached
+worker has no visible terminal prompt. Only that explicit choice passes
+`--force`; a rejected form preserves it for correction. The console also refuses, before queueing, a source folder with a broken symlink or an unreadable media file (each path is named); the host worker's own check stays authoritative. The console passes `--skip-upload`
+and `--no-youtube-upload`, so the pipeline treats the scheduled run as
+audit-only. The publishing and long-form days still plan it, but nothing is
+uploaded. Leave review enabled for production acceptance checks.
+For a run whose on-screen place text should be checked against its retained
+GPS, select **Use GPS to review on-screen locations**. This
+passes `--ost-system-review` for that run only. The system can pass the OST
+gate only when its sealed route-claim record agrees on every long-form and
+matches the exact burn text; an unsupported claim or missing evidence still
+stops for review. The console does not create a `.confirmed` marker or pass
+`--ost-audit-confirmed`.
+
+The **Shorts** tab launches the same drive pipeline. For a full render there,
+review the dry-run plan and select the plan confirmation; it refuses an
+unconfirmed full run before creating a job. The same upload-hold and GPS
+system-review choices are available. A validation error keeps the entered
+source, output, schedule, and choices on the form for correction. Shorts
+launched from this tab still use the pipeline's automated review gates.
 
 ## Check the install
 
@@ -227,3 +279,9 @@ on it -- an untested backup script is not a backup plan.
 
 Nothing in the container is unique: rebuild the image from this checkout, restore
 the volume if it was lost, then `docker compose -f docker/console-compose.yaml up -d --build gomoveshift-console` again.
+
+## Schedule tab volume figures
+
+`/schedule` shows four separate shorts-per-long-form figures from `gomoveshift/console/schedule_model.py`: the selected target (Waypost's `shorts_per_lf` decision), slot capacity (the region's shorts windows × the LF interval), feasible output (the lower of the two, labelled as derived, with the binding side), and actually scheduled (content-ledger rows). Each carries its source, a fallback reason (a `seed` value, an unreadable decision store, a ledger figure that has no policy version) and the policy revision. The model only reads `cadence_decisions` and the schedule report; it writes nothing. Times render in America/New_York (EST/EDT).
+
+**Who writes the origin.** `gomoveshift drive` and `gomoveshift pipeline` write `run_origin.json` into their run dir when they start (`gomoveshift/run_origin.py`; not on `--dry-run`, never overwritten on resume). The origin comes from `GMS_RUN_ORIGIN`: the console sets `console` on every child it launches, a cron entry would set `GMS_RUN_ORIGIN=cron` (planned: no tracked cron launches drives today), and anything else is `cli`. The sidecar keeps only the program name and subcommand, never paths or other arguments.

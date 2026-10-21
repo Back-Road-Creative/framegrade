@@ -18,6 +18,8 @@ ONE directory, routed through ``DriveConfig.resolved_geocode_cache_dir``.
 from pathlib import Path
 from unittest.mock import patch
 
+from gomoveshift import paths
+
 
 def _cache_parent(mock_cache) -> Path:
     """Directory of the ``cache_path`` handed to GeocodingCache."""
@@ -101,6 +103,4 @@ def test_resolved_geocode_cache_dir_is_the_single_source(tmp_path, monkeypatch):
     monkeypatch.delenv("GMS_GPS_CACHE_DIR", raising=False)
     resolved = DriveConfig().resolved_geocode_cache_dir()
     assert resolved.is_absolute()
-    from gomoveshift.paths import gms_cache_home
-
-    assert resolved == gms_cache_home() / "geocoding"
+    assert resolved == paths.gms_geocoding_cache_dir()

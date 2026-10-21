@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional, Union
 
+from ...paths import gms_inputs_dir
 from ...pipeline._yt_creds import sops_age_recipients, write_channel_identity
 from ...pipeline.drive_phases.youtube_uploader import (
     YOUTUBE_ANALYTICS_SCOPE,
@@ -44,20 +45,6 @@ def _resolve_client_secret_path() -> Path:
 
     client_secret_path, _token_path = _resolve_default_cred_paths()
     return client_secret_path
-
-
-def _service_dir() -> Optional[Path]:
-    """The service directory holding the project ``config.yaml``, or None when it
-    cannot be found. A ``config.yaml`` under the config home is overlaid from any
-    launch directory; relative credential paths resolve against the launch
-    directory. An editable install has it three levels above this file; a wheel
-    install puts this file under the venv's site-packages, so the venv's parent is
-    tried next. Never a guess: a candidate counts only when ``config.yaml`` is
-    actually there."""
-    for candidate in (Path(__file__).resolve().parents[3], Path(sys.prefix).resolve().parent):
-        if (candidate / "config.yaml").is_file():
-            return candidate
-    return None
 
 
 def _config_manager_path_unset() -> bool:
@@ -184,19 +171,14 @@ def run_youtube_auth(
             )
         except FileNotFoundError:
             if _config_manager_path_unset():
-                # The launch directory is the cause, not a missing download.
-                service_dir = _service_dir()
-                rerun = (
-                    f"Run from the service directory: cd {service_dir} && "
-                    ".venv/bin/gomoveshift youtube-auth"
-                    if service_dir is not None
-                    else "Run gomoveshift youtube-auth from the project directory, "
-                    "the one that holds config.yaml"
-                )
+                # No config loaded is the cause, not a missing download.
+                inputs = gms_inputs_dir()
                 print(
-                    f"Error: no config.yaml was loaded from {Path.cwd()} "
-                    "(seo.manager_path is unset), so the client secret and the shared "
-                    f"token were looked up relative to this directory. {rerun}",
+                    f"Error: no config.yaml was loaded (none in {Path.cwd()} or {inputs}; "
+                    "seo.manager_path is unset), so the client secret and the shared "
+                    "token were looked up relative to this directory. Put config.yaml in "
+                    f"{inputs}, or set GMS_INPUTS_DIR to the directory that holds it, then "
+                    "re-run gomoveshift youtube-auth.",
                     file=err,
                 )
                 return 2

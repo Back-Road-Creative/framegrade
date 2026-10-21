@@ -200,7 +200,7 @@ def test_dry_run_conflict_prints_warns_and_returns(monkeypatch, capsys, caplog):
     )
 
     out = capsys.readouterr().out
-    assert result is None  # advisory only — the label gate still exits normally
+    assert result is False  # advisory only — no route refusal, the gate exits normally
     assert "sign evidence: conflicts" in out
     assert "COLLETON COUNTY" in out
     assert "SIGN-VERIFY-CONFLICT" in caplog.text

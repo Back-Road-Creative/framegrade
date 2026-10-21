@@ -38,7 +38,12 @@ class TestDoubleNestedOutputPath:
 
         orch = DrivePipelineOrchestrator()
         orch.config.drive.no_review = True
-        orch.config.drive.skip_validation = True
+        # Isolation test: stub a passing DoD validator. --skip-validation is
+        # refused on a run that uploads (GMS-17c).
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.drive_orchestrator.run_validation",
+            lambda **_kw: MagicMock(passed_count=13, failed_count=0, checks=[]),
+        )
 
         # Stub all phases
         captured_state = {}

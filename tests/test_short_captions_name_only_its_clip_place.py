@@ -153,10 +153,14 @@ def test_no_frame_template_uses_direction_framing():
 
 
 def _region_tags_of(parent, location, regions):
-    post = parent.generate_all(
-        num_shorts=1, per_short_locations=[location], per_short_regions=[regions]
-    )[0]
-    return post.youtube_tags.lower()
+    """The region phrases the variant derives. Asserted on ``_region_tags``
+    itself: the Short tag rule drops non-template tags (region phrases included) from a
+    Short's published tags, so the published list no longer shows them."""
+    from gomoveshift.pipeline.social_generator import _region_tags
+
+    variant = parent._per_short_variant(location, list(regions) or None)
+    tags = _region_tags(variant.location, variant.resolved_location, variant._own_regions)
+    return " ".join(tags).lower()
 
 
 def test_variant_region_tags_follow_the_shorts_own_state_not_the_parents_country():

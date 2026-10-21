@@ -16,11 +16,41 @@ Layout:
 A brand with no ``brands/<brand>/creds`` directory falls back to the shared
 dir — a tenant with no credentials of its own still gets the console's
 account.
+
+Operator inputs: sealed tokens may live in ``$SEO_INPUTS_DIR`` (default
+``seo`` under ``gms_inputs_dir()``, see ``seo_inputs_dir``), outside the
+publishable tree. For the configured ``seo.credentials_dir`` with no
+brand-scoped dir, a file there wins over ``base.parent / filename``; the
+``base.parent`` path stays the fallback. An explicitly passed other dir never
+reads it.
 """
 
 from __future__ import annotations
 
+import functools
+import os
 from pathlib import Path
+
+
+def seo_inputs_dir() -> Path:
+    """``$SEO_INPUTS_DIR``, else ``seo`` under the operator's inputs directory
+    (``gomoveshift.paths.gms_inputs_dir``)."""
+    from gomoveshift.paths import gms_inputs_dir
+
+    override = os.environ.get("SEO_INPUTS_DIR")
+    if override:
+        return Path(override)
+    return gms_inputs_dir() / "seo"
+
+
+@functools.cache
+def configured_base() -> Path:
+    """``seo.credentials_dir``, read once per process. Every loader's
+    ``DEFAULT_CREDENTIALS_DIR`` is this value, so resolving a path never
+    re-loads and re-validates the whole config."""
+    from gomoveshift.config import get_config
+
+    return Path(get_config().seo.credentials_dir)
 
 
 def resolve_credentials_dir(brand: str | None, base: Path | None = None) -> Path:
@@ -43,5 +73,11 @@ def resolve_credentials_dir(brand: str | None, base: Path | None = None) -> Path
 
 def resolve_sops_file(filename: str, brand: str | None, base: Path | None = None) -> Path:
     """The SOPS ``.enc`` path for ``filename``, honouring the same
-    ``creds_dir.parent / filename`` convention every loader already uses."""
-    return resolve_credentials_dir(brand, base).parent / filename
+    ``creds_dir.parent / filename`` convention every loader already uses,
+    except that a copy in ``seo_inputs_dir()`` wins for the configured dir."""
+    creds_dir = resolve_credentials_dir(brand, base)
+    if creds_dir == configured_base():
+        private = seo_inputs_dir() / filename
+        if private.is_file():
+            return private
+    return creds_dir.parent / filename

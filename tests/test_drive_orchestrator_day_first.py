@@ -761,6 +761,11 @@ class TestBuildLfTitleGpsPointsWiring:
                 "gomoveshift.pipeline.gps_enrichment.build_lf_title",
                 side_effect=_fake_build_lf_title,
             ),
+            # The sentinel has no route coordinates. This test covers title
+            # builder GPS wiring, not the retained-route approval contract.
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first._approve_waypost_titles_before_encode"
+            ),
             patch.object(DrivePipelineOrchestrator, "_probe_duration", return_value=900.0),
         ):
             orch._phase_bc_day_first(state)

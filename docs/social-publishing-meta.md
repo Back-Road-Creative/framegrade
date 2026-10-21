@@ -1,7 +1,7 @@
 # Meta publishing (Instagram + Facebook)
 
 `gomoveshift/publishing/meta_auth.py`: shared Meta credential loader (SOPS
-`meta_publishing.json.enc` beside the SEO credentials directory, same `sops -d`
+`meta_publishing.json.enc` in `$SEO_INPUTS_DIR` (default `seo` under `GMS_INPUTS_DIR`; else beside the SEO credentials directory), same `sops -d`
 pattern as `pipeline._yt_creds`; fields `app_id`, `app_secret`, `page_id`,
 `ig_user_id`, `page_access_token`, `token_type`, `scopes`,
 `user_token_expires_at`, `data_access_expires_at`, `issued_at`,

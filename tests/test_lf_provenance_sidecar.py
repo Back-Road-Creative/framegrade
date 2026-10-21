@@ -22,9 +22,11 @@ _LF_KEYS: dict[str, tuple[type, ...]] = {
     "burned_ost_text": (str, type(None)),
     "source": (dict,),
     "footage_window": (dict,),
-    "gps_coverage_pct": (float, type(None)),
+    "fix_density_pct": (float, type(None)),
     "endpoints": (dict,),
     "road_vote": (dict, type(None)),
+    "road_coverage_measured": (bool,),
+    "road_vote_basis": (str,),
     "awarded_tier": (str, type(None)),
     "tier_evidence": (dict, list, type(None)),
     "cut_from_master_fingerprint": (str, type(None)),
@@ -79,14 +81,14 @@ def test_missing_inputs_become_null_with_reasons_not_crashes() -> None:
     assert lf["source"] == {"gpx_path": None, "episode_paths": None}
     assert lf["footage_window"] == {"start_sec": None, "end_sec": None}
     assert lf["endpoints"] == {"start": None, "end": None}
-    assert lf["gps_coverage_pct"] is None and lf["road_vote"] is None
+    assert lf["fix_density_pct"] is None and lf["road_vote"] is None
     assert lf["burned_ost_text"] is None
     for field in (
         "burned_ost_text",
         "source",
         "footage_window",
         "endpoints",
-        "gps_coverage_pct",
+        "fix_density_pct",
         "road_vote",
     ):
         assert lf["null_reasons"].get(field), f"no reason for null {field}"
@@ -120,6 +122,9 @@ def test_road_vote_threaded_from_resolved_model() -> None:
     lf = build_lf_provenance_payload(state)["lfs"][0]
     assert lf["road_vote"] == {"I-81": 8, "South Main Street": 1}
     assert "road_vote" not in lf["null_reasons"]
+    # The tally is untimed reverse-geocode votes, never measured coverage.
+    assert lf["road_coverage_measured"] is False
+    assert lf["road_vote_basis"] == "reverse_geocode_votes_untimed"
 
 
 def test_awarded_tier_and_evidence_recorded_from_state_map() -> None:
@@ -145,14 +150,15 @@ def test_empty_resolved_road_votes_records_the_reason() -> None:
         lf["null_reasons"]["road_vote"]
         == "no road vote recorded (ResolvedLocation.road_votes empty)"
     )
+    assert lf["road_coverage_measured"] is False
 
 
-def test_gps_coverage_pct_lights_up_from_state() -> None:
+def test_fix_density_pct_lights_up_from_state() -> None:
     state = _state_full()
     state.per_lf_gps_coverage_pct = {0: 87.44}
     lf = build_lf_provenance_payload(state)["lfs"][0]
-    assert lf["gps_coverage_pct"] == 87.4
-    assert "gps_coverage_pct" not in lf["null_reasons"]
+    assert lf["fix_density_pct"] == 87.4
+    assert "fix_density_pct" not in lf["null_reasons"]
 
 
 def test_tier_fields_survive_a_state_json_round_trip() -> None:
@@ -165,7 +171,7 @@ def test_tier_fields_survive_a_state_json_round_trip() -> None:
     state.per_lf_tier_evidence = {0: {"corroborations": 2, "gps_point_count": 900}}
     revived = PipelineState.from_dict(json.loads(json.dumps(state.to_dict(), default=str)))
     lf = build_lf_provenance_payload(revived)["lfs"][0]
-    assert lf["gps_coverage_pct"] == 87.4
+    assert lf["fix_density_pct"] == 87.4
     assert lf["awarded_tier"] == "2"
     assert lf["tier_evidence"] == {"corroborations": 2, "gps_point_count": 900}
     assert "awarded_tier" not in lf["null_reasons"]
@@ -285,3 +291,35 @@ def test_write_file_skip_empty_and_oserror(tmp_path, monkeypatch) -> None:
 
 def _boom(self, *args, **kwargs):
     raise OSError("disk full")
+
+
+def test_the_sidecar_never_calls_fix_density_coverage() -> None:
+    # The ladder's locked-GPS duration share is fix
+    # density, not retained-time coverage (that lives in the route-claims record),
+    # so the sidecar must not publish it under a coverage name.
+    state = _state_full()
+    state.per_lf_gps_coverage_pct = {0: 93.0}
+    lf = build_lf_provenance_payload(state)["lfs"][0]
+    assert lf["fix_density_pct"] == 93.0
+    # The one coverage-named key is the flag saying road coverage was NOT
+    # measured; it carries no number, so fix density can never ride on it.
+    assert [k for k in lf if "coverage" in k] == ["road_coverage_measured"]
+    assert lf["road_coverage_measured"] is False
+
+
+def test_fix_density_state_field_reaches_no_surface_but_the_sidecar() -> None:
+    # The state field keeps its old name for resume only. Its one reader is the
+    # sidecar (published as fix_density_pct); any new reader that could put it
+    # on an OST, record, refusal or log line as "coverage" must be named here.
+    pkg = Path(__file__).resolve().parents[1] / "gomoveshift"
+    allowed = {
+        "pipeline/drive_phases/phase_bc_day_first.py",  # the writer
+        "pipeline/drive_state_model.py",  # the field
+        "pipeline/lf_provenance_sidecar.py",  # the one reader
+    }
+    readers = {
+        str(p.relative_to(pkg))
+        for p in pkg.rglob("*.py")
+        if "per_lf_gps_coverage_pct" in p.read_text(encoding="utf-8")
+    }
+    assert readers <= allowed, sorted(readers - allowed)

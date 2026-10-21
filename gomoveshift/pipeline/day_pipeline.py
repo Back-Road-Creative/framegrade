@@ -67,11 +67,9 @@ from keycut import (
     segments_to_master_ranges,
 )
 
-from ..console.settings import current_brand
-from ..publishing.brand_policy import load_brand_policy, load_media_profile
-from . import volume_source
+from ..config import resolve_lf_mode
+from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
-from .chapters.marker_merger import chapter_town_events
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
@@ -82,6 +80,8 @@ from .inserts import (
     insert_label,
     insert_records,
     plan_drive_inserts,
+    probe_media,
+    shift_photo_inserts,
     splice_day_lf_inserts,
 )
 from .montage_builder import (
@@ -103,9 +103,12 @@ from .ost_audit_sidecar import (
     shorts_gate_or_raise,
     stamp_confirmed,
     superlong_gate_or_raise,
+    system_review_passes,
     write_ost_audit,
     write_shorts_ost_audit,
+    write_system_review_copy,
 )
+from .ost_system_review import record_surface_reviews
 from .ost_validator import validate_ost
 from .preflight import check_lf_work_space, check_superlong_output_space
 from .regular_lf_planner import (
@@ -115,6 +118,7 @@ from .regular_lf_planner import (
     plan_full_drive_parts,
     plan_regular_lfs,
 )
+from .route_claims import RouteClaimRefusedError
 from .schedule_constants import required_shorts_per_lf
 from .short_planner import (
     DEFAULT_MAX_DURATION_SEC,
@@ -132,6 +136,7 @@ from .stop_mask import (
     mask_summary,
     stop_mask_kwargs,
 )
+from .title_kit import TitleKit, require_title_kit
 from .validation.content_gates import check_short_location_invariant, check_stop_free_windows
 
 logger = logging.getLogger(__name__)
@@ -729,6 +734,7 @@ def _render_day_shorts(
     short_regions_fn: Optional[Callable] = None,
     state=None,
     stop_mask=None,
+    short_route_fn: Optional[Callable] = None,
 ) -> tuple:
     """Extract + OST-burn every planned short for one day (Step 5).
 
@@ -748,6 +754,10 @@ def _render_day_shorts(
     # (short_range, duration, ost_text) specs collected in the derive pass;
     # the actual burns run in a second pass AFTER the pre-burn review gate.
     _render_specs: list = []
+    # Per-rank route-claim outcomes for the Shorts system review record.
+    _short_outcomes: dict = {}
+    # Every Short whose retained GPS cannot support its text, reported together.
+    _route_refusals: list = []
     # Degraded-derivation visibility: per-day counts feeding ONE summary
     # WARN — how many GPS-bearing shorts shipped inherited OST text and how
     # many skipped the region gate (gate failing open).
@@ -1003,6 +1013,28 @@ def _render_day_shorts(
                 f"GPS place and fell back to {short_ost_text!r}, which is not "
                 "verified against this clip's GPS. Do NOT encode/upload this short."
             )
+        # The long-form route-claim rule at Short scale, over this clip's own
+        # retained window (one sample per GAP_S, no place floor): a gap, an
+        # unsettled sample or an omitted place refuses or broadens the text.
+        if short_route_fn is not None and _trimmed_points:
+            _requested = short_ost_text
+            try:
+                _route_label, _route_note = short_route_fn(
+                    day_gps_points, short_range, short_ost_text
+                )
+            except RouteClaimRefusedError as exc:
+                _route_refusals.append(f"rank {rank}: {exc}")
+                continue
+            if _route_note:
+                logger.warning("Short rank %d (day %s): %s", rank, date, _route_note)
+                short_ost_text = _route_label
+            # What this clip's own retained GPS was measured to support.
+            _short_outcomes[rank] = {
+                "refused": False,
+                "reason": _route_note or "",
+                "label_requested": _requested,
+                "ost_text": short_ost_text,
+            }
         # Cross-surface location gate for shorts: hard-fail UPSTREAM of
         # the irreversible 9:16 encode when the burned county is in ZERO of the
         # clip's own sampled GPS regions — the shorts analog of the LF location
@@ -1133,6 +1165,7 @@ def _render_day_shorts(
                 "start_sec": float(short_range.start_sec),
                 "end_sec": float(short_range.end_sec),
                 "regions": list(_clip_regions or []),
+                "roads": list(getattr(_clip_regions, "roads", None) or []),
                 "median_speed_mps": _median_speed,
                 "place_source": "clip_gps" if _ost_from_clip_vote else "lf_label",
             }
@@ -1161,7 +1194,14 @@ def _render_day_shorts(
     # irreversible artefact instead of merely recorded after it.
     # Every entry needs a stamp and no two share a title prefix -- refuse
     # here, before any pixels burn, not at enqueue.
+    if _route_refusals:
+        raise RouteClaimRefusedError(
+            f"Short route claims REFUSED (day {date}); nothing rendered:\n"
+            + "\n".join(_route_refusals)
+        )
     assert_day_title_stamps(date, short_ost_audit_entries)
+    if state is not None:
+        record_surface_reviews(state, "shorts", date, short_ost_audit_entries, _short_outcomes)
     shorts_gate_or_raise(day_dir.parent, date, short_ost_audit_entries, state)
 
     # ── Step 5b: burn every gated short (rank-ordered) ────────────
@@ -1293,6 +1333,7 @@ def _build_superlong_part_metadata(
     config,
     stages_dir: Path,
     day_journey=None,
+    kit: Optional[TitleKit] = None,
 ) -> dict:
     """Build one superlong part's title / chapters / description.
 
@@ -1312,22 +1353,20 @@ def _build_superlong_part_metadata(
     ``validation.content_gates.check_metadata_quality`` already honours
     for GPS-less regular LFs.
     """
-    from .chapters.generator import YOUTUBE_MIN_CHAPTERS, ChapterGenerator, superlong_max_chapters
-    from .title_builder import build_superlong_part_title
-
-    title = build_superlong_part_title(location, part.part_index, part.part_count)
+    kit = require_title_kit(kit)
+    title = kit.superlong_title(location, part.part_index, part.part_count)
     has_gps = day_journey is not None or gpx_path is not None
     chapters: list = []
     chapter_text = ""
     if has_gps:
         try:
-            generator = ChapterGenerator(config)
+            generator = kit.chapter_generator(config)
             chapters = generator.generate(
                 gpx_path=gpx_path,
                 day_journey=day_journey,
                 video_duration=part.kept_duration_sec,
                 start_location=location,
-                max_chapters=superlong_max_chapters(part.kept_duration_sec),
+                max_chapters=kit.superlong_max_chapters(part.kept_duration_sec),
                 resolved_location=resolved_location,
                 stages_dir=stages_dir,
                 included_segments=list(part.ranges) if day_journey is not None else None,
@@ -1347,7 +1386,7 @@ def _build_superlong_part_metadata(
         f"The whole day's drive from {location}, part {part.part_index} of "
         f"{part.part_count} — stops removed, nothing else cut."
     )
-    if len(chapters) >= YOUTUBE_MIN_CHAPTERS:
+    if len(chapters) >= kit.min_chapters:
         description = f"{description}\n\n\U0001f4cd CHAPTERS\n{chapter_text}"
 
     return {
@@ -1375,6 +1414,8 @@ def _produce_superlong_parts(
     state=None,
     day_gps_points: Optional[list[tuple[float, float, float]]] = None,
     media_profile=None,
+    kit: Optional[TitleKit] = None,
+    superlong_route_fn: Optional[Callable] = None,
 ) -> dict:
     """Cut + OST-burn opt-in superlong parts (``sl_NN.mp4``) from the day
     master. Never turned into ``RegularLFPlan``s, so they can't reach
@@ -1396,9 +1437,15 @@ def _produce_superlong_parts(
     ``gps_points_by_date``), spanning every episode of the day. Builds the
     per-part chapter journey (see ``_build_superlong_part_metadata``);
     ``None`` falls back to the legacy single-episode-GPX chapters.
+
+    ``superlong_route_fn`` (``route_claims.make_superlong_route_fn``): each
+    part's title text and lower-thirds are checked against that part's OWN
+    retained ranges before any part extracts or burns; an unsupported title is
+    broadened or refused, an off-route lower-third refused, and every refusal is
+    raised together. A GPS-bearing day with no route check refuses.
     """
     from ..models import LFSegment
-    from .chapters.generator import build_day_master_journey
+    from .route_claims import lower_third_issues, route_claim_outcome
     from .superlong_planner import plan_superlong_parts
 
     _drive = getattr(config, "drive", None) if config is not None else None
@@ -1428,7 +1475,8 @@ def _produce_superlong_parts(
         _resolved_location = (getattr(state, "per_lf_resolved_location", None) or {}).get(
             _first_idx
         )
-    _day_journey = build_day_master_journey(day_gps_points)
+    kit = require_title_kit(kit)
+    _day_journey = kit.day_master_journey(day_gps_points)
     _gpx_path: Optional[Path] = None
     for _ep in episodes:
         _p = getattr(_ep, "gpx_path", None)
@@ -1440,8 +1488,28 @@ def _produce_superlong_parts(
     # Same ``part_transitions`` derivation the old single-pass loop used.
     records: list[dict] = []
     _burn_work: list[dict] = []
+    _route_refusals: list[str] = []
+    if day_gps_points and superlong_route_fn is None:
+        raise RouteClaimRefusedError(
+            f"Day {date}: superlong text {location!r} has GPS but no route check to "
+            "measure it against each part's retained footage; next: run through "
+            "phase_bc_day_first, which wires make_superlong_route_fn"
+        )
     for part in plans:
         final_sl = sl_dir / f"sl_{part.part_index:02d}.mp4"
+        part_text, _route_ev, _route_note = location, None, ""
+        if day_gps_points:
+            try:
+                part_text, _route_note, _route_ev = superlong_route_fn(
+                    part.part_index, part.ranges, day_gps_points, location
+                )
+            except RouteClaimRefusedError as exc:
+                _route_refusals.append(f"part {part.part_index}: {exc}")
+                continue
+            if _route_note:
+                logger.warning(
+                    "ROUTE-CLAIM: day %s superlong part %d %s", date, part.part_index, _route_note
+                )
         record = {
             "path": str(final_sl),
             "part_index": part.part_index,
@@ -1452,15 +1520,30 @@ def _produce_superlong_parts(
             _build_superlong_part_metadata(
                 part=part,
                 date=date,
-                location=location,
+                location=part_text,
                 gpx_path=_gpx_path,
                 resolved_location=_resolved_location,
                 config=config,
                 stages_dir=sl_dir,
                 day_journey=_day_journey,
+                kit=kit,
             )
         )
-        part_transitions = chapter_town_events(record.get("chapters"))
+        part_transitions = kit.town_events(record.get("chapters"))
+        if _route_ev is not None:
+            _lt_issues = lower_third_issues(part_transitions, _route_ev)
+            if _lt_issues:
+                _route_refusals.append(
+                    f"part {part.part_index}: " + "\n  - ".join(["lower-thirds:", *_lt_issues])
+                )
+                continue
+            record["route_claim"] = {
+                "part_index": part.part_index,
+                **route_claim_outcome(
+                    part.part_index, location, _route_ev, chosen=part_text, reason=_route_note
+                ),
+            }
+            record["route_claim"].pop("lf_index", None)
         records.append(record)
         _burn_work.append(
             {
@@ -1471,12 +1554,20 @@ def _produce_superlong_parts(
                 "part_index": part.part_index,
                 "part_count": part.part_count,
                 # Burned title text: the day-level ``location`` from
-                # ``run_day_pipeline`` — in no audit artifact before the superlong gate.
-                "ost_text": location,
+                # ``run_day_pipeline``, as this part's route check kept it.
+                "ost_text": part_text,
                 "lower_thirds": [
                     {"label": lbl, "time_sec": t} for lbl, t in (part_transitions or [])
                 ],
             }
+        )
+
+    if _route_refusals:
+        for r in _route_refusals:
+            logger.error("ROUTE-CLAIM SL: day %s %s", date, r.splitlines()[0])
+        raise RouteClaimRefusedError(
+            f"Day {date}: {len(_route_refusals)} superlong part(s) claim more than their "
+            "retained GPS proves (nothing extracted or burned):\n" + "\n".join(_route_refusals)
         )
 
     # ── Superlong pre-burn OST review gate (third burned-text surface) ──
@@ -1484,6 +1575,18 @@ def _produce_superlong_parts(
     # extract/apply_ost — mirrors the shorts pre-burn gate. The burn loop consumes
     # the gate's RETURNED work-list, so a part can only reach
     # ``apply_ost`` by having been in what this gate audited.
+    if state is not None:
+        record_surface_reviews(
+            state,
+            "superlong",
+            date,
+            _burn_work,
+            {
+                w["part_index"]: {**w["record"]["route_claim"], "ost_text": w["ost_text"]}
+                for w in _burn_work
+                if "route_claim" in w["record"]
+            },
+        )
     _gated_work = superlong_gate_or_raise(day_dir.parent, date, _burn_work, state)
 
     # ── Pass 2: extract + burn every gated part ──
@@ -1499,7 +1602,7 @@ def _produce_superlong_parts(
         # with no sidecar) is NOT adopted on file size alone — see
         # ``_superlong_ost_fingerprint``.
         sl_fingerprint = _superlong_ost_fingerprint(
-            location,
+            entry["ost_text"],
             part.ranges,
             ost_crossfade_sec,
             part_transitions,
@@ -1578,7 +1681,7 @@ def _produce_superlong_parts(
         ost_result = apply_ost(
             input_path=concatenated,
             output_path=final_sl,
-            location=location,
+            location=entry["ost_text"],
             layout="regular_lf",
             brand_logo_path=brand_logo_path,
             prefer_nvenc=True,
@@ -1600,6 +1703,47 @@ def _produce_superlong_parts(
     return {"part_count": len(plans), "records": records}
 
 
+def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
+    """Hard-fail a day whose master came out softer than, or ringing above, its sources.
+
+    Runs only when the day's colour cache (beside the master) records a step that
+    changed the picture. The day's episode concats are measured with the same
+    sampler and frame count as the master, so the comparison is like for like.
+    A source that cannot be measured (concat gone) defers to Phase D's gate.
+    """
+    from . import quality
+    from .validation.longform_validator import picture_quality_gate
+
+    cache = master_path.parent / f"day_{date}_color_cache.json"
+    steps = cache.with_name(f"day_{date}_picture_steps.json")
+    # Neither record on disk: no step ran. Phase D's gate warns about it.
+    if not (cache.is_file() or steps.is_file()) or not quality.picture_changed_for_day(cache):
+        return
+    episodes = list(getattr(day_batch, "episodes", None) or [])
+    source = quality.sample_source_picture(
+        [getattr(ep, "concat_path", None) or "" for ep in episodes],
+        [float(getattr(ep, "total_duration", 0.0) or 0.0) for ep in episodes],
+    )
+    if source is None:
+        logger.warning(
+            "Day %s: day-master picture gate skipped -- sources unmeasurable; Phase D gates it",
+            date,
+        )
+        return
+    gate = picture_quality_gate(
+        master_path,
+        float(getattr(day_batch, "total_duration", 0.0) or 0.0),
+        source_sharpness=source[0],
+        changed=True,
+        source_ringing=source[1],
+    )
+    logger.info("Day %s: day-master picture gate: %s", date, gate.message)
+    if not gate.passed:
+        raise RuntimeError(
+            f"Day {date}: day master {master_path.name} failed the picture gate: {gate.message}"
+        )
+
+
 def run_day_pipeline(
     day_batch: DayBatch,
     day_scores: np.ndarray,
@@ -1613,8 +1757,11 @@ def run_day_pipeline(
     gps_points_by_date: Optional[dict] = None,
     short_ost_text_fn: Optional[Callable] = None,
     short_regions_fn: Optional[Callable] = None,
+    short_route_fn: Optional[Callable] = None,
+    superlong_route_fn: Optional[Callable] = None,
     state=None,
     inserts_by_lf: Optional[dict] = None,
+    kit: Optional[TitleKit] = None,
 ) -> Optional[DayArtifacts]:
     """Run the full day-first pipeline for a single day.
 
@@ -1707,7 +1854,8 @@ def run_day_pipeline(
             _per_day_record = _pdc.get(date)
     # The tenant's MediaProfile, loaded once per run on the orchestration
     # side and handed to the engine (encode_day_master, apply_ost).
-    media_profile = load_media_profile(current_brand())
+    kit = require_title_kit(kit)
+    media_profile = kit.media_profile()
     master_path = encode_day_master(
         day_batch,
         day_dir,
@@ -1719,6 +1867,9 @@ def run_day_pipeline(
     if master_path is None:
         logger.error("Day %s: master encode failed, aborting day", date)
         return None
+    # Judge the picture where a rendition step changed it, before
+    # any LF or short is cut from it (Phase D's final gate still runs as well).
+    _gate_master_picture(day_batch, master_path, date)
 
     # The master already has OST burned in. It also serves as the
     # source for stream-copy extraction of regular LFs and shorts
@@ -1833,11 +1984,7 @@ def run_day_pipeline(
     # planner is the robust-by-construction single source of truth for
     # what shape the LF list takes. ``best_moments`` keeps the legacy
     # external-caller contract (lf_plans built by LongFormAssembler).
-    lf_selection_mode = (
-        getattr(_drive, "lf_selection_mode", "best_moments")
-        if _drive is not None
-        else "best_moments"
-    )
+    lf_selection_mode = resolve_lf_mode(_drive) if _drive is not None else "best_moments"
     full_drive_max_duration_sec = (
         int(getattr(_drive, "full_drive_max_duration_sec", 7200)) if _drive is not None else 7200
     )
@@ -1858,12 +2005,13 @@ def run_day_pipeline(
             part_ranges = plan_full_drive_parts(
                 day_scores,
                 min_duration_sec=float(
-                    getattr(config, "min_lf_duration", DEFAULT_REGULAR_LF_MIN_DURATION_SEC)
+                    getattr(_drive, "min_lf_duration", DEFAULT_REGULAR_LF_MIN_DURATION_SEC)
                 ),
                 full_drive_max_duration_sec=full_drive_max_duration_sec,
                 stop_mask=stop_mask,
                 part_min_sec=part_min,
                 part_max_sec=part_max,
+                day=date,
             )
         else:
             part_ranges = [
@@ -2075,6 +2223,9 @@ def run_day_pipeline(
         elif _passed_map.get(date) is True and _hash_map.get(date) == current_hash:
             gate_passes = True
             reason = "state['ost_audit_passed'] + matching hash"
+        else:
+            # The opt-in system review (``ost_system_review``).
+            gate_passes, reason = system_review_passes(state, date, _gate_lf_text)
 
         if not gate_passes:
             sidecar_path = write_ost_audit(Path(output_dir), date, payload)
@@ -2087,8 +2238,10 @@ def run_day_pipeline(
             raise OstAuditPendingError(
                 f"OST audit pending for day {date}: review {sidecar_path} "
                 f"and create {confirmed_file} (or re-run with "
-                f"--ost-audit-confirmed) before OST burn-in."
+                f"--ost-audit-confirmed) before OST burn-in." + (f" {reason}." if reason else "")
             )
+        if reason.startswith("system review record"):
+            write_system_review_copy(Path(output_dir), date, state)
 
         # Persist the pass marker and hash so later invocations skip the
         # file/CLI check via the state path; both are ``PipelineState``
@@ -2198,7 +2351,9 @@ def run_day_pipeline(
             final_lf.is_file()
             and final_lf.stat().st_size > 0
             and fp_path.is_file()
-            and fp_path.read_text().strip() == ost_fingerprint
+            # a swapped-in trail opening is folded into the stored fingerprint
+            and fp_path.read_text().strip()
+            == trail_opening.expected_fingerprint(lf_dir, idx, ost_fingerprint)
         ):
             logger.info(
                 "Day %s: LF %d final is fresh (OST unchanged) — skipping re-burn",
@@ -2222,6 +2377,7 @@ def run_day_pipeline(
             float(file_boundaries[-1][1]) if file_boundaries else 0.0,
             lf_index=idx,
         )
+        trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"
         concatenated = extract_and_concat_segments(
@@ -2289,6 +2445,24 @@ def run_day_pipeline(
                 prepended=prepended,
                 concatenated=concatenated,
             )
+        # Keep the lead and the OST recipe so the trail film, rendered after this
+        # LF, can replace the montage at 0 s once it exists (the intermediates are purged).
+        try:
+            _lead_s = float(probe_media(prepended).duration) - float(
+                probe_media(concatenated).duration
+            )
+            trail_opening.record_lead(
+                lf_dir,
+                idx,
+                lead_s=_lead_s,
+                location=lf_location,
+                crossfade_sec=ost_crossfade_sec,
+                brand_logo_path=brand_logo_path,
+                inserts=shift_photo_inserts(_lf_inserts, _lead_s - montage_duration),
+                planned_s=montage_duration,
+            )
+        except Exception as exc:  # noqa: BLE001 -- the LF is fine; only its trail opening is lost
+            logger.warning("Day %s: LF %d lead not recorded (%s)", date, idx, exc)
         # Persist the burned-OST fingerprint so a later resume can detect this
         # final is fresh and skip the re-burn.
         fp_path.write_text(ost_fingerprint)
@@ -2387,7 +2561,7 @@ def run_day_pipeline(
     # gate below checks THIS cap-derived target, never the uncapped
     # config/derived value or the unrelated min_shorts_per_lf floor.
     if _state_target is None and target_count is not None:
-        _policy_cap = load_brand_policy(current_brand()).per_location_cap
+        _policy_cap = kit.per_location_cap()
         if _policy_cap is not None and _policy_cap < _effective_per_lf:
             _effective_per_lf = _policy_cap
             target_count = _effective_per_lf * num_lfs
@@ -2497,6 +2671,7 @@ def run_day_pipeline(
         short_ost_text_fn=short_ost_text_fn,
         master_source_for_extract=master_source_for_extract,
         short_regions_fn=short_regions_fn,
+        short_route_fn=short_route_fn,
         state=state,
         stop_mask=stop_mask,
     )
@@ -2575,6 +2750,8 @@ def run_day_pipeline(
                 state=state,
                 day_gps_points=_day_gps_points,
                 media_profile=media_profile,
+                kit=kit,
+                superlong_route_fn=superlong_route_fn,
             )
             if state is not None:
                 state.setdefault("superlong_parts", {})[date] = _sl_plan
@@ -2675,11 +2852,14 @@ def run_all_days(
     gps_points_by_date: Optional[dict] = None,
     short_ost_text_fn: Optional[Callable] = None,
     short_regions_fn: Optional[Callable] = None,
+    short_route_fn: Optional[Callable] = None,
+    superlong_route_fn: Optional[Callable] = None,
     state=None,
     on_day_complete: Optional[Callable] = None,
     state_save_fn: Optional[Callable] = None,
     all_day_batches: Optional[list] = None,
     all_gps_points_by_date: Optional[dict] = None,
+    kit: Optional[TitleKit] = None,
 ) -> list:
     """Run the day-first pipeline for every day in `day_batches`.
 
@@ -2887,8 +3067,11 @@ def run_all_days(
                     gps_points_by_date=gps_points_by_date,
                     short_ost_text_fn=short_ost_text_fn,
                     short_regions_fn=short_regions_fn,
+                    short_route_fn=short_route_fn,
+                    superlong_route_fn=superlong_route_fn,
                     state=state,
                     inserts_by_lf=_inserts_by_date.get(day_batch.date) or None,
+                    kit=kit,
                 )
             )
         except OstAuditPendingError:

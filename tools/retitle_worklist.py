@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 from collections import Counter
@@ -34,13 +35,25 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 # The shorts' own place-hashtag builder, so a rewritten description carries the
 # same per-component tags a fresh upload would (longform_metadata reuses it too).
+from gomoveshift.pipeline.geo_constants import US_STATE_ABBREVS  # noqa: E402
+from gomoveshift.pipeline.location_evidence import (  # noqa: E402
+    LocationEvidence,
+    title_claim_issues,
+)
 from gomoveshift.pipeline.social_generator import (  # noqa: E402
     TERRAIN_HASHTAGS,
     _location_hashtags,
 )
 from tools.retitle_apply import evaluate_row as _evaluate_row  # noqa: E402
 
-FIELDNAMES = ["video_id", "current_title", "reason", "suggested_title", "platform"]
+FIELDNAMES = [
+    "video_id",
+    "current_title",
+    "reason",
+    "suggested_title",
+    "platform",
+    "location_evidence",
+]
 
 _HIGHLIGHTS_RE = re.compile(r"^Highlights from ", re.IGNORECASE)
 
@@ -92,69 +105,48 @@ def build_suggested_title(video: dict[str, Any]) -> str:
     return "needs-human"
 
 
-# Composition -- when no structured field is present, the ONLY safe
-# source of place data is the place text already sitting inside the current
-# (defective) title. These strip a known junk shape and return exactly the
-# substring that survives; they never add a place name that wasn't already
-# there.
-_PREPOSITION_STRIP_RES = [
-    re.compile(r"^.*\bThrough To\s+", re.IGNORECASE),
-    re.compile(r"^#To(?=[A-Z])"),
-    re.compile(r"^To\s+", re.IGNORECASE),
-]
-
-
-def _extract_place_from_title(title: str) -> Optional[str]:
-    """Recover the real place text embedded in a template/prefix-led title.
-
-    Handles the three shapes ``retitle_worklist`` classifies: the
-    ``"{Region} Scenic Drive in 4K | {place}"`` template (duplicate-title's
-    usual shape), a ``"Highlights from {place}"`` label, and a preposition-
-    led label (``"To {place}"`` / ``"#To{Place}"`` / ``"... Through To
-    {place}"``). Returns ``None`` when nothing recognisable survives the
-    strip -- the caller must fall back to needs-human rather than guess.
-    """
-    candidate = None
-    if "|" in title:
-        candidate = title.rpartition("|")[2].strip()
-    elif is_highlights_from(title):
-        candidate = _HIGHLIGHTS_RE.sub("", title, count=1).strip()
-    elif has_preposition_led_label(title):
-        for pat in _PREPOSITION_STRIP_RES:
-            if pat.search(title):
-                candidate = pat.sub("", title, count=1).strip()
-                break
-    if not candidate:
+def title_from_evidence(evidence: dict[str, Any]) -> Optional[str]:
+    """``"{first} to {last}, {ST}"`` from the segment's GPS evidence record
+    (one place: ``"{place}, {ST}"``). ``None`` when the record entered no place
+    or its endpoints lie in different states -- a human titles those."""
+    places = [p for p in LocationEvidence.from_dict(evidence).places if p.scope != "near"]
+    if not places:
         return None
-    candidate = re.sub(r"\s*in 4K\s*$", "", candidate, flags=re.IGNORECASE).strip()
-    if not candidate or "scenic drive" in candidate.lower() or candidate == title.strip():
+    first, last = places[0], places[-1]
+    if first.state != last.state:
         return None
-    return candidate
+    region = US_STATE_ABBREVS.get(first.state or "", first.state) or first.county
+    if not region:
+        return None
+    if first.name == last.name:
+        return f"{first.name}, {region}"
+    return f"{first.name} to {last.name}, {region}"
 
 
 def compose_suggested_title(
     video: dict[str, Any], *, dup_index: Optional[int] = None, dup_total: Optional[int] = None
 ) -> str:
-    """Best available title for ``video``, gate-checked before it's handed out.
+    """The title the segment's GPS evidence record supports.
 
-    Prefers the structured-field cascade (:func:`build_suggested_title`);
-    falls back to the place text recovered from the current title
-    (:func:`_extract_place_from_title`). A ``duplicate-title`` collision is
-    disambiguated with the same ``"(Part N of M)"`` shape
+    Places come ONLY from ``video["location_evidence"]`` -- never from the
+    current title or unverified structured fields, which is how wrong places
+    got into the catalog. No record means ``needs-human``. A ``duplicate-title``
+    collision is disambiguated with the same ``"(Part N of M)"`` shape
     ``title_builder.ensure_unique_titles`` uses for sibling LFs. The result
-    is run through ``retitle_apply``'s own gates -- a candidate that would be
-    REFUSED is never surfaced; the row stays ``needs-human`` instead.
+    is run through ``retitle_apply``'s own gates and the evidence check -- a
+    candidate that would be REFUSED is never surfaced.
     """
-    candidate = build_suggested_title(video)
-    if candidate == "needs-human":
-        extracted = _extract_place_from_title(str(video.get("title") or ""))
-        if extracted:
-            candidate = extracted
-    if candidate == "needs-human":
-        return candidate
+    evidence = video.get("location_evidence")
+    if not evidence:
+        return "needs-human"
+    candidate = title_from_evidence(evidence)
+    if not candidate:
+        return "needs-human"
     if dup_total and dup_total > 1:
         candidate = f"{candidate} (Part {dup_index} of {dup_total})"
     if _evaluate_row({"suggested_title": candidate}):
+        return "needs-human"
+    if title_claim_issues(candidate, LocationEvidence.from_dict(evidence)):
         return "needs-human"
     return candidate
 
@@ -215,6 +207,19 @@ def load_videos(path: Path) -> list[dict[str, Any]]:
     data = yaml.safe_load(path.read_text()) or {}
     videos = data.get("videos") or []
     return [v for v in videos if isinstance(v, dict) and v.get("id") and v.get("title")]
+
+
+def attach_evidence(videos: list[dict[str, Any]], path: Path) -> list[dict[str, Any]]:
+    """Each video with its GPS evidence record from a JSONL sidecar of
+    ``{"video_id": ..., "record": <LocationEvidence.to_dict()>}`` lines."""
+    records = {}
+    for line in Path(path).read_text().splitlines():
+        if line.strip():
+            entry = json.loads(line)
+            records[entry["video_id"]] = entry["record"]
+    return [
+        {**v, "location_evidence": records[v["id"]]} if v["id"] in records else v for v in videos
+    ]
 
 
 _YT_ID_RE = re.compile(r"[?&]v=([\w-]{6,})")
@@ -288,6 +293,9 @@ def build_rows(
                 "reason": reason,
                 "suggested_title": suggested,
                 "platform": "youtube",
+                "location_evidence": (
+                    json.dumps(v["location_evidence"]) if v.get("location_evidence") else ""
+                ),
             }
             for reason in reasons
         )
@@ -313,10 +321,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="Skip title composition; only structured video fields fill suggested_title.",
     )
+    parser.add_argument(
+        "--evidence",
+        type=Path,
+        default=None,
+        help="JSONL of per-video GPS evidence records; composed titles come only from these.",
+    )
     parser.set_defaults(compose=True)
     args = parser.parse_args(argv)
 
     videos = load_videos(args.videos_yaml)
+    if args.evidence:
+        videos = attach_evidence(videos, args.evidence)
     rss_entries = load_rss_entries(args.rss) if args.rss else []
     rows = build_rows(videos, rss_entries, compose=args.compose)
     write_csv(rows, args.out)

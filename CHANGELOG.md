@@ -7,6 +7,25 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- Console: GPU jobs (`drive`, `route-story-film`) run on a host worker through a
+  file spool when `GMS_HOST_SPOOL_DIR` is set; the console queues, shows
+  progress, cancels, refuses duplicates and answers 409 when the worker is not
+  alive. The worker applies a request's registry-named `env` overrides and stops
+  a job's process group on SIGTERM/SIGINT.
+- Console: backend runs it did not launch (CLI or cron drives) list under
+  `/drives/gates/pending` with their origin; `gomoveshift drive` and
+  `gomoveshift pipeline` write `run_origin.json` (`GMS_RUN_ORIGIN`).
+- Console: read-only `/publishing/reconcile` view, a `/schedule` read model that
+  shows target, capacity, feasible output and scheduled Shorts separately, and
+  `docs/console-inventory.md` with a test that fails when a route has no row.
+- `--ost-system-review` (default off) lets the long-form, Shorts and superlong
+  burn gates pass on a sealed per-surface route-check record instead of a person.
+- Route claims: pinned Census county/state boundary proofs for retained-route
+  labels; unresolved samples with a proof are reported as `samples_unresolved`.
+- `gomoveshift health backlog --region R` launches the next backlog day as an
+  audit-only drive, through the job runner (`$GMS_JOB_RUNNER`) under the lease
+  script named by `$GMS_LEASE_SCRIPT` (default `bin/lease.sh`).
+
 - `<GMS_INPUTS_DIR>/known_ids.txt` lists the channel's private and unlisted
   video ids that no uploads listing returns, one per line (`#` comments,
   repeats dropped). `site_sync/known_ids.py` `load_known_ids()` reads it;
@@ -26,6 +45,13 @@ All notable changes to this project are recorded here. The format follows
   fails it in CI instead of skipping it.
 
 ### Changed
+
+- Zero-tolerance place gate: a place named in an LF title, OST, description or
+  tags must hold every retained second; `route_claims.recheck_place_text`
+  re-checks a persisted record offline.
+- Long-form titles are approved against retained route evidence before encoding,
+  and the decision is reused by metadata and upload checks.
+- Locked pillow 13.0.0 and certifi 2026.10.19.
 
 - Default locations are per-user instead of host-specific. Inputs, outputs,
   photo state and exports default to `input/`, `output/` and `photos/` under
@@ -56,6 +82,17 @@ All notable changes to this project are recorded here. The format follows
   reprovisioning script, and internal governance documents.
 
 ### Fixed
+
+- Superlong parts are route-checked over their own retained ranges.
+- Drive-text chapters bind to the first evidenced place in each title.
+- Phase D no longer crashes on a claim id with no matching evidence place.
+- `full_drive` planning and the Shorts planner cut GPS gaps with the route-claim
+  gap rule, so planned clips are not refused later.
+- Console alerts stay pending until delivered and retry with bounded backoff;
+  duplicate schedules are refused; delivery state reads the same on every page.
+- The review gate's placeholder check scans metadata values only.
+- `queue reslot-overdue-manual` dry run reserves each proposed slot.
+- `health heal` honours a `no-auto-resume` file beside a drive's `resume.json`.
 
 - `docs/pipeline/96-packaging.md` linked the install guide as `install.md`,
   which resolves to `docs/pipeline/install.md` and 404s; it now links

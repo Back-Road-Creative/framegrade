@@ -150,8 +150,9 @@ def concat_episode(
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if result.returncode != 0:
         partial_path.unlink(missing_ok=True)
+        # The cause is at the end of stderr; its head is the version banner.
         raise RuntimeError(
-            f"FFmpeg concat failed for episode {episode.index}: {result.stderr[:500]}"
+            f"FFmpeg concat failed for episode {episode.index}: {result.stderr[-1500:]}"
         )
     partial_path.replace(output_path)
 

@@ -6,12 +6,15 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
 from ..models import DrivePipelineResult
+from .day_grouper import group_episodes_by_day
+from .ingest import create_ingest_plan
 from .inserts import describe_drive_inserts
-from .preflight import run_preflight
+from .preflight import PreflightBlockedError, format_blockers, run_preflight
 from .preflight_plan import print_plan
 
 logger = logging.getLogger("gomoveshift.pipeline.drive_orchestrator")
@@ -101,6 +104,153 @@ def _calibration_for_plan(*, dry_run: bool, source_dir: Path, stages_dir: Path, 
     )
 
 
+def _open_controlling_tty():
+    """The operator's terminal regardless of redirection, or ``None``."""
+    try:
+        return open("/dev/tty", "w")  # noqa: SIM115 - closed by _ask
+    except OSError:
+        return None
+
+
+def _prompt_channel():
+    """Where 'Proceed? [y/N]' can actually be SEEN, or ``None``.
+
+    stdin being a tty is not enough: with stdout and stderr redirected to a
+    log, ``input()`` writes the prompt into the log and the run waits invisibly
+    (the operator never sees it). Order: stdout tty, stderr tty, controlling tty.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        try:
+            if stream is not None and stream.isatty():
+                return stream
+        except (AttributeError, ValueError):
+            pass
+    return _open_controlling_tty()
+
+
+def _ask(channel) -> str:
+    prompt = "Proceed? [y/N] "
+    if channel is sys.stdout:
+        return input(prompt)
+    channel.write(prompt)
+    channel.flush()
+    try:
+        return sys.stdin.readline()
+    finally:
+        if channel is not sys.stderr:
+            channel.close()
+
+
+def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
+    """Upstream gate: a full_drive day whose RAW footage is under the part minimum.
+
+    Kept (stop-masked) footage can never exceed a day's raw footage, so a day
+    whose summed raw source duration is under ``full_drive_part_min_sec`` is
+    certain to be refused by ``plan_full_drive_parts`` -- after the whole of
+    Phase A has run. ``create_ingest_plan`` is a no-file-ops scan (durations
+    and container ``creation_time`` only), so the refusal is knowable here.
+    Inactive unless both part bounds are set. The planner's stop-masked check
+    is unchanged. Returns the refusal message, or ``None``.
+
+    Before ingest there is no GPX, so days key on ``creation_time`` (the
+    camera clock), which can sit a calendar day off the GPX-local day Phase A
+    later uses. To never refuse a day that the real grouping would keep, a day
+    is refused only when it AND its adjacent calendar days together are still
+    under the minimum.
+    """
+    drive = getattr(config, "drive", None)
+    part_min = getattr(drive, "full_drive_part_min_sec", None)
+    if part_min is None or getattr(drive, "full_drive_part_max_sec", None) is None:
+        return None
+    source_dir = Path(source_dir)
+    if not source_dir.is_dir():
+        return None  # run_preflight names the missing source dir
+    plan = create_ingest_plan(
+        source_dir,
+        mode=drive.ingest_mode,
+        extensions=drive.video_extensions,
+    )
+    raw = {b.date: b.total_duration for b in group_episodes_by_day(plan)}
+    for day in sorted(raw):
+        if raw[day] <= 0:
+            continue
+        d = date.fromisoformat(day)
+        near = sum(raw.get((d + timedelta(days=k)).isoformat(), 0.0) for k in (-1, 0, 1))
+        if near < part_min:
+            return (
+                f"Day {day}: raw source footage {raw[day]:.0f}s is under "
+                f"full_drive_part_min_sec={part_min}s, so the day can never fill a "
+                "part. Footage is never padded, repeated or joined to another day. "
+                "Refused before ingest."
+            )
+    return None
+
+
+def _readiness_blockers(*, state, stages_dir: Path, source_dir: Path, project_dir: Path, config):
+    """Run ``run_preflight`` for a real run; return its blockers (empty = ready).
+
+    Logs the ``READY TO RENDER`` report when clear. ``cleanup_stale_staging``
+    runs first so the staging-space check measures what the run will have; it
+    only removes other projects' staging dirs older than its age bound and
+    never one holding outputs, so running it before the operator prompt is safe.
+    run_preflight runs UNCONDITIONALLY: on resume, ``resume_invariants`` also checks disk/RAM via
+    the same helpers; this remains the canonical entry because it also
+    validates source_dir + input files + SEO ownership.
+    """
+    from .preflight import cleanup_stale_staging
+
+    try:
+        cleanup_stale_staging(stages_dir.parent.parent, protect={stages_dir.parent})
+        report = run_preflight(
+            source_dir=source_dir,
+            output_dir=project_dir,
+            staging_dir=stages_dir,
+            # Gate-bypass hardening: resumed runs carry
+            # episode_locations in state — re-run the OST check here since
+            # the phase_a execution branch is skipped on resume.
+            episode_titles=_episode_titles(state),
+            seo_storage_path=Path(config.seo.storage_path),
+            seo_project="gomoveshift",
+            video_extensions=config.drive.video_extensions,
+            allow_cross_fs_source=config.drive.allow_cross_fs_source,
+            weather_hwaccel=config.drive.weather_hwaccel,
+            # Refuse to start a blur run whose detectors would fall
+            # back to CPU because the GPU onnxruntime build was clobbered.
+            blur_enabled=config.drive.blur_enabled and not config.drive.skip_blur,
+            # Surface missing Drive credentials at preflight instead of hours
+            # into Phase D.
+            check_credentials=True,
+            # Resume-aware disk gate — don't demand space for days whose
+            # masters are already encoded (their raw episodes are purgeable).
+            completed_source_bytes=_completed_source_bytes(state),
+            # A resume with Phase A already done won't re-ingest (no re-concat),
+            # so the source×1.5 concat term doesn't apply — drop the gate to its
+            # floor rather than false-fail on a disk holding the prior outputs.
+            ingest_complete=_phase_a_done(state),
+            # Same ``state.superlong_enabled`` sentinel read as
+            # ``preflight_plan._estimate_wall_clock`` — by preflight time
+            # ``run()`` has already resolved this run's CLI intent onto
+            # state, on both a fresh run and a resume.
+            superlong_enabled=bool(getattr(state, "superlong_enabled", None)),
+            # A GoPro run must be able to read its own GPS.
+            ingest_mode=config.drive.ingest_mode,
+        )
+    except PreflightBlockedError as e:
+        return list(e.blockers)
+    except RuntimeError as e:
+        return [("pre-flight", str(e))]
+    checked = list(getattr(report, "checked", None) or [])
+    warnings = list(getattr(report, "warnings", None) or [])
+    logger.info(
+        "READY TO RENDER: %d pre-flight checks passed before any encode%s%s",
+        len(checked),
+        f" ({', '.join(checked)})" if checked else "",
+        f"; {len(warnings)} warning(s): " + "; ".join(warnings) if warnings else "",
+    )
+    return []
+
+
 def run_preflight_and_prompt(
     *,
     state,
@@ -113,6 +263,7 @@ def run_preflight_and_prompt(
     stages_completed: list,
     config,
     emit_summary: Callable[..., None],
+    labels_only: bool = False,
 ) -> Optional[DrivePipelineResult]:
     """Render the preflight execution plan, prompt the operator, and run
     ``run_preflight``. Returns a non-None ``DrivePipelineResult`` only on
@@ -123,11 +274,60 @@ def run_preflight_and_prompt(
     Prompting policy:
 
     * ``--force`` → no prompt, proceed.
-    * non-tty → no prompt, proceed (tmux / background runs).
+    * tty stdin but stdout AND stderr redirected → the prompt goes to the
+      controlling terminal (/dev/tty); with none, REFUSED by name.
+    * non-tty without ``--force`` → REFUSED (named message, no prompt): nobody
+      can answer, and a detached run used to sit at a prompt for an hour (or
+      silently proceed). Pass ``--force`` to run unattended, ``--dry-run`` to
+      only see the plan.
     * tty + no ``--force`` → ``Proceed? [y/N]``; non-yes aborts.
     """
+    # Render-readiness gate: every cheap prerequisite is checked, and every
+    # blocker reported together, BEFORE the calibration encode (the run's
+    # first GPU work). A refusal on a missing parser or an unreadable source
+    # must not come after a calibration encode, or a full Phase A.
+    # ``--dry-run`` keeps its plan-only, side-effect-free path: it reads a
+    # saved calibration and never runs the gate.
+    blockers: list[tuple[str, str]] = []
+    if not _phase_a_done(state):
+        refusal = day_under_part_min_message(config, source_dir)
+        if refusal:
+            blockers.append(("raw duration", refusal))
+    if not dry_run:
+        blockers.extend(
+            _readiness_blockers(
+                state=state,
+                stages_dir=stages_dir,
+                source_dir=source_dir,
+                project_dir=project_dir,
+                config=config,
+            )
+        )
+    if blockers:
+        report = format_blockers(blockers)
+        logger.error("Pre-flight check failed: %s", report)
+        emit_summary(
+            source_dir=source_dir,
+            state=state,
+            stages_completed=stages_completed,
+            phase_defs_total=0,
+            total_time=time.time() - start_time,
+        )
+        return DrivePipelineResult(
+            success=False,
+            source_dir=source_dir,
+            output_dir=project_dir,
+            drive_plan=None,
+            regular_lf_paths=[],
+            shorts_per_lf={},
+            stages_completed=[],
+            errors=[f"Pre-flight failed: {report}"],
+            timings={},
+        )
+    # A --label-dry-run / --list-lfs run never encodes (and in full_drive never
+    # takes the GPU lock), so it only reads a saved record, like --dry-run.
     record = _calibration_for_plan(
-        dry_run=dry_run, source_dir=source_dir, stages_dir=stages_dir, config=config
+        dry_run=dry_run or labels_only, source_dir=source_dir, stages_dir=stages_dir, config=config
     )
     fast_skipped = getattr(getattr(config, "drive", None), "fast_skipped", None)
     # No record -> print_plan's own default (load; none -> reference model).
@@ -165,9 +365,29 @@ def run_preflight_and_prompt(
             is_tty = sys.stdin.isatty()
         except (AttributeError, ValueError):
             is_tty = False
-        if is_tty:
+        channel = _prompt_channel() if is_tty else None
+        if channel is None:
+            msg = (
+                "PREFLIGHT-NO-OPERATOR: refusing to start -- no operator can see and answer "
+                "'Proceed? [y/N]' (stdin is not a terminal, or no visible terminal exists "
+                "for the prompt: stdout/stderr are redirected and /dev/tty is unavailable). Re-run with --force to run "
+                "unattended, or --dry-run to only print the plan."
+            )
+            logger.error(msg)
+            return DrivePipelineResult(
+                success=False,
+                source_dir=source_dir,
+                output_dir=project_dir,
+                drive_plan=None,
+                regular_lf_paths=[],
+                shorts_per_lf={},
+                stages_completed=[],
+                errors=[msg],
+                timings={},
+            )
+        if channel is not None:
             try:
-                answer = input("Proceed? [y/N] ").strip().lower()
+                answer = _ask(channel).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 answer = ""
             if answer not in {"y", "yes"}:
@@ -194,67 +414,4 @@ def run_preflight_and_prompt(
                     timings={},
                 )
 
-    # run_preflight runs UNCONDITIONALLY: on resume, ``resume_invariants`` above
-    # also checks disk/RAM via the same helpers; the full run_preflight
-    # here remains the canonical entry because it also validates
-    # source_dir + input files + SEO ownership.
-    try:
-        from .preflight import cleanup_stale_staging
-
-        cleanup_stale_staging(stages_dir.parent.parent, protect={stages_dir.parent})
-        run_preflight(
-            source_dir=source_dir,
-            output_dir=project_dir,
-            staging_dir=stages_dir,
-            # Gate-bypass hardening: resumed runs carry
-            # episode_locations in state — re-run the OST check here since
-            # the phase_a execution branch is skipped on resume.
-            episode_titles=_episode_titles(state),
-            seo_storage_path=Path(config.seo.storage_path),
-            seo_project="gomoveshift",
-            video_extensions=config.drive.video_extensions,
-            allow_cross_fs_source=config.drive.allow_cross_fs_source,
-            weather_hwaccel=config.drive.weather_hwaccel,
-            # Refuse to start a blur run whose detectors would fall
-            # back to CPU because the GPU onnxruntime build was clobbered.
-            blur_enabled=config.drive.blur_enabled and not config.drive.skip_blur,
-            # Surface
-            # missing Drive credentials at preflight instead of hours
-            # into Phase D.
-            check_credentials=True,
-            # resume-aware disk gate — don't demand space for days whose
-            # masters are already encoded (their raw episodes are purgeable).
-            completed_source_bytes=_completed_source_bytes(state),
-            # A resume with Phase A already done won't re-ingest (no re-concat),
-            # so the source×1.5 concat term doesn't apply — drop the gate to its
-            # floor rather than false-fail on a disk holding the prior outputs.
-            ingest_complete=_phase_a_done(state),
-            # Same ``state.superlong_enabled`` sentinel read as
-            # ``preflight_plan._estimate_wall_clock`` — by preflight time
-            # ``run()`` has already resolved this run's CLI intent onto
-            # state, on both a fresh run and a resume.
-            superlong_enabled=bool(getattr(state, "superlong_enabled", None)),
-            # A GoPro run must be able to read its own GPS.
-            ingest_mode=config.drive.ingest_mode,
-        )
-    except RuntimeError as e:
-        logger.error("Pre-flight check failed: %s", e)
-        emit_summary(
-            source_dir=source_dir,
-            state=state,
-            stages_completed=stages_completed,
-            phase_defs_total=0,
-            total_time=time.time() - start_time,
-        )
-        return DrivePipelineResult(
-            success=False,
-            source_dir=source_dir,
-            output_dir=project_dir,
-            drive_plan=None,
-            regular_lf_paths=[],
-            shorts_per_lf={},
-            stages_completed=[],
-            errors=[f"Pre-flight failed: {e}"],
-            timings={},
-        )
     return None

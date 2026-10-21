@@ -114,11 +114,17 @@ class TestPartNumbers:
 
 
 class TestPartTitles:
-    def test_k2_titles_carry_part_suffix(self, tmp_path):
-        out, _ = _run(tmp_path, [_lf(1, 1, 2), _lf(2, 2, 2)], make_state())
-        assert out[1]["title"].endswith(" — Part 1 of 2")
-        assert out[2]["title"].endswith(" — Part 2 of 2")
-        assert len(out[2]["title"]) <= 100
+    def test_k2_parts_hand_their_numbers_to_the_generator(self, tmp_path):
+        # U5: the generator appends the suffix before Waypost decides, so the
+        # decision's chosen title is the one that ships (tests/test_title_decision.py).
+        _, gen = _run(tmp_path, [_lf(1, 1, 2), _lf(2, 2, 2)], make_state())
+        assert _kw(gen, 1)["title_part"] == (1, 2)
+        assert _kw(gen, 2)["title_part"] == (2, 2)
+
+    def test_k1_and_none_pass_no_part(self, tmp_path):
+        _, gen = _run(tmp_path, [_lf(1), _lf(2, 1, 1)], make_state())
+        assert _kw(gen, 1)["title_part"] is None
+        assert _kw(gen, 2)["title_part"] is None
 
     def test_k1_and_none_titles_unchanged(self, tmp_path):
         out, _ = _run(tmp_path, [_lf(1), _lf(2, 1, 1)], make_state())
@@ -127,7 +133,8 @@ class TestPartTitles:
 
     def test_identical_part_labels_are_not_double_suffixed(self, tmp_path):
         state = make_state(per_lf_ost_text={1: "Schull, County Cork", 2: "Schull, County Cork"})
-        out, _ = _run(tmp_path, [_lf(1, 1, 2), _lf(2, 2, 2)], state)
+        gen = _gen("Schull, County Cork in 4K — Part 1 of 2")
+        out, _ = _run(tmp_path, [_lf(1, 1, 2), _lf(2, 2, 2)], state, gen)
         for i, t in out.items():
             assert t["title"].count("Part") == 1, t["title"]
 

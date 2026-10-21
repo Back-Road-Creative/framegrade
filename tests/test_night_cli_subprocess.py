@@ -22,8 +22,8 @@ from gomoveshift.pipeline.photos.night_render import validate_render
 # A hang guard, not a speed assertion. Each run is a fresh ``python -m gomoveshift``
 # whose ~8-10 s on this host is mostly import (the CLI loads every handler; the
 # photos package pulls in scipy.optimize). Full xdist suites and CI share this
-# host (load average 23.5 on 12 cores, 2026-10-11), and the resume run hit 45 s in
-# framegrade export cut-05 (16193 passed, this one TimeoutExpired). The guard only
+# host (a load average of 23 on 12 cores was seen), and one resume run hit 45 s in
+# a suite whose other tests passed. The guard only
 # has to catch a worker that never exits.
 _HANG_GUARD_SECONDS = 300
 
@@ -65,9 +65,10 @@ def test_real_cli_exports_and_resumes_verified_project(tmp_path):
     workspace = tmp_path / "projects"
     service = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(service), os.environ.get("PYTHONPATH", "")) if part
-    )
+    # Only the service itself: Waypost (seo_manager) and gps-journey come from
+    # the venv's pinned installs, and an inherited PYTHONPATH entry could shadow
+    # a pin.
+    environment["PYTHONPATH"] = str(service)
     environment["GMS_NIGHT_ADMISSION_LOCK"] = str(tmp_path / "admission.lock")
     command = [
         sys.executable,

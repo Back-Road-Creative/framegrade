@@ -22,7 +22,7 @@ Tests import several of the private helpers directly via the legacy
 import logging
 from collections import Counter
 from types import SimpleNamespace
-from typing import Optional
+from typing import Any, Optional
 
 from ..models import DrivePlan, ResolvedLocation
 from .ost_validator import validate_ost
@@ -53,7 +53,7 @@ GEOCODE_QUORUM_MIN = 2
 _ENDPOINT_LOSS_GAP_SEC = 5.0
 
 
-def _resolve_lf_destination(lf) -> Optional[str]:
+def _resolve_lf_destination(lf, outcome: Optional[dict] = None) -> Optional[str]:
     """Best-effort destination POI for one LF's montage-peak footage.
 
     The WIRE half. Resolves once from the LF's featured (montage-peak)
@@ -63,20 +63,27 @@ def _resolve_lf_destination(lf) -> Optional[str]:
     by construction: a resolver miss or any exception yields ``None`` so the
     caller's A→B title cascade runs — the destination never raises into the
     pipeline. Returns the destination name or ``None``.
+
+    ``outcome`` (optional out-dict) receives ``"source"`` (``overpass`` / ``none``
+    / ``failed``, see ``destination_resolver.resolve_destination``).
     """
+    if outcome is not None:
+        outcome["source"] = "none"
     peaks = list(getattr(lf, "montage_peaks", None) or [])
     if not peaks:
         return None
     try:
         from .destination_resolver import resolve_destination
 
-        return resolve_destination(peaks)
+        return resolve_destination(peaks, outcome=outcome)
     except Exception as exc:  # noqa: BLE001 — degrade to the A→B cascade
         logger.warning(
             "destination_resolver.resolve_destination failed for LF %d: %s",
             int(getattr(lf, "index", 0)),
             exc,
         )
+        if outcome is not None:
+            outcome["source"] = "failed"
         return None
 
 
@@ -137,6 +144,23 @@ def _coerce_gps_points_to_dicts(points) -> list:
         else:
             out.append(p)
     return out
+
+
+_UNRESOLVED_SLOTS = frozenset({"", "none", "null", "unknown"})
+
+
+def region_label(county, state="") -> "str | None":
+    """``"County, State"`` for one county vote, or ``None`` when the county slot
+    is unresolved — a geocoder miss (e.g. an independent city) is never a
+    ``"None, Virginia"`` region. An unresolved state collapses to the bare
+    county (never ``"County, None"``)."""
+    county = str(county if county is not None else "").strip()
+    state = str(state if state is not None else "").strip()
+    if county.lower() in _UNRESOLVED_SLOTS:
+        return None
+    if state.lower() in _UNRESOLVED_SLOTS:
+        return county
+    return f"{county}, {state}"
 
 
 def build_resolved_location(points, *, geocoder, withhold_endpoints=None) -> ResolvedLocation:
@@ -228,12 +252,9 @@ def build_resolved_location(points, *, geocoder, withhold_endpoints=None) -> Res
     total = sum(dom.votes.values()) or 1  # vote/regions from dom.votes ("county|state")
     for key, n in dom.votes.items():
         county, _, state = key.partition("|")
-        # Collapse an empty OR legacy-literal ``"None"`` state to no-state so
-        # a stateless county (Irish/independent-city) labels as the bare county,
-        # never a malformed ``"County, None"``. Redundant with the producer's
-        # empty-slot serialization; defense against any future second producer.
-        state = "" if state in ("", "None") else state
-        label = f"{county}, {state}" if state else county
+        label = region_label(county, state)
+        if label is None:
+            continue  # unresolved county (independent city): no region claim
         rl.vote[label] = round(n / total, 4)
         if label not in rl.regions:
             rl.regions.append(label)
@@ -342,6 +363,53 @@ def _differentiate_and_revalidate_siblings(
                     _revalidated,
                 )
             _day[idx] = _revalidated
+
+
+def canonical_lf_ost_text(
+    lf: Any,
+    *,
+    lf_location: str,
+    overrides: dict,
+    geocoder: Any,
+    gps_points: Any,
+    destination: Optional[str],
+) -> str:
+    """One LF's canonical burn text — the string its OST, thumbnail and YouTube
+    title baseline derive from. The render (``_enrich_per_lf_gps``) and
+    ``--label-dry-run`` both call this, so the dry-run cannot drift from it.
+    """
+    lf_idx = int(getattr(lf, "index", 0))
+    # Operator override is AUTHORITATIVE — burn it verbatim (the
+    # documented ``derive_per_lf_locations`` contract: "overrides[idx]
+    # wins over centroid-derived labels"). Without this, an explicit
+    # ``--per-lf-location`` on a GPS-BEARING LF was silently reshaped by
+    # build_lf_title's GPS cascade (e.g. "Saluda to Lake Toxaway" came
+    # out "Quebec to Toxaway Falls"). A GPS-less LF already routed its
+    # override through the cascade's county fallback; this makes the
+    # behaviour uniform and predictable for both. The override also wins
+    # over the destination anchor — the operator was explicit.
+    _override = overrides.get(lf_idx)
+    if isinstance(_override, str) and _override.strip():
+        canonical = _override.strip()
+    else:
+        try:
+            canonical = build_lf_title(
+                list(getattr(lf, "segments", None) or []),
+                geocoder=geocoder,
+                per_lf_location=lf_location,
+                gps_points=gps_points,
+                resolved_destination=destination,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "title_builder.build_lf_title failed for LF %d "
+                "(pre-run_all_days OST text derivation): %s — "
+                "falling back to per_lf_location string",
+                lf_idx,
+                exc,
+            )
+            canonical = lf_location
+    return validate_burned_ost_text(canonical, lf_location, lf_idx)
 
 
 def _enrich_per_lf_gps(
@@ -482,47 +550,53 @@ def _enrich_per_lf_gps(
         day_ost_text: dict[int, str] = {}
         for lf in day_real_lfs or []:
             lf_idx = int(getattr(lf, "index", 0))
-            segments = list(getattr(lf, "segments", None) or [])
             lf_location = day_labels.get(
                 lf_idx, per_day_locations.get(date_key, drive_wide_location)
             )
             destination = _resolve_lf_destination(lf)
             if destination:
                 destination_by_lf[lf_idx] = destination
-            # Operator override is AUTHORITATIVE — burn it verbatim (the
-            # documented ``derive_per_lf_locations`` contract: "overrides[idx]
-            # wins over centroid-derived labels"). Without this, an explicit
-            # ``--per-lf-location`` on a GPS-BEARING LF was silently reshaped by
-            # build_lf_title's GPS cascade (e.g. "Saluda to Lake Toxaway" came
-            # out "Quebec to Toxaway Falls"). A GPS-less LF already routed its
-            # override through the cascade's county fallback; this makes the
-            # behaviour uniform and predictable for both. The override also wins
-            # over the destination anchor — the operator was explicit.
-            _override = per_lf_overrides.get(lf_idx)
-            if isinstance(_override, str) and _override.strip():
-                canonical = _override.strip()
-            else:
-                try:
-                    canonical = build_lf_title(
-                        segments,
-                        geocoder=geocoder,
-                        per_lf_location=lf_location,
-                        gps_points=gps_points_by_lf.get(lf_idx),
-                        resolved_destination=destination,
-                    )
-                except Exception as exc:  # noqa: BLE001 — best-effort
-                    logger.warning(
-                        "title_builder.build_lf_title failed for LF %d "
-                        "(pre-run_all_days OST text derivation): %s — "
-                        "falling back to per_lf_location string",
-                        lf_idx,
-                        exc,
-                    )
-                    canonical = lf_location
-            day_ost_text[lf_idx] = validate_burned_ost_text(canonical, lf_location, lf_idx)
+            day_ost_text[lf_idx] = canonical_lf_ost_text(
+                lf,
+                lf_location=lf_location,
+                overrides=per_lf_overrides,
+                geocoder=geocoder,
+                gps_points=gps_points_by_lf.get(lf_idx),
+                destination=destination,
+            )
         per_lf_ost_text_by_date[date_key] = day_ost_text
 
     _differentiate_and_revalidate_siblings(per_lf_ost_text_by_date, gps_points_by_lf, geocoder)
+    # The label may claim only what the RETAINED footage's own GPS
+    # proves — checked after planning, before the burn (route_claims).
+    from .boundary_proof import CensusBoundaryProver
+    from .final_text_record import boundary_review_available
+    from .ost_system_review import record_system_reviews
+    from .route_claims import enforce_route_claims
+
+    # Keep what the check decided (refusals included, written before
+    # the raise) as the system record the opt-in OST gate signal reads.
+    claim_outcomes: dict = {}
+    try:
+        route_claims_by_lf = enforce_route_claims(
+            per_lf_ost_text_by_date,
+            _build_route_windows_by_lf(real_plan, state.gps_per_episode),
+            geocoder,
+            overrides=per_lf_overrides,
+            outcomes=claim_outcomes,
+            boundary_prover=CensusBoundaryProver(),
+            require_review_support=True,
+            review_support_available=boundary_review_available(),
+        )
+    finally:
+        record_system_reviews(state, per_lf_ost_text_by_date, claim_outcomes)
+    # Persist the evidence the final-text review is built from (Phase D)
+    # and re-verified against at upload.
+    from .final_text_record import route_record
+
+    state.per_lf_route_record = {
+        idx: route_record(ev) for idx, ev in route_claims_by_lf.items()
+    } or None
 
     return SimpleNamespace(
         gps_points_by_lf=gps_points_by_lf,
@@ -533,6 +607,7 @@ def _enrich_per_lf_gps(
         per_lf_ost_text_by_date=per_lf_ost_text_by_date,
         destination_by_lf=destination_by_lf,
         endpoint_loss_by_lf=endpoint_loss_by_lf,
+        route_claims_by_lf=route_claims_by_lf,
     )
 
 
@@ -1250,6 +1325,125 @@ def rebuild_gps_per_episode(gpx_files: Optional[list], *, had_gps_indices=None) 
     return result
 
 
+def _segment_trackpoints(
+    seg, gps_per_episode, lf_idx: int, *, with_episode: bool = False
+) -> Optional[tuple]:
+    """``(corrected_offset, trackpoints)`` for one segment's window, or ``None``.
+
+    Looks up the source episode's GPSData via the segment's GLOBAL
+    ``source_file_index`` and returns the fixes in ``[start_time + offset,
+    end_time + offset]``; the offset maps segment media seconds to GPS time.
+    ``with_episode`` appends the episode's full trackpoint list (the fixes
+    either side of the window bound a dropout a cut falls inside).
+    """
+    file_idx = int(getattr(seg, "source_file_index", -1))
+    if file_idx < 0 or file_idx >= len(gps_per_episode):
+        return None
+    entry = gps_per_episode[file_idx]
+    if not entry:
+        return None
+    gps_data, gps_offset = entry[0], entry[1] if len(entry) > 1 else 0.0
+    if gps_data is None:
+        return None
+    # JSON-roundtrip reconstitution (mirrors logic in
+    # longform_assembler.segment_context.populate_gps).
+    if isinstance(gps_data, dict) and "trackpoints" in gps_data:
+        try:
+            from ..analysis.shorts_models import GPSData, GPSTrackpoint
+
+            gps_data = GPSData(trackpoints=[GPSTrackpoint(**tp) for tp in gps_data["trackpoints"]])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "GPSData reconstitution failed for LF %d seg ep %d: %s", lf_idx, file_idx, exc
+            )
+            return None
+    from ..analysis.shorts_models import effective_offset as _effective_offset
+
+    corrected = _effective_offset(gps_data, gps_offset)
+    start = float(getattr(seg, "start_time", 0.0) or 0.0) + corrected
+    end = float(getattr(seg, "end_time", 0.0) or 0.0) + corrected
+    try:
+        in_range = gps_data.get_points_in_range(start, end)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_points_in_range failed for LF %d seg ep %d: %s", lf_idx, file_idx, exc)
+        in_range = []
+    if with_episode:
+        return corrected, list(in_range or []), list(getattr(gps_data, "trackpoints", None) or [])
+    return corrected, list(in_range or [])
+
+
+def _nearest_outside_fixes(points, corrected: float, start_s: float, end_s: float) -> tuple:
+    """``(prev_fix_s, next_fix_s)``: the nearest valid fixes of the episode
+    before ``start_s`` and at/after ``end_s``, in media seconds (``None`` if none)."""
+    from .route_claims import _valid
+
+    prev_s = next_s = None
+    for p in points:
+        if not _valid(getattr(p, "lat", None), getattr(p, "lon", None)):
+            continue
+        t = float(p.timestamp) - corrected
+        if t < start_s and (prev_s is None or t > prev_s):
+            prev_s = t
+        elif t >= end_s and (next_s is None or t < next_s):
+            next_s = t
+    return prev_s, next_s
+
+
+def _nearest_outside_fix_points(points, corrected: float, start_s: float, end_s: float) -> tuple:
+    """The same cut-boundary anchors with coordinates for bounded reachability."""
+    from .route_claims import _valid
+
+    before = after = None
+    for p in points:
+        if not _valid(getattr(p, "lat", None), getattr(p, "lon", None)):
+            continue
+        item = (float(p.timestamp) - corrected, float(p.lat), float(p.lon))
+        if item[0] < start_s and (before is None or item[0] > before[0]):
+            before = item
+        elif item[0] >= end_s and (after is None or item[0] < after[0]):
+            after = item
+    return before, after
+
+
+def _build_route_windows_by_lf(drive_plan: Optional[DrivePlan], gps_per_episode) -> dict:
+    """``{lf_index: [RouteWindow]}`` — each retained segment with its own fixes
+    in segment media seconds (no dedup: a gap must stay visible). Same GLOBAL
+    index constraint as :func:`_build_gps_points_by_lf`."""
+    from .route_claims import RouteWindow
+
+    if drive_plan is None or not gps_per_episode:
+        return {}
+    out: dict[int, list] = {}
+    for lf in getattr(drive_plan, "regular_lfs", None) or []:
+        lf_idx = int(getattr(lf, "index", 0))
+        windows = []
+        for n, seg in enumerate(getattr(lf, "segments", None) or []):
+            hit = _segment_trackpoints(seg, gps_per_episode, lf_idx, with_episode=True)
+            if hit is None:
+                continue
+            corrected, pts, episode_pts = hit
+            start_s = float(getattr(seg, "start_time", 0.0) or 0.0)
+            end_s = float(getattr(seg, "end_time", 0.0) or 0.0)
+            prev_s, next_s = _nearest_outside_fixes(episode_pts, corrected, start_s, end_s)
+            prev_fix, next_fix = _nearest_outside_fix_points(episode_pts, corrected, start_s, end_s)
+            windows.append(
+                RouteWindow(
+                    segment_id=f"lf{lf_idx:02d}-s{n}",
+                    start_s=start_s,
+                    end_s=end_s,
+                    fixes=[(float(p.timestamp) - corrected, p.lat, p.lon) for p in pts],
+                    source=f"ep{int(getattr(seg, 'source_file_index', -1))}",
+                    prev_fix_s=prev_s,
+                    next_fix_s=next_s,
+                    prev_fix=prev_fix,
+                    next_fix=next_fix,
+                )
+            )
+        if windows:
+            out[lf_idx] = windows
+    return out
+
+
 def _build_gps_points_by_lf(
     drive_plan: Optional[DrivePlan],
     gps_per_episode: Optional[list],
@@ -1286,47 +1480,8 @@ def _build_gps_points_by_lf(
         points: list = []
         _last_coord: Optional[tuple] = None  # deduplicate consecutive stuck-GPS coordinates
         for seg in getattr(lf, "segments", None) or []:
-            file_idx = int(getattr(seg, "source_file_index", -1))
-            if file_idx < 0 or file_idx >= len(gps_per_episode):
-                continue
-            entry = gps_per_episode[file_idx]
-            if not entry:
-                continue
-            gps_data, gps_offset = entry[0], entry[1] if len(entry) > 1 else 0.0
-            if gps_data is None:
-                continue
-            # JSON-roundtrip reconstitution (mirrors logic in
-            # longform_assembler.segment_context.populate_gps).
-            if isinstance(gps_data, dict) and "trackpoints" in gps_data:
-                try:
-                    from ..analysis.shorts_models import GPSData, GPSTrackpoint
-
-                    gps_data = GPSData(
-                        trackpoints=[GPSTrackpoint(**tp) for tp in gps_data["trackpoints"]]
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug(
-                        "GPSData reconstitution failed for LF %d seg ep %d: %s",
-                        lf_idx,
-                        file_idx,
-                        exc,
-                    )
-                    continue
-            from ..analysis.shorts_models import effective_offset as _effective_offset
-
-            corrected = _effective_offset(gps_data, gps_offset)
-            start = float(getattr(seg, "start_time", 0.0) or 0.0) + corrected
-            end = float(getattr(seg, "end_time", 0.0) or 0.0) + corrected
-            try:
-                in_range = gps_data.get_points_in_range(start, end)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(
-                    "get_points_in_range failed for LF %d seg ep %d: %s",
-                    lf_idx,
-                    file_idx,
-                    exc,
-                )
-                in_range = []
+            hit = _segment_trackpoints(seg, gps_per_episode, lf_idx)
+            in_range = hit[1] if hit else []
             if in_range:
                 # Collapse consecutive identical (lat, lon) pairs so a stuck GPS fix
                 # (e.g. GoPro reporting the same Bahamas coordinate for hundreds of

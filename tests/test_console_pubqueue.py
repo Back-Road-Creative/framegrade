@@ -7,6 +7,7 @@ argv matching the parser contract exactly.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -1163,7 +1164,8 @@ def test_detail_published_row_shows_source_label_never_the_word_verified(tmp_pat
 def test_detail_legacy_published_row_reads_unknown(tmp_path, monkeypatch):
     response, _ = _detail(tmp_path, monkeypatch, status="published", published_at=_PUBLISHED_AT)
     assert "unknown (legacy)" in response.text.lower()
-    assert "verified" not in response.text.lower()
+    # "unverified" is the honest Status label for this row; a bare "verified" would be a claim.
+    assert not re.search(r"(?<!un)verified", response.text.lower())
 
 
 def test_detail_shadow_row_is_marked_not_a_real_publication(tmp_path, monkeypatch):

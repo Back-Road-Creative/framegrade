@@ -234,11 +234,51 @@ no longer needs is not a restore defect — and names one of:
 | `short_not_in_sidecar` | the sidecar loads but carries no short matching this row's `(project_name, short_index)` — a *different* run's plan file | point the row at the right sidecar, or re-enqueue |
 | `credential_absent` | no credential file on disk for that platform (existence only — nothing is decrypted or read) | restore the SOPS `.enc` file before the first drain |
 | `stale_lease` | `lease_owner` set with `lease_expires_at` still in the future: a worker that died with the old instance | wait out the lease or clear it; until then `queue._has_live_foreign_lease` refuses the operator's cancel and reschedule and the row reads as busy |
+| `missing_remote` | a YouTube row marked terminal because the channel returns no video for its upload id (post-upload verify, or `queue mark-missing-remote`) | find out why and tell the operator; re-queue only on the operator's per-row decision: `queue recover-terminal --id N --authorized-by ...` dry-runs every gate, and `--apply` writes the recovery row, which resolves the problem. See `docs/social-publishing-queue.md` § `missing_remote` |
+| `awaiting_ig_reconcile` | an Instagram row parked on Graph's "Media ID is not available" for more than 24 h: every hourly account scan since has been unable to prove the post is live or absent | check the account by hand; `queue recover-terminal` only applies once the row is terminal |
+| `manual_publish_overdue` | a TikTok inbox draft (`awaiting_manual_publish`) whose `scheduled_at` slot passed more than 24 h ago (`MANUAL_PUBLISH_GRACE_HOURS`) and still has not been posted from the app | open the TikTok app's inbox notification and tap Post; the hourly reconcile closes the row. To give a missed slot a new time instead, `queue reslot-overdue-manual` (dry run; `--apply` moves it and, for a pack row, adds a `RESLOTTED` caption block) -- the row then drops off the overdue list because its slot is no longer past; it never closes the row. The operator digest's "Waiting on a manual publish" section prints the overdue count every morning (zero included) and marks each listed row; the row has no expiry and stays named until the reconcile closes it |
 
 Exit status is `1` when any problem is found and `0` when the restore is
 coherent, so a restore script can gate on it. Without the flag the command is
 the unchanged presence-and-counts report and always exits `0` — a broken
 restore must not start failing a status check that never claimed to validate.
+
+The same problems also **gate publishing** (every kind except `stale_lease`,
+which on a running box is just work in flight, and `manual_publish_overdue`, a
+reminder for the human who taps Post rather than a pipeline defect): `enqueue-plan --apply` and
+`dispatch-queue --apply` refuse the affected platform/project pairs. See
+`docs/social-publishing-queue.md` § "Validate problems gate enqueue and dispatch".
+
+### `--live-catalog`: published YouTube deliveries vs the live channel
+
+`gomoveshift publishing-status --validate --live-catalog <live_catalog.json>`
+(`validate_against_live_catalog`) adds the remote check the restore walk
+skips: every **`published`** YouTube delivery is looked up in a catalog
+written by `gomoveshift catalog-fetch --out <live_catalog.json>` (read-only
+`videos.list`). The status command makes no network call itself; the catalog
+file is the evidence. To make absence conclusive rather than an enumeration
+miss, fetch with `--known-ids-from-queue` (or `--known-ids` listing the queue's published
+ids); `queue mark-missing-remote` then turns each proven-missing row terminal.
+
+| kind | what it means | what to do |
+|---|---|---|
+| `published_video_missing` | the row's `platform_upload_id` is not in the live catalog — the queue says published, YouTube returns no such video | find out why (deleted, removed by YouTube, re-uploaded under another id) and tell the operator; **never** re-upload or flip the row to re-queue |
+| `published_title_drift` | the live title differs from the publish plan's YouTube title | report it; a human decides which title is accurate. Never auto-retitle |
+| `plan_stale_retitled` | the live title differs from the plan, but it is the newest `APPLIED` title in a `tools/retitle_apply.py` audit log passed as `--retitle-audit` — our own retitle, the plan lagging behind it | report-only (exit stays 0): run the `gomoveshift queue sync-plan-titles --audit <log> --apply` the line names. Without `--retitle-audit` it reads as drift |
+
+`retitle_apply` now writes each applied title into the plan sidecar in
+the same step, so a fresh `plan_stale_retitled` means a retitle made before
+that, or a sync that failed (it warns, naming the command).
+
+The same two kinds also gate `enqueue-plan` / `dispatch-queue` when a
+`catalog-fetch --known-ids-from-queue` snapshot no older than 24 h sits at
+`<storage_path>/live_catalog.latest.json`; older or missing is a named warning
+(`docs/social-publishing-queue.md` § "Validate problems gate enqueue and dispatch").
+
+A row whose sidecar is gone has no local title to compare, so it is unknown,
+not drift. Detection only: nothing is re-queued, re-uploaded, deleted or
+retitled. Long-form title drift is the `uploaded_title_matches_live` column of
+`gomoveshift catalog-inventory`.
 
 ## Parity: where the Metricool CSV's rows come from vs. `plan_builder`
 

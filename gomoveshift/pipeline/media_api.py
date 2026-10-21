@@ -31,8 +31,13 @@ class RunSpec:
     gps_points_by_date: Optional[dict] = None
     short_ost_text_fn: Optional[Callable] = None
     short_regions_fn: Optional[Callable] = None
+    short_route_fn: Optional[Callable] = None
+    superlong_route_fn: Optional[Callable] = None
     state: Any = None
     inserts_by_lf: Optional[dict] = None
+    # The publish-side title / chapter / brand inputs (``TitleKit``); the engine
+    # imports no publishing code, so the caller hands them in.
+    kit: Any = None
 
 
 @dataclass
@@ -69,13 +74,14 @@ class Deliverables(DayArtifacts):
 
     ``trail_films`` are the Route Story films rendered beside the LFs;
     ``trail_skips`` are the reasons a day got none (a skip is recorded, never
-    silent).
+    silent); ``trail_openings`` are the LFs whose montage the film's opening replaced.
     """
 
     sidecars: dict[str, Path] = field(default_factory=dict)
     measurements: Measurements = field(default_factory=Measurements)
     trail_films: list[TrailFilm] = field(default_factory=list)
     trail_skips: list[str] = field(default_factory=list)
+    trail_openings: list[dict] = field(default_factory=list)
 
 
 _SIDECAR_STEMS = ("ost_audit", "shorts_ost_audit")
@@ -114,8 +120,11 @@ def render_day(spec: RunSpec) -> Optional[Deliverables]:
         gps_points_by_date=spec.gps_points_by_date,
         short_ost_text_fn=spec.short_ost_text_fn,
         short_regions_fn=spec.short_regions_fn,
+        short_route_fn=spec.short_route_fn,
+        superlong_route_fn=spec.superlong_route_fn,
         state=spec.state,
         inserts_by_lf=spec.inserts_by_lf,
+        kit=spec.kit,
     )
     if artifacts is None:
         return None
@@ -171,6 +180,7 @@ def deliverables_to_state(d: Deliverables) -> dict:
             for f in d.trail_films
         ],
         "trail_skips": list(d.trail_skips),
+        "trail_openings": [dict(o) for o in d.trail_openings],
     }
 
 
@@ -204,6 +214,7 @@ def deliverables_from_state(record: dict) -> Deliverables:
             for f in record.get("trail_films") or []
         ],
         trail_skips=list(record.get("trail_skips") or []),
+        trail_openings=[dict(o) for o in record.get("trail_openings") or []],
     )
 
 

@@ -187,3 +187,24 @@ class TestPreviewAndPhaseFilterStillTakeGpuLock:
                 phase="phase_a",
                 force=True,
             )
+
+
+def test_refused_label_dry_run_is_a_failed_run_not_success(tmp_path, monkeypatch):
+    # E1: a route-claim refusal in --label-dry-run must reach the exit code.
+    from gomoveshift.pipeline import drive_orchestrator as mod
+    from gomoveshift.pipeline.drive_phases import lf_listing
+
+    monkeypatch.setattr(mod, "acquire_gpu_lock", lambda *a, **k: (None, None))
+    _patch_resume_scaffolding(monkeypatch, mod)
+    _patch_common(monkeypatch, mod)
+    monkeypatch.setattr(lf_listing, "print_label_dry_run", lambda config, state: True)
+    cfg = Config()
+    cfg.drive.lf_selection_mode = "full_drive"
+    cfg.drive.no_review = True
+    src = tmp_path / "source"
+    src.mkdir()
+    result = mod.DrivePipelineOrchestrator(config=cfg).run(
+        source_dir=src, output_base=tmp_path / "out", region="usa", label_dry_run=True, force=True
+    )
+    assert result.success is False
+    assert any("ROUTE-CLAIM" in str(e) for e in result.errors)

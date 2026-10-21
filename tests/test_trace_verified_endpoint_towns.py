@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from gomoveshift.models import ResolvedLocation
+from gomoveshift.pipeline import forward_geocode
 from gomoveshift.pipeline.chapters import nominatim_source
 from gomoveshift.pipeline.chapters.nominatim_source import (
     _nominatim_places as _real_nominatim_places,
@@ -42,6 +43,9 @@ from gomoveshift.pipeline.validation.content_gates import (
 from _state_helpers import make_state
 
 LABEL = "Goleen to Crookhaven, County Cork"
+# A corroborated evidence record: these tests exercise the county/endpoint
+# invariant, so the ladder needs a claim basis but no trace checks (U1).
+_EV = {1: {"corroborations": 1}}
 
 # Nominatim-shaped hits for the scoped queries. The top hit
 # for "Goleen, County Cork" is the electoral division, 2.7 km from the village;
@@ -304,23 +308,27 @@ class TestPopulateStampsTraceVerifiedPlaces:
         assert rl.regions == ["County Cork"]
         assert rl.trace_verified_places is None
         with pytest.raises(RuntimeError, match="Goleen"):
-            _assert_pre_encode_location_invariant({1: LABEL}, {1: rl})
+            _assert_pre_encode_location_invariant({1: LABEL}, {1: rl}, evidence_by_lf=_EV)
 
     def test_populate_verifies_and_the_pre_encode_gate_passes(self):
         state = self._populate(places_fn=_places())
         rl = state.per_lf_resolved_location[1]
         assert rl.trace_verified_places == ["Crookhaven", "Goleen"]
-        _assert_pre_encode_location_invariant({1: LABEL}, state.per_lf_resolved_location)
+        _assert_pre_encode_location_invariant(
+            {1: LABEL}, state.per_lf_resolved_location, evidence_by_lf=_EV
+        )
 
     def test_unverifiable_endpoint_still_refuses_the_encode(self):
         state = self._populate(places_fn=_places({"Goleen, County Cork": [_GOLEEN_VILLAGE]}))
         assert state.per_lf_resolved_location[1].trace_verified_places == ["Goleen"]
         with pytest.raises(RuntimeError, match="Crookhaven"):
-            _assert_pre_encode_location_invariant({1: LABEL}, state.per_lf_resolved_location)
+            _assert_pre_encode_location_invariant(
+                {1: LABEL}, state.per_lf_resolved_location, evidence_by_lf=_EV
+            )
 
     def test_production_forward_geocoder_is_the_default(self, monkeypatch):
         calls: list[str] = []
-        monkeypatch.setattr(nominatim_source, "_nominatim_places", _places(calls=calls))
+        monkeypatch.setattr(forward_geocode, "_nominatim_places", _places(calls=calls))
         rl = self._populate().per_lf_resolved_location[1]
         assert rl.trace_verified_places == ["Crookhaven", "Goleen"]
         assert sorted(calls) == ["Crookhaven, County Cork", "Goleen, County Cork"]
@@ -329,7 +337,7 @@ class TestPopulateStampsTraceVerifiedPlaces:
         def _boom(*_a, **_k):
             raise OSError("network down")
 
-        monkeypatch.setattr(nominatim_source, "_nominatim_places", _boom)
+        monkeypatch.setattr(forward_geocode, "_nominatim_places", _boom)
         with caplog.at_level("WARNING", logger=phase_bc_day_first.__name__):
             assert phase_bc_day_first._forward_geocode_places("Goleen, County Cork") == []
         # The failure is named, not mistaken for "no settlement of that name".
@@ -351,6 +359,29 @@ class TestPopulateStampsTraceVerifiedPlaces:
 
 
 # ── every gate surface carries it ───────────────────────────────────────
+
+
+def _evidence(towns):
+    """A location-evidence record (dict form) entering ``towns`` in order."""
+    return {
+        "segment_id": "lf01",
+        "provenance": "test",
+        "method": "reverse_geocode",
+        "places": [
+            {
+                "name": t,
+                "county": "County Cork",
+                "state": "Munster",
+                "scope": "in",
+                "method": "reverse_geocode",
+                "provenance": "test",
+                "segment_id": "lf01",
+                "evidence_id": f"ev-{t}",
+            }
+            for t in towns
+        ],
+        "conflicts": [],
+    }
 
 
 class TestGateDictCarriesTraceVerifiedPlaces:
@@ -392,7 +423,11 @@ class TestGateDictCarriesTraceVerifiedPlaces:
                     regular_lfs=[SimpleNamespace(index=1, total_duration=1800.0, segments=[])]
                 ),
                 regular_lf_paths=["/v/lf.mp4"],
-                state=make_state(per_lf_resolved_location={1: self._rl()}),
+                state=make_state(
+                    per_lf_resolved_location={1: self._rl()},
+                    # GMS-17b: Phase D refuses an A-to-B title with no record.
+                    per_lf_location_evidence={1: _evidence(["Goleen", "Crookhaven"])},
+                ),
                 location=LABEL,
                 publish_day_full="Sunday",
                 project_base="p",

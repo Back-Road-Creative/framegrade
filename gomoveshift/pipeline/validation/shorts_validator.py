@@ -49,6 +49,7 @@ class ShortsValidator:
         *,
         source_sharpness: float | None = None,
         picture_changed: bool = False,
+        source_ringing: float | None = None,
     ) -> PipelineValidationResult:
         """Run quality validation on a specific list of short files.
 
@@ -88,6 +89,7 @@ class ShortsValidator:
                     self._ffprobe.probe_duration(short_path) if picture_changed else 0.0,
                     source_sharpness=source_sharpness,
                     changed=picture_changed,
+                    source_ringing=source_ringing,
                 )
             )
             for g in short_gates:
@@ -233,6 +235,18 @@ class ShortsValidator:
 
         width = int(video_stream.get("width", 0))
         height = int(video_stream.get("height", 0))
+
+        # Non-square pixels (the 4K crop's 1214:1215) hard-fail here, before
+        # upload. ffprobe always reports the field; an absent one is a stub.
+        sar = video_stream.get("sample_aspect_ratio")
+        if sar is not None and sar != "1:1":
+            return GateResult(
+                gate=f"short_resolution:{name}",
+                passed=False,
+                message=f"{name}: SAR {sar} != required 1:1 (non-square pixels)",
+                measured_value=f"SAR {sar}",
+                threshold="SAR 1:1",
+            )
 
         if width == ec.SHORTS_WIDTH and height == ec.SHORTS_HEIGHT:
             return GateResult(

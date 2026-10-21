@@ -190,6 +190,26 @@ def compute_gate_cd_hash(*, state, output_dir: Path) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+# Pipeline evidence embedded in the metadata JSON, judged by its own gate
+# (final_text_record) -- never shipped as title/description/tag text.
+_EVIDENCE_RECORD_KEYS = frozenset({"final_text_review"})
+
+# Waypost's description entries: each ``text`` ships, while ``kind`` /
+# ``surface`` / ``template_id`` only label where the text came from.
+_SHIPPED_ENTRY_KEYS = frozenset({"final_text_description"})
+
+
+def _string_values(obj) -> list[str]:
+    """Every string value in a parsed JSON document, keys excluded."""
+    if isinstance(obj, str):
+        return [obj]
+    if isinstance(obj, dict):
+        obj = list(obj.values())
+    if isinstance(obj, list):
+        return [s for item in obj for s in _string_values(item)]
+    return []
+
+
 class ReviewGate:
     MIN_BITRATE_KBPS = 40_000  # 40 Mbps floor — above YouTube 4K rec (35-45 Mbps)
     MAX_AV_DRIFT_PCT = 2.0  # A/V duration drift threshold (%)
@@ -786,11 +806,31 @@ class ReviewGate:
             return 0.0
 
     def _check_placeholders(self, json_path: Path) -> list[str]:
-        """Return list of matched placeholder patterns found in the JSON file."""
+        """Return list of matched placeholder patterns found in the JSON file.
+
+        Only string values are checked: key names such as ``insert_count`` or
+        ``template_id`` are schema, not shipped text. Unparseable JSON falls
+        back to the raw text. Embedded evidence records (``final_text_review``)
+        carry policy ids, not shipped text, and have their own gate. Of
+        Waypost's description entries only the ``text`` is checked."""
         try:
             text = json_path.read_text(encoding="utf-8")
         except Exception:
             return []
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data = {
+                k: [e.get("text") for e in v if isinstance(e, dict)]
+                if k in _SHIPPED_ENTRY_KEYS and isinstance(v, list)
+                else v
+                for k, v in data.items()
+                if k not in _EVIDENCE_RECORD_KEYS
+            }
+        if data is not None:
+            text = "\n".join(_string_values(data))
         matched = []
         for pattern in self.PLACEHOLDER_PATTERNS:
             if pattern.lower() in text.lower():

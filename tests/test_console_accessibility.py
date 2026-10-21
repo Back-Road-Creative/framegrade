@@ -154,6 +154,7 @@ _SCHEDULE_REPORT_WITH_THREE_TABLES = {
             "slot": "2026-08-18T16:00:00-04:00",
             "shorts_windows": ["14:00", "18:00"],
             "shorts_required": 2,
+            "shorts_slots": 14,
             "earliest_for_region": True,
         }
     ],
@@ -173,7 +174,7 @@ def test_multi_table_page_offers_a_distinct_preceding_heading_per_table(monkeypa
     monkeypatch.setattr(
         console_schedule,
         "build_schedule_report",
-        lambda ledger, config: _SCHEDULE_REPORT_WITH_THREE_TABLES,
+        lambda ledger, config, **_kw: _SCHEDULE_REPORT_WITH_THREE_TABLES,
     )
     resp = TestClient(_create_app()).get("/schedule", headers={"accept": "text/html"})
     # strip <style>/<script> blocks first: the base template's own prose comments

@@ -413,8 +413,12 @@ class TestOrchestratorForceFlag:
                 MagicMock(side_effect=_bc_side_effect),
             ):
                 with patch.object(orch, "_phase_d_metadata_and_publish", MagicMock()):
-                    # Skip the terminal DoD gate; isolation test.
-                    orch.config.drive.skip_validation = True
+                    # Stub a passing DoD gate; isolation test (--skip-validation
+                    # is refused on a run that uploads, GMS-17c).
+                    monkeypatch.setattr(
+                        "gomoveshift.pipeline.drive_orchestrator.run_validation",
+                        lambda **_kw: MagicMock(passed_count=13, failed_count=0, checks=[]),
+                    )
                     result = orch.run(
                         source_dir=source,
                         output_base=tmp_path / "out",
@@ -426,7 +430,7 @@ class TestOrchestratorForceFlag:
 
 
 class TestOrchestratorNonTtyBehavior:
-    """When stdin is not a tty, we never prompt — skip + proceed."""
+    """When stdin is not a tty, we never prompt and never proceed: named refusal."""
 
     def test_non_tty_does_not_prompt(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock, patch
@@ -455,15 +459,19 @@ class TestOrchestratorNonTtyBehavior:
                 MagicMock(side_effect=_bc_side_effect),
             ):
                 with patch.object(orch, "_phase_d_metadata_and_publish", MagicMock()):
-                    orch.config.drive.skip_validation = True
+                    monkeypatch.setattr(
+                        "gomoveshift.pipeline.drive_orchestrator.run_validation",
+                        lambda **_kw: MagicMock(passed_count=13, failed_count=0, checks=[]),
+                    )
                     result = orch.run(
                         source_dir=source,
                         output_base=tmp_path / "out",
                         region="usa",
                         publish_day="wed",
-                        force=False,  # explicit: even without force, non-tty skips
+                        force=False,  # no operator and no --force: refused by name
                     )
-        assert result.success is True
+        assert result.success is False
+        assert "PREFLIGHT-NO-OPERATOR" in result.errors[0]
 
 
 class TestOrchestratorTtyPromptDeclined:
@@ -481,6 +489,7 @@ class TestOrchestratorTtyPromptDeclined:
         mock_bc = MagicMock()
 
         monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
         # Answer "n" → abort, phase methods never called.
         monkeypatch.setattr("builtins.input", lambda *a, **kw: "n")
 

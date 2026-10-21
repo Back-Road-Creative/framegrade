@@ -55,7 +55,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION
+from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, graph_error_tag
 from gomoveshift.publishing.photo_adapter import (
     PhotoAuthBlockedError,
     PhotoPermanentError,
@@ -92,12 +92,13 @@ def _raise_for_photo_graph_error(status_code: int, body: dict) -> None:
     error = (body or {}).get("error") or {}
     code, subcode = error.get("code"), error.get("error_subcode")
     message = str(error.get("message") or "unknown Graph API error")
+    tag = graph_error_tag(status_code, error)
     if code in _AUTH_ERROR_CODES or subcode in _AUTH_ERROR_SUBCODES:
-        raise PhotoAuthBlockedError("Meta access token expired or revoked; reauthorize")
+        raise PhotoAuthBlockedError(f"{tag} Meta access token expired or revoked; reauthorize")
     if code in _RATE_LIMIT_CODES or status_code >= 500:
-        raise PhotoRetryableError(f"transient Graph API error: {message}")
+        raise PhotoRetryableError(f"{tag} transient Graph API error: {message}")
     raise PhotoPermanentError(
-        f"Graph API permanently rejected the request: {message} — not "
+        f"{tag} Graph API permanently rejected the request: {message} — not "
         "automatically retryable; this can mean a content/account rejection "
         "or a request bug (e.g. an invalid/nonexistent field), verify before "
         "resubmitting"

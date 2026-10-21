@@ -26,7 +26,18 @@ from gomoveshift.publishing.youtube_adapter import (
     YouTubeShortsAdapter,
 )
 
-SHORT_TITLE = "Golden Hour Coast Drive"
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
+
+
+#: Names the base record's sampled region, so the Short review agrees.
+SHORT_TITLE = "County Kerry drive"
 
 
 @pytest.fixture
@@ -83,11 +94,18 @@ def _setup(mock_service, queue_conn, tmp_path, *, cfg=None):
         up = yu.YouTubeUploader(credentials_dir=Path("/tmp/fake-creds"))
         up._build_service()
     adapter = YouTubeShortsAdapter(up, cfg or Config())
-    record = _base_record(routes=("youtube",))
+    record = _titled(_base_record(routes=("youtube",)), SHORT_TITLE)
     delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "youtube", "hash")
     video_path = tmp_path / "short_00.mp4"
     video_path.write_bytes(b"\x00\x00\x00\x20ftypiso5")
     return adapter, record, delivery_id, video_path
+
+
+def _titled(record, title):
+    import dataclasses
+
+    yt = dataclasses.replace(record.payloads.youtube, title=title)
+    return dataclasses.replace(record, payloads=dataclasses.replace(record.payloads, youtube=yt))
 
 
 def _publish(adapter, record, queue_conn, delivery_id, video_path):
@@ -218,7 +236,10 @@ def test_reconciliation_of_nonexistent_video_permits_one_retry(mock_service, que
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
     transition(queue_conn, delivery_id, "queued", "submitting")
     transition(queue_conn, delivery_id, "submitting", "uploaded", platform_upload_id="BOGUS")
-    mock_service.videos.return_value.list.return_value.execute.return_value = {"items": []}
+    mock_service.videos.return_value.list.return_value.execute.side_effect = [
+        {"items": []},
+        {"items": [{"id": "SHORTVID123"}]},  # the post-upload verify sees it
+    ]
 
     result = _publish(adapter, record, queue_conn, delivery_id, video_path)
 
@@ -227,7 +248,9 @@ def test_reconciliation_of_nonexistent_video_permits_one_retry(mock_service, que
 
 
 def test_killed_worker_lease_is_reclaimable(mock_service, queue_conn, tmp_path):
-    mock_service.videos.return_value.list.return_value.execute.return_value = {"items": []}
+    mock_service.videos.return_value.list.return_value.execute.return_value = {
+        "items": [{"id": "SHORTVID123"}]
+    }
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
     transition(queue_conn, delivery_id, "queued", "submitting")
     # A dead worker's lease, long expired — never got as far as an id.
@@ -385,7 +408,9 @@ def _playlist_titles_created(mock_service) -> list[str]:
 def _with_regions(record, *regions):
     import dataclasses
 
-    return dataclasses.replace(record, sampled_regions=tuple(regions))
+    record = dataclasses.replace(record, sampled_regions=tuple(regions))
+    # The title names the clip's own place, as the Short review requires.
+    return _titled(record, f"{regions[0].partition(',')[0]} drive") if regions else record
 
 
 @pytest.mark.parametrize(

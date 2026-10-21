@@ -20,12 +20,15 @@ import socket
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Tuple
 
 from ..console.settings import current_brand
 from .brand_policy import load_brand_policy
+from .ig_media_scan import SCAN_LIMIT, ScanUnprovableError, scan_for_post
 from .queue import (
     _TERMINAL_SQL,
+    STATUS_AWAITING_IG_RECONCILE,
+    STATUS_MISSING_REMOTE,
     TERMINAL_STATUSES,
     acquire_lease,
     get_platform_daily_cap,
@@ -73,7 +76,14 @@ _STATUS_AWAITING_MANUAL_PUBLISH = "awaiting_manual_publish"
 _STATUS_DEFERRED = "deferred"
 #: Where a handler that returns WITHOUT publishing leaves its row. The row's
 #: own wait governs it from there, never this pass's lease.
-_WAITING_STATUSES = (_STATUS_AWAITING_MANUAL_PUBLISH, _STATUS_DEFERRED)
+_WAITING_STATUSES = (
+    _STATUS_AWAITING_MANUAL_PUBLISH,
+    _STATUS_DEFERRED,
+    STATUS_AWAITING_IG_RECONCILE,
+)
+#: Never selected by the drain whatever their ``next_attempt_at``: each waits
+#: on something other than a retry time (a person; the account scan).
+_PARKED_STATUSES = (_STATUS_AWAITING_MANUAL_PUBLISH, STATUS_AWAITING_IG_RECONCILE)
 
 
 #: Every privacy class a publishable short must have VERIFIED.
@@ -231,6 +241,10 @@ class DrainResult:
     #: keeps its status, its lease and its attempt count, so restoring the
     #: model and re-running the day publishes the very same delivery.
     held_privacy_unverified: int = 0
+    #: Due deliveries left untouched because ``publishing-status --validate``
+    #: names a problem on their (platform, project). Same contract as the
+    #: privacy hold: no lease, no transition, no attempt charged.
+    held_validate: int = 0
     #: Subset of `retried`, counted separately: a throttled pass is a
     #: standing instruction to a human, not queue noise.
     throttled: int = 0
@@ -330,8 +344,8 @@ def _select_due(
     conditions = [f"status NOT IN {_TERMINAL_SQL}", "shadow = 0"]
     params: List[Any] = []
     if status is None:
-        conditions.append("status != ?")
-        params.append(_STATUS_AWAITING_MANUAL_PUBLISH)
+        conditions.append("status NOT IN (?, ?)")
+        params.extend(_PARKED_STATUSES)
     else:
         conditions.append("status = ?")
         params.append(status)
@@ -572,14 +586,15 @@ def reconcile_interrupted_attempts(
                 platform,
             )
             continue
-        if status == _STATUS_AWAITING_MANUAL_PUBLISH:
+        if status in _PARKED_STATUSES:
             # A parked draft waits on a person, not on a dead worker. Charging
             # it set a retry time that un-parked it.
             transition(conn, delivery_id, status, status, lease_owner=None, lease_expires_at=None)
             logger.info(
                 "dispatch: delivery %s's stale lease was released without charging an "
-                "attempt because it is parked for a manual publish",
+                "attempt because it is parked (%s)",
                 delivery_id,
+                status,
             )
             continue
         attempt_count = row["attempt_count"] + 1
@@ -687,6 +702,7 @@ def drain_queue(
     backoff_cap_seconds: int = _DEFAULT_BACKOFF_CAP_SECONDS,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     privacy_attestations: Optional[Callable[[Dict[str, Any]], Optional[Mapping[str, Any]]]] = None,
+    held_scopes: Optional[Collection[Tuple[str, str]]] = None,
 ) -> DrainResult:
     """One drain pass. Never raises on an empty queue, an unavailable lease,
     or a single handler's exception — all recorded on ``DrainResult`` so one
@@ -697,7 +713,11 @@ def drain_queue(
     is HELD, never attempted. Injected like ``handlers`` rather than read from
     disk here — the writer lives under ``pipeline/`` and importing it would
     drag the encoder into the drain loop. Left ``None``, the gate is inert, so
-    wiring the loader in is what arms it."""
+    wiring the loader in is what arms it.
+
+    ``held_scopes`` is the validate gate: ``(platform, project)`` pairs whose
+    rows are HELD the same way, because the validator names a problem on that
+    pair. Every other pair drains normally."""
     now = now or datetime.now(timezone.utc).isoformat()
     owner = owner or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     expires_at = (datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)).isoformat()
@@ -727,6 +747,14 @@ def drain_queue(
                 result.skipped_no_handler_by_platform.get(platform, 0) + 1
             )
             logger.warning("dispatch: no handler registered for platform %r", platform)
+            continue
+
+        if held_scopes and (platform, row["project_name"]) in held_scopes:
+            result.held_validate += 1
+            result.errors.append(
+                f"{platform}#{delivery_id}: validate hold: {platform}/{row['project_name']} "
+                "has a publishing-status --validate problem"
+            )
             continue
 
         # Same reasoning, one rung earlier in the same "check before locking"
@@ -891,6 +919,16 @@ def drain_queue(
             # un-parked the draft, and the next pass read the handler's early
             # return for it as a publish.
             live = _live_row(conn, delivery_id)
+            if live is not None and live["status"] == STATUS_MISSING_REMOTE:
+                # U-R1: the handler uploaded, then found YouTube does not
+                # list the video. Terminal and never a success.
+                _release_own_lease(conn, delivery_id, owner)
+                result.failed_permanent += 1
+                result.errors.append(
+                    f"{platform}#{delivery_id}: missing_remote: uploaded but YouTube "
+                    "returns no such video; not re-uploaded"
+                )
+                continue
             if live is not None and live["status"] in _WAITING_STATUSES:
                 _release_own_lease(conn, delivery_id, owner)
                 logger.info(
@@ -1148,3 +1186,125 @@ def apply_suppression_response(
 
 def _now_iso_for_response() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class IgReconcileResult:
+    """One ``reconcile_awaiting_ig`` pass. Nothing to do is success."""
+
+    considered: int = 0
+    published: int = 0
+    retried: int = 0
+    failed: int = 0
+    unprovable: int = 0
+    errors: List[str] = field(default_factory=list)
+
+
+_IG_ABSENT_ERROR_CLASS = "IgReconcileAbsent"
+
+
+def reconcile_awaiting_ig(
+    conn,
+    *,
+    recent_media: Callable[[int], List[Dict[str, Any]]],
+    record_loader: Callable[[str, int], Any],
+    now: str,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    backoff_base_seconds: int = _DEFAULT_BACKOFF_BASE_SECONDS,
+    backoff_cap_seconds: int = _DEFAULT_BACKOFF_CAP_SECONDS,
+) -> IgReconcileResult:
+    """Decide every Instagram row parked at ``awaiting_ig_reconcile`` from a
+    scan of the account's recent media -- the same scan ``queue
+    recover-terminal`` gate (c) runs (``ig_media_scan.scan_for_post``):
+
+    - a match: the post is live, so the row closes ``published`` with the
+      matched media id (``platform_reconciled``);
+    - proven absent: back to ``queued`` with one attempt charged, the old
+      container cleared so the next pass builds a fresh one, and the ordinary
+      backoff; at ``max_attempts`` it fails permanently instead;
+    - unprovable (empty page, a page short of the row's creation): the row
+      stays parked, untouched. ``publishing-status --validate`` names one
+      parked too long.
+
+    ``recent_media(limit)`` is read once per pass, lazily. Best effort like
+    ``reconcile_awaiting_manual``: one row's failure is recorded, never
+    raised, and a paused Instagram is never scanned."""
+    result = IgReconcileResult()
+    if is_platform_paused(conn, "instagram"):
+        return result
+    rows = conn.execute(
+        "SELECT * FROM deliveries WHERE status=? AND platform='instagram' AND shadow=0 ORDER BY id",
+        (STATUS_AWAITING_IG_RECONCILE,),
+    ).fetchall()
+    media: Optional[List[Dict[str, Any]]] = None
+    for row in rows:
+        delivery_id = row["id"]
+        result.considered += 1
+        try:
+            record = record_loader(row["project_name"], row["short_index"])
+            if media is None:
+                media = list(recent_media(SCAN_LIMIT))
+            scan = scan_for_post(
+                media,
+                created_at=row["created_at"],
+                caption=record.payloads.instagram.caption,
+                sha256=getattr(record.media, "sha256", None),
+            )
+        except ScanUnprovableError as exc:
+            result.unprovable += 1
+            result.errors.append(f"instagram#{delivery_id}: still parked: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 -- one bad row never aborts the pass
+            result.errors.append(f"instagram#{delivery_id}: ig reconcile: {_detail(exc)}")
+            continue
+
+        if scan.matches:
+            found = scan.matches[0]
+            if transition(
+                conn,
+                delivery_id,
+                STATUS_AWAITING_IG_RECONCILE,
+                "published",
+                platform_post_id=str(found["id"]),
+                permalink=found.get("permalink"),
+                published_at_source=RECONCILED,
+            ):
+                result.published += 1
+            continue
+
+        attempt_count = row["attempt_count"] + 1
+        detail = (
+            f"account scan of {scan.scanned} media (oldest {scan.oldest_scanned or 'whole account'}) "
+            f"found no post; container {row['platform_upload_id']} dropped for a fresh one"
+        )
+        if attempt_count >= max_attempts:
+            moved = transition(
+                conn,
+                delivery_id,
+                STATUS_AWAITING_IG_RECONCILE,
+                "failed_permanent",
+                attempt_count=attempt_count,
+                error_class=f"MaxAttemptsExceeded({_IG_ABSENT_ERROR_CLASS})",
+                error_detail=detail,
+            )
+            result.failed += int(moved)
+            continue
+        moved = transition(
+            conn,
+            delivery_id,
+            STATUS_AWAITING_IG_RECONCILE,
+            "queued",
+            attempt_count=attempt_count,
+            platform_upload_id=None,
+            next_attempt_at=compute_next_attempt_at(
+                now,
+                attempt_count,
+                base_seconds=backoff_base_seconds,
+                cap_seconds=backoff_cap_seconds,
+            ),
+            next_attempt_reason=RETRY_BACKOFF,
+            error_class=_IG_ABSENT_ERROR_CLASS,
+            error_detail=detail,
+        )
+        result.retried += int(moved)
+    return result

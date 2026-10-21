@@ -541,13 +541,15 @@ def test_load_overrides_warns_loudly_on_missing_configured_file(tmp_path, caplog
 
 def test_resolve_overrides_path_is_cwd_independent(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    cfg_home = tmp_path / "cfg"
-    monkeypatch.setenv("GMS_CONFIG_HOME", str(cfg_home))
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    monkeypatch.setenv("GMS_INPUTS_DIR", str(inputs))
     resolved = pr.resolve_overrides_path("playlist_routing_overrides.json")
     assert resolved.is_absolute()
-    assert resolved.parent == cfg_home
-    other = tmp_path / "other-cfg"
-    monkeypatch.setenv("GMS_CONFIG_HOME", str(other))
+    assert resolved.parent == inputs
+    other = tmp_path / "other-inputs"
+    other.mkdir()
+    monkeypatch.setenv("GMS_INPUTS_DIR", str(other))
     assert pr.resolve_overrides_path("playlist_routing_overrides.json").parent == other
     assert pr.resolve_overrides_path("/abs/x.json") == Path("/abs/x.json")
     assert pr.resolve_overrides_path("") is None
@@ -574,7 +576,7 @@ def test_overrides_file_loads_and_skips_comment_keys(tmp_path):
     }
 
 
-def test_reconcile_loads_overrides_relative_to_config_home(monkeypatch, tmp_path):
+def test_reconcile_loads_overrides_relative_to_inputs_dir(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     seen = {}
     monkeypatch.setattr(pr, "load_overrides", lambda path: seen.setdefault("path", path) and {})

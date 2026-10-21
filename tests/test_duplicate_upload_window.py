@@ -31,8 +31,20 @@ from googleapiclient.errors import HttpError
 from gomoveshift.config import Config
 from gomoveshift.pipeline.drive_phases import external_systems_coordinator as esc
 from gomoveshift.pipeline.drive_phases import youtube_uploader as yu
+from gomoveshift.pipeline.title_decision import decide_title
 
+import pytest
 from _state_helpers import make_state
+
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
+
 
 FAKE_CREDS = {
     "token": "ya29.fake",
@@ -110,7 +122,13 @@ def _run_loop(*, svc, state, tmp_path, save_state, n_lfs=1):
     up = _uploader(svc)
     lfs = [SimpleNamespace(index=i + 1, total_duration=1800.0) for i in range(n_lfs)]
     meta = {
-        lf.index: {"title": f"T{lf.index}", "description": "d", "tags": [], "location": "Cork"}
+        lf.index: {
+            "title": f"T{lf.index}",
+            "description": "d",
+            "tags": [],
+            "location": "Cork",
+            "title_decision": decide_title("longform", f"T{lf.index}", None, suffix=""),
+        }
         for lf in lfs
     }
     sched = SimpleNamespace(

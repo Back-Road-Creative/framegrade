@@ -111,8 +111,8 @@ class TestAssociatedShorts:
         rows = _rows(ledger)
         for row in rows:
             assert row["shorts_windows"], f"{row['region']}/{row['day']} resolved no windows"
-            # required_shorts_per_lf = windows x LF_PUBLISH_INTERVAL_DAYS (7)
-            assert row["shorts_required"] == len(row["shorts_windows"]) * 7
+            # required_shorts_per_lf = windows x LF_PUBLISH_INTERVAL_DAYS (7): slot capacity
+            assert row["shorts_slots"] == len(row["shorts_windows"]) * 7
         ireland = next(r for r in rows if r["region"] == "ireland")
         assert ireland["shorts_windows"] == ["08:00", "12:00"]
 
@@ -132,3 +132,48 @@ class TestNoMutation:
         _rows(ledger)
         assert schedule_constants.LONG_FORM_DAYS == days
         assert schedule_constants.LONG_FORM_TIME == time_
+
+
+class TestShortsTargetIsTheDecisionNotTheCapacity:
+    """``shorts_required`` is the count a drive actually plans per LF: Waypost's decision,
+    trimmed by the brand's per-location cap -- never the 14-slot capacity, which is the
+    rate the channel was terminated at (2026-08-27)."""
+
+    @pytest.fixture
+    def decided(self, monkeypatch):
+        from gomoveshift.pipeline import volume_source
+
+        def _decide(value):
+            monkeypatch.setattr(
+                volume_source,
+                "shorts_per_lf",
+                lambda db=None: volume_source.ShortsDecision(value, "policy", "AT_FLOOR"),
+            )
+
+        return _decide
+
+    def _report(self, ledger, **kw):
+        return build_schedule_report(ledger, Config(), after=ANCHOR, **kw)["next_available"]
+
+    def test_without_a_cap_it_is_the_waypost_decision(self, ledger, decided):
+        decided(7)
+        assert {r["shorts_required"] for r in self._report(ledger)} == {7}
+
+    def test_a_lower_brand_cap_trims_it(self, ledger, decided):
+        decided(7)
+        rows = self._report(ledger, per_location_cap=5)
+        assert {r["shorts_required"] for r in rows} == {5}
+        assert all(r["shorts_slots"] == len(r["shorts_windows"]) * 7 for r in rows)
+
+    def test_a_higher_cap_never_raises_it(self, ledger, decided):
+        decided(7)
+        assert {r["shorts_required"] for r in self._report(ledger, per_location_cap=9)} == {7}
+
+    def test_an_unreadable_store_reports_none_not_a_number(self, ledger, monkeypatch):
+        from gomoveshift.pipeline import volume_source
+
+        def _boom(db=None):
+            raise volume_source.VolumeSourceUnreadableError("VOLUME_SOURCE_UNREADABLE")
+
+        monkeypatch.setattr(volume_source, "shorts_per_lf", _boom)
+        assert {r["shorts_required"] for r in self._report(ledger)} == {None}

@@ -104,6 +104,15 @@ recoverable, never duplicated.
     unknown outcome, never a failure, and the adapter's own docstring
     forbids resubmitting on it.
 
+**Every Meta Graph error leads with its own classification fields.** The
+Instagram, Facebook and photo mappers prefix each message with
+`[graph http=<status> code=<code> subcode=<subcode> fbtrace=<fbtrace_id>]`
+(`-` when Meta omits one; fbtrace is cut to `[A-Za-z0-9_-]`, 64 chars). A 4xx
+with no error object still records its HTTP status. Because the tag leads,
+the bounded `error_detail` always keeps it. Before this, five Instagram rows
+were stored only as "Media ID is not available" or "unknown Graph API error",
+and the cause could not be read back from the queue.
+
 ## A failure is recorded from the row's live status
 
 Adapters move their own row before they can fail (Instagram goes
@@ -150,6 +159,29 @@ a parked row, and the drain recorded that return as a publish.
 - An expired lease on a parked draft is released without charging an attempt.
   A `deferred` row's expired lease is still charged: it is selectable, so a
   worker dying on it every pass is a crash loop.
+
+## Instagram "Media ID is not available" parks for an account scan
+
+Graph sometimes answers a Reel publish with "Media ID is not available" when
+the post did in fact go live, so neither a terminal fail nor a blind retry is
+safe: the first loses a live post's record, the second can double-post. The
+Instagram handler parks the row at `awaiting_ig_reconcile`
+(`next_attempt_at=9999-01-01`, reason `awaiting_ig_reconcile`) instead.
+
+- The park is the same as `awaiting_manual_publish`: `_select_due` excludes it
+  by status, `drain_queue` counts nothing for it, an expired lease is released
+  without charging an attempt, and `queue retry` refuses it.
+- `dispatch-queue --apply` runs `reconcile_awaiting_ig` before the drain when
+  Instagram is routed first_party. It scans the account's last 50 media with
+  the same proof `queue recover-terminal` uses (`publishing/ig_media_scan.py`,
+  `scan_for_post`): a caption-prefix or sha256 match closes the row
+  `published` with that media id; proven absence re-queues it with one
+  attempt charged, the old container cleared and the normal backoff (failing
+  permanently at the attempt ceiling); a scan that cannot prove either (empty
+  page, a full page short of the row's creation) leaves it parked.
+- The pass prints `ig reconcile: considered=… published=… retried=… failed=…
+  unprovable=…` when it had rows, and `publishing-status --validate` names a
+  row parked longer than 24 h (`awaiting_ig_reconcile`).
 
 ## Other safety properties
 

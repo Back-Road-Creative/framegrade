@@ -1,0 +1,14 @@
+# Build context is the directory holding the framegrade, gps-journey and
+# waypost checkouts side by side; patterns are relative to it.
+# A checkout's virtualenv can be several GB, and `COPY framegrade` would carry
+# it into the image, bloating the image and making the layer export take many
+# minutes. The image pip-installs its own packages, so host virtualenvs and
+# caches never belong in it.
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/.coverage.*
+**/htmlcov

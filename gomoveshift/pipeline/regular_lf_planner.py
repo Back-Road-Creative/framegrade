@@ -309,6 +309,15 @@ def split_ranges_balanced(
     return parts
 
 
+class InsufficientFootageError(ValueError):
+    """A full_drive day's kept footage is under ``full_drive_part_min_sec``.
+
+    Raised at planning time, upstream of any encode. A ``ValueError`` so the
+    existing planner-error handling still catches it. Never resolved by padding,
+    repeating footage or joining another day.
+    """
+
+
 def plan_full_drive_parts(
     scores: np.ndarray,
     *,
@@ -317,6 +326,7 @@ def plan_full_drive_parts(
     stop_mask: Optional[np.ndarray],
     part_min_sec: Optional[int] = None,
     part_max_sec: Optional[int] = None,
+    day: Optional[str] = None,
 ) -> list[list[RegularLFRange]]:
     """``plan_regular_lfs(mode="full_drive")`` grouped into long-form parts.
 
@@ -325,6 +335,11 @@ def plan_full_drive_parts(
     With both set the day is split by :func:`split_ranges_balanced` and the
     480 s minimum and ``full_drive_max_duration_sec`` ceiling apply PER PART
     (a part over the ceiling raises; nothing is truncated).
+
+    With both bounds set, a day whose kept footage is under ``part_min_sec``
+    raises :class:`InsufficientFootageError` (naming ``day``). There is no
+    escape: one LF covers one calendar day, and footage is never padded,
+    repeated, slowed or joined to another day.
     """
     if part_min_sec is None or part_max_sec is None:
         return [
@@ -343,6 +358,13 @@ def plan_full_drive_parts(
         full_drive_max_duration_sec=sys.maxsize,  # ceiling is enforced per part below
         stop_mask=stop_mask,
     )
+    kept_sec = sum(r.duration_sec for r in ranges)
+    if kept_sec < part_min_sec:
+        raise InsufficientFootageError(
+            f"Day {day or '?'}: kept (stop-masked) footage {kept_sec:.0f}s is under "
+            f"full_drive_part_min_sec={part_min_sec}s. Footage is never padded, "
+            "repeated or joined to another day."
+        )
     parts = split_ranges_balanced(ranges, min_sec=part_min_sec, max_sec=part_max_sec)
     for i, part in enumerate(parts, 1):
         d = sum(r.duration_sec for r in part)

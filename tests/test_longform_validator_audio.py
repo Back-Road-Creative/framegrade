@@ -240,3 +240,58 @@ class TestAudioScanTimeoutScaling:
         v.check_momentary_loudness(Path("/tmp/lf.mp4"))
         _, kwargs = subproc_mod.run.call_args
         assert kwargs["timeout"] == 14400
+
+
+def _run(input_i: float, decoded_s: float | None, returncode: int = 0) -> CompletedProcess:
+    progress = f"size=N/A time={_hms(decoded_s)} bitrate=N/A speed=20x\n" if decoded_s else ""
+    return CompletedProcess(
+        args=[], returncode=returncode, stdout="", stderr=progress + _loudnorm_stderr(input_i)
+    )
+
+
+def _hms(seconds: float) -> str:
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{int(h):02d}:{int(m):02d}:{s:05.2f}"
+
+
+class TestLoudnessMeasurementCoversTheFile:
+    """r5 (job 341c78b6, 2026-10-20 15:40 ET) failed this gate at -42.9 LUFS on an LF that
+    re-measures -45.0 on every rerun with the same code. loudnorm prints its JSON for whatever
+    it decoded, so a decode cut short reads a partial-file loudness as the file's. A
+    measurement that did not cover the audio, or whose ffmpeg exited nonzero, is re-taken
+    once and never judged; the -43 ceiling is unchanged."""
+
+    def test_short_decode_is_remeasured_and_the_full_reading_judged(self):
+        v, subproc_mod = _make_validator()
+        v._ffprobe.probe_duration.return_value = 4329.0
+        subproc_mod.run.side_effect = [_run(-42.9, 2900.0), _run(-45.0, 4328.6)]
+        result = v.check_audio_loudness(Path("/tmp/lf.mp4"))
+        assert result.passed, result.message
+        assert subproc_mod.run.call_count == 2
+
+    def test_full_decode_that_is_loud_still_fails_without_a_retry(self):
+        v, subproc_mod = _make_validator()
+        v._ffprobe.probe_duration.return_value = 4329.0
+        subproc_mod.run.side_effect = [_run(-42.9, 4328.6)]
+        result = v.check_audio_loudness(Path("/tmp/lf.mp4"))
+        assert not result.passed
+        assert "LOUDER" in result.message
+        assert subproc_mod.run.call_count == 1
+
+    def test_two_short_decodes_fail_closed_as_incomplete(self):
+        v, subproc_mod = _make_validator()
+        v._ffprobe.probe_duration.return_value = 4329.0
+        subproc_mod.run.side_effect = [_run(-50.0, 1000.0), _run(-50.0, 1200.0)]
+        result = v.check_audio_loudness(Path("/tmp/lf.mp4"))
+        assert not result.passed
+        assert "incomplete" in result.message
+        assert "1200" in result.message
+
+    def test_nonzero_ffmpeg_exit_is_not_judged(self):
+        v, subproc_mod = _make_validator()
+        v._ffprobe.probe_duration.return_value = 4329.0
+        subproc_mod.run.side_effect = [_run(-50.0, 4328.6, 1), _run(-50.0, 4328.6, 1)]
+        result = v.check_audio_loudness(Path("/tmp/lf.mp4"))
+        assert not result.passed
+        assert "incomplete" in result.message

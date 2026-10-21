@@ -16,7 +16,7 @@ from ...analysis.unified_scorer import (
     NUM_COLUMNS,
     UnifiedSegmentScorer,
 )
-from ...config import Config
+from ...config import Config, resolve_lf_mode
 from ...video_types import VideoType, classify_video, suggest_action
 from .._drive_helpers import _extract_episode_ost_meta, differentiate_duplicate_ost
 from ..gopro_gps import (
@@ -462,7 +462,7 @@ class PhaseA:
         # boundaries themselves come from real composite-score thresholds, so
         # a synthetic array would print meaningless labels.
         labels_only_skip_scoring = labels_only and (
-            getattr(self.config.drive, "lf_selection_mode", "best_moments") == "full_drive"
+            resolve_lf_mode(self.config.drive) == "full_drive"
         )
         if labels_only_skip_scoring:
             logger.info(

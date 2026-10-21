@@ -25,17 +25,19 @@ unbounded across runs.
 
 from __future__ import annotations
 
+import errno
 import importlib.util
 import logging
 import os
 import shutil
 import stat
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from gomoveshift.paths import gms_cache_home, gms_config_home
+from gomoveshift.paths import gms_config_home
 
 from .ost_validator import validate_ost, validate_ost_uniqueness
 
@@ -831,52 +833,122 @@ def check_seo_ownership(
         )
 
 
+def _device_of(path: str | os.PathLike) -> int:
+    """``st_dev`` of *path*, following symlinks. Seam for tests."""
+    return os.stat(path).st_dev
+
+
+def _read_probe(path: str | os.PathLike) -> None:
+    """Read the first 4 KiB. ``stat`` alone is not proof: a drvfs
+    volume can answer ``stat`` from cache while every read fails EIO."""
+    with open(path, "rb") as fh:
+        fh.read(4096)
+
+
+def _read_mounts() -> list[tuple[str, str]]:
+    """(mount point, fstype) rows from /proc/self/mounts; empty off Linux."""
+    try:
+        with open("/proc/self/mounts", encoding="utf-8") as fh:
+            rows = [line.split() for line in fh]
+    except OSError:
+        return []
+    # /proc/mounts escapes spaces in paths as \040.
+    return [(r[1].replace("\\040", " "), r[2]) for r in rows if len(r) >= 3]
+
+
+def _mount_for(path: str, table: list[tuple[str, str]]) -> tuple[str, str]:
+    """Longest mount point that contains *path*, matched on whole components."""
+    best = ("?", "unknown")
+    for mnt, fstype in table:
+        root = mnt.rstrip("/") or "/"
+        inside = root == "/" or path == root or path.startswith(root + "/")
+        if inside and (best[0] == "?" or len(root) > len(best[0])):
+            best = (root, fstype)
+    return best
+
+
 def check_source_filesystem(
     source_dir: Path,
     staging_dir: Path,
     allow_cross_fs: bool = False,
+    *,
+    video_extensions: Iterable[str] | None = None,
 ) -> None:
-    """Refuse source on a different filesystem than staging.
+    """Resolve the source video files, refuse unreadable ones, report where
+    the reads really happen.
 
-    On WSL2, a Windows drive mount (``/mnt/<letter>``, drvfs) reads ~5–10×
-    slower than ext4 and
-    collapses the chunked weather brightness measurement (every chunk hits
-    the 90s timeout ceiling), then the scorer silently bakes
-    DEFAULT_WEATHER_CLASS into drive_scores.npz. The first irreversible
-    artifact (encode) consumes that bad data.
+    Correctness (always refuses; no flag bypasses it): a video entry whose
+    symlink dangles, or a file that cannot be opened and read. Both mean the
+    pipeline would encode from footage it cannot get.
 
-    Robust-by-construction fix: compare st_dev of source_dir and staging_dir.
-    Different filesystems => raise unless the operator explicitly opted in
-    via ``allow_cross_fs=True`` (config.drive.allow_cross_fs_source or
-    ``--allow-cross-fs-source``).
+    Performance (never refuses): video files whose resolved target sits on a
+    different filesystem than staging. On WSL2 that is the documented
+    common layout -- ``~/.cache/gomoveshift/sources/<trip>/`` symlinks
+    into a Windows drive mount (drvfs) -- and its cost is read speed (~3x
+    master encode wall-clock). Weather carries no score weight and
+    ``allow_degraded_weather`` defaults True (config.py), so nothing that
+    ranks or renders depends on slow reads. The comparison follows each
+    file's symlink, not the directory, so footage symlinked from another
+    volume is not hidden by a staging directory on the symlinks' own volume.
+    ``allow_cross_fs`` (``--allow-cross-fs-source``) only lowers the report
+    from WARNING to INFO.
     """
     src = Path(source_dir)
     stg = Path(staging_dir)
-    if not src.exists() or not stg.exists():
+    if not src.is_dir() or not stg.exists():
         return  # other preflight checks surface the missing-path error
-    src_dev = src.stat().st_dev
-    stg_dev = stg.stat().st_dev
-    if src_dev == stg_dev:
-        return
-    if allow_cross_fs:
-        logger.warning(
-            "Source %s is on a different filesystem than staging %s "
-            "(allow_cross_fs_source=True). Expect ~3× longer master encode "
-            "wall-clock and likely weather degradation.",
-            src,
-            stg,
+    exts = {e.lower() for e in (video_extensions or (".mp4",))}
+    entries = sorted(e for e in src.iterdir() if e.suffix.lower() in exts)
+
+    dangling: list[str] = []
+    unreadable: list[str] = []
+    resolved: list[str] = []
+    for entry in entries:
+        if entry.is_symlink() and not entry.exists():
+            dangling.append(f"{entry.name} -> missing target {os.readlink(entry)}")
+            continue
+        if not entry.is_file():
+            continue
+        real = os.path.realpath(entry)
+        try:
+            _read_probe(real)
+        except OSError as exc:
+            code = errno.errorcode.get(exc.errno or 0, str(exc.errno))
+            unreadable.append(f"{entry.name} ({real}): {code} {exc.strerror}")
+            continue
+        resolved.append(real)
+
+    if dangling or unreadable:
+        lines = [f"  - {d}" for d in dangling] + [f"  - {u} cannot be read" for u in unreadable]
+        raise RuntimeError(
+            f"Source footage in {src} is not readable:\n" + "\n".join(lines) + "\n"
+            "Reattach the volume the files live on (or re-point the symlinks) and "
+            "re-run. This is not a filesystem-speed check; "
+            "--allow-cross-fs-source does not bypass it."
         )
+
+    stg_real = os.path.realpath(stg)
+    stg_dev = _device_of(stg_real)
+    remote = [r for r in resolved if _device_of(r) != stg_dev]
+    if not remote:
         return
-    suggested = gms_cache_home() / "sources" / src.name
-    raise RuntimeError(
-        f"Source directory {src} is on a different filesystem than the "
-        f"staging directory {stg}. Cross-filesystem source IO silently "
-        f"degrades weather measurement and triples master encode wall-clock. "
-        f"Copy the source to a Linux ext4 path first:\n"
-        f"    mkdir -p {suggested}\n"
-        f"    cp {src}/*.{{mp4,mov,mkv,m4v,mxf}} {suggested}/\n"
-        f"    gomoveshift drive {suggested} ...\n"
-        f"Or pass --allow-cross-fs-source to bypass (not recommended)."
+    table = _read_mounts()
+    stg_mnt, stg_fs = _mount_for(stg_real, table)
+    where = sorted({_mount_for(r, table) for r in remote})
+    dirs = sorted({os.path.dirname(r) for r in remote})
+    logger.log(
+        logging.INFO if allow_cross_fs else logging.WARNING,
+        "PERFORMANCE: %d of %d source video files are read from a different "
+        "filesystem than staging. Files: %s on %s. Staging: %s on %s (%s). "
+        "Correct output, slower reads (~3x master encode wall-clock). To avoid "
+        "it, stage on the footage volume or copy the footage next to staging.",
+        len(remote),
+        len(resolved),
+        ", ".join(dirs),
+        ", ".join(f"{m} ({f})" for m, f in where),
+        stg,
+        stg_mnt,
+        stg_fs,
     )
 
 
@@ -1208,6 +1280,52 @@ def check_concat_target_alignment(
         )
 
 
+class PreflightBlockedError(RuntimeError):
+    """Every blocker ``run_preflight`` found, reported together.
+
+    ``blockers`` is ``[(check, message), ...]`` in check order; ``str()`` is the
+    operator-facing ``RENDER BLOCKED`` report.
+    """
+
+    def __init__(self, blockers: list[tuple[str, str]]):
+        self.blockers = list(blockers)
+        super().__init__(format_blockers(self.blockers))
+
+
+def format_blockers(blockers: list[tuple[str, str]]) -> str:
+    """The ``RENDER BLOCKED`` report: one numbered line per blocker."""
+    n = len(blockers)
+    lines = [f"RENDER BLOCKED: {n} blocker{'s' if n != 1 else ''} found before any encode:"]
+    for i, (check, message) in enumerate(blockers, 1):
+        lines.append(f"  {i}. [{check}] " + str(message).replace("\n", "\n     "))
+    return "\n".join(lines)
+
+
+@dataclass
+class PreflightReport:
+    """Checks ``run_preflight`` ran and passed, plus non-blocking warnings."""
+
+    checked: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+class _Blockers:
+    """Collects each failing check instead of stopping at the first."""
+
+    def __init__(self) -> None:
+        self.found: list[tuple[str, str]] = []
+        self.checked: list[str] = []
+
+    @contextmanager
+    def step(self, name: str):
+        try:
+            yield
+        except RuntimeError as exc:
+            self.found.append((name, str(exc)))
+        else:
+            self.checked.append(name)
+
+
 def run_preflight(
     source_dir: Path,
     output_dir: Path,
@@ -1229,8 +1347,14 @@ def run_preflight(
     ingest_complete: bool = False,
     superlong_enabled: bool = False,
     ingest_mode: str | None = None,
-) -> None:
-    """Run all pre-flight checks. Raises RuntimeError on first failure.
+) -> PreflightReport:
+    """Run every pre-flight check and report all blockers together.
+
+    Each check that fails is collected rather than raised, so one run names
+    every cheap blocker before any encode (render-readiness gate). Raises
+    ``PreflightBlockedError`` (a ``RuntimeError``) listing them; returns a
+    ``PreflightReport`` of the checks that passed. A missing ``source_dir``
+    still raises at once — nothing else can be measured without it.
 
     Args:
         source_dir: Directory containing raw GoPro .MP4 files.
@@ -1259,6 +1383,7 @@ def run_preflight(
             ``check_gopro_telemetry_parser``; ``None`` (default) skips it.
     """
     logger.info("Pre-flight: validating environment...")
+    gate = _Blockers()
 
     # 1. Source directory
     if not Path(source_dir).is_dir():
@@ -1268,18 +1393,21 @@ def run_preflight(
 
     # 1c. GPMF parser for GoPro ingest. Cheap
     # and fatal, so it runs before any disk or encode measurement.
-    check_gopro_telemetry_parser(ingest_mode)
+    with gate.step("GoPro telemetry parser"):
+        check_gopro_telemetry_parser(ingest_mode)
 
-    # 1a. Source filesystem contract.
-    # Refuses cross-fs source so weather measurement and master encode
-    # don't silently degrade. ``staging_dir`` is the comparison target.
+    # 1a. Source footage contract. Refuses dangling or unreadable
+    # video files; reports, never refuses, files read from another filesystem
+    # than ``staging_dir`` (a speed cost, see ``check_source_filesystem``).
     if staging_dir is not None:
         Path(staging_dir).mkdir(parents=True, exist_ok=True)
-        check_source_filesystem(
-            Path(source_dir),
-            Path(staging_dir),
-            allow_cross_fs=allow_cross_fs_source,
-        )
+        with gate.step("source footage"):
+            check_source_filesystem(
+                Path(source_dir),
+                Path(staging_dir),
+                allow_cross_fs=allow_cross_fs_source,
+                video_extensions=list(video_extensions) if video_extensions else None,
+            )
 
     # 1b. Concat symlink alignment — stale symlinks point at a previous
     # source directory and cause Phase A to silently re-read the old
@@ -1288,7 +1416,8 @@ def run_preflight(
     # output_dir for legacy single-FS layouts. Operator deletes the stale
     # symlink or re-invokes with the original source path.
     _ingest_dir = Path(staging_dir) if staging_dir is not None else Path(output_dir)
-    check_concat_target_alignment(Path(source_dir), _ingest_dir)
+    with gate.step("concat alignment"):
+        check_concat_target_alignment(Path(source_dir), _ingest_dir)
 
     # 2. Find video files. ``video_extensions``
     # is the single source of truth for accepted extensions — populated
@@ -1307,13 +1436,15 @@ def run_preflight(
     file_errors = validate_input_files(
         mp4_files, allowed_extensions=tuple(exts_lower), warnings=file_warnings
     )
-    if file_errors:
-        raise RuntimeError(
-            "Input file validation failed:\n" + "\n".join(f"  - {e}" for e in file_errors)
-        )
+    with gate.step("input files"):
+        if file_errors:
+            raise RuntimeError(
+                "Input file validation failed:\n" + "\n".join(f"  - {e}" for e in file_errors)
+            )
 
     # 4. Disk space — output
-    check_disk_space(output_dir, min_free_gb=min_free_gb)
+    with gate.step("output disk"):
+        check_disk_space(output_dir, min_free_gb=min_free_gb)
 
     # 5. Disk space — staging / intermediate cache (separate mount from
     # output in WSL drvfs setups). Estimate peak usage from source file
@@ -1321,73 +1452,77 @@ def run_preflight(
     # instead of mid-encode on day 2. The estimate uses the per-day
     # bounded cache — see ``estimate_peak_cache_gb``.
     if staging_dir is not None:
-        staging_dir = Path(staging_dir)
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        # Phase A writes the concatenated per-episode .mp4s to the staging
-        # dir, where they PERSIST through scoring + the per-day master
-        # encode. Peak ≈ all episode concats (~source size) + the busiest
-        # day's master-encode working set (raw + master + work). Size at
-        # source × 1.5 so the preflight gate AGREES with the per-day gate's
-        # own ``day_source × 1.5`` formula (day_master_encoder) — a batch
-        # that won't fit fails loud HERE instead of mid-encode on day N.
-        # On a resume, subtract days whose masters are already encoded —
-        # their raw episodes are purgeable, so they aren't part of the
-        # remaining peak. A fresh run passes 0 and behaves as before.
-        # ingest_complete: a resume with Phase A already done does NOT
-        # re-create the per-episode concats (Phase A is skipped), so the whole
-        # source×1.5 concat term overstates the real remaining peak (which is
-        # just the downstream LF/short working set, comfortably above the
-        # floor). Treat the full source as already-staged so the gate drops to
-        # ``floor_gb`` — otherwise a Phase-A-complete resume on a disk that
-        # held the prior run's outputs false-fails (the gate demands the full
-        # concat term though no re-ingest would occur).
-        effective_completed = completed_source_bytes
-        if ingest_complete:
-            try:
-                effective_completed = float(sum(f.stat().st_size for f in mp4_files))
-            except OSError:
-                effective_completed = completed_source_bytes
-        est_peak_gb = estimate_peak_cache_gb(
-            mp4_files,
-            safety_factor=1.5,
-            floor_gb=min_staging_gb,
-            completed_source_bytes=effective_completed,
-            superlong_enabled=superlong_enabled,
-        )
-        usage = shutil.disk_usage(staging_dir)
-        free_gb = usage.free / _GB
-        if free_gb < est_peak_gb:
-            total_source_gb = sum(f.stat().st_size for f in mp4_files) / _GB
-            raise RuntimeError(
-                f"Insufficient cache space at {staging_dir}: "
-                f"{free_gb:.1f} GB free, need ~{est_peak_gb:.1f} GB "
-                f"(estimated peak from {total_source_gb:.1f} GB source). "
-                f"Free space in the intermediate cache volume, or set "
-                f"GMS_INTERMEDIATE_DIR to a volume with more headroom."
+        with gate.step("staging disk"):
+            staging_dir = Path(staging_dir)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            # Phase A writes the concatenated per-episode .mp4s to the staging
+            # dir, where they PERSIST through scoring + the per-day master
+            # encode. Peak ≈ all episode concats (~source size) + the busiest
+            # day's master-encode working set (raw + master + work). Size at
+            # source × 1.5 so the preflight gate AGREES with the per-day gate's
+            # own ``day_source × 1.5`` formula (day_master_encoder) — a batch
+            # that won't fit fails loud HERE instead of mid-encode on day N.
+            # On a resume, subtract days whose masters are already encoded —
+            # their raw episodes are purgeable, so they aren't part of the
+            # remaining peak. A fresh run passes 0 and behaves as before.
+            # ingest_complete: a resume with Phase A already done does NOT
+            # re-create the per-episode concats (Phase A is skipped), so the whole
+            # source×1.5 concat term overstates the real remaining peak (which is
+            # just the downstream LF/short working set, comfortably above the
+            # floor). Treat the full source as already-staged so the gate drops to
+            # ``floor_gb`` — otherwise a Phase-A-complete resume on a disk that
+            # held the prior run's outputs false-fails
+            # (the gate demands the full concat term though no re-ingest would occur).
+            effective_completed = completed_source_bytes
+            if ingest_complete:
+                try:
+                    effective_completed = float(sum(f.stat().st_size for f in mp4_files))
+                except OSError:
+                    effective_completed = completed_source_bytes
+            est_peak_gb = estimate_peak_cache_gb(
+                mp4_files,
+                safety_factor=1.5,
+                floor_gb=min_staging_gb,
+                completed_source_bytes=effective_completed,
+                superlong_enabled=superlong_enabled,
             )
+            usage = shutil.disk_usage(staging_dir)
+            free_gb = usage.free / _GB
+            if free_gb < est_peak_gb:
+                total_source_gb = sum(f.stat().st_size for f in mp4_files) / _GB
+                raise RuntimeError(
+                    f"Insufficient cache space at {staging_dir}: "
+                    f"{free_gb:.1f} GB free, need ~{est_peak_gb:.1f} GB "
+                    f"(estimated peak from {total_source_gb:.1f} GB source). "
+                    f"Free space in the intermediate cache volume, or set "
+                    f"GMS_INTERMEDIATE_DIR to a volume with more headroom."
+                )
 
-        # 5a. WSL host-volume headroom. The ext4 staging FS can report
-        # plenty free while the host VHDX expands into a near-full Windows
-        # drive and crashes the host (ext4 can report hundreds of GB free
-        # while the host drive is nearly full). The host must cover the VHDX growth beyond what
-        # ext4 can already absorb (est_peak − current ext4 free), floored at
-        # an absolute minimum so a brink-full host never passes. No-op off
-        # WSL. See ``check_wsl_host_volume_space``.
-        host_needed_gb = max(est_peak_gb - free_gb, _WSL_HOST_MIN_FREE_GB)
-        check_wsl_host_volume_space(staging_dir, host_needed_gb)
+            # 5a. WSL host-volume headroom. The ext4 staging FS can report
+            # plenty free while the host VHDX expands into a near-full Windows
+            # drive and crashes the host (ext4 can report hundreds of GB free
+            # while the host drive is nearly full). The host must cover the VHDX growth beyond what
+            # ext4 can already absorb (est_peak − current ext4 free), floored at
+            # an absolute minimum so a brink-full host never passes. No-op off
+            # WSL. See ``check_wsl_host_volume_space``.
+            host_needed_gb = max(est_peak_gb - free_gb, _WSL_HOST_MIN_FREE_GB)
+            check_wsl_host_volume_space(staging_dir, host_needed_gb)
 
     # 6. RAM
-    check_ram(min_free_gb=min_ram_gb)
+    with gate.step("RAM"):
+        check_ram(min_free_gb=min_ram_gb)
 
     # 7. Tools
     if require_tools:
-        check_tools(require_tools)
+        with gate.step("tools"):
+            check_tools(require_tools)
 
     # 7b. OST burn font. Every burned title (LF + shorts) renders with the
     # single canonical FONT_PATH; a missing font silently ships title-less
     # long-forms via the apply_ost stream-copy fallback, with no other gate to
     # catch it. Assert it upstream of any encode.
-    check_ost_font()
+    with gate.step("OST font"):
+        check_ost_font()
 
     # 7a. Weather decode path contract.
     # Verify the configured weather_hwaccel can actually deliver GPU
@@ -1395,24 +1530,28 @@ def run_preflight(
     # the param) skips the check — keeps existing test call-sites working
     # without a config plumb.
     if weather_hwaccel is not None:
-        check_weather_decode_path(mp4_files, weather_hwaccel)
+        with gate.step("weather decode"):
+            check_weather_decode_path(mp4_files, weather_hwaccel)
 
     # 7c. Blur inference provider (silent CPU fallback). Same
     # ``None``-skips contract as 7a; ``False`` (blur disabled / skipped) has
     # nothing to gate.
     if blur_enabled:
-        check_blur_inference_provider()
+        with gate.step("blur provider"):
+            check_blur_inference_provider()
 
     # 8. OST uniqueness (if titles available)
     if episode_titles is not None:
-        run_preflight_ost_check(episode_titles)
+        with gate.step("OST uniqueness"):
+            run_preflight_ost_check(episode_titles)
 
     # 9. SEO state-file ownership (cross-user drift). Only runs when caller
     # passes the SEO paths; tests / non-drive entry points can omit and skip
     # this check. ``GMS_SEO_OWNER_USER`` / ``GMS_SEO_OWNER_GROUP`` only name
     # the account in the repair hint.
     if seo_storage_path is not None and seo_project is not None:
-        check_seo_ownership(seo_storage_path, seo_project)
+        with gate.step("SEO ownership"):
+            check_seo_ownership(seo_storage_path, seo_project)
 
     # 10. Drive credential / SOPS asset existence. Catch missing creds at
     # preflight instead of hours into Phase D. Each env var defaults to a file
@@ -1422,9 +1561,13 @@ def run_preflight(
     # existing test entry points that don't exercise the Drive upload code
     # path stay green without mocking out the credential files.
     if check_credentials:
-        check_drive_credentials()
+        with gate.step("credentials"):
+            check_drive_credentials()
 
-    logger.info("Pre-flight: all checks passed.")
+    if gate.found:
+        raise PreflightBlockedError(gate.found)
+    logger.info("Pre-flight: all %d checks passed.", len(gate.checked))
+    return PreflightReport(checked=gate.checked, warnings=file_warnings)
 
 
 def check_drive_credentials() -> None:

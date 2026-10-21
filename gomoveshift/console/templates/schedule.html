@@ -19,7 +19,7 @@
   <a href="/schedule">Clear journey filter</a></p>
   {% endif %}
   {% endif %}
-  <p>As of {{ report.as_of or "-" }}. Weekly long-form capacity: {{ report.weekly_longform_capacity }}
+  <p>As of {{ report.as_of|et }} (America/New_York). Weekly long-form capacity: {{ report.weekly_longform_capacity }}
   ({{ report.designed_days|join(", ") }}). Queue ends: {{ report.queue_ends or "(nothing booked)" }}.
   Scheduled shorts: {{ report.scheduled_shorts_count }}.
   {%- if not report.journey and report.scheduled_shorts_by_region and
@@ -30,6 +30,46 @@
   Of those, {{ report.scheduled_shorts_by_region["unassigned"] }} are unassigned
   (no region recorded) and so appear under no region filter.
   {%- endif %}</p>
+
+  {% if model %}
+  <h2>Shorts volume</h2>
+  <p>Four different figures; none stands in for another.</p>
+  {% macro prov(f) -%}
+    source {{ f.source }}{% if f.reason_code %}, reason {{ f.reason_code }}{% endif %},
+    {% if f.policy_rev is not none %}policy rev {{ f.policy_rev }}{% else %}no policy version{% endif %}
+    {%- if f.fallback_reason %}; <em>fallback: {{ f.fallback_reason }}</em>{% endif %}
+  {%- endmacro %}
+  <table border="1">
+    <thead><tr><th>Figure</th><th>Region</th><th>Shorts per long-form</th><th>Provenance</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Selected target</td><td>all</td>
+        <td>{{ model.selected.value if model.selected.value is not none else "-" }}</td>
+        <td>{{ prov(model.selected) }}</td>
+      </tr>
+      {% for region, cap in model.capacity.by_region.items() %}
+      <tr>
+        <td>Slot capacity</td><td>{{ region }}</td><td>{{ cap.value }}</td>
+        <td>windows {{ cap.windows|join(", ") }}; {{ prov(cap) }}</td>
+      </tr>
+      {% endfor %}
+      {% for region, fe in model.feasible.by_region.items() %}
+      <tr>
+        <td>Feasible output</td><td>{{ region }}</td>
+        <td>{{ fe.value if fe.value is not none else "-" }}</td>
+        <td>{% if fe.binding %}bound by {{ fe.binding }}; {% endif %}{{ model.feasible.derived }}</td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td>Actually scheduled</td><td>all</td><td>{{ model.scheduled.total }}</td>
+        <td>{{ model.scheduled.source }}; <em>{{ model.scheduled.fallback_reason }}</em></td>
+      </tr>
+    </tbody>
+  </table>
+  {% elif model_error %}
+  <h2>Shorts volume</h2>
+  <p><strong>volume model unavailable: {{ model_error }}</strong></p>
+  {% endif %}
 
   <h2>Booked long-forms</h2>
   {% if report.scheduled_longforms %}
@@ -60,8 +100,8 @@
       <tr>
         <td>{{ row.region }}</td>
         <td>{{ row.day }}</td>
-        <td>{{ row.slot }}</td>
-        <td>{{ row.shorts_required }}</td>
+        <td>{{ row.slot|et }}</td>
+        <td>{{ row.shorts_required if row.shorts_required is not none else "unknown" }}</td>
         <td>{{ row.shorts_windows|join(", ") }}</td>
         <td>{{ "*" if row.earliest_for_region else "" }}</td>
       </tr>
@@ -81,7 +121,7 @@
       <tr>
         <td>{{ row.region }}</td>
         <td>{{ row.day }}</td>
-        <td>{{ row.slot }}</td>
+        <td>{{ row.slot|et }}</td>
       </tr>
       {% endfor %}
     </tbody>

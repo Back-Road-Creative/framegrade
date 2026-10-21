@@ -103,6 +103,9 @@ _INT_KEY_DICT_FIELDS = (
     "per_lf_gps_coverage_pct",
     "per_lf_awarded_tier",
     "per_lf_tier_evidence",
+    "per_lf_location_evidence",
+    "per_lf_route_record",
+    "per_lf_pre_render_title_decisions",
 )
 
 # Phase-A-derived per-LF label/text fields that must inherit a resumed
@@ -148,7 +151,15 @@ _UNSERIALIZED_FIELDS = frozenset(
     # ``drive_orchestrator.reset_force_sidecar_reset_after_resume`` closes
     # that gap by forcing the field back to THIS invocation's CLI intent
     # after the resume merge re-imports whatever is on disk.
-    {"drive_scores", "gps_per_episode", "ost_audit_confirmed_this_run", "force_sidecar_reset"}
+    # ``ost_system_review_this_run``: the same per-invocation rule
+    # for the ``--ost-system-review`` opt-in.
+    {
+        "drive_scores",
+        "gps_per_episode",
+        "ost_audit_confirmed_this_run",
+        "ost_system_review_this_run",
+        "force_sidecar_reset",
+    }
 )
 
 
@@ -306,6 +317,20 @@ class PipelineState:
     # ``gps_enrichment._build_gps_points_by_lf`` from the persisted
     # ``gps_per_episode`` (no new persisted field).
     per_lf_resolved_location: Optional[dict] = None
+    # One LocationEvidence record per LF, as its plain
+    # dict form, built in Phase BC from a bounded GPS sample. Phase D hands it
+    # to Waypost's select_title as the title facts. ``None`` default: a
+    # state file written before this field loads cleanly and the LF keeps its
+    # baseline title.
+    per_lf_location_evidence: Optional[dict] = None
+    # Each LF's retained-route evidence (``final_text_record.route_record``)
+    # from Phase BC — place names, seconds, gaps and region claims, no fixes.
+    # Phase D builds the final-text review from it and upload re-verifies.
+    per_lf_route_record: Optional[dict] = None
+    # Waypost's chosen title, approved against the retained route before the
+    # LF encode. Phase D uses this exact record and checks its route fingerprint
+    # and baseline rather than making a later independent title choice.
+    per_lf_pre_render_title_decisions: Optional[dict] = None
     # The specificity-ladder award, RECORDED (never gating) where it is
     # already computed — the pre-encode demotion pass
     # (``phase_bc_day_first._degrade_labels_to_awarded_tier``). Declared so the
@@ -415,6 +440,8 @@ class PipelineState:
     # re-encoding a silent-intent day master WITH audio; readers treat
     # None as False.
     skip_audio: Optional[bool] = None
+    # Explicit --lf-mode (cli | resumed): None = never stated, config decides.
+    lf_mode: Optional[str] = None
     # Per-LF operator-supplied location overrides — argparse
     # ``--per-lf-location 'INDEX=LABEL'``. Phase A / Phase BC consume
     # this via ``gps_enrichment._derive_per_lf_locations`` when GPS is
@@ -447,6 +474,13 @@ class PipelineState:
     # the audit hash. A resume re-passes through the hash-bound ``ost_audit_passed``
     # + ``ost_audit_hash`` markers, not this flag.
     ost_audit_confirmed_this_run: Optional[bool] = None
+    # ``--ost-system-review`` on THIS invocation (never persisted).
+    # Lets ``ost_system_review`` pass the OST gates; see that module.
+    ost_system_review_this_run: Optional[bool] = None
+    # Phase BC's route-claim record per day, sealed by its writer
+    # (``ost_system_review.record_system_reviews``). Persisted so a resume
+    # keeps it; route claims re-running rewrites it.
+    ost_system_review: Optional[dict] = None
     # ``--gate-cd-confirmed`` — bypasses the Gate C/D content-review
     # prompt when the persisted content hash still matches.
     # Set by ``review_gate`` after a successful gate; round-tripped
@@ -466,6 +500,11 @@ class PipelineState:
     # re-prompt; a material change to any short's burned text reopens the gate.
     shorts_ost_audit_passed: Optional[dict] = None
     shorts_ost_audit_hash: Optional[dict] = None
+    # The Shorts / superlong route-claim records per day, sealed by their
+    # writer (``ost_system_review.record_surface_reviews``); each surface's
+    # gate reads only its own. Rewritten by the measuring loop every run.
+    shorts_ost_system_review: Optional[dict] = None
+    superlong_ost_system_review: Optional[dict] = None
     # Phase D fingerprint for partial-resume safety. ``drive_orchestrator``
     # writes the SHA + inputs at Phase D entry; resume compares the
     # fingerprint of the just-computed inputs against the persisted SHA

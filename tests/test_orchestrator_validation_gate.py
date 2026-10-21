@@ -184,6 +184,7 @@ def test_skip_validation_flag_bypasses_gate_with_warning(
             source_dir=source,
             output_base=tmp_path / "output",
             region="ireland",
+            skip_upload=True,
         )
     mock_v.assert_not_called()
     assert result.success is True
@@ -193,6 +194,33 @@ def test_skip_validation_flag_bypasses_gate_with_warning(
         if r.levelno == logging.WARNING and "validation" in r.message.lower()
     ]
     assert warnings, "expected a WARNING log when skip_validation=True"
+
+
+def test_skip_validation_refused_on_a_live_upload_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """GMS-17c: --skip-validation is honoured only on a skip-upload/preview
+    run. On a live upload run it refuses with a named reason; a skipped
+    check never becomes a PASS."""
+    _stub_review_gate(monkeypatch)
+    source = tmp_path / "source"
+    source.mkdir()
+    cfg = Config()
+    cfg.drive.skip_validation = True
+    orch = DrivePipelineOrchestrator(config=cfg)
+    _mock_phase(orch)
+
+    with (
+        patch("gomoveshift.pipeline.drive_orchestrator.run_validation") as mock_v,
+        pytest.raises(PipelineValidationError, match="--skip-validation"),
+    ):
+        orch.run(
+            source_dir=source,
+            output_base=tmp_path / "output",
+            region="ireland",
+            publish_day="wed",
+        )
+    mock_v.assert_not_called()
 
 
 def test_skip_validation_false_is_default():

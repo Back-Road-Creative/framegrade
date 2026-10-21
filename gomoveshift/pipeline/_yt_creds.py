@@ -19,8 +19,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from gomoveshift.config import get_config as _get_config
-from gomoveshift.publishing.credential_paths import resolve_sops_file
+from gomoveshift.publishing.credential_paths import configured_base, resolve_sops_file
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +72,7 @@ def _sanitize_sops_stderr(stderr: str) -> str:
 # the import-time constant to the live ``get_config()`` value so the user's
 # ``seo:`` block actually drives behaviour. Tests still monkeypatch this
 # constant directly via ``conftest.isolate_seo_storage_from_workspace``.
-DEFAULT_CREDENTIALS_DIR = Path(_get_config().seo.credentials_dir)
+DEFAULT_CREDENTIALS_DIR = configured_base()
 
 
 def sops_age_recipients(enc_path: Path) -> list[str]:

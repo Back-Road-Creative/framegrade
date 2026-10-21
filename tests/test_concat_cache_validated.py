@@ -104,3 +104,23 @@ def test_failed_ffmpeg_leaves_no_file_at_the_final_name(tmp_path):
     with patch("subprocess.run", side_effect=_run), pytest.raises(RuntimeError):
         concat_episode(ep, tmp_path)
     assert not out.exists()
+
+
+def test_failed_concat_names_the_ffmpeg_error_not_its_banner(tmp_path):
+    """2026-10-16: the episode 2 concat failure printed only the ffmpeg
+    version banner (stderr[:500]), so the cause was invisible."""
+    ep = _episode(tmp_path)
+    banner = "ffmpeg version git-2026-04-10 Copyright (c) 2000-2026\n" + "  lib x\n" * 200
+    cause = "[mov @ 0x1] moov atom not found\nGX020062.MP4: Invalid data found"
+
+    def _fail(cmd, **_kw):
+        return MagicMock(returncode=1, stderr=banner + cause)
+
+    with patch(_PROBE, return_value=0.0), patch("subprocess.run", side_effect=_fail):
+        with pytest.raises(RuntimeError) as exc:
+            concat_episode(ep, tmp_path)
+    msg = str(exc.value)
+    assert "Invalid data found" in msg
+    assert "moov atom not found" in msg
+    assert "ffmpeg version" not in msg
+    assert not list(tmp_path.glob("*.partial.mp4"))

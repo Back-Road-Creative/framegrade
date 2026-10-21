@@ -173,6 +173,16 @@ def test_terrain_rgb_roundtrip() -> None:
     assert np.max(np.abs(decoded - heights)) < 0.1
 
 
+def test_terrain_rgb_bytes_are_exact_at_every_channel_boundary() -> None:
+    """Pins the byte layout (R = unit >> 16, G = unit >> 8, B = unit, each & 255)
+    at the carries between channels, so a faster encoder cannot shift a byte."""
+    units = np.array([0, 1, 255, 256, 65535, 65536, 65537, 1_000_000, 256**3 - 1], dtype=np.int64)
+    heights = -10000.0 + units.astype(np.float64) * 0.1
+    encoded = bundle.encode_terrain_rgb(heights[None, :])[0]
+    expected = np.stack([(units >> 16) & 255, (units >> 8) & 255, units & 255], axis=-1)
+    assert encoded.tolist() == expected.tolist()
+
+
 def test_terrain_rgb_rejects_nan() -> None:
     heights = np.array([[0.0, float("nan")]], dtype=np.float32)
     with pytest.raises(ValueError):
@@ -317,6 +327,31 @@ def test_write_tile_pyramid_never_copies_the_whole_source_per_tile(
     )
     assert len(report.written) > 1
     assert _AstypeCountingArray.full_copies == 0
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        np.random.default_rng(3).uniform(-50.0, 2500.0, (97, 131)).astype(np.float32),
+        np.random.default_rng(4).integers(0, 256, (97, 131, 3), dtype=np.uint8),
+    ],
+)
+def test_tile_sampling_on_separable_axes_is_bit_identical(source: np.ndarray) -> None:
+    """A tile's lon depends only on its column and its lat only on its row, so
+    sampling gathers on the two 1-D axes instead of two full 256x256 index
+    grids (~40 s of a full-terrain prepare). Every written tile must be the
+    same float64 array, bit for bit, as sampling the full meshgrid."""
+    footprint = _source_footprint()
+    for z in (9, 10, 12):
+        for x, y in bundle.tiles_covering(footprint, z):
+            if not bundle._fully_covered(bundle.tile_bounds(z, x, y), footprint):
+                continue
+            lon, lat = bundle._tile_lonlat_grid(z, x, y)
+            row, col = bundle._to_source_rowcol(lon, lat, footprint, source.shape[:2])
+            expected = bundle._bilinear(source, row, col)
+            got = bundle._sample_tile_bilinear(source, footprint, z, x, y)
+            assert got.dtype == expected.dtype
+            assert np.array_equal(got, expected), (z, x, y)
 
 
 def test_written_tiles_footprint_unions_the_written_tiles(tmp_path: Path) -> None:

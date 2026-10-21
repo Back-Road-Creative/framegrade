@@ -1,6 +1,7 @@
 {
   "wall_clock": [
     "tests/test_analytics_capture.py::test_quota_cap_skips_analytics_beyond_newest_200_and_older_than_90_days",
+    "tests/test_console_host_executor.py::_beat",
     "tests/test_console_jobs.py::_wait_done",
     "tests/test_console_jobs.py::test_due_schedules_boundary_cases",
     "tests/test_console_jobs.py::test_run_due_launches_via_allowlist_and_stamps_last_run_at",
@@ -17,6 +18,7 @@
     "tests/test_dod_metricool_fidelity.py::test_new_checks_registered_in_post_upload_mode",
     "tests/test_dod_metricool_fidelity.py::test_new_checks_registered_in_skip_upload_mode",
     "tests/test_gate_cd_before_uploads.py::test_gate_cd_rejection_blocks_all_phase_d_uploads",
+    "tests/test_hostworker.py::test_a_stop_request_mid_job_kills_the_child_and_marks_it_failed",
     "tests/test_objective_policy.py::_fresh_evidence",
     "tests/test_objective_policy.py::test_refuses_when_evidence_is_stale",
     "tests/test_overpass_shared_cache.py::test_expired_entry_is_refetched",

@@ -60,9 +60,49 @@ def capability_status() -> list[dict]:
                 "command": command,
                 "installed": importlib.util.find_spec(module) is not None,
                 "console": action is not None and action in _ACTIONS,
+                "reason": ""
+                if importlib.util.find_spec(module) is not None
+                else f"module {module} is not importable",
             }
         )
+    rows.extend(_drive_capability_rows())
     return rows
+
+
+def _drive_capability_rows() -> list[dict]:
+    """The two photo-adjacent drive features, in the same row shape.
+
+    Their ``installed`` flag means "can run here now" and ``reason`` says what is
+    missing when it cannot; the checks live beside the Route Story console code
+    (``console/route_story.py``). Neither is launched from the console.
+    """
+    from . import route_story
+
+    drive = (
+        (
+            "Trail film",
+            "gomoveshift.pipeline.drive_phases.trail_film",
+            "gomoveshift drive --trail --trail-profile PROFILE.yaml",
+            route_story.trail_film_unavailable(),
+        ),
+        (
+            "Inserts",
+            "gomoveshift.pipeline.inserts",
+            "gomoveshift drive --insert-photos DIR --insert-clip FILE@MM:SS",
+            route_story.inserts_unavailable(),
+        ),
+    )
+    return [
+        {
+            "name": name,
+            "module": module,
+            "command": command,
+            "installed": not reason,
+            "console": False,
+            "reason": reason,
+        }
+        for name, module, command, reason in drive
+    ]
 
 
 def journey_stages(journey: str = "") -> list[dict]:

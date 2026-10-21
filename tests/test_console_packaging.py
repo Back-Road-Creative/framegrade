@@ -53,7 +53,7 @@ def test_gomoveshift_service_uses_named_console_data_volume():
 #: Container-only plumbing (data dir) and the auth secret: neither is a user
 #: setting, and the token must never appear in the settings registry the
 #: /settings tab renders (it would set the bearer gate in tests and is a secret).
-_NOT_A_SETTING = {"GMS_CONSOLE_DATA_DIR", "GMS_CONSOLE_TOKEN"}
+_NOT_A_SETTING = {"GMS_CONSOLE_DATA_DIR", "GMS_CONSOLE_TOKEN", "GMS_HOST_SPOOL_DIR"}
 
 
 def test_gomoveshift_service_env_passthrough_matches_registry():
@@ -138,7 +138,28 @@ def test_dockerfile_pins_pip_retries_and_timeout_before_installing():
     retries = re.search(r"PIP_RETRIES=(\d+)", body)
     assert timeout and int(timeout.group(1)) >= 60
     assert retries and int(retries.group(1)) >= 10
-    assert env.start() < text.index("RUN pip install")
+    first_pip = text.find(next((s for s in _run_steps(text) if "pip install" in s), "\0"))
+    assert first_pip >= 0, "no RUN ... pip install step"
+    assert env.start() < first_pip
+
+
+def _run_steps(text):
+    """Each RUN instruction with its backslash-continued lines joined."""
+    return [m.group(0) for m in re.finditer(r"^RUN\b(?:[^\n]*\\\n)*[^\n]*$", text, re.M)]
+
+
+def test_dockerfile_pip_installs_reuse_a_buildkit_cache():
+    # The source COPY sits above the pip step, so every code change rebuilds it;
+    # with --no-cache-dir each rebuild re-downloaded every wheel (onnxruntime-gpu
+    # alone is ~283 MB) and a flaky network failed the build. A BuildKit cache
+    # mount keeps the wheels on the host between builds without putting them in
+    # the image.
+    text = _DOCKERFILE_PATH.read_text()
+    pip_steps = [step for step in _run_steps(text) if "pip install" in step]
+    assert pip_steps, "no RUN ... pip install step"
+    for step in pip_steps:
+        assert "--no-cache-dir" not in step, step
+        assert re.search(r"--mount=type=cache,[^\s]*target=/root/\.cache/pip", step), step
 
 
 def test_dockerfile_installs_ffmpeg_and_runs_non_root():

@@ -81,6 +81,44 @@ def test_build_drive_argv_raises_when_only_one_of_publish_lf_day_given():
         drives.build_drive_argv("/data/day1", output_dir="/data/out", lf_day="tue")
 
 
+def test_build_drive_argv_can_render_with_uploads_disabled():
+    argv = drives.build_drive_argv(
+        "/data/day1",
+        output_dir="/data/out",
+        dry_run=False,
+        no_review=False,
+        publish="fri",
+        lf_day="fri",
+        skip_upload=True,
+        confirm_plan=True,
+    )
+    assert "--skip-upload" in argv
+    assert "--no-youtube-upload" in argv
+    assert "--dry-run" not in argv
+    assert "--publish" in argv and "--lf-day" in argv
+    assert "--force" in argv
+
+
+def test_build_drive_argv_confirms_only_full_runs_explicitly():
+    unconfirmed = drives.build_drive_argv("/data/day1", output_dir="/data/out", dry_run=False)
+    confirmed = drives.build_drive_argv(
+        "/data/day1", output_dir="/data/out", dry_run=False, confirm_plan=True
+    )
+    dry = drives.build_drive_argv(
+        "/data/day1", output_dir="/data/out", dry_run=True, confirm_plan=True
+    )
+    assert "--force" not in unconfirmed
+    assert confirmed.count("--force") == 1
+    assert "--force" not in dry
+
+
+def test_build_drive_argv_opts_into_bounded_system_review_only_when_selected():
+    base = drives.build_drive_argv("/data/day1", output_dir="/data/out")
+    reviewed = drives.build_drive_argv("/data/day1", output_dir="/data/out", ost_system_review=True)
+    assert "--ost-system-review" not in base
+    assert reviewed.count("--ost-system-review") == 1
+
+
 def test_drives_run_launches_through_the_allowlist(tmp_path, monkeypatch):
     monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
 
@@ -111,6 +149,91 @@ def test_drives_run_launches_through_the_allowlist(tmp_path, monkeypatch):
     # The review checkbox defaults OFF -- review stays ON unless the
     # operator explicitly opts out, so --no-review is absent here.
     assert "--dry-run" in row["argv"] and "--no-review" not in row["argv"]
+    assert "--skip-upload" not in row["argv"]
+    assert "--ost-system-review" not in row["argv"]
+
+
+def test_drives_form_submits_non_uploading_render(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+
+    class _FakePopen:
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", lambda *a, **k: _FakePopen())
+    client = _client()
+    assert 'name="skip_upload"' in client.get("/drives").text
+    response = client.post(
+        "/drives/run",
+        data={
+            "directory": str(tmp_path / "day1"),
+            "output_dir": str(tmp_path / "out"),
+            "region": "usa",
+            "publish": "fri",
+            "lf_day": "fri",
+            "skip_upload": "on",
+            "confirm_plan": "on",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = int(response.headers["location"].rsplit("/", 1)[-1])
+    row = jobs.get_job(jobs.JobStore(tmp_path / "jobs.sqlite3"), job_id)
+    assert "--skip-upload" in row["argv"]
+    assert "--no-youtube-upload" in row["argv"]
+    assert "--dry-run" not in row["argv"]
+    assert "--force" in row["argv"]
+
+
+def test_drives_form_refuses_full_run_without_plan_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+    response = _client().post(
+        "/drives/run",
+        data={
+            "directory": str(tmp_path / "day1"),
+            "output_dir": str(tmp_path / "out"),
+            "publish": "fri",
+            "lf_day": "fri",
+            "skip_upload": "on",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "Confirm the dry-run plan" in response.text
+    assert not (tmp_path / "jobs.sqlite3").exists()
+
+
+def test_drives_form_launches_with_system_review_when_selected(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path))
+
+    class _FakePopen:
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", lambda *a, **k: _FakePopen())
+    client = _client()
+    page = client.get("/drives").text
+    assert 'name="ost_system_review"' in page
+    assert 'name="ost_system_review" checked' not in page
+    response = client.post(
+        "/drives/run",
+        data={
+            "directory": str(tmp_path / "day1"),
+            "output_dir": str(tmp_path / "out"),
+            "publish": "fri",
+            "lf_day": "fri",
+            "skip_upload": "on",
+            "ost_system_review": "on",
+            "confirm_plan": "on",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = int(response.headers["location"].rsplit("/", 1)[-1])
+    row = jobs.get_job(jobs.JobStore(tmp_path / "jobs.sqlite3"), job_id)
+    assert "--ost-system-review" in row["argv"]
+    assert "--ost-audit-confirmed" not in row["argv"]
+    assert "--force" in row["argv"]
 
 
 def test_drives_run_accepts_paired_publish_and_lf_day(tmp_path, monkeypatch):
@@ -130,6 +253,7 @@ def test_drives_run_accepts_paired_publish_and_lf_day(tmp_path, monkeypatch):
             "region": "usa",
             "publish": "tue",
             "lf_day": "tue",
+            "dry_run": "on",
         },
         follow_redirects=False,
     )
@@ -199,6 +323,7 @@ def test_drives_run_accepts_the_curated_pipeline_flags_and_brand(
             "superlong": "on",
             "shorts_target": "6",
             "shorts_gap": "45",
+            "dry_run": "on",
         },
         follow_redirects=False,
     )

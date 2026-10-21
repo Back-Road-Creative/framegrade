@@ -53,7 +53,7 @@ def test_crop_filter_downscale_uses_zscale_spline36():
     """The shorts 4K→1080 downscale goes through the one resampling scaler,
     not swscale's default bicubic, which softens detail-heavy footage."""
     result = build_crop_filter(3840, 2160)
-    assert result.endswith("zscale=w=1080:h=1920:filter=spline36"), (
+    assert result.endswith("zscale=w=1080:h=1920:filter=spline36,setsar=1"), (
         f"Expected the zscale spline36 scaler, got '{result}'"
     )
     # 1214, not the raw 1215 this pinned before: int(2160 * 1080/1920) is odd,

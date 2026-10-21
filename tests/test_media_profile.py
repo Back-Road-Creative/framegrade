@@ -124,10 +124,10 @@ def test_drive_path_hands_loaded_profile_to_engine(tmp_path, monkeypatch):
     from unittest.mock import patch
 
     import test_day_pipeline_ost_audit_gate as g
-    from gomoveshift.pipeline import day_pipeline
+    from gomoveshift.publishing import brand_policy
 
     loaded = MediaProfile(brand_text="WiredCo")
-    monkeypatch.setattr(day_pipeline, "load_media_profile", lambda slug: loaded)
+    monkeypatch.setattr(brand_policy, "load_media_profile", lambda slug: loaded)
     state = g._state_with_ost_text("2025-09-14", 1)
     out = tmp_path / "out"
     out.mkdir(parents=True, exist_ok=True)

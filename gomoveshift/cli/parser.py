@@ -451,7 +451,9 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--lf-mode",
         choices=["best_moments", "full_drive"],
         default=None,
-        help="LF selection mode. 'best_moments' (default) = sliding-window "
+        help="LF selection mode. Unset = 'full_drive' when config.drive."
+        "full_drive_part_min_sec/max_sec are both set, else 'best_moments'. "
+        "'best_moments' = sliding-window "
         "best contiguous ranges. 'full_drive' = one LF per day spanning the entire "
         "post-stop-removal timeline, or K balanced parts per day when "
         "config.drive.full_drive_part_min_sec/max_sec are set (Insta360 use case). Overrides "
@@ -562,8 +564,9 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--skip-validation",
         action="store_true",
         default=False,
-        help="EMERGENCY ONLY: bypass the terminal DoD validator gate. "
-        "Every use logs a WARNING; never set via env variable.",
+        help="Bypass the terminal DoD validator gate on a --skip-upload run only; "
+        "a live upload run refuses it and exits non-zero. Logs a WARNING; "
+        "never set via env variable.",
     )
     p.add_argument(
         "--no-audio",
@@ -694,10 +697,11 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--allow-cross-fs-source",
         action="store_true",
         default=False,
-        help="Allow source dir on a different filesystem than the staging "
-        "dir. Default refuses cross-filesystem source (WSL2 /mnt/d, NFS, "
-        "etc.) because slow IO collapses weather measurement and triples "
-        "encode wall-clock.",
+        help="Acknowledge that source video files are read from a different "
+        "filesystem than staging (WSL2 drvfs mounts, NFS). Pre-flight never refuses "
+        "that layout -- it only costs read speed -- and logs it as a "
+        "PERFORMANCE warning; this flag lowers the report to INFO. Dangling or "
+        "unreadable source files are refused regardless.",
     )
     p.add_argument(
         "--allow-degraded-weather",
@@ -833,6 +837,18 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "Use when running non-interactively (tmux, agent-launched) after "
         "reviewing the previous run's <output_base>/ost_audit_<date>.json "
         "out-of-band. Persists to state so a resume doesn't re-prompt.",
+    )
+    # Opt-in, this run only, default off.
+    p.add_argument(
+        "--ost-system-review",
+        action="store_const",
+        const=True,
+        default=None,
+        help="OST AUDIT GATE: let the route-claim system review pass the "
+        "per-day OST gate when it agrees on every LF, names no refused claim "
+        "and covers the exact burn text. Applies to THIS run only (a resume "
+        "passes on the stored hash). Without it, or when the record does not "
+        "cover the text, the gate stays pending for a person.",
     )
     # Mirror of --ost-audit-confirmed
     # for the Gate C/D content review. Argparse-sentinel.
@@ -1215,6 +1231,18 @@ def _add_enqueue_plan_parser(subparsers: argparse._SubParsersAction) -> None:
         "sidecars (default: the state file's directory).",
     )
     p.add_argument(
+        "--ignore-validate",
+        action="store_true",
+        help="Proceed although publishing-status --validate names a problem on a "
+        "platform/project this run touches. Requires --reason; the override is "
+        "written to the response_log audit table.",
+    )
+    p.add_argument(
+        "--reason",
+        default=None,
+        help="Why --ignore-validate is safe this time (required with it; audited).",
+    )
+    p.add_argument(
         "--max-shorts",
         type=int,
         default=None,
@@ -1308,6 +1336,18 @@ def _add_dispatch_queue_parser(subparsers: argparse._SubParsersAction) -> None:
         "what would be drained and calls no platform API.",
     )
     p.add_argument(
+        "--ignore-validate",
+        action="store_true",
+        help="Proceed although publishing-status --validate names a problem on a "
+        "platform/project this run touches. Requires --reason; the override is "
+        "written to the response_log audit table.",
+    )
+    p.add_argument(
+        "--reason",
+        default=None,
+        help="Why --ignore-validate is safe this time (required with it; audited).",
+    )
+    p.add_argument(
         "--sidecar-dir",
         type=Path,
         default=None,
@@ -1315,6 +1355,128 @@ def _add_dispatch_queue_parser(subparsers: argparse._SubParsersAction) -> None:
         "(default: seo.storage_path). The queue row carries only "
         "(project, short_index, platform), so the full record is read back "
         "from the sidecar that produced it.",
+    )
+
+
+def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser("queue", help="Audited operator actions on the delivery queue")
+    actions = p.add_subparsers(dest="queue_action", required=True)
+    r = actions.add_parser(
+        "recover-terminal",
+        help="Re-queue ONE failed_permanent Instagram row or missing_remote YouTube row as a "
+        "new linked delivery, only if every recovery gate passes (refuses and writes nothing "
+        "otherwise)",
+    )
+    r.add_argument("--id", type=int, required=True, help="Delivery id of the terminal row.")
+    r.add_argument(
+        "--authorized-by",
+        required=True,
+        help="Who authorized this and when, recorded verbatim on the new row and audit log.",
+    )
+    r.add_argument(
+        "--sidecar-dir",
+        type=Path,
+        default=None,
+        help="Directory holding publish-plan sidecars (default: seo.storage_path), as dispatch-queue.",
+    )
+    r.add_argument(
+        "--apply",
+        action="store_true",
+        help="Insert the recovery row (default: dry run -- run every gate, write nothing).",
+    )
+    m = actions.add_parser(
+        "mark-missing-remote",
+        help="Mark every published YouTube row whose video a catalog-fetch checked by id "
+        "and did not find as the terminal missing_remote. Dry run unless --apply; "
+        "never deletes, re-uploads or writes to YouTube",
+    )
+    m.add_argument(
+        "--live-catalog",
+        required=True,
+        help="live_catalog.json from `gomoveshift catalog-fetch --known-ids-from-queue`",
+    )
+    m.add_argument("--apply", action="store_true", help="Write the marks (default: dry run).")
+    s = actions.add_parser(
+        "sync-plan-titles",
+        help="Write each retitled short's newest APPLIED title (tools/retitle_apply.py audit "
+        "log) into its publish-plan sidecar. Dry run unless --apply; local files only, "
+        "never writes to YouTube",
+    )
+    s.add_argument(
+        "--audit",
+        action="append",
+        required=True,
+        metavar="PATH",
+        help="retitle_apply audit log (<worklist>.audit.jsonl); repeatable",
+    )
+    s.add_argument("--apply", action="store_true", help="Write the sidecars (default: dry run).")
+    t = actions.add_parser(
+        "sync-plan-tags",
+        help="Rewrite each queued YouTube Short's publish-plan tags to the reviewable set "
+        "(Waypost tag templates plus the clip's own counties and roads) when its sidecar "
+        "predates that rule. Dry run unless --apply; local files only",
+    )
+    t.add_argument("--apply", action="store_true", help="Write the sidecars (default: dry run).")
+    o = actions.add_parser(
+        "reslot-overdue-manual",
+        help="Move each TikTok row still awaiting a manual post more than 24h past its slot "
+        "to the region's next Waypost shorts time; a pack row also gets a RESLOTTED caption "
+        "block. Operator-only, dry run unless --apply; posts nothing, renames no file",
+    )
+    o.add_argument("--id", type=int, default=None, help="Only this delivery id.")
+    o.add_argument("--apply", action="store_true", help="Move the rows (default: dry run).")
+
+
+def _add_catalog_inventory_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "catalog-inventory",
+        help="Join a live channel catalog (live_catalog.json) to local evidence and "
+        "write the per-slice title-accuracy CSVs. Read-only on every source",
+    )
+    p.add_argument(
+        "--live-catalog", required=True, help="live_catalog.json from a videos.list pass"
+    )
+    p.add_argument("--out-dir", required=True, help="Directory for longform/shorts CSV slices")
+    p.add_argument(
+        "--vid-output-dir", default=None, help="Video output root (*/youtube_uploads.json)"
+    )
+    p.add_argument("--output-dir", default=None, help="Output root (*/tracking/*.json)")
+    p.add_argument("--queue-db", default=None, help="social_queue.sqlite3 (opened read-only)")
+    p.add_argument("--events-jsonl", default=None, help="Waypost events.jsonl")
+    p.add_argument("--ledger", default=None, help=".content_ledger.json")
+
+
+def _add_catalog_classify_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "catalog-classify",
+        help="Build each long-form video's GPS location-evidence record and classify its "
+        "live title A-E (writes classification.csv, evidence.jsonl, worklist-AB.csv). "
+        "Read-only: never writes to YouTube",
+    )
+    p.add_argument(
+        "--inventory", required=True, help="longform.csv / shorts-*.csv from catalog-inventory"
+    )
+    p.add_argument("--out-dir", required=True, help="Directory for the classification outputs")
+    p.add_argument("--kind", choices=("long", "short", "all"), default="long")
+    p.add_argument("--limit", type=int, default=None, help="Classify only the first N rows")
+    p.add_argument("--output-dir", default=None, help="Output root (default: GMS_OUTPUT_DIR)")
+
+
+def _add_catalog_fetch_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "catalog-fetch",
+        help="Read-only live pull of every own-channel video into the live_catalog.json "
+        "that catalog-inventory reads. Never writes to YouTube",
+    )
+    p.add_argument("--out", required=True, help="live_catalog.json to write")
+    p.add_argument(
+        "--known-ids", default=None, help='JSON {"known_ids": [...]} fetched even if unlisted'
+    )
+    p.add_argument(
+        "--known-ids-from-queue",
+        action="store_true",
+        help="Also check by id every upload id the delivery queue holds for a published "
+        "or uploaded YouTube row, so `queue mark-missing-remote` can act on the result",
     )
 
 
@@ -1333,6 +1495,23 @@ def _add_publishing_status_parser(subparsers: argparse._SubParsersAction) -> Non
         "behind by a worker that no longer exists. Read-only, dispatches nothing; "
         "exits 1 when anything is wrong. Run it on a restored backup before "
         "letting a drain near it",
+    )
+    p.add_argument(
+        "--live-catalog",
+        default=None,
+        help="With --validate: live_catalog.json from `gomoveshift catalog-fetch`. "
+        "Also report every published YouTube delivery whose video the channel no "
+        "longer returns, or whose live title differs from its publish plan. "
+        "Reports only; never re-queues, re-uploads or retitles",
+    )
+    p.add_argument(
+        "--retitle-audit",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="With --live-catalog: a tools/retitle_apply.py audit log (repeatable). A live "
+        "title matching its newest APPLIED retitle is reported as plan_stale_retitled "
+        "(report-only, names the sync command), not published_title_drift",
     )
 
 
@@ -1446,6 +1625,104 @@ def _add_schedule_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Content ledger JSON to read. Defaults to the shared ledger.",
     )
     p.add_argument("--json", action="store_true", help="Emit the report as JSON.")
+
+
+def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "health",
+        help="Pipeline health: `check` detects failed drives and stalled cadence and writes "
+        "incident rows (exit 1 while any incident is open); `heal` auto-resumes failed drives",
+    )
+    sub = p.add_subparsers(dest="health_command", required=True)
+    c = sub.add_parser("check", help="Run the detection rules once")
+    c.add_argument(
+        "--data-root",
+        type=Path,
+        default=None,
+        help="Root directory the health state lives under (env GMS_DATA_ROOT).",
+    )
+    c.add_argument(
+        "--incidents-dir",
+        type=Path,
+        default=None,
+        help="Incident rows dir (env GMS_HEALTH_INCIDENTS_DIR).",
+    )
+    c.add_argument(
+        "--jobs-dir",
+        type=Path,
+        default=None,
+        help="Job records dir (default <data root>/logs/jobs).",
+    )
+    c.add_argument(
+        "--code-root", type=Path, default=None, help="Checkout whose HEAD is staging_sha."
+    )
+    c.add_argument(
+        "--staging-sha", default=None, help="Mirror HEAD to record (default: git rev-parse HEAD)."
+    )
+    c.add_argument(
+        "--ledger-path",
+        type=Path,
+        default=None,
+        help="Content ledger JSON (default: the shared ledger).",
+    )
+    c.add_argument("--json", action="store_true", help="Print the open incidents as JSON.")
+    h = sub.add_parser(
+        "heal",
+        help="Auto-resume failed drives (audit only: --skip-upload --no-youtube-upload) from "
+        "their resume.json, once per new mirror SHA",
+    )
+    for flag, kind, text in (
+        ("--data-root", Path, "Root directory the health state lives under (env GMS_DATA_ROOT)."),
+        ("--incidents-dir", Path, "Incident rows dir (env GMS_HEALTH_INCIDENTS_DIR)."),
+        ("--jobs-dir", Path, "Job records dir (default <data root>/logs/jobs)."),
+        (
+            "--code-root",
+            Path,
+            "Checkout holding the job-runner script and whose HEAD is the mirror SHA.",
+        ),
+        ("--staging-sha", None, "Mirror HEAD (default: git rev-parse HEAD of the code root)."),
+        (
+            "--recipe",
+            Path,
+            "Heal only this drive's resume.json, registering it as an incident first "
+            "(a drive no `health check` saw fail, e.g. an evidence run).",
+        ),
+    ):
+        h.add_argument(flag, type=kind, default=None, help=text)
+    h.add_argument(
+        "--dry-run", action="store_true", help="Report what would launch; change nothing."
+    )
+    h.add_argument("--json", action="store_true", help="Print the result as JSON.")
+    b = sub.add_parser(
+        "backlog",
+        help="Launch the next drive_backlog.yaml row for the region's first uncovered LF slot "
+        "(audit only: --skip-upload --no-youtube-upload); a repeat call is a no-op",
+    )
+    b.add_argument("--region", required=True, help="Waypost region (e.g. usa).")
+    for flag, text in (
+        (
+            "--stages-root",
+            "Stage roots parent; the run gets GMS_INTERMEDIATE_DIR=<this>/<project>.",
+        ),
+        ("--output-root", "Output parent; the run writes <this>/<project>."),
+    ):
+        b.add_argument(flag, type=Path, required=True, help=text)
+    for flag, kind, text in (
+        ("--sources-root", Path, "Per-day symlink dirs (default <output root>/_sources)."),
+        ("--data-root", Path, "Root directory the health state lives under (env GMS_DATA_ROOT)."),
+        ("--incidents-dir", Path, "Incident rows dir (env GMS_HEALTH_INCIDENTS_DIR)."),
+        ("--jobs-dir", Path, "Job records dir (default <data root>/logs/jobs)."),
+        (
+            "--code-root",
+            Path,
+            "Checkout holding the job-runner script, the lease script and the venv.",
+        ),
+        ("--staging-sha", None, "Mirror HEAD to record (default: git rev-parse HEAD)."),
+        ("--ledger-path", Path, "Content ledger JSON (default: the shared ledger)."),
+    ):
+        b.add_argument(flag, type=kind, default=None, help=text)
+    b.add_argument("--dry-run", action="store_true", help="Report the plan; change nothing.")
+    b.add_argument("--json", action="store_true", help="Print the result as JSON.")
 
 
 def _add_sync_site_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -3163,7 +3440,11 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_enqueue_plan_parser(subparsers)
     _add_enqueue_asset_parser(subparsers)
     _add_dispatch_queue_parser(subparsers)
+    _add_queue_parser(subparsers)
     _add_publishing_status_parser(subparsers)
+    _add_catalog_inventory_parser(subparsers)
+    _add_catalog_classify_parser(subparsers)
+    _add_catalog_fetch_parser(subparsers)
     _add_metrics_parser(subparsers)
     _add_platform_decline_parser(subparsers)
     _add_post_anomaly_parser(subparsers)
@@ -3172,6 +3453,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_comments_parser(subparsers)
     _add_youtube_auth_parser(subparsers)
     _add_schedule_parser(subparsers)
+    _add_health_parser(subparsers)
     _add_sync_site_parser(subparsers)
     _add_reconcile_playlists_parser(subparsers)
     _add_route_story_prepare_parser(subparsers)

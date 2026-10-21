@@ -249,8 +249,9 @@ def test_invalidate_phases_drops_stamped_version_mismatch():
     kept = invalidate_phases_if_code_version_stale(
         saved, ["phase_a", "phase_bc_day_first", "phase_d"]
     )
-    # phase_bc stamped 999 != current → dropped; phase_a matches; phase_d untracked.
-    assert kept == ["phase_a", "phase_d"]
+    # phase_bc stamped 999 != current → dropped, and phase_d with it (it reads
+    # phase_bc's record); phase_a matches.
+    assert kept == ["phase_a"]
 
 
 def test_invalidate_phases_lenient_on_missing_stamp():
@@ -491,3 +492,43 @@ def test_dual_lock_contends_across_differing_stages_base(tmp_path):
     s2, sp2, p2, pp2 = _acquire_run_locks(project, stages_b, output)
     _release_run_lock(s2, sp2)
     _release_run_lock(p2, pp2)
+
+
+def test_pre_unresolved_split_checkpoint_re_enters_phase_bc():
+    # A phase_bc stamped 1 predates the unresolved-sample split: its persisted route claims count
+    # unresolved samples as outside, and phase D only reads that record. The
+    # resume must re-run phase_bc so the route is re-measured, and phase D so
+    # its text is rebuilt from the new record.
+    from gomoveshift.pipeline.orchestrator_fingerprint import (
+        invalidate_phases_if_code_version_stale,
+    )
+
+    saved = {"phase_code_versions": {"phase_bc_day_first": 1}}
+    kept = invalidate_phases_if_code_version_stale(saved, ["phase_bc_day_first", "phase_d"])
+    assert kept == []
+
+
+def test_current_phase_bc_keeps_resumed_phase_d():
+    from gomoveshift.pipeline.orchestrator_fingerprint import (
+        PHASE_CODE_VERSIONS,
+        invalidate_phases_if_code_version_stale,
+    )
+
+    saved = {"phase_code_versions": dict(PHASE_CODE_VERSIONS)}
+    kept = invalidate_phases_if_code_version_stale(
+        saved, ["phase_a", "phase_bc_day_first", "phase_d"]
+    )
+    assert kept == ["phase_a", "phase_bc_day_first", "phase_d"]
+
+
+def test_pre_place_gate_checkpoint_re_enters_phase_bc():
+    # A phase_bc stamped 2 predates the zero-tolerance place gate: its persisted
+    # route record has no bins or windows_key, so phase D refuses it as
+    # unverifiable. The resume must re-run phase_bc to re-measure and re-prove.
+    from gomoveshift.pipeline.orchestrator_fingerprint import (
+        invalidate_phases_if_code_version_stale,
+    )
+
+    saved = {"phase_code_versions": {"phase_bc_day_first": 2}}
+    kept = invalidate_phases_if_code_version_stale(saved, ["phase_bc_day_first", "phase_a"])
+    assert "phase_bc_day_first" not in kept

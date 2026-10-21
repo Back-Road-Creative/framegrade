@@ -120,6 +120,7 @@ _FAKE_REPORT = {
             "slot": "2026-08-18T16:00:00-04:00",
             "shorts_windows": ["14:00", "18:00"],
             "shorts_required": 2,
+            "shorts_slots": 14,
             "earliest_for_region": True,
         },
         {
@@ -128,6 +129,7 @@ _FAKE_REPORT = {
             "slot": "2026-08-17T14:00:00-04:00",
             "shorts_windows": ["08:00", "12:00"],
             "shorts_required": 2,
+            "shorts_slots": 14,
             "earliest_for_region": True,
         },
     ],
@@ -145,7 +147,7 @@ def _config_with_journey_map(mapping):
 
 def test_schedule_view_filters_by_journey_via_active_journey_region_map(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: dict(_FAKE_REPORT)
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: dict(_FAKE_REPORT)
     )
     config = _config_with_journey_map({"usa": "journey-a", "ireland": "journey-b"})
     result = console_schedule.schedule_view(config, journey="journey-a")
@@ -157,7 +159,7 @@ def test_schedule_view_filters_by_journey_via_active_journey_region_map(monkeypa
 
 def test_schedule_view_unknown_journey_filters_to_nothing_not_everything(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: dict(_FAKE_REPORT)
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: dict(_FAKE_REPORT)
     )
     config = _config_with_journey_map({"usa": "journey-a", "ireland": "journey-b"})
     result = console_schedule.schedule_view(config, journey="no-such-journey")
@@ -170,7 +172,7 @@ def test_schedule_view_unknown_journey_filters_to_nothing_not_everything(monkeyp
 
 def test_schedule_view_no_journey_param_behaviour_unchanged(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: dict(_FAKE_REPORT)
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: dict(_FAKE_REPORT)
     )
     config = _config_with_journey_map({"usa": "journey-a"})
     result = console_schedule.schedule_view(config)
@@ -180,7 +182,7 @@ def test_schedule_view_no_journey_param_behaviour_unchanged(monkeypatch):
 
 def test_schedule_route_renders_journey_indicator_and_filters(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: dict(_FAKE_REPORT)
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: dict(_FAKE_REPORT)
     )
     fake_config = _config_with_journey_map({"usa": "journey-a", "ireland": "journey-b"})
     monkeypatch.setattr(console_schedule.Config, "load", staticmethod(lambda: fake_config))
@@ -194,7 +196,7 @@ def test_schedule_route_renders_journey_indicator_and_filters(monkeypatch):
 
 def test_schedule_route_unknown_journey_renders_visibly_not_full_list(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: dict(_FAKE_REPORT)
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: dict(_FAKE_REPORT)
     )
     fake_config = _config_with_journey_map({"usa": "journey-a"})
     monkeypatch.setattr(console_schedule.Config, "load", staticmethod(lambda: fake_config))

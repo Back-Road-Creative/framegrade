@@ -46,6 +46,23 @@ COLOR_TAG_CONTRACT: dict[str, str] = {
 _AUDIO_SCAN_TIMEOUT_MULTIPLIER = 1.0
 _AUDIO_SCAN_TIMEOUT_FLOOR_SEC = 300
 
+# loudnorm prints its JSON for whatever it decoded, so a decode cut short (an I/O stall on a
+# drvfs stage dir) reads a partial file's loudness as the whole file's. r5 (2026-10-20) failed
+# at -42.9 on an LF that re-measures -45.0. A reading whose last ``time=`` progress stops more
+# than this short of the probed duration, or whose ffmpeg exited nonzero, is re-taken once and
+# otherwise fails as incomplete; it is never judged against the ceiling.
+_LOUDNESS_COVERAGE_SLACK_SEC = 2.0
+_PROGRESS_TIME_RE = re.compile(r"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def decoded_seconds(stderr: str) -> float | None:
+    """The last ``time=HH:MM:SS.ss`` ffmpeg progress stamp in ``stderr`` (None if absent)."""
+    stamps = _PROGRESS_TIME_RE.findall(stderr)
+    if not stamps:
+        return None
+    h, m, s = stamps[-1]
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
 
 def color_tag_issues(video_stream: dict) -> list[str]:
     """Return one issue per colour tag that is absent or off-contract.
@@ -92,16 +109,22 @@ def picture_quality_gate(
     *,
     source_sharpness: float | None,
     changed: bool,
+    source_ringing: float | None = None,
 ) -> GateResult:
-    """Fail a delivered file that is softer than its source or rings.
+    """Fail a delivered file that is softer than its source or rings more than it.
 
-    Skipped (recorded as passed, with a message -- never absent) when no
-    rendition step changed the picture or the source sharpness is unmeasured.
+    The ringing limit is ``RINGING_MAX`` or the source's own ringing plus
+    ``RINGING_SOURCE_MARGIN``, whichever is higher; an unmeasured source
+    ringing leaves ``RINGING_MAX`` alone. Skipped (recorded as passed, with a
+    message -- never absent) when no rendition step changed the picture or the
+    source sharpness is unmeasured.
     """
     gate = "picture_quality"
     if not changed or source_sharpness is None:
         return GateResult(gate=gate, passed=True, message=PICTURE_SKIPPED_MESSAGE)
-    sharp, ring = quality.sample_delivered_picture(video_path, duration)
+    sharp, ring = quality.sample_delivered_picture(
+        video_path, duration, quality.PICTURE_GATE_SAMPLES
+    )
     if not sharp:
         return GateResult(
             gate=gate, passed=False, message="no frame could be decoded for the picture check"
@@ -115,8 +138,12 @@ def picture_quality_gate(
             f"delivered sharpness {delivered:.1f} < {floor:.1f} "
             f"(source {source_sharpness:.1f} less {quality.DELIVERED_SHARPNESS_TOLERANCE:.0%})"
         )
-    if ringing > quality.RINGING_MAX:
-        problems.append(f"ringing {ringing:.4f} > max {quality.RINGING_MAX:.4f}")
+    ring_max = quality.RINGING_MAX
+    if source_ringing is not None:
+        ring_max = max(ring_max, source_ringing * (1.0 + quality.RINGING_SOURCE_MARGIN))
+    if ringing > ring_max:
+        basis = "" if source_ringing is None else f" (source {source_ringing:.4f})"
+        problems.append(f"ringing {ringing:.4f} > max {ring_max:.4f}{basis}")
     if problems:
         return GateResult(gate=gate, passed=False, message="; ".join(problems))
     return GateResult(
@@ -166,27 +193,53 @@ class LongformValidator:
         duration = self._ffprobe.probe_duration(video_path)
         return max(_AUDIO_SCAN_TIMEOUT_FLOOR_SEC, int(duration * _AUDIO_SCAN_TIMEOUT_MULTIPLIER))
 
+    def _measure_loudnorm(self, video_path: Path) -> tuple[str, str | None]:
+        """One loudnorm pass: ``(stderr, problem)``; ``problem`` names why the reading does
+        not cover the file (see ``_LOUDNESS_COVERAGE_SLACK_SEC``), None when it does."""
+        cmd = [
+            "ffmpeg",
+            "-i",
+            str(video_path),
+            "-vn",
+            "-af",
+            "loudnorm=print_format=json",
+            "-f",
+            "null",
+            "-",
+        ]
+        result = self._ffprobe._subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=self._audio_scan_timeout_sec(video_path),
+        )
+        stderr = result.stderr or ""
+        if result.returncode != 0:
+            return stderr, f"ffmpeg exited {result.returncode}"
+        expected = self._ffprobe.probe_duration(video_path)
+        decoded = decoded_seconds(stderr)
+        if expected and decoded is not None and decoded < expected - _LOUDNESS_COVERAGE_SLACK_SEC:
+            return stderr, f"decoded {decoded:.1f}s of {expected:.1f}s"
+        return stderr, None
+
     def check_audio_loudness(self, video_path: Path) -> GateResult:
         """Measure output loudness and verify it's below threshold."""
         try:
-            cmd = [
-                "ffmpeg",
-                "-i",
-                str(video_path),
-                "-vn",
-                "-af",
-                "loudnorm=print_format=json",
-                "-f",
-                "null",
-                "-",
-            ]
-            result = self._ffprobe._subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._audio_scan_timeout_sec(video_path),
-            )
-            stderr = result.stderr or ""
+            stderr, problem = self._measure_loudnorm(video_path)
+            if problem:
+                logger.warning(
+                    "audio_loudness: %s for %s; measuring again. ffmpeg stderr tail: %s",
+                    problem,
+                    video_path,
+                    stderr[-600:],
+                )
+                stderr, problem = self._measure_loudnorm(video_path)
+            if problem:
+                return GateResult(
+                    gate="audio_loudness",
+                    passed=False,
+                    message=f"Loudness measurement incomplete twice ({problem})",
+                )
 
             json_match = re.search(
                 r'\{\s*\n\s*"input_i".*?\}',
@@ -365,11 +418,16 @@ class LongformValidator:
         *,
         source_sharpness: float | None,
         changed: bool,
+        source_ringing: float | None = None,
     ) -> GateResult:
         """Post-rendition picture gate -- see ``picture_quality_gate``."""
         duration = self._ffprobe.probe_duration(video_path) if changed else 0.0
         return picture_quality_gate(
-            video_path, duration, source_sharpness=source_sharpness, changed=changed
+            video_path,
+            duration,
+            source_sharpness=source_sharpness,
+            changed=changed,
+            source_ringing=source_ringing,
         )
 
     def check_video_quality(

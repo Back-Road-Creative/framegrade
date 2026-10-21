@@ -929,6 +929,8 @@ class PipelineUploader:
                     )
                 except _SSL_ERRORS as exc:
                     last_exc = exc
+                    if attempt == len(_SSL_RETRY_DELAYS):
+                        break  # last attempt: nothing left to wait for
                     jitter = 0.5 + random.random()  # [0.5, 1.5)
                     delay = base_delay * jitter
                     logger.warning(

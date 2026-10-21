@@ -1103,6 +1103,11 @@ def _build_day_blur_mask(
         # detect_and_track leaves frames between samples with no entry at all,
         # and the renderer reads "no entry" as "nothing to blur". Fill those
         # gaps before the timeline is built — see fill_detection_gaps.
+        # A detector miss must not unmask an object still in frame: hold it per object.
+        frame_boxes = blur_gate.hold_missed_detections(
+            frame_boxes,
+            sample_interval_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)),
+        )
         frame_boxes = blur_gate.fill_detection_gaps(
             frame_boxes,
             max_gap_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)) + 1,
@@ -1241,13 +1246,18 @@ def _repair_cabin_leaks(
                     if x1 <= x0 or y1 <= y0:
                         continue
                     box = br.dilate_box((x0, y0, x1 - x0, y1 - y0), timeline.box_dilation_px, w, h)
+                    px0, py0, px1, py1 = blur_gate.plate_band_region(bx, w, h)
+                    band = br.dilate_box(
+                        (px0, py0, px1 - px0, py1 - py0), timeline.box_dilation_px, w, h
+                    )
                     lo = max(0, idx - CABIN_REPAIR_HOLD_FRAMES)
                     hi = idx + CABIN_REPAIR_HOLD_FRAMES
                     for f in range(lo, (min(hi, n - 1) if n > 0 else hi) + 1):
                         boxes = timeline.frame_boxes.setdefault(f, [])
-                        if box not in boxes:
-                            boxes.append(box)
-                            added += 1
+                        for new_box in (box, band):
+                            if new_box not in boxes:
+                                boxes.append(new_box)
+                                added += 1
         finally:
             cap.release()
         if not added:

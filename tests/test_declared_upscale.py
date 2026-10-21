@@ -82,7 +82,7 @@ def test_sub4k_source_upscaled_and_recorded(tmp_path):
         master_record=record,
         regular_lf_indices=[0, 1],
     )
-    _, changed = picture_inputs_from_state(
+    _, _, changed = picture_inputs_from_state(
         SimpleNamespace(source_sharpness=[], day_artifacts=[art])
     )
     assert changed == {0: True, 1: True}
@@ -160,7 +160,7 @@ def test_plan_shapes_and_claim_policy():
 
 def test_short_from_narrow_crop_scaled_through_one_scaler():
     chain = build_crop_filter(1600, 900)  # 9:16 crop is 506 wide: an upscale
-    assert chain == "crop=506:900,zscale=w=1080:h=1920:filter=spline36"
+    assert chain == "crop=506:900,zscale=w=1080:h=1920:filter=spline36,setsar=1"
     assert "scale=" not in chain.replace("zscale=", "")
     assert crop_upscaled_from(1600, 900) == [506, 900]
     assert crop_upscaled_from(3840, 2160) is None
@@ -192,7 +192,7 @@ def _run_claim_gate(tmp_path, record, native_only):
         regular_lf_paths=[big],
         metadata_per_lf={1: {}},
         perceptual_check_fn=lambda p, d: None,
-        picture_check_fn=lambda *a: None,
+        picture_check_fn=lambda *a, **k: None,
         day_records={1: record},
         claim_native_resolution_only=native_only,
     )

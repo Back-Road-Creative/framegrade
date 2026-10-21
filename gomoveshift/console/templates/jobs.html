@@ -26,6 +26,9 @@
   </div>
   {% endif %}
 
+  {% if not job_rows %}
+  <p>No jobs yet.</p>
+  {% endif %}
   <ul>
     {% for job in job_rows %}
     <li{% if job.status == "failed" %} class="job-failed"{% endif %}>

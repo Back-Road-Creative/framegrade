@@ -57,6 +57,7 @@ from ...config import get_config
 from .._yt_creds import DEFAULT_CREDENTIALS_DIR, load_youtube_credentials
 from ..endscreen_sidecar import format_endscreen_checklist_line
 from ..exceptions import YouTubeQuotaError
+from ..final_text_record import PublicationGateError
 from ..playlist_resolver import resolve_playlist
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,14 @@ YOUTUBE_COMMENT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
 
 MAX_TITLE_LEN = 100
+
+#: Publication gate. True: the final-text byte-bind for
+#: title, description and tags is on. If False, ``upload_video`` raises before
+#: ``videos().insert`` on every surface. Deliberately no env var or flag.
+FINAL_TEXT_BIND_ON = True
+PUBLICATION_GATE_MESSAGE = (
+    "publication_gate: final_text_bind_off — no YouTube insert until the final-text byte-bind is on"
+)
 # YouTube Data API v3 hard-rejection thresholds (not SEO guidance):
 MAX_DESCRIPTION_BYTES = 5000
 MAX_TAGS_TOTAL_LEN = 500
@@ -297,6 +306,8 @@ class YouTubeUploader:
         privacy: str = "private",
         recording_date: Optional[str] = None,
         contains_synthetic_media: Optional[bool] = None,
+        final_text_review: Any = None,
+        final_text_context: Optional[dict] = None,
     ) -> str:
         """
         Upload a video file and return the YouTube video ID.
@@ -404,6 +415,25 @@ class YouTubeUploader:
             resumable=True,
             mimetype="video/*",
         )
+
+        if final_text_review is not None or final_text_context is not None:
+            # G2: the last check before the irreversible insert — the review
+            # must agree and cover exactly this title and the current state.
+            from ..final_text_record import check_final_text
+
+            check_final_text(
+                final_text_review,
+                final_text_context,
+                title,
+                description=description,
+                tags=tags,
+            )
+
+        if not globals().get("FINAL_TEXT_BIND_ON", False):  # absent reads as off
+            # Until the description/tag byte-bind is on, no insert
+            # leaves this process. Not an env var or a flag: only a code change
+            # (flipping the constant) opens it.
+            raise PublicationGateError(PUBLICATION_GATE_MESSAGE)
 
         request = service.videos().insert(
             part=part,
@@ -805,6 +835,7 @@ class YouTubeUploader:
         publish_at: Optional[datetime] = None,
         privacy: str = "private",
         recording_date: Optional[str] = None,
+        final_text_context: Optional[dict] = None,
     ) -> str:
         """Upload + assign to the resolved playlist.
 
@@ -822,6 +853,9 @@ class YouTubeUploader:
         ``upload_video`` + ``assign_video_to_resolved_playlist`` pair
         directly.
         """
+        from ..title_decision import require_title_decision
+
+        require_title_decision(title, metadata)
         video_id = self.upload_video(
             video_path,
             title=title,
@@ -831,6 +865,8 @@ class YouTubeUploader:
             publish_at=publish_at,
             privacy=privacy,
             recording_date=recording_date,
+            final_text_review=metadata.get("final_text_review") if final_text_context else None,
+            final_text_context=final_text_context,
         )
         self.assign_video_to_resolved_playlist(video_id, metadata=metadata, config=config)
         # Emit the operator end-screen checklist line for this
@@ -859,6 +895,7 @@ class YouTubeUploader:
         config: Any = None,
         recording_date: Optional[str] = None,
         persist: Optional[Callable[[], None]] = None,
+        plan_lf: Any = None,
     ) -> dict:
         """
         Upload a long-form video unless state shows it is already uploaded.
@@ -906,6 +943,19 @@ class YouTubeUploader:
             logger.info(f"LF {lf_idx} already uploaded as {existing['video_id']} — skipping")
             return existing
 
+        # U5: the title about to ship must be the one Waypost's decision chose;
+        # a format or resume path that replaced it is refused before insert.
+        from ..title_decision import require_title_decision
+
+        require_title_decision(title, metadata)
+        decision = metadata.get("title_decision") if isinstance(metadata, dict) else None
+        # G2: a GPS-bearing LF needs an agreeing final-text review; the
+        # context is recomputed from current state, never read from the review.
+        from ..final_text_record import final_text_context
+
+        ft_context = final_text_context(state, lf_idx, plan_lf, metadata)
+        ft_review = metadata.get("final_text_review") if ft_context else None
+
         if playlist_expected:
             # Split upload from playlist assignment so we can
             # persist ``video_id`` BEFORE attempting the playlist insert.
@@ -920,6 +970,8 @@ class YouTubeUploader:
                 publish_at=publish_at,
                 privacy=privacy,
                 recording_date=recording_date,
+                final_text_review=ft_review,
+                final_text_context=ft_context,
             )
             record = {
                 "video_id": video_id,
@@ -928,6 +980,8 @@ class YouTubeUploader:
                 "title": title[:MAX_TITLE_LEN],
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
             }
+            if decision:
+                record["title_decision"] = decision
             uploads[lf_idx] = record
             # ``videos.insert`` above is IRREVERSIBLE and the video is now
             # live on YouTube, while everything after this line is fallible
@@ -958,6 +1012,8 @@ class YouTubeUploader:
                 publish_at=publish_at,
                 privacy=privacy,
                 recording_date=recording_date,
+                final_text_review=ft_review,
+                final_text_context=ft_context,
             )
             record = {
                 "video_id": video_id,
@@ -966,5 +1022,7 @@ class YouTubeUploader:
                 "title": title[:MAX_TITLE_LEN],
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
             }
+            if decision:
+                record["title_decision"] = decision
             uploads[lf_idx] = record
         return record

@@ -33,7 +33,9 @@ import yaml
 from ..models import ResolvedLocation
 from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
+from .final_text_record import reviewable_short_tags
 from .geo_constants import US_STATE_ABBREVS
+from .title_decision import decide_title, short_place_facts
 from .weather import WeatherCondition, WeatherResult
 
 logger = logging.getLogger(__name__)
@@ -384,6 +386,8 @@ class SocialPost:
     # gate checks each shipped surface's county against this set; empty for a
     # GPS-less / legacy short (no per-short region → gate no-ops).
     sampled_regions: list[str] = field(default_factory=list)
+    #: The clip's OWN GPS road names; empty for an LF or a road-less clip.
+    sampled_roads: list[str] = field(default_factory=list)
     # Whether this short is flagged for the interactive family — the
     # generator withholds the place from ``youtube_title``, ``tiktok_title``,
     # every ``captions[...]``/``caption`` and ``youtube_tags`` by
@@ -398,6 +402,10 @@ class SocialPost:
     # instagram_adapter.py) keep reading it unchanged. Empty dict for legacy
     # construction (e.g. an older sidecar round-trip).
     captions: "dict[str, str]" = field(default_factory=dict)
+    # Waypost's title decision for ``youtube_title`` (format "short").
+    # The publish plan refuses a YouTube title that is not its
+    # ``chosen_title``. None for an older sidecar round-trip.
+    title_decision: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -412,6 +420,7 @@ class SocialPost:
             "pinterest_board": self.pinterest_board,
             "first_comment": self.first_comment,
             "interactive": self.interactive,
+            "title_decision": self.title_decision,
         }
 
 
@@ -623,13 +632,13 @@ _PLATFORM_CAPTION_TEMPLATES = {
 # platform caption while the title/OST correctly hide it.
 LOCATION_WITHHELD = "this route"
 
-# Base tags that go on every video (kept small so rotating tags fit in 15 cap)
+# Base tags that go on every video (kept small so rotating tags fit in 15 cap).
+# Each is a Waypost tag template, so a Short's final-text review can cover it.
+# "driving" and "travel" have no template and were dropped.
 BASE_TAGS = [
     "POV driving",
     "drive",
     "road trip",
-    "driving",
-    "travel",
     "drive with me",
 ]
 
@@ -699,6 +708,7 @@ class SocialGenerator:
         self.resolved_location = resolved_location
         # Set only on a per-short variant: the short's OWN clip-GPS regions.
         self._own_regions: Optional[list[str]] = None
+        self._own_roads: list[str] = []
         self.project_name = project_name
         self.pinterest_board = pinterest_board
         self.youtube_category = youtube_category
@@ -1382,13 +1392,16 @@ class SocialGenerator:
         if self.county and not interactive:
             self._dedup_add(tags, [self.county])
 
-        # Add state abbreviation from location. Match whole state names on word
-        # boundaries, longest name first, so "West Virginia" is tested before
-        # "Virginia" — a bare substring test tagged every West-Virginia short VA.
+        # Add state abbreviation from the location's STATE SLOT only — the
+        # trailing comma component — longest name first, so "West Virginia" is
+        # tested before "Virginia". A state name inside the county ("Washington
+        # County, Virginia") is not a state claim; tagging it WA was a false
+        # location claim No comma → no state slot → no tag.
+        _head, comma, state_slot = (self.location or "").rpartition(",")
         for state_name, abbrev in sorted(
             US_STATE_ABBREVS.items(), key=lambda kv: len(kv[0]), reverse=True
         ):
-            if re.search(rf"\b{re.escape(state_name)}\b", self.location):
+            if comma and re.match(rf"\s*{re.escape(state_name)}\b", state_slot):
                 self._dedup_add(tags, [abbrev])
                 break
 
@@ -1468,6 +1481,11 @@ class SocialGenerator:
                 # is a subjective claim on a ContentValidator-unseen tag surface.
                 weather_tags.extend(["sunny drive"])
             self._dedup_add(tags, weather_tags)
+
+        # A Short (own clip-GPS regions) keeps only tags Waypost can review:
+        # its tag templates, the clip's county names and the clip's own road names.
+        if self._own_regions:
+            tags = reviewable_short_tags(tags, self._own_regions, self._own_roads)
 
         # Case-insensitive dedup (final pass to catch duplicates from extend)
         seen_lower: set[str] = set()
@@ -1685,11 +1703,22 @@ class SocialGenerator:
                 short_index, interactive=interactive
             )
 
+            baseline = title[:100]  # YT max 100
+            place_facts = None
+            if hand is None and title_facts is not None and title_facts.place_ok:
+                place_facts = short_place_facts(
+                    baseline,
+                    self.location_short,
+                    self._own_regions,
+                    segment_id=f"lf{self.series_part or 0:02d}-short{short_index:03d}",
+                )
+            decision = decide_title("short", baseline, None, suffix="", facts=place_facts)
             post = SocialPost(
                 short_index=short_index,
                 caption=captions["instagram"],
                 captions=captions,
-                youtube_title=title[:100],  # YT max 100
+                youtube_title=decision["chosen_title"],
+                title_decision=decision,
                 youtube_tags=tags,
                 youtube_category=self.youtube_category,
                 tiktok_title=tiktok_title,
@@ -1729,7 +1758,10 @@ class SocialGenerator:
                     raise
 
     def _per_short_variant(
-        self, location: str, regions: "list[str] | None" = None
+        self,
+        location: str,
+        regions: "list[str] | None" = None,
+        roads: "list[str] | None" = None,
     ) -> "SocialGenerator":
         """Clone this generator anchored on a short's OWN resolved location.
 
@@ -1781,6 +1813,8 @@ class SocialGenerator:
         clone.recording_date = self.recording_date
         clone.resolved_location = self.resolved_location
         clone._own_regions = list(regions) if regions else None
+        # The clip's own GPS road names, never the parent LF's ``roads``.
+        clone._own_roads = list(roads) if roads else []
         clone._used_pois = self._used_pois
         parent_places = list(self._place_strings())
         dest = getattr(self.resolved_location, "destination", None)
@@ -1805,6 +1839,7 @@ class SocialGenerator:
         index_offset: int = 0,
         per_short_locations: Optional[List[str]] = None,
         per_short_regions: Optional[List[List[str]]] = None,
+        per_short_roads: Optional[List[List[str]]] = None,
         global_indexes: Optional[Sequence[int]] = None,
         per_short_title_facts: Optional[Sequence[Optional[TitleFacts]]] = None,
     ) -> List[SocialPost]:
@@ -1831,6 +1866,9 @@ class SocialGenerator:
                 short's OWN resolved location (its burned OST text). An entry
                 that is falsy or equal to this generator's location keeps the
                 parent-LF surfaces; ``None`` list preserves legacy behaviour.
+            per_short_roads: Optional list parallel to ``per_short_regions`` — each
+                short's OWN clip-GPS road names; they, with the clip's
+                county names, are the only non-template Short tags.
             per_short_regions: Optional list parallel to the shorts — each
                 short's OWN clip-GPS vote regions. A non-empty entry becomes that
                 post's ``sampled_regions`` (the independent reference the CSV
@@ -1887,10 +1925,15 @@ class SocialGenerator:
             has_regions = bool(
                 per_short_regions and i - 1 < len(per_short_regions) and per_short_regions[i - 1]
             )
+            roads = (
+                per_short_roads[i - 1] if per_short_roads and i - 1 < len(per_short_roads) else None
+            )
             gen = (
                 self
                 if not loc or (loc == self.location and not has_regions)
-                else self._per_short_variant(loc, per_short_regions[i - 1] if has_regions else None)
+                else self._per_short_variant(
+                    loc, per_short_regions[i - 1] if has_regions else None, roads
+                )
             )
             # An explicit stable global index (assigned at plan time) wins
             # over the legacy len(posts)-derived index_offset. titles.yaml is
@@ -1917,6 +1960,7 @@ class SocialGenerator:
                 regions = per_short_regions[i - 1]
                 if regions:
                     post.sampled_regions = list(regions)
+                    post.sampled_roads = list(roads or [])
             # Apply the resolved global index (explicit list wins,
             # else the legacy offset) for multi-LF drives.
             if global_indexes is not None or index_offset:

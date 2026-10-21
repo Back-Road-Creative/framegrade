@@ -16,6 +16,15 @@ from gomoveshift.pipeline.drive_phases.phase_d import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _final_text_gate_open(monkeypatch):
+    # The final-text gate holds every insert until the final text is bound; these
+    # upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
+
+
 # ── _parse_short_index regex fix ──────────────────────────────
 
 

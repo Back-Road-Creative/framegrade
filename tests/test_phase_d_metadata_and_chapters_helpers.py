@@ -519,8 +519,13 @@ class TestBuildMetadataRouteProfileWiring:
             episode_dates=["2025-09-01", "2025-09-01"],
             per_lf_recording_date={1: "2025-09-01", 2: "2025-09-01"},
             per_lf_resolved_location={
-                1: ResolvedLocation(ordered_place_sequence=["Alpha", "Beta"]),
-                2: ResolvedLocation(ordered_place_sequence=["Gamma", "Delta"]),
+                # U1: the arc endpoints come from each LF's own burned label.
+                1: ResolvedLocation(
+                    ordered_place_sequence=["Alpha", "Beta"], ost_signature="Alpha to Beta"
+                ),
+                2: ResolvedLocation(
+                    ordered_place_sequence=["Gamma", "Delta"], ost_signature="Gamma to Delta"
+                ),
             },
         )
         with _pass_redundancy():
@@ -596,7 +601,7 @@ class TestBuildMetadataRouteProfileWiring:
         assert by_proj["p_lf02"]["roads_traversed"] == ["SC-174"]
         # Symptom level: LF2's rendered description/tags never name LF1's road.
         enriched = LongFormMetadataGenerator._enrich_with_route_profile(
-            {"description": "", "tags": []}, by_proj["p_lf02"]
+            {"description": "", "tags": []}, by_proj["p_lf02"], road_coverage_measured=True
         )
         assert "Roads traveled: SC-174." in enriched["description"]
         assert "US-17" not in enriched["description"]

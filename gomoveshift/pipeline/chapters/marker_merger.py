@@ -34,12 +34,19 @@ class MarkerMerger:
     for stop-removed videos, and deduplication of chapter names.
     """
 
-    def __init__(self, named_routes: Optional[list[str]] = None):
+    def __init__(
+        self,
+        named_routes: Optional[list[str]] = None,
+        road_coverage_measured: bool = False,
+    ):
         """
         Args:
             named_routes: List of detected named routes for chapter enrichment
+            road_coverage_measured: the route suffix ships only when road
+                coverage is measured over retained time
         """
         self.named_routes = named_routes or []
+        self.road_coverage_measured = road_coverage_measured
         # (lat, lon) of the sampled waypoints where the drive actually ran along
         # named_routes[0]; proximity-gates the per-chapter route suffix.
         self.route_waypoints: list[tuple[float, float]] = []
@@ -178,7 +185,7 @@ class MarkerMerger:
             combined.append((m_time, m_title, "marker", None))
         # Named route suffix for chapter enrichment
         _route_suffix = ""
-        if self.named_routes:
+        if self.named_routes and self.road_coverage_measured:
             _route_suffix = f", {self.named_routes[0]}"
 
         bands = terrain_bands or [None] * len(waypoints_with_towns)

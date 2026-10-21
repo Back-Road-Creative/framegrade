@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from gomoveshift.pipeline.route_story.layers import (
@@ -34,11 +35,17 @@ def _raster(tmp_path: Path, name: str, bounds, credit: str, width: int, colour) 
     return SatelliteRaster(path, west, south, east, north, credit)
 
 
-def _dive_rasters(tmp_path: Path) -> tuple[SatelliteRaster, ...]:
+@pytest.fixture(scope="module")
+def dive_rasters(tmp_path_factory: pytest.TempPathFactory) -> tuple[SatelliteRaster, ...]:
     """A coarse green band and a finer, differently toned band that fully
     covers the target's neighbourhood -- mirrors the real GIBS-to-NAIP
     hand-off (green -> grey-blue) closely enough to exercise the cross-fade
-    and tone match without a multi-megapixel fixture."""
+    and tone match without a multi-megapixel fixture.
+
+    Shared read-only per module: grading each 4096-px band is ~55 s, and the
+    graded/tone-matched images are cached by path, so one pair means one grade
+    per worker instead of one per test."""
+    tmp_path = tmp_path_factory.mktemp("dive-rasters")
     coarse = _raster(
         tmp_path, "coarse", (-101.25, 21.94, -67.5, 48.92), "Coarse band", 4096, (40, 140, 60)
     )
@@ -63,8 +70,8 @@ def _labels() -> tuple[MapLabel, ...]:
     )
 
 
-def test_no_label_is_shown_for_fewer_than_the_dwell_frames(tmp_path):
-    rasters = _dive_rasters(tmp_path)
+def test_no_label_is_shown_for_fewer_than_the_dwell_frames(dive_rasters):
+    rasters = dive_rasters
     labels = _labels()
 
     windows = _opening_label_windows(rasters, TARGET, WIDTH, HEIGHT, labels)
@@ -76,13 +83,13 @@ def test_no_label_is_shown_for_fewer_than_the_dwell_frames(tmp_path):
         assert end - start >= _OPENING_LABEL_DWELL_FRACTION - 1e-9
 
 
-def test_a_labels_visibility_never_flaps_on_off_on(tmp_path):
+def test_a_labels_visibility_never_flaps_on_off_on(dive_rasters):
     # The defect viewers saw: "Bryson City, Andrews" -> "+ Clingmans Dome" ->
     # a DIFFERENT set, back and forth several times in under two seconds.
     # Once a label's plan is fixed for the whole move, each label may appear
     # at most once: a single contiguous on-screen run, never on, off, then
     # on again.
-    rasters = _dive_rasters(tmp_path)
+    rasters = dive_rasters
     labels = _labels()
 
     for label in labels:
@@ -99,8 +106,8 @@ def test_a_labels_visibility_never_flaps_on_off_on(tmp_path):
         assert transitions <= 2, f"{label.name} appeared/disappeared {transitions} times"
 
 
-def test_a_labels_alpha_is_continuous_across_its_own_window(tmp_path):
-    rasters = _dive_rasters(tmp_path)
+def test_a_labels_alpha_is_continuous_across_its_own_window(dive_rasters):
+    rasters = dive_rasters
     labels = _labels()
 
     windows = _opening_label_windows(rasters, TARGET, WIDTH, HEIGHT, labels)
@@ -131,8 +138,8 @@ def test_a_labels_alpha_is_continuous_across_its_own_window(tmp_path):
         previous_alpha = alpha
 
 
-def test_a_label_already_on_screen_is_never_evicted_by_a_higher_ranked_newcomer(tmp_path):
-    rasters = _dive_rasters(tmp_path)
+def test_a_label_already_on_screen_is_never_evicted_by_a_higher_ranked_newcomer(dive_rasters):
+    rasters = dive_rasters
     # Early Town qualifies from wide up in the zoom (max_span_lon=5.0) and
     # stays qualified all the way to the end; Late City, despite outranking
     # it (kind="city" > "poi"), only starts qualifying once the span has
@@ -158,8 +165,8 @@ def test_a_label_already_on_screen_is_never_evicted_by_a_higher_ranked_newcomer(
         assert early_end <= late_start or late_end <= early_start
 
 
-def test_rendering_the_opening_with_labels_does_not_raise(tmp_path):
-    rasters = _dive_rasters(tmp_path)
+def test_rendering_the_opening_with_labels_does_not_raise(dive_rasters):
+    rasters = dive_rasters
     labels = _labels()
 
     for fraction in (0.0, 0.3, 0.6, 0.9, 1.0):
@@ -174,8 +181,8 @@ def _mean_rgb(image: Image.Image) -> np.ndarray:
     return np.asarray(image, dtype=np.float64).reshape(-1, 3).mean(axis=0)
 
 
-def test_the_mean_colour_step_between_consecutive_opening_frames_is_capped(tmp_path):
-    rasters = _dive_rasters(tmp_path)
+def test_the_mean_colour_step_between_consecutive_opening_frames_is_capped(dive_rasters):
+    rasters = dive_rasters
 
     previous_mean = None
     max_step = 0.0
@@ -194,10 +201,10 @@ def test_the_mean_colour_step_between_consecutive_opening_frames_is_capped(tmp_p
     assert max_step < 40.0, f"single-frame colour step of {max_step:.1f} looks like a hard cut"
 
 
-def test_a_finer_raster_is_tone_matched_toward_its_coarser_neighbour(tmp_path):
+def test_a_finer_raster_is_tone_matched_toward_its_coarser_neighbour(dive_rasters):
     from gomoveshift.pipeline.route_story.layers import _tone_matched_opening_image
 
-    rasters = _dive_rasters(tmp_path)
+    rasters = dive_rasters
     coarse, fine = rasters
 
     matched = _tone_matched_opening_image(rasters, fine)

@@ -10,6 +10,7 @@ write the ``<gate_id>.answer`` the pipeline consumes on its next poll.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -39,6 +40,39 @@ _PREVIEW_GATES = (check_metadata_quality, check_label_quality, check_description
 LF_MODE_CHOICES = ("best_moments", "full_drive")
 
 
+#: Same container suffixes the host worker's own source preflight scans.
+_SOURCE_MEDIA_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mxf"})
+
+
+def unreadable_source_media(directory: "str | Path") -> list[str]:
+    """One message per media entry of ``directory`` the console cannot read.
+
+    Follows symlinks: a dangling link reads ``no such file`` and a target
+    without read permission reads ``not readable`` (wording shared with
+    ``console/photos.py``). A missing directory yields ``[]`` -- the worker
+    reports that itself. The console's user may differ from the host worker's,
+    so this is only the cheap first gate that refuses before a job is queued;
+    the worker's own preflight (``hostworker.worker._drive_source_error``)
+    stays authoritative.
+    """
+    source = Path(directory)
+    if not source.is_dir():
+        return []
+    errors = []
+    try:
+        entries = sorted(source.iterdir())
+    except OSError as exc:
+        return [f"{source}: not readable ({exc.strerror or exc})"]
+    for entry in entries:
+        if entry.suffix.lower() not in _SOURCE_MEDIA_SUFFIXES:
+            continue
+        if not entry.exists():  # follows symlinks: dangling link -> False
+            errors.append(f"{entry}: no such file (broken link or missing target)")
+        elif not os.access(entry, os.R_OK):
+            errors.append(f"{entry}: not readable")
+    return errors
+
+
 def build_drive_argv(
     directory: str,
     *,
@@ -46,6 +80,9 @@ def build_drive_argv(
     region: "str | None" = None,
     dry_run: bool = True,
     no_review: bool = True,
+    skip_upload: bool = False,
+    confirm_plan: bool = False,
+    ost_system_review: bool = False,
     publish: "str | None" = None,
     lf_day: "str | None" = None,
     lf_mode: "str | None" = None,
@@ -88,6 +125,16 @@ def build_drive_argv(
         argv.append("--no-review")
     if dry_run:
         argv.append("--dry-run")
+    elif confirm_plan:
+        # A full run in the detached host worker has no visible terminal
+        # prompt. The console passes this only after explicit form consent.
+        argv.append("--force")
+    if skip_upload:
+        # The explicit YouTube opt-out also makes the cadence/anchor gate treat
+        # this as an audit-only render when --publish supplies a schedule.
+        argv.extend(("--skip-upload", "--no-youtube-upload"))
+    if ost_system_review:
+        argv.append("--ost-system-review")
     if publish and lf_day:
         argv += ["--publish", publish, "--lf-day", lf_day]
     if lf_mode:

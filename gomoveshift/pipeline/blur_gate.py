@@ -123,6 +123,116 @@ def backfill_track_births(frame_boxes: dict, *, pre_roll_frames: int) -> dict:
     return filled
 
 
+# Samples the detector may miss in a row before a tracked object is declared gone.
+# Each missed sample is one ``blur_sample_fps`` interval (~7 frames at 8 fps/60 fps).
+MISSED_SAMPLE_HOLD = 3
+# Frames a box with no later match is held after its last detection (object leaving
+# or a missed tail). Bounded: a held box with no detection support must not outlive
+# this, or it would blur sky/road the object already left.
+TRAILING_HOLD_FRAMES = 8
+# Minimum IoU for two detections either side of a gap to count as one object.
+_MATCH_MIN_IOU = 0.1
+# A small fast object (a ~15 px plate) can move further than its own width across
+# a gap, so IoU is 0. Fallback: the nearest box of similar size (area within this
+# ratio) whose centre is within this many box-sizes per sample interval spanned.
+_MATCH_MAX_AREA_RATIO = 4.0
+_MATCH_MAX_SIZES_PER_SAMPLE = 3.0
+# Fraction of a vehicle body box, measured up from its bottom edge, that holds the
+# bumper/plate zone. The tracker's cabin box covers only the top of the body.
+PLATE_BAND_FRAC = 0.35
+
+
+def _iou(a: list, b: list) -> float:
+    ix = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
+    iy = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    inter = ix * iy
+    return inter / float(a[2] * a[3] + b[2] * b[3] - inter)
+
+
+def _centre_match(box: list, pool: list, samples: float):
+    """Nearest similar-size box in ``pool`` within the motion bound, else None."""
+    cx, cy = box[0] + box[2] / 2.0, box[1] + box[3] / 2.0
+    size = max(box[2], box[3], 1)
+    limit = _MATCH_MAX_SIZES_PER_SAMPLE * size * max(samples, 1.0)
+    best, best_d = None, None
+    for c in pool:
+        a0, a1 = max(box[2] * box[3], 1), max(c[2] * c[3], 1)
+        if max(a0, a1) / min(a0, a1) > _MATCH_MAX_AREA_RATIO:
+            continue
+        d = ((c[0] + c[2] / 2.0 - cx) ** 2 + (c[1] + c[3] / 2.0 - cy) ** 2) ** 0.5
+        if d <= limit and (best_d is None or d < best_d):
+            best, best_d = c, d
+    return best
+
+
+def plate_band_region(box, w: int, h: int, frac: float = PLATE_BAND_FRAC) -> tuple:
+    """(x0, y0, x1, y1) of the bottom ``frac`` of a vehicle body ``box`` (x, y, w, h),
+    clamped to the frame: the bumper zone where the plate sits."""
+    x, y, bw, bh = box
+    band = max(1, int(round(bh * frac)))
+    return max(0, x), max(0, y + bh - band), min(w, x + bw), min(h, y + bh)
+
+
+def hold_missed_detections(
+    frame_boxes: dict,
+    *,
+    sample_interval_frames: int,
+    max_missed_samples: int = MISSED_SAMPLE_HOLD,
+    trailing_hold_frames: int = TRAILING_HOLD_FRAMES,
+) -> dict:
+    """Keep an object masked across detector misses, per object.
+
+    ``fill_detection_gaps`` only bridges a gap of one sample interval, so a single
+    missed sample leaves every following frame unmasked until the object is seen
+    again. Here, for a gap of up to ``max_missed_samples`` extra intervals, each
+    box before the gap is matched (IoU, else the nearest similar-size box within a
+    motion bound, for small fast plates that never overlap themselves) to a box
+    after it and linearly interpolated. Unmatched boxes are never unioned across the gap — that is the
+    Ireland 531-frame void failure, where unrelated boxes would blur open road —
+    but are held in place for at most ``trailing_hold_frames`` after their last
+    detection (also after the final detected frame).
+
+    Returns a new dict keyed by int frame index; the input is not mutated.
+    """
+    normalized = {int(k): v for k, v in frame_boxes.items()}
+    detected = sorted(f for f, boxes in normalized.items() if boxes)
+    if not detected:
+        return normalized
+    max_span = sample_interval_frames * (max_missed_samples + 1)
+    filled = {f: [list(b) for b in boxes] for f, boxes in normalized.items()}
+
+    def _put(frame: int, box: list) -> None:
+        entry = filled.setdefault(frame, [])
+        if box not in entry:
+            entry.append(box)
+
+    bounds = list(zip(detected, detected[1:])) + [(detected[-1], None)]
+    for lo, hi in bounds:
+        if hi is not None and hi - lo <= 1:
+            continue
+        end = hi if hi is not None else lo + trailing_hold_frames + 1
+        unmatched = [list(b) for b in normalized[lo]]
+        if hi is not None and hi - lo <= max_span:
+            pool = [list(b) for b in normalized[hi]]
+            for b in list(unmatched):
+                best = max(pool, key=lambda c: _iou(b, c), default=None)
+                if best is None or _iou(b, best) < _MATCH_MIN_IOU:
+                    best = _centre_match(b, pool, (hi - lo) / max(sample_interval_frames, 1))
+                if best is None:
+                    continue
+                pool.remove(best)
+                unmatched.remove(b)
+                for f in range(lo + 1, hi):
+                    t = (f - lo) / (hi - lo)
+                    _put(f, [round(b[i] + (best[i] - b[i]) * t) for i in range(4)])
+        for f in range(lo + 1, min(end, lo + 1 + trailing_hold_frames)):
+            for b in unmatched:
+                _put(f, list(b))
+    return filled
+
+
 def fill_detection_gaps(frame_boxes: dict, *, max_gap_frames: int) -> dict:
     """Give every frame between two detected frames a mask.
 

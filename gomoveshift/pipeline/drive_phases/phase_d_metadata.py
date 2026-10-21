@@ -16,9 +16,12 @@ from typing import Optional
 from ...config import Config
 from .._atomic_write import atomic_write_json
 from ..chapters.generator import YOUTUBE_MIN_CHAPTERS
+from ..drive_text_adapter import attach_drive_text, reattach_with_chapters
+from ..final_text_record import build_final_text_review
+from ..location_evidence import refuse_unsupported_title
 from ..region_resolver import derive_region, is_us_region
 from ..route_profile import RouteProfile, build_lf_profile
-from ..title_builder import append_full_drive_part_suffix, ensure_unique_titles
+from ..title_builder import ensure_unique_titles
 
 # Use the phase_d logger name so existing log-capture tests + grep-trails
 # stay valid across the module split (tests assert on
@@ -30,7 +33,23 @@ def _lf_inserts(state) -> dict[int, list[dict]]:
     """``{lf_index: [insert record, ...]}`` the drive run spliced (``Deliverables.inserts``)."""
     from ..media_api import deliverables_for_publish
 
-    return {i: r for d in deliverables_for_publish(state) for i, r in d.inserts.items() if r}
+    out: dict[int, list[dict]] = {}
+    for d in deliverables_for_publish(state):
+        # a trail opening that replaced the montage moved the stills by its lead change
+        moved = {
+            int(o["lf_index"]): float(o.get("insert_delta_s") or 0.0) for o in d.trail_openings
+        }
+        for i, recs in d.inserts.items():
+            if not recs:
+                continue
+            delta = moved.get(i, 0.0)
+            out[i] = [
+                {**r, "at_s": round(max(0.0, float(r["at_s"]) + delta), 3)}
+                if delta and r.get("kind") == "still"
+                else r
+                for r in recs
+            ]
+    return out
 
 
 def _rescope_arc_to_lf(profile: dict, resolved) -> None:
@@ -46,13 +65,22 @@ def _rescope_arc_to_lf(profile: dict, resolved) -> None:
     No-op when the LF has no resolved sequence — a GPS-less / legacy LF keeps the
     day aggregate. Features stay day-scoped; the road list is windowed separately
     by ``_rescope_roads_to_lf`` (``ResolvedLocation`` carries no per-LF road list).
+
+    The "Started in X, ended in Y" endpoints come from the SAME record as the
+    title — the burned ``ost_signature``'s own "A to B" endpoints — never the
+    first/last geocoded town (a title naming one pair of towns while its
+    description named another is a contradiction). A label that names no
+    endpoints makes no endpoint claim.
     """
+    from gomoveshift.pipeline.validation.content_gates import title_endpoints
+
     seq = list(getattr(resolved, "ordered_place_sequence", None) or []) if resolved else []
     if not seq:
         return
     profile["towns_traversed"] = seq
-    profile["start_town"] = seq[0]
-    profile["end_town"] = seq[-1]
+    start, end = title_endpoints(getattr(resolved, "ost_signature", None) or "") or (None, None)
+    profile["start_town"] = start
+    profile["end_town"] = end
 
 
 def _rescope_roads_to_lf(profile: dict, own_profiles: list[RouteProfile], lf_idx: int) -> None:
@@ -229,6 +257,7 @@ def _build_metadata_per_lf(
     per_lf_locations_override = state.per_lf_locations or {}
     per_lf_resolved = state.per_lf_resolved_location or {}
     per_lf_ost_text_state = state.per_lf_ost_text or {}
+    pre_render_decisions = getattr(state, "per_lf_pre_render_title_decisions", None) or {}
     if per_lf_ost_text_state:
         from ..longform_metadata import load_published_titles
 
@@ -239,13 +268,18 @@ def _build_metadata_per_lf(
             lf.index for lf in drive_plan.regular_lfs if (getattr(lf, "part_count", None) or 1) > 1
         }
         _title_map_input = {
-            int(k): v for k, v in per_lf_ost_text_state.items() if int(k) not in _split_idx
+            int(k): v
+            for k, v in per_lf_ost_text_state.items()
+            if int(k) not in _split_idx and int(k) not in pre_render_decisions
         }
         per_lf_titles_override = ensure_unique_titles(
             _title_map_input, published_titles=load_published_titles()
         )
         per_lf_titles_override.update(
             {int(k): v for k, v in per_lf_ost_text_state.items() if int(k) in _split_idx}
+        )
+        per_lf_titles_override.update(
+            {int(k): decision["input_label"] for k, decision in pre_render_decisions.items()}
         )
     else:
         per_lf_titles_override = state.per_lf_titles or {}
@@ -302,6 +336,25 @@ def _build_metadata_per_lf(
                 "diverge the YouTube title from the burned OST pixels."
             )
         lf_title_override = per_lf_titles_override.get(lf.index) or None
+        preselected = pre_render_decisions.get(lf.index)
+        route_record = (getattr(state, "per_lf_route_record", None) or {}).get(lf.index)
+        if preselected and not route_record:
+            from ..title_decision import PreRenderTitleError
+
+            raise PreRenderTitleError(f"LF {lf.index} lost its retained route after title approval")
+        if route_record:
+            from ..title_decision import PreRenderTitleError, route_fingerprint
+
+            if not preselected:
+                raise PreRenderTitleError(
+                    f"LF {lf.index} has retained-route evidence but no pre-render Waypost title decision"
+                )
+            if preselected.get("ost_text") != per_lf_ost_text_state.get(lf.index):
+                raise PreRenderTitleError(f"LF {lf.index} OST changed after title approval")
+            if preselected.get("route_fingerprint") != route_fingerprint(route_record):
+                raise PreRenderTitleError(
+                    f"LF {lf.index} retained route changed after title approval"
+                )
         lf_profile = route_profiles.get(lf.index)
 
         # Units + playlist region come from the SAME canonical
@@ -430,11 +483,48 @@ def _build_metadata_per_lf(
             resolved_location=lf_resolved,
             full_drive_stats=lf_full_drive_stats,
             insert_count=len(lf_inserts.get(lf.index, [])),
+            # The evidence record behind the title's place claims; the
+            # part suffix goes INTO Waypost's decision, never appended after.
+            location_evidence=(state.per_lf_location_evidence or {}).get(lf.index),
+            preselected_title_decision=preselected,
+            title_part=(
+                (lf.part_index, lf.part_count)
+                if (getattr(lf, "part_count", None) or 1) > 1
+                else None
+            ),
         )
-        if (getattr(lf, "part_count", None) or 1) > 1 and metadata.get("title"):
-            metadata["title"] = append_full_drive_part_suffix(
-                metadata["title"], lf.part_index, lf.part_count
+        if preselected and (
+            metadata.get("title") != preselected.get("chosen_title")
+            or metadata.get("title_decision") != preselected
+        ):
+            from ..title_decision import PreRenderTitleError
+
+            raise PreRenderTitleError(
+                f"LF {lf.index} metadata replaced the pre-render Waypost title decision"
             )
+        # The shipped title's place claims must be backed by this LF's
+        # evidence record before anything is written; no record is a refusal.
+        refuse_unsupported_title(
+            metadata.get("title", ""),
+            (state.per_lf_location_evidence or {}).get(lf.index),
+            lf_index=lf.index,
+        )
+        # Waypost's review of the final text against the retained route;
+        # ``None`` for a GPS-less LF. Upload re-verifies it before insert.
+        attach_drive_text(
+            (state.per_lf_route_record or {}).get(lf.index),
+            metadata,
+            lf_location,
+            final_seconds=lf.total_duration,
+            source_seconds=lf_source_duration,
+            trim_ratio=lf_trim,
+            distance_km=lf_distance_km,
+            bearing=lf_bearing,
+            recording_date=lf_recording_date,
+            insert_count=len(lf_inserts.get(lf.index, [])),
+            us=is_us_region(lf_location, resolved=lf_resolved),
+        )
+        metadata["final_text_review"] = build_final_text_review(state, lf, metadata)
         metadata.setdefault("location", lf_location)
         # Stamp the resolved region (JSON-safe) so the playlist
         # consumes the SAME model the units used (resolve_playlist's region key).
@@ -480,6 +570,119 @@ def _build_metadata_per_lf(
     return metadata_per_lf
 
 
+def _below_chapter_floor(chapters: list, video_duration: float) -> bool:
+    """True when ``chapters`` miss the metadata gate's middle-chapter floor."""
+    from ..chapters.generator import intermediate_chapters, min_intermediate_chapters
+
+    return len(intermediate_chapters(chapters)) < min_intermediate_chapters(video_duration)
+
+
+def _lf_chapters(config: Config, lf, state, location: str, stages_dir: Path):
+    """``(chapters, chapter_text)`` for one LF from its GPS, or ``None`` when
+    the LF has no GPX. A generator error yields ``([], "")``, logged."""
+    from . import phase_d as _pd
+
+    gpx_files = state.gpx_files or []
+    per_lf_gpx_path = state.per_lf_gpx_path or {}
+    per_lf_locations_override = state.per_lf_locations or {}
+    per_lf_resolved = state.per_lf_resolved_location or {}
+    gpx_path_str = per_lf_gpx_path.get(lf.index)
+    if gpx_path_str is None and gpx_files:
+        first_seg_idx = lf.segments[0].source_file_index if lf.segments else None
+        if first_seg_idx is not None and first_seg_idx < len(gpx_files):
+            gpx_path_str = gpx_files[first_seg_idx]
+            logger.warning(
+                "  LF %d: per_lf_gpx_path missing in state — "
+                "falling back to segment-index lookup "
+                "(may be wrong on multi-day resumes from "
+                "pre-fix state files)",
+                lf.index,
+            )
+    if not gpx_path_str:
+        logger.debug("  LF %d: no GPX file, skipping chapters", lf.index)
+        return None
+    gpx_path = Path(gpx_path_str)
+    if not gpx_path.exists():
+        logger.debug("  LF %d: GPX file %s not found, skipping", lf.index, gpx_path)
+        return None
+
+    lf_location = per_lf_locations_override.get(lf.index, location)
+    # Int-keyed by construction (see the metadata-loop note above) — no
+    # ``str(lf.index)`` fallback.
+    lf_resolved = per_lf_resolved.get(lf.index)
+    # Pass gpx_files so the window's representative episode is chosen
+    # among GPX-bearing episodes — the same one per_lf_gpx_path/gpx_path
+    # above resolves to, so chapters trim the actual charted GPX.
+    lf_included_segments = _pd._build_included_segments_for_lf(lf, gpx_files=gpx_files)
+    lf_day_journey = None
+    multi = _build_lf_multi_episode_journey(
+        lf, getattr(state, "gps_per_episode", None), gpx_files=gpx_files
+    )
+    if multi is not None:
+        lf_day_journey, lf_included_segments = multi
+        logger.info(
+            "  LF %d: charting %d waypoints across every GPX-bearing episode "
+            "(drive timeline, %d ranges)",
+            lf.index,
+            len(lf_day_journey.waypoints),
+            len(lf_included_segments),
+        )
+    try:
+        chapters, chapter_text = _pd._generate_chapters_for_lf(
+            config=config,
+            gpx_path=gpx_path,
+            video_duration=lf.total_duration,
+            location=lf_location,
+            stages_dir=stages_dir,
+            included_segments=lf_included_segments or None,
+            resolved_location=lf_resolved,
+            day_journey=lf_day_journey,
+        )
+    except Exception as e:
+        # The single-video path returns success=False on chapter
+        # failure (stages/chapters.py); the drive path used to swallow it at
+        # WARN and embed an empty block. Fail loud with a greppable ERROR.
+        logger.error("CHAPTER-GATE: LF %d chapter generation failed: %s", lf.index, e)
+        chapters = []
+        chapter_text = ""
+    return chapters, chapter_text
+
+
+def assert_chapter_floor_before_encode(
+    config: Config, drive_plan, state, location: str, stages_dir: Path
+) -> None:
+    """Refuse to START an encode whose LF chapters cannot clear the
+    metadata gate's middle-chapter floor.
+
+    Runs the same per-LF chapter computation (and the same retry-once repair)
+    as Phase D's D1.5, against the planned LF durations, so a trace too sparse
+    to chapter fails in minutes instead of at Phase D after a multi-hour
+    encode. An LF with no GPX is skipped, as the metadata gate skips it
+    (``has_gps`` False). The geocodes it makes land in the shared geocoding
+    cache, so D1.5 reuses them.
+    """
+    short: list[str] = []
+    for lf in getattr(drive_plan, "regular_lfs", None) or []:
+        computed = _lf_chapters(config, lf, state, location, stages_dir)
+        if computed is None or not _below_chapter_floor(computed[0], lf.total_duration):
+            continue
+        retry = _lf_chapters(config, lf, state, location, stages_dir)
+        if retry is not None and not _below_chapter_floor(retry[0], lf.total_duration):
+            continue
+        from ..chapters.generator import intermediate_chapters, min_intermediate_chapters
+
+        got = len(intermediate_chapters((retry or computed)[0]))
+        short.append(
+            f"LF {lf.index}: {got} middle chapter(s) for "
+            f"{lf.total_duration / 60:.0f}min (need {min_intermediate_chapters(lf.total_duration)}+)"
+        )
+    if short:
+        raise RuntimeError(
+            "CHAPTER-GATE: refusing to start the encode — the GPS trace cannot "
+            "chapter these LFs: " + "; ".join(short)
+        )
+
+
 def _generate_chapters_all_lfs(
     *,
     config: Config,
@@ -517,8 +720,6 @@ def _generate_chapters_all_lfs(
 
     gpx_files = state.gpx_files or []
     per_lf_gpx_path = state.per_lf_gpx_path or {}
-    per_lf_locations_override = state.per_lf_locations or {}
-    per_lf_resolved = state.per_lf_resolved_location or {}
     lf_inserts = _lf_inserts(state)
     if not (per_lf_gpx_path or gpx_files):
         logger.info("  D1.5: No GPX files — skipping chapter generation")
@@ -526,67 +727,24 @@ def _generate_chapters_all_lfs(
 
     logger.info("  D1.5: Generating YouTube chapters from GPS...")
     for lf in drive_plan.regular_lfs:
-        gpx_path_str = per_lf_gpx_path.get(lf.index)
-        if gpx_path_str is None and gpx_files:
-            first_seg_idx = lf.segments[0].source_file_index if lf.segments else None
-            if first_seg_idx is not None and first_seg_idx < len(gpx_files):
-                gpx_path_str = gpx_files[first_seg_idx]
-                logger.warning(
-                    "  LF %d: per_lf_gpx_path missing in state — "
-                    "falling back to segment-index lookup "
-                    "(may be wrong on multi-day resumes from "
-                    "pre-fix state files)",
-                    lf.index,
-                )
-        if not gpx_path_str:
-            logger.debug("  LF %d: no GPX file, skipping chapters", lf.index)
+        computed = _lf_chapters(config, lf, state, location, stages_dir)
+        if computed is None:
             continue
-        gpx_path = Path(gpx_path_str)
-        if not gpx_path.exists():
-            logger.debug("  LF %d: GPX file %s not found, skipping", lf.index, gpx_path)
-            continue
-
-        lf_location = per_lf_locations_override.get(lf.index, location)
-        # Int-keyed by construction (see the metadata-loop note above) — no
-        # ``str(lf.index)`` fallback.
-        lf_resolved = per_lf_resolved.get(lf.index)
-        meta = metadata_per_lf.get(lf.index, {})
-        # Pass gpx_files so the window's representative episode is chosen
-        # among GPX-bearing episodes — the same one per_lf_gpx_path/gpx_path
-        # above resolves to, so chapters trim the actual charted GPX.
-        lf_included_segments = _pd._build_included_segments_for_lf(lf, gpx_files=gpx_files)
-        lf_day_journey = None
-        multi = _build_lf_multi_episode_journey(
-            lf, getattr(state, "gps_per_episode", None), gpx_files=gpx_files
-        )
-        if multi is not None:
-            lf_day_journey, lf_included_segments = multi
-            logger.info(
-                "  LF %d: charting %d waypoints across every GPX-bearing episode "
-                "(drive timeline, %d ranges)",
+        chapters, chapter_text = computed
+        if _below_chapter_floor(chapters, lf.total_duration):
+            # A shortfall the generator can fix (a geocoder blip that
+            # emptied the first pass) is repaired here, once, instead of
+            # failing the run at the metadata gate after the encode.
+            logger.warning(
+                "CHAPTER-GATE: LF %d first pass under the chapter floor — regenerating",
                 lf.index,
-                len(lf_day_journey.waypoints),
-                len(lf_included_segments),
             )
-        try:
-            chapters, chapter_text = _pd._generate_chapters_for_lf(
-                config=config,
-                gpx_path=gpx_path,
-                video_duration=lf.total_duration,
-                location=lf_location,
-                stages_dir=stages_dir,
-                included_segments=lf_included_segments or None,
-                resolved_location=lf_resolved,
-                day_journey=lf_day_journey,
+            chapters, chapter_text = _lf_chapters(config, lf, state, location, stages_dir) or (
+                chapters,
+                chapter_text,
             )
-        except Exception as e:
-            # The single-video path returns success=False on chapter
-            # failure (stages/chapters.py); the drive path used to swallow it at
-            # WARN and embed an empty block. Fail loud with a greppable ERROR.
-            logger.error("CHAPTER-GATE: LF %d chapter generation failed: %s", lf.index, e)
-            chapters = []
-            chapter_text = ""
 
+        meta = metadata_per_lf.get(lf.index, {})
         if chapters and lf_inserts.get(lf.index):
             from ..chapters.marker_merger import add_insert_markers
 
@@ -616,6 +774,11 @@ def _generate_chapters_all_lfs(
                     YOUTUBE_MIN_CHAPTERS,
                 )
 
+        # The embed above rewrote the description, so the review is
+        # built from the text that will be sent, after it.
+        if len(chapters) >= YOUTUBE_MIN_CHAPTERS:
+            reattach_with_chapters((state.per_lf_route_record or {}).get(lf.index), meta, chapters)
+        meta["final_text_review"] = build_final_text_review(state, lf, meta)
         metadata_per_lf[lf.index] = meta
 
         _red2 = _check_red(meta)
