@@ -49,7 +49,7 @@ drain holds the delivery rather than publishing it unattested.
 **From the console (Waypost route-story job).** `gomoveshift/pipeline/route_story/profile.py`
 is the profile -> argv mapping, so a tenant's console can launch a film
 in-process as a regular job -- a second door onto `film.main()`. `console/route_story.py`'s `profile_dirs()`
-reads `<console data dir>/route-story-profiles/` (and a `route_story_profiles/` directory beside the package if one is present; none ships, so the operator supplies profiles);
+reads `<GMS_INPUTS_DIR>/route_story_profiles/` (`paths.gms_inputs_dir()`; default `<data home>/operator-inputs`; a `GMS_INPUTS_DIR` that is set but is not an existing directory is refused with a message naming it), `<console data dir>/route-story-profiles/` (and a `route_story_profiles/` directory beside the package if one is present; none ships, so the operator supplies profiles);
 `resolve_profile` accepts only a bare `*.yaml` basename present in one. `POST /route-stories/film`
 resolves the profile, builds argv, and `jobs.launch`s it as the allowlisted `"route-story-film"`
 subcommand -- `jobs.launch` is the supervisor here, same as any other console job.

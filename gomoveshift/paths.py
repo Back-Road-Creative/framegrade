@@ -120,6 +120,34 @@ def gms_export_dir() -> Path:
     return Path(os.environ.get("GMS_EXPORT_DIR") or gms_data_home() / "output")
 
 
+class InputsDirError(ValueError):
+    """``GMS_INPUTS_DIR`` is set to something that is not an existing directory."""
+
+
+def gms_inputs_dir() -> Path:
+    """The operator's own inputs (for example Route Story launch profiles),
+    kept outside the code tree.
+
+    ``GMS_INPUTS_DIR`` when set (``~`` is expanded; an empty or whitespace-only
+    value counts as unset), else ``operator-inputs`` under the data home. The
+    default is deliberately not checked: a fresh install has no inputs yet and
+    readers treat a missing subdirectory as empty. A value that *is* set must
+    name an existing directory; otherwise ``InputsDirError`` (a ``ValueError``)
+    names the variable and the path, so a typo surfaces at once instead of as
+    "no inputs found".
+    """
+    raw = os.environ.get("GMS_INPUTS_DIR", "").strip()
+    if not raw:
+        return gms_data_home() / "operator-inputs"
+    path = Path(raw).expanduser()
+    if not path.is_dir():
+        reason = "is not a directory" if path.exists() else "does not exist"
+        raise InputsDirError(
+            f"GMS_INPUTS_DIR={path} {reason}. Create the directory or unset GMS_INPUTS_DIR."
+        )
+    return path
+
+
 def assert_required_paths_exist() -> None:
     """Validate that env-resolved required paths exist on disk.
 

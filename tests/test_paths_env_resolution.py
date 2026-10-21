@@ -59,6 +59,7 @@ _HOME_VARS = (
     "GMS_INTERMEDIATE_DIR",
     "GMS_OVERPASS_CACHE_DIR",
     "GMS_ROUTE_STORY_CACHE_DIR",
+    "GMS_INPUTS_DIR",
 )
 
 
@@ -153,3 +154,69 @@ def test_legacy_default_names_resolve_lazily(
     assert gms_paths._DEFAULT_ROUTE_STORY_CACHE_DIR == str(clean_homes / "c" / "route-story")
     with pytest.raises(AttributeError):
         gms_paths._NOT_A_DEFAULT  # noqa: B018
+
+
+# ---------------------------------------------------------------------------
+# gms_inputs_dir: the operator's own inputs, outside the code tree
+# ---------------------------------------------------------------------------
+
+
+def test_inputs_dir_defaults_under_the_data_home(clean_homes: Path) -> None:
+    # Not created and not checked: a fresh install has no inputs yet.
+    default = clean_homes / ".local/share/gomoveshift" / "operator-inputs"
+    assert gms_paths.gms_inputs_dir() == default
+    assert not default.exists()
+
+
+def test_inputs_dir_default_follows_the_data_home(
+    monkeypatch: pytest.MonkeyPatch, clean_homes: Path
+) -> None:
+    monkeypatch.setenv("GMS_DATA_HOME", str(clean_homes / "d"))
+    assert gms_paths.gms_inputs_dir() == clean_homes / "d" / "operator-inputs"
+
+
+def test_inputs_dir_env_override_wins(monkeypatch: pytest.MonkeyPatch, clean_homes: Path) -> None:
+    chosen = clean_homes / "mine"
+    chosen.mkdir()
+    monkeypatch.setenv("GMS_INPUTS_DIR", str(chosen))
+    monkeypatch.setenv("GMS_DATA_HOME", str(clean_homes / "d"))
+    assert gms_paths.gms_inputs_dir() == chosen
+
+
+def test_inputs_dir_env_override_expands_the_user_home(
+    monkeypatch: pytest.MonkeyPatch, clean_homes: Path
+) -> None:
+    (clean_homes / "mine").mkdir()
+    monkeypatch.setenv("HOME", str(clean_homes))
+    monkeypatch.setenv("GMS_INPUTS_DIR", "~/mine")
+    assert gms_paths.gms_inputs_dir() == clean_homes / "mine"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"], ids=["empty", "spaces", "whitespace"])
+def test_inputs_dir_blank_env_counts_as_unset(
+    monkeypatch: pytest.MonkeyPatch, clean_homes: Path, blank: str
+) -> None:
+    monkeypatch.setenv("GMS_INPUTS_DIR", blank)
+    assert gms_paths.gms_inputs_dir() == (
+        clean_homes / ".local/share/gomoveshift" / "operator-inputs"
+    )
+
+
+def test_inputs_dir_missing_path_raises_naming_variable_and_path(
+    monkeypatch: pytest.MonkeyPatch, clean_homes: Path
+) -> None:
+    missing = clean_homes / "does-not-exist"
+    monkeypatch.setenv("GMS_INPUTS_DIR", str(missing))
+    with pytest.raises(gms_paths.InputsDirError) as exc:
+        gms_paths.gms_inputs_dir()
+    assert isinstance(exc.value, ValueError)
+    assert "GMS_INPUTS_DIR" in str(exc.value)
+    assert str(missing) in str(exc.value)
+
+
+def test_inputs_dir_file_path_raises(monkeypatch: pytest.MonkeyPatch, clean_homes: Path) -> None:
+    a_file = clean_homes / "a-file"
+    a_file.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("GMS_INPUTS_DIR", str(a_file))
+    with pytest.raises(gms_paths.InputsDirError, match="not a directory"):
+        gms_paths.gms_inputs_dir()
