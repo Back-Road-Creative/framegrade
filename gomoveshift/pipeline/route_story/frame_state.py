@@ -40,14 +40,39 @@ def frame_state_at(
     position, even if a straight interpolation would look visually smooth.
     """
     recording_time_s = timeline.route_time_at_frame(frame)
-    ordered = [sorted(segment, key=lambda point: point.time_s) for segment in segments if segment]
-    offsets, total_distance_m = _segment_distance_offsets(ordered)
+    ordered, offsets, total_distance_m = _ordered_segments(segments)
     for points, offset in zip(ordered, offsets):
         state = _state_in_segment(recording_time_s, points, offset)
         if state is not None:
             return state
     distance_m = _gap_distance_m(recording_time_s, ordered, offsets, total_distance_m)
     return FrameState(recording_time_s, None, None, None, None, None, distance_m, False)
+
+
+# Sorted segments and their distance offsets, built once per leg rather than
+# once per frame (a 14,001-point track spent ~0.07 s a frame here). Same rule
+# as ``dashboard._INDEX_CACHE``: a hit needs ``is`` identity with the cached
+# segments object, because CPython reuses a freed object's ``id()``.
+_ORDERED_CACHE: dict[
+    int,
+    tuple[Sequence[Sequence[RoutePoint]], tuple[list[list[RoutePoint]], list[float], float]],
+] = {}
+_ORDERED_CACHE_MAX = 8
+
+
+def _ordered_segments(
+    segments: Sequence[Sequence[RoutePoint]],
+) -> tuple[list[list[RoutePoint]], list[float], float]:
+    key = id(segments)
+    cached = _ORDERED_CACHE.get(key)
+    if cached is not None and cached[0] is segments:
+        return cached[1]
+    ordered = [sorted(segment, key=lambda point: point.time_s) for segment in segments if segment]
+    offsets, total_distance_m = _segment_distance_offsets(ordered)
+    if key not in _ORDERED_CACHE and len(_ORDERED_CACHE) >= _ORDERED_CACHE_MAX:
+        _ORDERED_CACHE.pop(next(iter(_ORDERED_CACHE)))
+    _ORDERED_CACHE[key] = (segments, (ordered, offsets, total_distance_m))
+    return ordered, offsets, total_distance_m
 
 
 def _segment_distance_offsets(

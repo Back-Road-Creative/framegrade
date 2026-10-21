@@ -1,0 +1,71 @@
+{% extends "_base.html" %}
+{% block title %}Reconcile - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Cross-platform reconciliation</h1>
+  <p>Read-only. As of {{ report.as_of }} (UTC); coverage horizon {{ report.horizon_days }} days.
+  Nothing on this page publishes, retries or changes a row.</p>
+  {% if report.shadow_ignored %}<p>{{ report.shadow_ignored }} rehearsal (shadow) row(s) ignored.</p>{% endif %}
+
+  {% set headings = {
+    "queued": "Queued",
+    "uploaded": "Uploaded",
+    "remotely_scheduled": "Remotely scheduled",
+    "published": "Published",
+    "awaiting_manual": "Awaiting manual",
+    "unverified": "Unverified"} %}
+  {% set notes = {
+    "remotely_scheduled": "The platform accepted these and named a later time; not yet a publication.",
+    "awaiting_manual": "Parked for a person to post (e.g. TikTok pack or inbox); not a publication.",
+    "unverified": "Operator-confirmed, legacy, awaiting Instagram reconcile or missing on the platform; the platform has not confirmed them."} %}
+  {% for key, title in headings.items() %}
+  <h2>{{ title }} ({{ report.states[key]|length }})</h2>
+  {% if notes.get(key) %}<p><em>{{ notes[key] }}</em></p>{% endif %}
+  {% if report.states[key] %}
+  <table border="1" class="delivery-table">
+    <thead><tr><th>Id</th><th>Platform</th><th>Format</th><th>Project</th><th>Short</th><th>Status</th><th>Source</th><th>Scheduled</th></tr></thead>
+    <tbody>
+      {% for r in report.states[key] %}
+      <tr><td data-label="Id">{{ r.id }}</td><td data-label="Platform">{{ r.platform }}</td><td data-label="Format">{{ r.format or "not stated" }}</td>
+      <td data-label="Project">{{ r.project_name }}</td><td data-label="Short">{{ r.short_index }}</td><td data-label="Status">{{ r.status }}</td>
+      <td data-label="Source">{{ r.published_at_source or "-" }}</td><td data-label="Scheduled">{{ r.scheduled_at or "-" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>(none)</p>{% endif %}
+  {% endfor %}
+
+  <h2>Coverage gaps</h2>
+  <p>Days with nothing queued, uploaded, scheduled, published or awaiting a person, per platform and format.</p>
+  {% if report.gaps %}
+  <table border="1" class="delivery-table">
+    <thead><tr><th>Platform</th><th>Format</th><th>Uncovered days</th></tr></thead>
+    <tbody>
+      {% for key, days in report.gaps.items() %}
+      <tr><td data-label="Platform">{{ key[0] }}</td><td data-label="Format">{{ key[1] }}</td><td data-label="Uncovered days">{{ days|join(", ") or "none" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>(no deliveries to measure coverage against)</p>{% endif %}
+
+  <h2>Failures</h2>
+  {% for key, title in [("unresolved", "Unresolved"), ("recovery_in_flight", "Recovery in flight"), ("recovered", "Recovered")] %}
+  <h3>{{ title }} ({{ report.failures[key]|length }})</h3>
+  {% if report.failures[key] %}
+  <table border="1" class="delivery-table">
+    <thead><tr><th>Id</th><th>Platform</th><th>Project</th><th>Short</th><th>Error</th><th>Notes</th></tr></thead>
+    <tbody>
+      {% for f in report.failures[key] %}
+      <tr><td data-label="Id">{{ f.id }}</td><td data-label="Platform">{{ f.platform }}</td><td data-label="Project">{{ f.project_name }}</td><td data-label="Short">{{ f.short_index }}</td>
+      <td data-label="Error">{{ f.error_class or "-" }}</td>
+      <td data-label="Notes">{% if f.recovered_by %}recovery row {{ f.recovered_by }}{% endif %}
+      {% if f.action %}{{ f.action }}:
+        {% if f.prior_publication %}already published as row {{ f.prior_publication.id }}{% if f.prior_publication.permalink %} ({{ f.prior_publication.permalink }}){% endif %}
+        {% else %}no earlier publication of this short found{% endif %}{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>(none)</p>{% endif %}
+  {% endfor %}
+
+  <p><a href="/publishing">Back to Publishing</a></p>
+{% endblock %}

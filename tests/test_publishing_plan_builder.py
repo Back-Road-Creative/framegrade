@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gomoveshift.pipeline.title_decision import decide_title
 from gomoveshift.publishing.models import MediaFingerprint
 from gomoveshift.publishing.plan import compute_plan_hash
 from gomoveshift.publishing.plan_builder import build_publish_plan
@@ -38,6 +39,9 @@ def _post(short_index=1, *, caption="Rolling through County Kerry today", **over
         "sampled_regions": ["County Kerry, Munster"],
     }
     fields.update(overrides)
+    fields.setdefault(
+        "title_decision", decide_title("short", fields["youtube_title"], None, suffix="")
+    )
     return SimpleNamespace(**fields)
 
 

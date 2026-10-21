@@ -105,6 +105,7 @@ class TestCanonicalFormat:
             segs,
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -122,6 +123,7 @@ class TestCanonicalFormat:
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
             state_abbr="SC",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -161,6 +163,7 @@ class TestViaRoadSpanGuard:
             segs,
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -210,6 +213,7 @@ class TestViaRoadSpanGuard:
             segs,
             geocoder,
             per_lf_location="Washington County, Virginia (I 81)",
+            road_coverage_measured=True,
         )
         assert title == "Bristol to Marion via I 81, VA"
 
@@ -268,6 +272,7 @@ class TestLoopFormat:
             segs,
             geocoder,
             per_lf_location="Colleton County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Colleton Loop via Sea Island Parkway, SC"
 
@@ -322,6 +327,7 @@ class TestCountyFallback:
             segs,
             geocoder=None,
             per_lf_location="Colleton County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Colleton County via Sea Island Parkway, SC"
 
@@ -429,7 +435,9 @@ class TestDestinationAnchor:
             _loc(city="Lady's Island"),
         ]
         per_lf_location = "Beaufort County, South Carolina (Sea Island Parkway)"
-        without_kwarg = build_lf_title(segs, geocoder, per_lf_location=per_lf_location)
+        without_kwarg = build_lf_title(
+            segs, geocoder, per_lf_location=per_lf_location, road_coverage_measured=True
+        )
 
         geocoder2 = MagicMock()
         geocoder2.reverse_geocode.side_effect = [
@@ -437,7 +445,11 @@ class TestDestinationAnchor:
             _loc(city="Lady's Island"),
         ]
         with_none = build_lf_title(
-            segs, geocoder2, per_lf_location=per_lf_location, resolved_destination=None
+            segs,
+            geocoder2,
+            per_lf_location=per_lf_location,
+            resolved_destination=None,
+            road_coverage_measured=True,
         )
         assert (
             without_kwarg == with_none == "Port Royal to Lady's Island via Sea Island Parkway, SC"
@@ -514,6 +526,7 @@ class TestNonContiguousTitleShape:
             segs,
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -530,6 +543,7 @@ class TestNonContiguousTitleShape:
             segs,
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -649,6 +663,7 @@ class TestRoadFromVotedCounty:
             _CrossCountyGeo(),
             per_lf_location="Beaufort County, South Carolina (Blocker Run Road)",
             gps_points=gps,
+            road_coverage_measured=True,
         )
         assert "Sea Island Parkway" in title
         assert "Blocker Run Road" not in title
@@ -897,6 +912,7 @@ class TestPerLFOSTTextParameter:
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
             per_lf_ost_text=None,
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
         # Legacy cascade actually hit the geocoder
@@ -916,6 +932,7 @@ class TestPerLFOSTTextParameter:
             geocoder,
             per_lf_location="Beaufort County, South Carolina (Sea Island Parkway)",
             per_lf_ost_text="",
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Lady's Island via Sea Island Parkway, SC"
 
@@ -1050,6 +1067,7 @@ class TestMultiRoadTitleFormat:
             geocoder,
             per_lf_location="Beaufort County, South Carolina",
             roads=self._roads("US-17", "SC-170"),
+            road_coverage_measured=True,
         )
         assert title == "Port Royal to Beaufort via US-17 + SC-170, SC"
 
@@ -1065,6 +1083,7 @@ class TestMultiRoadTitleFormat:
             geocoder,
             per_lf_location="X County, South Carolina",
             roads=self._roads("R1", "R2", "R3"),
+            road_coverage_measured=True,
         )
         assert title == "A to B via R1 + R2 + R3, SC"
 
@@ -1459,6 +1478,7 @@ class TestCrossStateShape:
             "Spartanburg County, South Carolina",
             gps_points=_CROSS_STATE_GPS,
             resolved_road="US-176",
+            road_coverage_measured=True,
         )
         assert title == "Landrum, SC to Saluda, NC via US-176"
 

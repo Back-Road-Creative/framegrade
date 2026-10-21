@@ -9,6 +9,7 @@ flag is the narrower claim that this screen launches it, with `command` naming w
 when it does not. Deriving it means the page cannot go stale against the build: it previously
 read "Selector, reel and astro are not built yet" while all three engines shipped and each had
 its own `gomoveshift photos ...` command, which reads as "the feature does not exist".
+Every row also carries a `reason` (empty when the row can run), and the page prints it when `installed` is false. Two drive-side rows ride the same shape: `Trail film` (`gomoveshift drive --trail`) and `Inserts` (`--insert-photos` / `--insert-clip`), neither launched from the console. For them `installed` means "can run here now", measured by `console/route_story.py::trail_film_unavailable` (the `pipeline/route_story/{prepare,proof,verify,film}` modules the trail step imports plus `numpy` and `PIL`, then a prepared imagery bundle -- a dir holding `manifest.json`, not the cache's `shared/` or `gnis/` -- in `GMS_ROUTE_STORY_CACHE_DIR`) and `inserts_unavailable` (`pipeline/inserts`, `keycut`, `PIL`, `ffmpeg` on PATH). A bundle is keyed by a day's GPX, so a populated cache is necessary, not sufficient: a day without its bundle still records a `trail_skips` reason when the drive runs.
 `journey_stages(journey)` renders the normal creator path -- Import, Suggested treatment,
 Review, Schedule, Results -- as links to the screens that already drive each stage
 (`/photos#import`, `/photos#develop`, `/library`, `/schedule`, `/seo`), each threaded with

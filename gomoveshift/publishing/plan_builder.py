@@ -15,6 +15,7 @@ from gomoveshift.pipeline.text_format import (
     hashtags_in,
     split_trailing_hashtags,
 )
+from gomoveshift.pipeline.title_decision import require_title_decision
 from gomoveshift.publishing.models import (
     FORMAT_SHORT,
     TIKTOK_PRIVACY_LEVELS,
@@ -173,6 +174,12 @@ def build_publish_plan(
     for lf_idx in sorted(shorts_by_lf):
         for post in shorts_by_lf[lf_idx]:
             short_idx = post.short_index
+            # U5: the title the payload is built from must be Waypost's
+            # decided title; the hashtag append below is the only change after.
+            require_title_decision(
+                getattr(post, "youtube_title", "") or "",
+                {"title_decision": getattr(post, "title_decision", None)},
+            )
             slot = slots_by_short_index.get(short_idx)
             if slot is None:
                 raise ValueError(f"PUBLISH-PLAN-NO-SLOT: short_index {short_idx} has no slot")
@@ -243,6 +250,7 @@ def build_publish_plan(
                     ),
                     recording_date=recording_date,
                     sampled_regions=tuple(getattr(post, "sampled_regions", None) or ()),
+                    sampled_roads=tuple(getattr(post, "sampled_roads", None) or ()),
                     parent_lf_video_id=parent_id,
                     parent_lf_publish_at=parent_publish_at,
                     payloads=payloads,

@@ -8,7 +8,10 @@
   (`publishing_tiktok_audit_approved`) is set and the requested privacy level
   appears in the account's `creator_info`; otherwise the adapter refuses
   rather than posting at a lower privacy level than asked.
-- **Routing:** `DriveConfig.publishing_route_tiktok` is `first_party` or `off`.
+- **Routing:** `DriveConfig.publishing_route_tiktok` is `first_party` or `off` and
+  selects the adapter; the resolved mode (see "Pack mode" below) determines whether
+  it calls a publishing API, so `first_party` alone does not establish automated
+  TikTok publication.
 
 ## Scope of this module
 
@@ -43,15 +46,22 @@ filenames by regex (`...\.json$`), which a random `*.tmp` name never satisfies
 creation rules" **after** TikTok had already issued (and possibly rotated) a
 new token, so the encrypt failure discarded it: the credential could go
 permanently unusable. Fixed by reading `.sops.yaml` fresh on every refresh and
-passing the matched rule's `age` recipients explicitly (`sops --age <recips>
--e -i <tmp>`), which bypasses path-based creation-rule matching entirely — the
-temp file's name no longer matters. Recipients are re-read each call, never
+passing the resolved `age` recipients explicitly. **Note:**
+`--age` alone does not bypass creation-rule matching in SOPS 3.11. A refresh
+still failed against a discovered config that rejected the temporary name.
+With explicit recipients, encryption now uses `--config /dev/null --age
+<recips> -e -i <tmp>`; the existing ciphertext's recipients take precedence
+over config-derived recipients. A real SOPS/age regression test exercises
+matching and unrelated creation rules, encrypted persistence and decryption
+with throwaway keys, without platform requests. Recipients are re-read each call, never
 hardcoded, so a rekey doesn't silently rot this path. `meta_auth.py` only
 reads credentials (no refresh/persist path) so it isn't exposed to this
 failure mode.
 
-**Still deferred:** queue reconciliation (idempotent resubmission keyed on the
-stored `publish_id`, recording `confirm_publish`'s `failed_permanent`).
+Queue reconciliation uses the persisted `publish_id` for API uploads;
+pack rows have no upload ID and use the separate read-only video-list matcher
+described below. Neither a failed local receipt nor an unmatched caption
+authorizes a duplicate upload.
 
 **Settled:** the status payload does NOT name a `privacy_level`
 field, so delivery confirmation cannot read the audience back.
@@ -316,6 +326,19 @@ for manual scheduling in TikTok Studio. Nothing here calls TikTok.
   scheduled twice); instead `captions.txt` gets one block headed
   `<existing name> -- UPDATED for delivery <new id>` with the new slot and
   caption, written once.
+- **Overdue pack row (`queue reslot-overdue-manual`):** a pack row still
+  `awaiting_manual_publish` more than 24 h past its slot is moved by the
+  operator command (dry run unless `--apply`; never run by the drain). It
+  appends one block headed
+  `<existing name> -- RESLOTTED for delivery <id> (<new slot YYYY-MM-DD HH:MM tz>)`
+  whose Schedule line is the new slot, then moves the row's `scheduled_at` to the
+  region's next Waypost shorts time (display timezone of the cadence, later than
+  now + 20 minutes, not held by another live TikTok row; the region comes from the
+  row's publish-plan record). The new slot is in the header so a second reslot on
+  a later day is not skipped as an already-listed name. The `.mp4` keeps its
+  original (now stale) name; the owner re-schedules by the block, and
+  `mark-published` stays the only close. A row with no pack file, no resolvable
+  region, a live lease, or an unmounted drive is refused and nothing is written.
 - **`captions.txt`:** UTF-8 with CRLF line endings, one block per file (name,
   schedule line, caption), appended once; a name already listed is skipped.
   The schedule line is `Schedule: Post now (the slot was ...)` when the slot
@@ -383,8 +406,19 @@ more candidates, or one video matching two rows, leave every row involved
 parked and print `ambiguous` lines -- it never guesses. Paging stops at the
 oldest slot minus the window. It needs the `video.list` scope and real
 credentials, fetched only here (the drain keeps its empty token); any failure
-prints `tiktok reconcile: skipped (...)` and costs only the reconcile. The
+prints `  error: tiktok reconcile: skipped (...)` and costs only the reconcile. The
 console's mark-published remains the fallback for ambiguous or unmatched rows.
+
+The cron-retained summary carries the resolved `tiktok_mode` and nonzero
+`tiktok_reconcile_errors` / `tiktok_reconcile_ambiguous` counts. Pack mode
+writes local files; inbox mode submits drafts; only direct mode requests an
+API publication and retains the audit/audience gates. Mode resolution is an
+explicit argument, then `GMS_TIKTOK_MODE`, then the existing pack default;
+API errors never switch modes. `awaiting_manual_publish` is a local state,
+not confirmation that a post remains unpublished remotely. Failed or
+ambiguous reconciliation leaves it unchanged and visible while the other
+platforms continue draining. Resolving expired API access does not establish
+app-audit approval or permission to retry a post.
 
 An unknown `$GMS_TIKTOK_MODE` takes only TikTok out of that pass: the other
 platforms still drain, a `tiktok: skipped for this pass` line is printed, and

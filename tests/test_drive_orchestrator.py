@@ -1732,10 +1732,10 @@ class TestDoDValidatorInSinglePhaseMode:
     def test_dod_respects_skip_validation_in_single_phase(
         self, mock_d, mock_rg, mock_validate, tmp_path
     ):
-        """Escape hatch still works: ``config.drive.skip_validation=True`` skips
-        the DoD validator in single-phase mode too. Keeps the emergency-only
-        flag usable for operators who already know the batch is fine and need
-        to push past a transient validator glitch.
+        """Escape hatch still works on a skip-upload run:
+        ``config.drive.skip_validation=True`` skips the DoD validator in
+        single-phase mode too. A live upload run refuses it (GMS-17c,
+        tests/test_orchestrator_validation_gate.py).
         """
         mock_d.return_value = {}
         source, output_base, _ = self._seed_resumed_state(tmp_path)
@@ -1748,12 +1748,13 @@ class TestDoDValidatorInSinglePhaseMode:
             output_base=output_base,
             region="ireland",
             phase="phase_d",
+            skip_upload=True,
         )
 
         assert result.success is True
         assert mock_validate.call_count == 0, (
             "skip_validation=True must bypass the DoD validator on single-phase "
-            f"exits too — escape hatch (emergency only); got call_count={mock_validate.call_count}"
+            f"skip-upload exits too; got call_count={mock_validate.call_count}"
         )
 
     @patch("gomoveshift.pipeline.drive_orchestrator.run_validation")

@@ -44,6 +44,9 @@
     </label>
     {# Defaults ON for a fresh form; a refusal must NOT re-tick one the operator cleared, which would turn a corrected form into a live run. #}
     <label><input type="checkbox" name="dry_run" {% if form and form.dry_run or not form %}checked{% endif %}> Dry run</label>
+    <label><input type="checkbox" name="confirm_plan" {% if form.confirm_plan %}checked{% endif %}> I reviewed the dry-run plan; proceed with a full render</label>
+    <label><input type="checkbox" name="skip_upload" {% if form.skip_upload %}checked{% endif %}> Render without uploading to Drive or YouTube</label>
+    <label><input type="checkbox" name="ost_system_review" {% if form.ost_system_review %}checked{% endif %}> Use GPS to review on-screen locations (stops if unverified)</label>
     <label><input type="checkbox" name="no_review" {% if form.no_review %}checked{% endif %}> Skip review (--no-review)</label>
     <fieldset>
       <legend>Pipeline flags</legend>

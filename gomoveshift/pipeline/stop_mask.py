@@ -37,6 +37,7 @@ import logging
 import numpy as np
 
 from .gps_quality import _in_window_coords, usable_fix_times, window_median_speed_mps
+from .route_claims import GAP_S as _ROUTE_CLAIM_GAP_S
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +154,13 @@ def build_stop_mask(
 # A short may name only a place its own clip's GPS votes (quorum: two fixes). A
 # second inside a fix-to-fix gap longer than this — or inside a lead before the
 # first fix / a tail after the last one longer than it — is vetoed for shorts.
-# 7 s keeps every window of the planner's 15-s minimum holding at least two
-# fixes, so every window left open can vote its own place.
-GPS_MAX_FIX_GAP_S = 7.0
+# It IS the route-claim gap (``route_claims.GAP_S``, a fix-to-fix interval longer
+# than that is a gap; exactly equal is not): a Short needs 100% GPS coverage, so
+# a looser veto lets the planner pick a window the claim gate then refuses
+# (a 6.0 s interval passed a 7 s veto). 5 s keeps
+# every window of the planner's 15-s minimum holding at least two fixes just as
+# 7 s did, so every window left open can vote its own place.
+GPS_MAX_FIX_GAP_S = _ROUTE_CLAIM_GAP_S
 
 
 def build_gps_gap_mask(

@@ -6,6 +6,7 @@ contents, plus the delivery queue's row counts by state.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from gomoveshift.cli.handlers.pub_status import (
     cmd_publishing_status,
     credential_presence,
     queue_state_counts,
+    validate_against_live_catalog,
     validate_restored_state,
 )
 from gomoveshift.pipeline.drive_phases.phase_d import _serialize_publish_plan
@@ -279,3 +281,90 @@ def test_without_the_flag_the_command_is_the_unchanged_report(tmp_path, capsys):
 
     assert cmd_publishing_status(SimpleNamespace(), config) == 0
     assert "queued: 1" in capsys.readouterr().out
+
+
+# --- published YouTube deliveries vs the live channel (--live-catalog) ---
+#
+# Shape of the 2026-10-15 reconcile finding: a Gettysburg short the queue
+# records as ``published`` whose YouTube id videos.list no longer returns.
+# Ids below are synthetic; detection only -- nothing is re-queued or rewritten.
+
+_GONE_ID = "SYNTHgone01"
+_LIVE_ID = "SYNTHlive01"
+
+
+def _published_youtube(tmp_path, upload_id, *, sidecar=True) -> tuple:
+    conn, delivery_id = _restored(
+        tmp_path, sidecar_path=str(_sidecar(tmp_path)) if sidecar else None
+    )
+    transition(
+        conn,
+        delivery_id,
+        "queued",
+        "published",
+        platform_upload_id=upload_id,
+        published_at_source="platform_confirmed",
+    )
+    return conn, delivery_id
+
+
+def _catalog(**videos) -> dict:
+    return {"enumerated": len(videos), "listed": len(videos), "videos": videos}
+
+
+def test_a_published_short_whose_video_is_gone_from_the_channel_is_named(tmp_path):
+    conn, delivery_id = _published_youtube(tmp_path, _GONE_ID)
+    try:
+        problems = validate_against_live_catalog(conn, _catalog())
+    finally:
+        conn.close()
+    assert _kinds(problems) == ["published_video_missing"]
+    assert problems[0].delivery_id == delivery_id
+    assert _GONE_ID in problems[0].detail
+
+
+def test_a_live_title_that_differs_from_the_plan_title_is_named_not_fixed(tmp_path):
+    conn, _ = _published_youtube(tmp_path, _LIVE_ID)
+    try:
+        before = [dict(r) for r in conn.execute("SELECT * FROM deliveries").fetchall()]
+        problems = validate_against_live_catalog(
+            conn, _catalog(**{_LIVE_ID: {"title": "Edited On YouTube", "privacy": "public"}})
+        )
+        after = [dict(r) for r in conn.execute("SELECT * FROM deliveries").fetchall()]
+    finally:
+        conn.close()
+    assert _kinds(problems) == ["published_title_drift"]
+    assert "The Title" in problems[0].detail and "Edited On YouTube" in problems[0].detail
+    assert before == after
+
+
+def test_a_published_short_that_is_live_with_its_plan_title_is_clean(tmp_path):
+    conn, _ = _published_youtube(tmp_path, _LIVE_ID)
+    try:
+        live = _catalog(**{_LIVE_ID: {"title": "The Title", "privacy": "public"}})
+        assert validate_against_live_catalog(conn, live) == []
+    finally:
+        conn.close()
+
+
+def test_a_live_video_whose_sidecar_is_gone_is_not_called_drift(tmp_path):
+    """No local title to compare against is unknown, not a mismatch."""
+    conn, _ = _published_youtube(tmp_path, _LIVE_ID, sidecar=False)
+    try:
+        live = _catalog(**{_LIVE_ID: {"title": "Anything", "privacy": "public"}})
+        assert validate_against_live_catalog(conn, live) == []
+    finally:
+        conn.close()
+
+
+def test_live_catalog_flag_exits_nonzero_and_names_the_missing_video(tmp_path, capsys):
+    config = _config(tmp_path)
+    conn, _ = _published_youtube(tmp_path, _GONE_ID)
+    conn.close()
+    catalog = tmp_path / "live_catalog.json"
+    catalog.write_text(json.dumps(_catalog()), encoding="utf-8")
+
+    args = SimpleNamespace(validate=True, live_catalog=str(catalog))
+    assert cmd_publishing_status(args, config) == 1
+    out = capsys.readouterr().out
+    assert "published_video_missing" in out and _GONE_ID in out

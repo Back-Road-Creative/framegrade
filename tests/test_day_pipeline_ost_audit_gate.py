@@ -118,14 +118,14 @@ def _state_with_ost_text(date: str, lf_index: int = 1):
     }
 
 
-def _run(tmp_path, state, date="2025-09-14"):
+def _run(tmp_path, state, date="2025-09-14", lf_indices=(1,)):
     """Invoke run_day_pipeline with mocks; returns (result, mock_apply_ost)."""
     from gomoveshift.pipeline import day_pipeline
 
     day_batch = _make_day_batch(date, 1, per_ep=600.0)
     day_scores = _make_scores(600, 0.6)
     output_base = tmp_path / "out"
-    lf_plans = [_make_lf_plan(1, [_make_seg(0, 100, 200)], [])]
+    lf_plans = [_make_lf_plan(i, [_make_seg(0, 100 * i, 100 * i + 100)], []) for i in lf_indices]
 
     _, patches = _patch_heavy(tmp_path)
 

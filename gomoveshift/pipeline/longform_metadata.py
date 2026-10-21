@@ -365,6 +365,34 @@ def load_published_titles() -> set[str]:
     return titles
 
 
+def live_catalog_title_ids() -> dict[str, str]:
+    """``{normalized_title: video_id}`` from the local live-catalog snapshot
+    that ``catalog-fetch --known-ids-from-queue`` writes beside the queue DB
+    (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``).
+
+    Names the live video behind a duplicate-title refusal when the run's
+    channel refresh gave no id (degraded run, or a site that never had one)
+    and the on-disk ledger, which carries titles only, cannot. Any age is
+    fine — this names a video, it does not gate one. Never fetches; a
+    missing or unreadable snapshot is ``{}``.
+    """
+    from ..cli.handlers.pub_status import live_catalog_snapshot_path
+
+    try:
+        catalog = json.loads(
+            live_catalog_snapshot_path(DEFAULT_SEO_STORAGE).read_text(encoding="utf-8")
+        )
+        videos = catalog.get("videos") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    ids: dict[str, str] = {}
+    for video_id, video in videos.items() if isinstance(videos, dict) else ():
+        title = video.get("title") if isinstance(video, dict) else None
+        if title and title.strip():
+            ids.setdefault(title.strip().lower(), video_id)
+    return ids
+
+
 def refresh_channel_title_ledger(credentials_dir: Optional[Path] = None) -> dict[str, str]:
     """One ``playlistItems.list`` call on the channel's uploads
     playlist, returning ``{normalized_title: video_id}`` for every live
@@ -618,6 +646,7 @@ def _seo_search_line(
     location: str,
     resolved: Optional[object] = None,
     named_routes: Optional[list[str]] = None,
+    road_coverage_measured: bool = False,
 ) -> str:
     """Build the above-the-fold description SEO search line.
 
@@ -625,7 +654,9 @@ def _seo_search_line(
     FULL state name for US drives (SEO value: "North Carolina" > "NC") and the
     trailing region verbatim for non-US — mirroring ``_front_loaded_title`` so
     the two surfaces agree. The via-road (dropped from the title) is restored
-    here. Returns the line WITH a trailing newline, or "" when no usable
+    here only when ``road_coverage_measured``: untimed votes
+    never back a road claim, so by default the clause is stripped, not
+    restored. Returns the line WITH a trailing newline, or "" when no usable
     location data exists (the line is then omitted, preserving back-compat).
     """
     from .title_builder import state_full_name
@@ -642,6 +673,8 @@ def _seo_search_line(
         via_road = m_via.group(0).strip()[len("via") :].strip().rstrip(",").strip()
     if not via_road and named_routes:
         via_road = next((r.strip() for r in named_routes if r and r.strip()), "")
+    if not road_coverage_measured:
+        via_road = ""
 
     parts = [p.strip() for p in _VIA_ROAD_RE.sub("", base).split(",") if p.strip()]
     # The label is "<arc-or-town>[, <region>]" where arc = "A to B".
@@ -1453,6 +1486,11 @@ class LongFormMetadataGenerator:
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
         insert_count: int = 0,
+        road_coverage_measured: bool = False,
+        location_evidence: Optional[dict] = None,
+        title_evidence: Optional[object] = None,
+        title_part: Optional[tuple] = None,
+        preselected_title_decision: Optional[dict] = None,
     ) -> dict:
         """
         Generate complete YouTube metadata for a long form video.
@@ -1466,6 +1504,16 @@ class LongFormMetadataGenerator:
             video_duration: Video duration in seconds
             project_name: Project name for reference
             title_format_index: Which title format to use (0 = best performing)
+            location_evidence: This LF's ``LocationEvidence`` record (dict form),
+                the facts Waypost's title decision may claim.
+            title_evidence: Waypost ``EvidenceSnapshot`` for the decision; none
+                means no observations, so the route-only baseline ships.
+            title_part: ``(part_index, part_count)`` of a split full-drive LF;
+                the part suffix is part of the decided title, never appended
+                after it.
+            preselected_title_decision: Waypost decision approved against the
+                retained route before encoding; its baseline must still match
+                the metadata title assembled here.
 
         Returns:
             Dict with: title, description, tags, category, publish_day,
@@ -1538,6 +1586,7 @@ class LongFormMetadataGenerator:
                 resolved_location=resolved_location,
                 full_drive_stats=full_drive_stats,
                 insert_count=insert_count,
+                road_coverage_measured=road_coverage_measured,
             )
         else:
             logger.warning(
@@ -1566,11 +1615,14 @@ class LongFormMetadataGenerator:
                 resolved_location=resolved_location,
                 full_drive_stats=full_drive_stats,
                 insert_count=insert_count,
+                road_coverage_measured=road_coverage_measured,
             )
 
         # Enrich with route profile data (GPS-verified towns, roads, features)
         if route_profile:
-            result = self._enrich_with_route_profile(result, route_profile)
+            result = self._enrich_with_route_profile(
+                result, route_profile, road_coverage_measured=road_coverage_measured
+            )
 
         # Re-cap tags at the single choke point every generate path passes
         # through. The optimized/basic paths cap COUNT (:30) BEFORE the
@@ -1602,6 +1654,17 @@ class LongFormMetadataGenerator:
         if full_drive_stats:
             result["full_drive_stats"] = list(full_drive_stats)
 
+        # Waypost decides the title from verified facts; the record rides
+        # with the metadata and the upload refuses any other title.
+        if isinstance(result, dict) and result.get("title"):
+            self._apply_title_decision(
+                result,
+                location_evidence,
+                title_evidence,
+                title_part,
+                preselected_title_decision=preselected_title_decision,
+            )
+
         # Enforce content safety — pipeline stops if any text is unsafe
         validator = ContentValidator()
         validator.enforce(
@@ -1612,7 +1675,42 @@ class LongFormMetadataGenerator:
         return result
 
     @staticmethod
-    def _enrich_with_route_profile(result: dict, route_profile: dict) -> dict:
+    def _apply_title_decision(
+        result, location_evidence, title_evidence, title_part, *, preselected_title_decision=None
+    ) -> None:
+        from .title_builder import append_full_drive_part_suffix
+        from .title_decision import PreRenderTitleError, decide_title
+
+        baseline = result["title"]
+        if title_part:
+            baseline = append_full_drive_part_suffix(baseline, *title_part)
+        if preselected_title_decision is not None:
+            if preselected_title_decision.get("baseline_title") != baseline:
+                raise PreRenderTitleError(
+                    f"pre-render title baseline {preselected_title_decision.get('baseline_title')!r} "
+                    f"does not match metadata baseline {baseline!r}"
+                )
+            chosen = preselected_title_decision.get("chosen_title")
+            if not isinstance(chosen, str) or not chosen.strip():
+                raise PreRenderTitleError("pre-render title decision has no chosen title")
+            result["title"] = chosen
+            result["title_decision"] = preselected_title_decision
+            return
+        cut = baseline.rfind(" in 4K")
+        decision = decide_title(
+            "longform",
+            baseline,
+            location_evidence,
+            suffix=baseline[cut:] if cut >= 0 else "",
+            snapshot=title_evidence,
+        )
+        result["title"] = decision["chosen_title"]
+        result["title_decision"] = decision
+
+    @staticmethod
+    def _enrich_with_route_profile(
+        result: dict, route_profile: dict, road_coverage_measured: bool = False
+    ) -> dict:
         """Enrich metadata with GPS-verified route profile data.
 
         Surfaces start/end-town journey arc, multi-state spans, and
@@ -1634,6 +1732,10 @@ class LongFormMetadataGenerator:
         # named through-road only). A street/lane/town road that a naive
         # share/distance floor let through must never reach prose or tags.
         roads = [r for r in (route_profile.get("roads_traversed") or []) if _road_passes_quality(r)]
+        # Road coverage is not measured over retained time, so
+        # by default no road reaches prose, ``named_routes`` or tags.
+        if not road_coverage_measured:
+            roads = []
         features = list(route_profile.get("features") or [])
         states = list(route_profile.get("states_traversed") or [])
         start_town = route_profile.get("start_town") or ""
@@ -1979,6 +2081,7 @@ class LongFormMetadataGenerator:
         """
         from datetime import datetime, timezone
 
+        from seo_manager.analytics import metric_source
         from seo_manager.core.events import EventType, SEOEvent
 
         video_ids = list(video_mapping.keys())
@@ -2015,6 +2118,10 @@ class LongFormMetadataGenerator:
                         "comments": int(stats.get("commentCount", 0)),
                         "favorites": int(stats.get("favoriteCount", 0)),
                     }
+                    # Every ctr row says what it is a rate OF. cardClickRate is
+                    # in-player card clicks among viewers already watching, not
+                    # thumbnail impressions; unlabelled it read as "unknown".
+                    data["ctr_source"] = metric_source.UNKNOWN
                     if published_at:
                         data["published_at"] = published_at
 
@@ -2028,6 +2135,8 @@ class LongFormMetadataGenerator:
                             data["average_view_percentage"] = analytics.get("averageViewPercentage")
                             data["card_impressions"] = analytics.get("cardImpressions")
                             data["ctr"] = analytics.get("cardClickRate")
+                            if data["ctr"] is not None:
+                                data["ctr_source"] = metric_source.YOUTUBE_CARD_CLICK_RATE
                             data["subscribers_gained"] = analytics.get("subscribersGained")
 
                     event = SEOEvent(
@@ -2065,6 +2174,7 @@ class LongFormMetadataGenerator:
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
         insert_count: int = 0,
+        road_coverage_measured: bool = False,
     ) -> dict:
         """Generate metadata using SEO Manager with analytics optimization."""
         from seo_manager import ContentType
@@ -2144,23 +2254,21 @@ class LongFormMetadataGenerator:
             resolved_location=resolved_location,
             full_drive_stats=full_drive_stats,
             insert_count=insert_count,
+            road_coverage_measured=road_coverage_measured,
         )
 
         # Transactional booking: NO ledger write here (metadata-gen is
         # pre-upload → phantom slots). The LF entry books after YouTube
         # confirms; ``next_slot`` above feeds description text only.
 
-        # Verb-led title is structural. The SEO Manager's title
-        # output is verb-less in practice, so we treat it as a suffix candidate
-        # rather than the whole title. ``trim_ratio`` may be None (unmeasured),
-        # which bands to Driving.
+        # The route-only baseline title (the optimizer's title is not an
+        # input; ``generate`` hands this baseline to Waypost's select_title).
         if title_override:
             # An explicit override is the canonical (verb-less)
             # location string (per_lf_ost_text). Route it through
             # _build_title so the trim-based verb ("Highlights from" /
             # "Driving") is still applied — don't bypass it. Strip any
-            # leading verb first to stay idempotent. No seo_suffix: the
-            # override is already the chosen canonical title.
+            # leading verb first to stay idempotent.
             title = self._build_title(
                 location=_strip_leading_verb(title_override),
                 trim_ratio=trim_ratio,
@@ -2170,7 +2278,6 @@ class LongFormMetadataGenerator:
             title = self._build_title(
                 location=location,
                 trim_ratio=trim_ratio,
-                seo_suffix=metadata.title,
                 resolved=resolved_location,
             )
 
@@ -2224,15 +2331,16 @@ class LongFormMetadataGenerator:
     def _build_title(
         location: str,
         trim_ratio: Optional[float] = None,
-        seo_suffix: Optional[str] = None,
         resolved: Optional[object] = None,
     ) -> str:
         """Build a route-only, SEO-optimized YouTube title for one LF.
 
         DECIDED shape ``"{A} to {B}, {ST} in 4K"`` (55-65 char SERP target) —
         route + "in 4K", no genre word. The trim-honesty verb moved OUT of the
-        description's 🎬 Final cut line, so ``trim_ratio``/``seo_suffix`` stay in
-        the signature for compat but no longer alter the title. The burned-OST/
+        description's 🎬 Final cut line, so ``trim_ratio`` stays in the signature
+        for compat but no longer alters the title. The optimizer's title is no
+        input at all: this is the route-only baseline, and Waypost's
+        ``select_title`` decides the published title. The burned-OST/
         thumbnail text (``per_lf_ost_text``) is a separate string — unaffected.
         ``_clamp_title_len`` still guards the 100-char limit + ``(Part N of M)``.
 
@@ -2261,6 +2369,7 @@ class LongFormMetadataGenerator:
         terrain_type: Optional[str] = None,
         chapter_towns: Optional[list[str]] = None,
         named_routes: Optional[list[str]] = None,
+        road_coverage_measured: bool = False,
     ) -> str:
         """Build a description body line using only verifiable facts.
 
@@ -2276,6 +2385,8 @@ class LongFormMetadataGenerator:
             "winding": "winding",
         }
 
+        if not road_coverage_measured:
+            named_routes = None  # an unmeasured road is not a verifiable fact
         # Without GPS-derived context, the body would only restate
         # facts already in the 📍 / 🎬 / 📅 block. Return empty so the
         # caller omits the body block entirely.
@@ -2310,6 +2421,7 @@ class LongFormMetadataGenerator:
         terrain_type: Optional[str] = None,
         chapter_towns: Optional[list[str]] = None,
         named_routes: Optional[list[str]] = None,
+        road_coverage_measured: bool = False,
     ) -> str:
         """Replace the body paragraph in a full description with updated facts.
 
@@ -2328,6 +2440,7 @@ class LongFormMetadataGenerator:
             terrain_type=terrain_type,
             chapter_towns=chapter_towns,
             named_routes=named_routes,
+            road_coverage_measured=road_coverage_measured,
         )
 
         # Replace body paragraph between hook and Location line:
@@ -2413,6 +2526,7 @@ class LongFormMetadataGenerator:
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
         insert_count: int = 0,
+        road_coverage_measured: bool = False,
     ) -> str:
         """
         Build GoMoveShift-specific YouTube description.
@@ -2531,7 +2645,12 @@ class LongFormMetadataGenerator:
         # town arc + the via-road sit in the first two lines YouTube renders
         # before the "…more" fold. Empty (line omitted) when there's no usable
         # location data.
-        seo_line = _seo_search_line(location, resolved=resolved_location, named_routes=named_routes)
+        seo_line = _seo_search_line(
+            location,
+            resolved=resolved_location,
+            named_routes=named_routes,
+            road_coverage_measured=road_coverage_measured,
+        )
 
         # Geo hashtags: one per GPS-clean location component (town-arc endpoints
         # + region), reusing the shorts' _location_hashtags so a route-form
@@ -2651,6 +2770,7 @@ class LongFormMetadataGenerator:
             terrain_type=terrain_type,
             chapter_towns=chapter_towns,
             named_routes=named_routes,
+            road_coverage_measured=road_coverage_measured,
         )
 
         # Build hashtags from GMS_BASE_TAGS + location/country (not hardcoded)
@@ -2779,6 +2899,7 @@ class LongFormMetadataGenerator:
         resolved_location: Optional[object] = None,
         full_drive_stats: Optional[list] = None,
         insert_count: int = 0,
+        road_coverage_measured: bool = False,
     ) -> dict:
         """Fallback: basic metadata generation without SEO Manager."""
         duration_str = self._format_duration(video_duration)
@@ -2818,6 +2939,7 @@ class LongFormMetadataGenerator:
             resolved_location=resolved_location,
             full_drive_stats=full_drive_stats,
             insert_count=insert_count,
+            road_coverage_measured=road_coverage_measured,
         )
 
         # Curated tags — base tags + whole-phrase location tags.

@@ -35,4 +35,5 @@ Every host `gomoveshift/**/*.py` names, and what it is for. See `docs/pipeline/8
 | `www.googleapis.com` | YouTube Data API (upload, metadata, playlists) and Drive API calls | YouTube upload / metrics | media/data out | default |
 | `www.tiktok.com` | Web origin used to build a human-facing TikTok permalink (not fetched) | TikTok publishing status | GET-only | opt-in |
 | `www.topografix.com` | GPX 1.1 XML namespace URI parsed/emitted in GPX files (not fetched) | GPS track parsing | GET-only | default |
+| `www2.census.gov` | Pinned 2026 TIGER county/state ZIPs, SHA-256 verified before caching | Retained-route boundary proof | GET-only | default |
 | `youtu.be` | Video permalink text built into descriptions, chapters and CSV rows (not fetched) | YouTube metadata / shorts CSV | GET-only | default |

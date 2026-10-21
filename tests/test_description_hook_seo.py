@@ -19,11 +19,11 @@ from gomoveshift.pipeline.longform_metadata import (
 
 class TestSeoSearchLineShape:
     def test_non_us_arc_region_and_road(self) -> None:
-        out = _seo_search_line("Killarney to Dingle via N86, Kerry")
+        out = _seo_search_line("Killarney to Dingle via N86, Kerry", road_coverage_measured=True)
         assert out == "Kerry 4K drive — Killarney to Dingle via N86.\n"
 
     def test_us_full_state_name_front_loaded(self) -> None:
-        out = _seo_search_line("Asheville to Boone via US-221, NC")
+        out = _seo_search_line("Asheville to Boone via US-221, NC", road_coverage_measured=True)
         # US drives front-load the FULL state name for SEO value, not the abbr.
         assert out == "North Carolina 4K drive — Asheville to Boone via US-221.\n"
 
@@ -37,7 +37,9 @@ class TestSeoSearchLineShape:
         assert out == "Killarney to Dingle — 4K drive.\n"
 
     def test_leading_verb_and_series_suffix_stripped(self) -> None:
-        out = _seo_search_line("Driving Killarney to Dingle via N86, Kerry — Part 2")
+        out = _seo_search_line(
+            "Driving Killarney to Dingle via N86, Kerry — Part 2", road_coverage_measured=True
+        )
         assert out == "Kerry 4K drive — Killarney to Dingle via N86.\n"
 
     def test_empty_location_omits_line(self) -> None:
@@ -45,7 +47,9 @@ class TestSeoSearchLineShape:
         assert _seo_search_line(None) == ""  # type: ignore[arg-type]
 
     def test_named_routes_fallback_when_label_has_no_via(self) -> None:
-        out = _seo_search_line("Killarney to Dingle, Kerry", named_routes=["N86"])
+        out = _seo_search_line(
+            "Killarney to Dingle, Kerry", named_routes=["N86"], road_coverage_measured=True
+        )
         assert out == "Kerry 4K drive — Killarney to Dingle via N86.\n"
 
     def test_road_dropped_when_absent(self) -> None:
@@ -77,7 +81,9 @@ class TestResolverConsumed:
         assert out.startswith("North Carolina 4K drive — ")
 
     def test_degraded_resolver_does_not_flip_non_us(self) -> None:
-        out = _seo_search_line("Killarney to Dingle via N86, Kerry", ResolvedLocation())
+        out = _seo_search_line(
+            "Killarney to Dingle via N86, Kerry", ResolvedLocation(), road_coverage_measured=True
+        )
         assert out == "Kerry 4K drive — Killarney to Dingle via N86.\n"
 
     def test_bare_region_uses_resolver_sequence_for_arc(self) -> None:
@@ -93,6 +99,7 @@ class TestDescriptionIntegration:
     def test_seo_line_is_line_two_above_the_fold(self) -> None:
         gen = self._gen()
         desc = gen._build_gms_description(
+            road_coverage_measured=True,
             location="Killarney to Dingle via N86, Kerry",
             seo_description="POV drive through Killarney to Dingle via N86, Kerry",
             duration_str="15 min",
@@ -118,6 +125,7 @@ class TestDescriptionIntegration:
     def test_trim_band_hook_preserved_on_line_one(self) -> None:
         gen = self._gen()
         desc = gen._build_gms_description(
+            road_coverage_measured=True,
             location="Killarney to Dingle via N86, Kerry",
             seo_description="Join me on a relaxing drive!",
             duration_str="15 min",

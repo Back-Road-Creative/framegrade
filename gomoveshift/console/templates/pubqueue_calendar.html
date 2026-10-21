@@ -29,7 +29,7 @@
         <ul>
           {% for row in group.rows %}
           <li><a href="/publishing/{{ row.id }}">{{ row.time_label }} #{{ row.short_index }}</a>
-          {{ row.platform }} &mdash; {{ row.status }}<br>
+          {{ row.platform }} &mdash; {{ row.delivery_state }}<br>
           {% if row.title_status == "present" %}
           <strong title="{{ row.title }}">{{ row.title|truncate(title_display_max_chars, True, "…") }}</strong>
           {% elif row.title_status == "unreadable" %}
@@ -59,7 +59,7 @@
       <td><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td>
       <td>{{ row.short_index }}</td>
       <td>{{ row.platform }}</td>
-      <td>{{ row.status }}</td>
+      <td>{{ row.delivery_state }}</td>
       <td>
         {% if row.title_status == "present" %}
         <span title="{{ row.title }}">{{ row.title|truncate(title_display_max_chars, True, "…") }}</span>

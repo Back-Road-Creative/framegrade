@@ -16,6 +16,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from _state_helpers import decided
+
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
 
 
 @pytest.fixture
@@ -119,7 +129,7 @@ def test_get_or_create_creates_playlist_when_missing(fake_creds_dict, fake_video
             title="Driving Dingle",
             description="d",
             tags=[],
-            metadata={"location": "Dingle, Kerry, Ireland"},
+            metadata=decided({"location": "Dingle, Kerry, Ireland"}, "Driving Dingle"),
             config=cfg,
         )
 
@@ -154,7 +164,7 @@ def test_idempotent_playlist_when_exists(fake_creds_dict, fake_video_file):
             title="Driving Dingle",
             description="d",
             tags=[],
-            metadata={"location": "Dingle, Kerry, Ireland"},
+            metadata=decided({"location": "Dingle, Kerry, Ireland"}, "Driving Dingle"),
             config=cfg,
         )
 
@@ -192,7 +202,7 @@ def test_one_playlists_list_per_run_cache(fake_creds_dict, tmp_path):
             title="A",
             description="",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "A"),
             config=cfg,
         )
         up.upload_video_with_playlist(
@@ -200,7 +210,7 @@ def test_one_playlists_list_per_run_cache(fake_creds_dict, tmp_path):
             title="B",
             description="",
             tags=[],
-            metadata={"location": "Y, Ireland"},
+            metadata=decided({"location": "Y, Ireland"}, "B"),
             config=cfg,
         )
 
@@ -227,7 +237,7 @@ def test_default_playlist_used_when_no_rule_matches(fake_creds_dict, fake_video_
             title="Driving Belgium",
             description="d",
             tags=[],
-            metadata={"location": "Somewhere, Belgium"},
+            metadata=decided({"location": "Somewhere, Belgium"}, "Driving Belgium"),
             config=cfg,
         )
 
@@ -249,7 +259,7 @@ def test_every_upload_calls_playlistitems_insert(fake_creds_dict, fake_video_fil
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "t"),
             config=cfg,
         )
 

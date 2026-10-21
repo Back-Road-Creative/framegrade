@@ -146,4 +146,6 @@ def test_pre_encode_gate_raises_on_radford_one_county_label():
         vote={MONT: 0.562, ROAN: 0.437},
     )
     with pytest.raises(RuntimeError, match="Roanoke County"):
-        _assert_pre_encode_location_invariant({1: MONT}, {1: rl})
+        _assert_pre_encode_location_invariant(
+            {1: MONT}, {1: rl}, evidence_by_lf={1: {"corroborations": 1}}
+        )

@@ -115,6 +115,9 @@ class TestDayJourneyThreadedThroughProduceSuperlongParts:
             day_gps_points=gps_points,
             # OST audit gate: drives the burn directly, so it stands in for a reviewer.
             state=make_state(ost_audit_confirmed_this_run=True),
+            # D8b: this test is about the chapter journey, not the route claim
+            # (test_superlong_route_claims.py), so the check keeps the text.
+            superlong_route_fn=lambda idx, ranges, pts, text: (text, "", None),
         )
 
         journey = captured.get("day_journey")

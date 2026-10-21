@@ -16,6 +16,20 @@ Project completes when video processing workflow is fully automated and stable, 
 
 ## Testing
 
+### Retained route location checks
+
+Before encoding a long-form, the route claim gate checks the on-screen label
+against GPS samples from the footage the edit keeps. A title that names all
+visited places must also have a truthful state suffix: `Alder and Birch, VA`
+is refused if a retained sample resolves to West Virginia. A place list alone
+does not validate a trailing state abbreviation. GPS gaps still require their
+own evidence before a broader county or state fallback can be approved.
+Pinned Census polygons can supply a bounded region check for those gaps;
+the pipeline waits for a matching Waypost review contract before using it.
+See [retained-route region proof](docs/pipeline/80-census-boundary-proof.md).
+
+### Test isolation
+
 `tests/conftest.py` points `HOME` at an empty temp directory in a module-level
 block, before `import gomoveshift`, so the suite is blind by construction to
 the developer's real `~/.config/gomoveshift/config.yaml` from the moment
@@ -36,7 +50,14 @@ differently than CI, and a developer's stale override silently changes their
 local suite result. See `tests/test_conftest_isolation.py` and
 `tests/test_conftest_hermetic_config.py`.
 
-The output root gets the same treatment: the autouse
+The same block sets `SEO_INPUTS_DIR` to an empty directory. In normal runs
+`SEO_INPUTS_DIR` (default: `seo` under `GMS_INPUTS_DIR`)
+holds the operator's sealed seo tokens, and `credential_paths.resolve_sops_file`
+prefers a copy there over the legacy `seo.credentials_dir` parent (see
+`docs/install.md`); pointing it at an empty dir keeps every test off the box's
+real tokens.
+
+The operator's output root gets the same treatment: the autouse
 `isolate_output_root_from_operator` fixture points `GMS_OUTPUT_DIR` inside
 each test's own `tmp_path`, so a default-constructed `TrackingStore` (where
 `enqueue-plan --apply` registers every enqueued short) never writes the real
@@ -154,11 +175,12 @@ The helpers are `gms_data_home`, `gms_cache_home` and `gms_config_home` in `gomo
 | --- | --- | --- |
 | `GMS_STAGING_DIR` | `<data home>/input` | Video staging/input dir (`gomoveshift/paths.py`). `assert_required_paths_exist` raises if the resolved path is missing. |
 | `GMS_OUTPUT_DIR` | `<data home>/output` | Pipeline output dir (`paths.py`); also backs the content ledger path (`pipeline/content_ledger.py`). Final deliverables land under the default. |
-| `GMS_INPUTS_DIR` | `<data home>/operator-inputs` | The operator's own inputs, kept outside the code tree: today the Route Story launch profiles in `route_story_profiles/` (`paths.py` `gms_inputs_dir`, read by `console/route_story.py`) and `known_ids.txt`, the channel's private/unlisted video ids that no uploads listing returns, one per line (`site_sync/known_ids.py` `load_known_ids`). Not the same as the video staging dir (`input/`, `GMS_STAGING_DIR`). An empty or whitespace-only value counts as unset and `~` is expanded. The default need not exist (no inputs yet); a value that is set must be an existing directory, otherwise the code raises `InputsDirError` (a `ValueError`) naming the variable and the path, and the console answers 422/400 with that message. |
+| `GMS_INPUTS_DIR` | `<data home>/operator-inputs` | The operator's own inputs, kept outside the code tree: `config.yaml`, the Route Story launch profiles in `route_story_profiles/`, playlist routing overrides (`paths.py` `gms_inputs_dir`, read by `console/route_story.py`), and `known_ids.txt`, the channel's private/unlisted video ids that no uploads listing returns, one per line (`site_sync/known_ids.py` `load_known_ids`). Not the same as the video staging dir (`input/`, `GMS_STAGING_DIR`). An empty or whitespace-only value counts as unset and `~` is expanded. The default need not exist (no inputs yet); a value that is set must be an existing directory, otherwise the code raises `InputsDirError` (a `ValueError`) naming the variable and the path, and the console answers 422/400 with that message. A container sets it explicitly and mounts the directory read-only. |
 | `GMS_INTERMEDIATE_DIR` | (none — falls through to the cache home when output is on `/mnt/`) | Absolute override for the ext4-backed `_stages` dir (`paths.py`). Without it, heavy intermediates use the cache home on drvfs output or the output dir itself on ext4. |
+| `XDG_CACHE_HOME` | unset (`~/.cache`) | Base for the SHA-verified 2026 Census county/state archive cache used by retained-route boundary proof. |
 | `GMS_ROUTE_STORY_CACHE_DIR` | `<cache home>/route-story` | Route Story map-bundle cache (`paths.py` `gms_route_story_cache_dir`). Kept on ext4 so tile writes are fast; a missing dir is created, a cleared cache just re-fetches. |
 | `GMS_OVERPASS_CACHE_DIR` | `<cache home>/overpass` | Overpass response cache (`paths.py` `gms_overpass_cache_dir`). Set to the empty string to never cache. |
-| `GMS_GEOCODING_CACHE_DIR` | `<cache home>/geocoding` | Backs the single geocode-cache namespace (`DriveConfig.resolved_geocode_cache_dir`); all consumers — Phase A GPX derivation, Phase BC per-LF labels, Phase D chapters — resolve here so one coordinate resolves identically across a run. A stale/missing path just re-fetches. |
+| `GMS_GEOCODING_CACHE_DIR` | `<cache home>/geocoding` | Backs the single geocode-cache namespace (`DriveConfig.resolved_geocode_cache_dir`, default from `paths.py` `gms_geocoding_cache_dir`); all consumers — Phase A GPX derivation, Phase BC per-LF labels, Phase D chapters — resolve here so one coordinate resolves identically across a run. A stale/missing path just re-fetches. |
 | `GMS_GPS_CACHE_DIR` | (none) | Legacy override for the same unified namespace (takes precedence over `GMS_GEOCODING_CACHE_DIR`); steers **every** geocoder at one dir, not just Phase A. Empty falls back to the default; cache rebuilt on miss. |
 | `GMS_WEB_JOBS_PATH` | `<GMS_STAGING_DIR>/_stages/web_jobs.json` | Web-UI job persistence file (`web/app.py`); test override hook. Default snapshot location used. |
 | `GMS_OST_ENCODE_TIMEOUT_SEC` | `7200` (2h) | Per-LF OST re-encode timeout (`pipeline/ost_applier.py`). Non-numeric/unset → 2h. Too low would kill a slow NVENC-flap encode. |
@@ -321,6 +343,13 @@ than proceeding, because the failure it prevents — an `nvenc` OOM partway
 through a day master — is worse than a clear refusal at the start. The error
 names the holder and its PID. To clear it by hand, stop the process that holds
 the lock (the PID is in the error message and in the lock file's JSON body).
+
+The host worker passes its configured lock path to every child. For `drive`,
+the drive orchestrator takes the lock itself after its run locks and holds it
+for the run; the worker does not take a second lock around that child. Other
+host-worker commands still run under the worker's lock. This avoids a drive
+child waiting on a lock held by its own parent while keeping GPU operations
+exclusive across services.
 
 ## Future-publish coordination — `publish-journal` cron pattern
 

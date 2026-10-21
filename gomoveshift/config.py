@@ -9,7 +9,12 @@ from typing import Literal, NamedTuple, Optional
 import yaml
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from gomoveshift.paths import gms_cache_home, gms_config_home, gms_data_home
+from gomoveshift.paths import (
+    gms_config_home,
+    gms_data_home,
+    gms_geocoding_cache_dir,
+    gms_inputs_dir,
+)
 from gomoveshift.video_types import LF_MIN_DURATION, SHORTS_MAX_DURATION
 
 logger = logging.getLogger(__name__)
@@ -1319,6 +1324,44 @@ class EndscreenConfig(BaseModel):
     reference_video_id: Optional[str] = None
 
 
+def resolve_lf_mode(drive) -> str:
+    """The single resolved LF selection mode for ``drive`` (never ``None``).
+
+    ``DriveConfig`` resolves it at construction; this also covers config
+    stand-ins that carry only the fields (unset mode + both part bounds set
+    -> ``full_drive``). Every reader goes through here -- no reader keeps its
+    own ``"best_moments"`` fallback.
+    """
+    mode = getattr(drive, "lf_selection_mode", None)
+    if mode:
+        return mode
+    both = (
+        getattr(drive, "full_drive_part_min_sec", None) is not None
+        and getattr(drive, "full_drive_part_max_sec", None) is not None
+    )
+    return "full_drive" if both else "best_moments"
+
+
+def lf_policy_snapshot(drive) -> dict:
+    """Mode + part bounds, the shape stamped beside a saved plan and compared on resume."""
+    return {
+        "mode": resolve_lf_mode(drive),
+        "part_min_sec": getattr(drive, "full_drive_part_min_sec", None),
+        "part_max_sec": getattr(drive, "full_drive_part_max_sec", None),
+    }
+
+
+def lf_policy_banner(drive) -> str:
+    """One launch-banner line: resolved mode, its source and the part bounds."""
+    snap = lf_policy_snapshot(drive)
+    lo, hi = snap["part_min_sec"], snap["part_max_sec"]
+    bounds = f"part_min={lo}s part_max={hi}s" if lo is not None else "part bounds unset"
+    return (
+        f"LF policy: mode={snap['mode']} "
+        f"(source={getattr(drive, 'lf_mode_source', 'default')}) {bounds}"
+    )
+
+
 def _is_valid_hhmm(value: str) -> bool:
     """True when *value* is a well-formed ``HH:MM`` 24h time string."""
     try:
@@ -1479,12 +1522,9 @@ class DriveConfig(BaseModel):
     # don't need a config.yaml change. This is the SINGLE geocode-cache namespace —
     # ``resolved_geocode_cache_dir`` routes Phase A, Phase BC, and Phase D
     # all through it so one coordinate resolves identically across a run.
-    geocoding_cache_dir: str = Field(
-        default_factory=lambda: os.environ.get(
-            "GMS_GEOCODING_CACHE_DIR",
-            str(gms_cache_home() / "geocoding"),
-        )
-    )
+    # Default from ``gomoveshift.paths.gms_geocoding_cache_dir`` (env
+    # ``GMS_GEOCODING_CACHE_DIR``, else ``<cache home>/geocoding``).
+    geocoding_cache_dir: str = Field(default_factory=lambda: str(gms_geocoding_cache_dir()))
     # Optional license-plate ONNX model for redactcam.
     # Plate detection is OPT-IN via a local ONNX model (faces have their own
     # model below). Empty (default) → plates disabled with a WARN (never
@@ -1901,7 +1941,15 @@ class DriveConfig(BaseModel):
     # ``full_drive_max_duration_sec`` caps the single LF (default 2h);
     # ``plan_regular_lfs(mode="full_drive")`` raises ``ValueError`` rather
     # than silently truncate when the source exceeds the ceiling.
-    lf_selection_mode: Literal["best_moments", "full_drive"] = "best_moments"
+    # ``None`` = "operator did not say": ``_resolve_lf_policy`` turns it into
+    # ``full_drive`` when BOTH part bounds below are set (the bounds only mean
+    # anything under full_drive; a config with bounds and no mode used to fall
+    # silently back to 8-12 min best_moments), else ``best_moments``. After
+    # construction the field is never ``None`` -- every reader goes through
+    # ``resolve_lf_mode`` / this resolved value.
+    lf_selection_mode: Optional[Literal["best_moments", "full_drive"]] = None
+    # Provenance of the resolved mode: default | yaml | cli | resumed-state.
+    lf_mode_source: str = "default"
     full_drive_max_duration_sec: int = 7200
     # Balanced long-form parts for full_drive (day-first): when BOTH are set a
     # day's kept timeline is split into ceil(kept/max) near-equal parts, each
@@ -1925,6 +1973,55 @@ class DriveConfig(BaseModel):
                 f"full_drive_part_max_sec (got {lo}, {hi})"
             )
         return self
+
+    @model_validator(mode="after")
+    def _resolve_lf_policy(self) -> "DriveConfig":
+        if self.lf_selection_mode is None:
+            both = self.full_drive_part_min_sec is not None and (
+                self.full_drive_part_max_sec is not None
+            )
+            self.lf_selection_mode = "full_drive" if both else "best_moments"
+            self.lf_mode_source = "default"
+            if both:
+                # Compatibility MIGRATION: configs written before the mode was
+                # inferred set only the part bounds (and silently got 8-12 min
+                # best_moments). Remove once every config states its mode.
+                logger.warning(
+                    "LF-POLICY-MIGRATION: mode inferred full_drive from part bounds "
+                    "(full_drive_part_min_sec=%s full_drive_part_max_sec=%s); set "
+                    "lf_selection_mode explicitly to silence this",
+                    self.full_drive_part_min_sec,
+                    self.full_drive_part_max_sec,
+                )
+        elif self.lf_mode_source == "default":
+            self.lf_mode_source = "yaml"
+        self.warn_lf_policy_override()
+        return self
+
+    def set_lf_mode(self, mode: str, source: str) -> None:
+        """Set the resolved mode from an explicit source (cli | resumed-state)."""
+        self.lf_selection_mode = mode  # type: ignore[assignment]
+        self.lf_mode_source = source
+        self.warn_lf_policy_override()
+
+    def warn_lf_policy_override(self) -> None:
+        """Named warning when an operator-chosen best_moments shadows part bounds.
+
+        Only reachable through an explicit choice (yaml/cli/resumed-state): an
+        unset mode never resolves to best_moments while both bounds are set.
+        """
+        lo, hi = self.full_drive_part_min_sec, self.full_drive_part_max_sec
+        if self.lf_selection_mode == "best_moments" and lo is not None and hi is not None:
+            logger.warning(
+                "LF-POLICY-OVERRIDE: operator explicitly chose lf_selection_mode=best_moments (source=%s), overriding "
+                "full_drive_part_min_sec=%s full_drive_part_max_sec=%s -- the part bounds "
+                "are IGNORED and LFs use min/max_lf_duration (%ss-%ss)",
+                self.lf_mode_source,
+                lo,
+                hi,
+                self.min_lf_duration,
+                self.max_lf_duration,
+            )
 
     # Superlong part planner (SEPARATE from full_drive above — RegularLF
     # machinery must never see these parts). Caps each part's KEPT duration;
@@ -1960,9 +2057,10 @@ class DriveConfig(BaseModel):
     # run different LF cadences (Sun vs Tue/Fri), so their parts should be
     # free to drip on different days.
     superlong_publish_day_by_region: dict[str, str] = Field(default_factory=dict)
-    # Source files on cross-filesystem
-    # mounts (WSL2 drvfs, NFS) silently degrade weather/IO. Default refuses
-    # cross-fs source; operator must explicitly opt in.
+    # Source video files read from another filesystem than staging (WSL2
+    # drvfs, NFS) cost read speed only: pre-flight resolves each file's
+    # symlink and logs a PERFORMANCE warning, never a refusal. True
+    # lowers that report to INFO. Dangling/unreadable files refuse regardless.
     allow_cross_fs_source: bool = False
     # When WeatherDetector returns degraded measurements (fewer than
     # min_success_ratio chunks succeed), the scorer falls back to
@@ -2266,7 +2364,9 @@ class Config(BaseModel):
         Precedence (lowest → highest):
 
         1. Pydantic defaults
-        2. Repo / project config: ``./config.yaml`` (or ``./config.yml``)
+        2. Project config: ``./config.yaml`` (or ``./config.yml``) in the
+           launch directory, else ``config.yaml`` in ``gms_inputs_dir()`` --
+           the operator's private inputs layer
         3. User override: ``config.yaml`` under the config home
            (``~/.config/gomoveshift/`` by default)
 
@@ -2300,7 +2400,11 @@ class Config(BaseModel):
                 return cls.model_validate(data)
             return cls()
 
-        project_candidates = [Path("config.yaml"), Path("config.yml")]
+        project_candidates = [
+            Path("config.yaml"),
+            Path("config.yml"),
+            gms_inputs_dir() / "config.yaml",
+        ]
         user_path = gms_config_home() / "config.yaml"
 
         def _read_yaml_dict(path: Path) -> Optional[dict]:

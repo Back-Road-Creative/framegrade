@@ -285,3 +285,43 @@ class TestOrchestratorSkipsGpuLockForFullDriveLabelDryRun:
                 output_base=tmp_path / "output",
                 region="usa",
             )
+
+
+class TestLabelDryRunNeverCalibrates:
+    """The pre-flight ETA calibration is a real nvenc (+blur) encode. A full_drive
+    --label-dry-run / --list-lfs skips the GPU lock, so it must never run it.
+
+    Regression: an unattended ``--label-dry-run --force`` on a box with
+    no saved calibration record ran a 63 s hevc_nvenc blur encode with no GPU
+    lock held, while another session's GPU trial was parked on that lock.
+    """
+
+    @pytest.mark.parametrize("flag", ["label_dry_run", "list_lfs"])
+    def test_labels_only_full_drive_never_measures(self, tmp_path, monkeypatch, flag):
+        from gomoveshift.pipeline import calibration
+        from gomoveshift.pipeline import drive_orchestrator as mod
+
+        monkeypatch.setattr(calibration, "load_calibration", lambda *a: None)
+        monkeypatch.setattr(
+            calibration,
+            "calibrate_master_chain",
+            lambda *a, **k: pytest.fail("a labels-only run must not run the calibration encode"),
+        )
+        monkeypatch.setattr(mod, "acquire_gpu_lock", lambda *a, **k: (None, None))
+        TestOrchestratorSkipsGpuLockForFullDriveLabelDryRun()._patch_common(monkeypatch, mod)
+
+        cfg = Config()
+        cfg.drive.lf_selection_mode = "full_drive"
+        orch = mod.DrivePipelineOrchestrator(config=cfg)
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "GX010001.MP4").write_bytes(b"x")
+
+        result = orch.run(
+            source_dir=source,
+            output_base=tmp_path / "output",
+            region="usa",
+            force=True,
+            **{flag: True},
+        )
+        assert result.success is True

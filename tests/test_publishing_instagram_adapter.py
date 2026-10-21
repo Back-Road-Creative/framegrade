@@ -720,3 +720,63 @@ def test_a_resumed_container_that_expires_while_waiting_starts_over(queue_conn):
     assert publish().media_id == "m-1"
     assert len(reels.created) == 1 and reels.published == ["c-new"]
     assert row()["platform_upload_id"] == "c-new" and row()["status"] == "published"
+
+
+# --- The Graph error's own code/subcode/fbtrace survive into error_detail ----
+#
+# 2026-10-15: five Instagram rows sat failed_permanent with only "Media ID is
+# not available" or "unknown Graph API error" stored. The code and subcode
+# that classify the failure were dropped, so the cause could not be read back
+# from the queue. The tag leads the message so error_detail's bound never
+# cuts it.
+
+_GRAPH_400 = {
+    "error": {
+        "code": 9007,
+        "error_subcode": 2207006,
+        "message": "Media ID is not available",
+        "fbtrace_id": "SYNTHtrace01",
+    }
+}
+
+
+def test_permanent_graph_error_leads_with_code_subcode_and_fbtrace():
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(400, _GRAPH_400)
+    assert str(exc_info.value).startswith(
+        "[graph http=400 code=9007 subcode=2207006 fbtrace=SYNTHtrace01] "
+    )
+
+
+def test_retryable_graph_error_carries_the_tag_too():
+    body = {"error": {"code": 9007, "error_subcode": 2207027, "message": "not ready"}}
+    with pytest.raises(InstagramRetryableError) as exc_info:
+        _raise_for_graph_error(400, body)
+    assert str(exc_info.value).startswith("[graph http=400 code=9007 subcode=2207027 fbtrace=-] ")
+
+
+def test_stored_error_detail_keeps_the_tag_past_its_bound():
+    from gomoveshift.publishing.dispatch import PermanentDeliveryError, _detail
+
+    body = {"error": dict(_GRAPH_400["error"], message="x" * 2000)}
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(400, body)
+    stored = _detail(PermanentDeliveryError(str(exc_info.value)))
+    assert stored.startswith("[graph http=400 code=9007 subcode=2207006 fbtrace=SYNTHtrace01] ")
+
+
+def test_fbtrace_from_the_response_is_sanitized_and_bounded():
+    body = {"error": {"code": 1, "message": "m", "fbtrace_id": "ab\ncd]" + "z" * 200}}
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(400, body)
+    tag = str(exc_info.value).split("] ", 1)[0]
+    assert "\n" not in tag
+    assert tag == "[graph http=400 code=1 subcode=- fbtrace=" + ("abcd" + "z" * 200)[:64]
+
+
+def test_an_error_body_meta_left_empty_still_records_the_http_status():
+    # Rows 58/66/77 stored only "unknown Graph API error": a 4xx whose body
+    # had no error object. The HTTP status is then the only evidence left.
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(403, {})
+    assert str(exc_info.value).startswith("[graph http=403 code=- subcode=- fbtrace=-] ")

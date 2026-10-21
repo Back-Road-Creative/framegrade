@@ -142,6 +142,8 @@ class TestBrandLogoPathThreading:
             patch.object(day_pipeline, "apply_ost", return_value=tmp_path / "lf_01.mp4"),
             patch.object(day_pipeline, "plan_shorts", return_value=[]),
             patch.object(day_pipeline, "compute_day_file_boundaries", return_value=[(0.0, 300.0)]),
+            # the stub files are not media: the trail-opening lead probe (I4) needs a duration
+            patch.object(day_pipeline, "probe_media", return_value=SimpleNamespace(duration=60.0)),
             caplog.at_level("WARNING", logger="gomoveshift.pipeline.day_pipeline"),
         ):
             (tmp_path / "master.mp4").write_bytes(b"\x00")

@@ -247,3 +247,93 @@ def test_overpass_down_fallback_spreads_samples_and_leaves_budget_for_the_floor(
     assert times and max(times) >= 0.75 * gps_seconds, (
         f"last fallback sample at {max(times, default=0):.0f}s of a {gps_seconds}s drive"
     )
+
+
+MIZEN_SECONDS = 61 * 60  # example-2025-09-17-mizen LF 1: 61 min of video
+
+
+def _mizen_journey():
+    start = datetime(2025, 9, 17, 9, 0, 0)
+    wps = []
+    for s in range(0, MIZEN_SECONDS + 1, 5):
+        wp = MagicMock()
+        wp.latitude = 51.55 - 0.1 * s / MIZEN_SECONDS
+        wp.longitude = -9.45 - 0.3 * s / MIZEN_SECONDS
+        wp.timestamp = start + timedelta(seconds=s)
+        wp.elevation = None
+        wp.location = None
+        wps.append(wp)
+    j = MagicMock()
+    j.waypoints = tuple(wps)
+    j.start_date = wps[0].timestamp
+    j.end_date = wps[-1].timestamp
+    j.statistics = MagicMock()
+    return j
+
+
+def _generate_mizen(tmp_path, reverse):
+    """Two place markers (West Cork at 1:00, the L4401 at 43:50) and a geocoder
+    that has no other name for anywhere on the drive: a Phase D
+    refusal (2 of 4 middle chapters left without an evidenced place)."""
+    from gomoveshift.config import Config
+
+    gen = ChapterGenerator(Config(), cache_path=tmp_path / "geocoding_cache.json")
+    gen.geocoder.reverse_geocode = MagicMock(side_effect=reverse)
+    gen.geocoder.reverse_geocode_detailed = MagicMock(return_value={})
+    places = [
+        (60.0, Location(latitude=51.55, longitude=-9.45, name="West Cork", county="County Cork")),
+        (2630.0, Location(latitude=51.48, longitude=-9.66, name="L4401", county="County Cork")),
+    ]
+    with (
+        patch.object(ChapterGenerator, "_discover_area_pois", return_value=[object()]),
+        patch.object(OverpassChapterSource, "pois_to_locations", return_value=places),
+        patch(
+            "gomoveshift.pipeline.chapters.generator._coastline_points_for_bbox",
+            return_value=[],
+        ),
+    ):
+        return gen.generate(
+            gpx_path=Path("fake.gpx"),
+            video_duration=MIZEN_SECONDS,
+            start_location="Mizen Head, County Cork",
+            end_location="Crookhaven",
+            _mock_journey=_mizen_journey(),
+        )
+
+
+def _west_cork_only(lat, lon):
+    return Location(
+        latitude=lat, longitude=lon, name="West Cork", county="County Cork", country="Ireland"
+    )
+
+
+def test_sparse_place_markers_still_clear_the_floor(tmp_path):
+    chapters = _generate_mizen(tmp_path, _west_cork_only)
+
+    middle = _intermediate(chapters)
+    assert len(middle) >= min_intermediate_chapters(MIZEN_SECONDS) == 4, chapters
+    times = [_secs(c["timestamp"]) for c in chapters]
+    assert times[0] == 0 and times == sorted(times), chapters
+    assert all(b - a >= 60 for a, b in zip(times[1:-1], times[2:-1])), chapters
+    assert len({c["title"] for c in chapters}) == len(chapters), chapters
+    result = check_metadata_quality(
+        {
+            "title": "Mizen Head, County Cork in 4K",
+            "location": "Mizen Head, County Cork",
+            "description": "POV drive around Mizen Head.",
+            "has_gps": True,
+            "video_duration": MIZEN_SECONDS,
+            "chapters": chapters,
+            "resolved_location": {"regions": ["County Cork"]},
+        }
+    )
+    assert "intermediate chapter" not in result.message, (result.message, chapters)
+
+
+def test_trace_spaced_chapters_name_the_geocoded_place_and_distance(tmp_path):
+    chapters = _generate_mizen(tmp_path, _west_cork_only)
+
+    padded = [c for c in _intermediate(chapters) if " km in" in c["title"]]
+    assert padded, chapters
+    for ch in padded:
+        assert re.fullmatch(r"West Cork, County Cork — \d+ km in", ch["title"]), ch

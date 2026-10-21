@@ -172,6 +172,7 @@ class TestBuildGmsDescription:
             duration_str="1h 15m",
             publish_day="Saturday",
             named_routes=["Blue Ridge Parkway"],
+            road_coverage_measured=True,
         )
         assert "Blue Ridge Parkway" in desc
 
@@ -286,6 +287,7 @@ class TestRebuildDescriptionBody:
             location="North Carolina, United States",
             duration_str="1h 15m",
             named_routes=["Blue Ridge Parkway"],
+            road_coverage_measured=True,
         )
         assert "Blue Ridge Parkway" in rebuilt
 

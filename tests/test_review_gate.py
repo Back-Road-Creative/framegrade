@@ -215,6 +215,62 @@ class TestPlaceholderCheck:
         hits = gate._check_placeholders(json_path)
         assert hits == []
 
+    def test_field_names_are_not_placeholders(self, tmp_path):
+        """Key names like ``insert_count`` and ``template_id`` are schema, not
+        text; only string values are checked."""
+        gate = ReviewGate(interactive=False)
+        data = {
+            "title": "Beaufort County, SC in 4K",
+            "insert_count": 0,
+            "title_decision": {"candidates": [{"template_id": "region_only_lf"}]},
+        }
+        json_path = tmp_path / "ep_001_youtube.json"
+        json_path.write_text(json.dumps(data))
+        assert gate._check_placeholders(json_path) == []
+
+    def test_final_text_review_record_is_not_scanned(self, tmp_path):
+        """The embedded final-text review carries policy ids such as
+        ``drive-templates-4``; its own gate judges it."""
+        gate = ReviewGate(interactive=False)
+        data = {
+            "title": "Beaufort County, SC in 4K",
+            "final_text_review": {"text_policy": {"drive_version": "drive-templates-4"}},
+        }
+        json_path = tmp_path / "ep_001_youtube.json"
+        json_path.write_text(json.dumps(data))
+        assert gate._check_placeholders(json_path) == []
+
+    def test_placeholder_in_a_nested_value_is_caught(self, tmp_path):
+        """A placeholder anywhere in a string value still fails."""
+        gate = ReviewGate(interactive=False)
+        data = {"chapters": [{"title": "INSERT_TOWN here"}], "tags": ["TEMPLATE tag"]}
+        json_path = tmp_path / "ep_001_youtube.json"
+        json_path.write_text(json.dumps(data))
+        assert gate._check_placeholders(json_path) == ["INSERT_", "TEMPLATE"]
+
+    def test_final_text_entry_provenance_is_not_scanned(self, tmp_path):
+        """Waypost description entries label their source (``kind: template``);
+        only each entry's ``text`` ships."""
+        gate = ReviewGate(interactive=False)
+        data = {
+            "title": "Beaufort County, SC in 4K",
+            "final_text_description": [
+                {"surface": "description.rule", "kind": "template", "text": "---\n"},
+                {"surface": "description.intro", "kind": "param_template", "text": "Drive.\n"},
+            ],
+        }
+        json_path = tmp_path / "ep_001_youtube.json"
+        json_path.write_text(json.dumps(data))
+        assert gate._check_placeholders(json_path) == []
+
+    def test_placeholder_in_final_text_entry_text_is_caught(self, tmp_path):
+        """The entry text is what uploads, so a placeholder there still fails."""
+        gate = ReviewGate(interactive=False)
+        data = {"final_text_description": [{"kind": "template", "text": "INSERT_TOWN"}]}
+        json_path = tmp_path / "ep_001_youtube.json"
+        json_path.write_text(json.dumps(data))
+        assert gate._check_placeholders(json_path) == ["INSERT_"]
+
     def test_guess_the_location_fails_gate_cd(self, tmp_path):
         """'guess the location' in JSON raises ReviewFailedError in gate_cd."""
         gate = ReviewGate(interactive=False)

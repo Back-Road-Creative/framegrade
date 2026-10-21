@@ -17,10 +17,9 @@ from pathlib import Path
 import requests
 import yaml
 
-from gomoveshift.config import get_config as _get_config
 from gomoveshift.pipeline._file_lock import make_blocking_file_lock
 from gomoveshift.pipeline._yt_creds import _unwrap_sops_binary, sops_age_recipients
-from gomoveshift.publishing.credential_paths import resolve_sops_file
+from gomoveshift.publishing.credential_paths import configured_base, resolve_sops_file
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ _SOPS_SENSITIVE_LINE = re.compile(
 _SOPS_REDACTED = "[sops stderr redacted — see DEBUG log]"
 
 _TIKTOK_CREDENTIALS_FILENAME = "tiktok_publishing.json.enc"
-DEFAULT_CREDENTIALS_DIR = Path(_get_config().seo.credentials_dir)
+DEFAULT_CREDENTIALS_DIR = configured_base()
 
 TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/"  # noqa: S105 — endpoint, not a secret
 
@@ -179,7 +178,13 @@ def get_valid_tiktok_credentials(
                 if existing_recipients
                 else (_age_recipients_for(sops_file))
             )
-            encrypt_args = ["--age", recipients] if recipients else []
+            # SOPS still discovers .sops.yaml with --age: a creation rule
+            # rejecting the random .tmp name aborts before those explicit
+            # recipients are used. Once readers are resolved, isolate that
+            # encryption from filename rules, including SOPS_CONFIG in the
+            # caller's environment. Keep config discovery for the no-reader
+            # fallback; never invent or drop recipients.
+            encrypt_args = ["--config", os.devnull, "--age", recipients] if recipients else []
             result = _run_sops([*encrypt_args, "-e", "-i", tmp])
             if result.returncode != 0:
                 raise TikTokAuthError(

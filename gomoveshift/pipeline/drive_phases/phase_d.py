@@ -799,6 +799,186 @@ def _serialize_publish_plan(plan) -> str:
     return json.dumps(payload, sort_keys=True, indent=2, default=_json_datetime_default) + "\n"
 
 
+#: Synthetic parent identity used ONLY by the preview; never a real YouTube id.
+_PREVIEW_PARENT_ID_PREFIX = "PREVIEW-NO-LF-ID-"
+#: Last-resort parent publish time when neither the upload record nor the drive
+#: schedule has one (epoch: earlier than every slot, so no ordering gate trips).
+_PREVIEW_PARENT_PUBLISH_AT = "1970-01-01T00:00:00+00:00"
+
+
+_PREVIEW_MEDIA_SHA256 = "PREVIEW-NOT-HASHED"
+
+
+def _build_first_party_plan(
+    *,
+    project_base,
+    route_selected,
+    drive_cfg,
+    drive_plan,
+    social_posts_per_lf,
+    drive_schedule,
+    youtube_uploads,
+    per_lf_recording_date,
+    shorts_paths_by_lf,
+    synthetic_parents: bool,
+):
+    """Assemble ``build_publish_plan`` inputs and build the plan in memory.
+
+    Shared by the real sidecar and the preview so both run the SAME gates over
+    the SAME inputs. ``synthetic_parents`` (preview only) fills a missing LF
+    video id / publish time with a labelled placeholder instead of letting the
+    builder raise PUBLISH-PLAN-NO-PARENT-ID. Returns ``(plan,
+    recording_dates_by_short_idx, placeholders_by_short_idx)``; the last is
+    empty for the real path. Writes nothing.
+    """
+    from ...publishing.media_fingerprint import fingerprint_media
+    from ...publishing.models import MediaFingerprint
+    from ...publishing.plan_builder import build_publish_plan
+
+    slots_by_idx: dict[int, object] = {
+        s.short_index: s for s in (drive_schedule.shorts_slots if drive_schedule else [])
+    }
+    lf_slots = list(getattr(drive_schedule, "lf_slots", None) or [])
+    parent_ids: dict[int, str] = {}
+    parent_publish_at: dict[int, str] = {}
+    placeholders: dict[int, list] = {}
+    shorts_by_lf: dict[int, list] = {}
+    for lf_pos, lf in enumerate(drive_plan.regular_lfs):
+        posts = social_posts_per_lf.get(lf.index, [])
+        shorts_by_lf[lf.index] = posts
+        _rec = youtube_uploads.get(lf.index) or {}
+        vid = _rec.get("video_id", "")
+        _pub_at = _rec.get("publish_at")
+        synthetic_id = synthetic_parents and not vid
+        synthetic_at = synthetic_parents and not _pub_at
+        if synthetic_id:
+            vid = f"{_PREVIEW_PARENT_ID_PREFIX}{lf.index}"
+        if synthetic_at:
+            slot_at = (
+                getattr(lf_slots[lf_pos], "datetime_est", "") if lf_pos < len(lf_slots) else ""
+            )
+            _pub_at = slot_at or _PREVIEW_PARENT_PUBLISH_AT
+        for p in posts:
+            parent_ids[p.short_index] = vid
+            if _pub_at:
+                parent_publish_at[p.short_index] = _pub_at
+            if synthetic_parents:
+                marks = []
+                if synthetic_id:
+                    marks.append("parent_lf_video_id")
+                if synthetic_at:
+                    marks.append("parent_lf_publish_at")
+                if synthetic_id:
+                    marks.append("payloads.youtube.description")
+                placeholders[p.short_index] = marks
+
+    recording_dates_by_short_idx = _build_recording_dates_by_short_index(
+        shorts_by_lf=shorts_by_lf,
+        per_lf_recording_date=per_lf_recording_date,
+    )
+
+    local_paths = _build_local_media_paths_by_short_index(
+        social_posts_per_lf=social_posts_per_lf,
+        shorts_paths_by_lf=shorts_paths_by_lf,
+    )
+    if synthetic_parents:
+        # Preview: no ffprobe/hashing on an audit pass (the deferral contract);
+        # the media identity is a labelled placeholder, flagged per short.
+        media_by_short_index = {
+            short_idx: MediaFingerprint(
+                path=str(path),
+                size_bytes=0,
+                duration_seconds=0.0,
+                width=0,
+                height=0,
+                codec="",
+                sha256=_PREVIEW_MEDIA_SHA256,
+            )
+            for short_idx, path in local_paths.items()
+        }
+        for marks in placeholders.values():
+            marks.append("media")
+    else:
+        media_by_short_index = {
+            short_idx: fingerprint_media(Path(path)) for short_idx, path in local_paths.items()
+        }
+
+    plan = build_publish_plan(
+        project_name=project_base,
+        shorts_by_lf=shorts_by_lf,
+        slots_by_short_index=slots_by_idx,
+        media_by_short_index=media_by_short_index,
+        parent_lf_video_id_by_short_index=parent_ids,
+        parent_recording_date_by_short_index=recording_dates_by_short_idx,
+        parent_publish_at_by_short_index=parent_publish_at,
+        route_selected=route_selected,
+        tiktok_privacy_level=getattr(drive_cfg, "publishing_tiktok_privacy_level", "SELF_ONLY"),
+    )
+    return plan, recording_dates_by_short_idx, placeholders
+
+
+def _emit_publish_preview_sidecar(
+    *,
+    output_base: Path,
+    project_base: str,
+    route_selected,
+    drive_cfg,
+    drive_plan,
+    social_posts_per_lf: dict,
+    drive_schedule,
+    youtube_uploads: dict,
+    per_lf_recording_date: dict,
+    shorts_paths_by_lf: Optional[dict],
+) -> None:
+    """Write ``<project>_publish_preview.json`` so a run that cannot write the
+    real plan (audit pass, ``--skip-upload``) still shows the final Short
+    payloads for review.
+
+    NOT a plan: a separate file name that no consumer globs
+    (``*_publish_plan.json``), a top-level ``"kind": "publish_preview"`` /
+    ``"not_for_publish": true`` marker that ``load_publish_plan`` refuses, and a
+    per-short ``placeholders`` list naming each synthetic field. Returns
+    ``None`` on purpose -- there is no path for a caller to pass on as the plan.
+    Built through the same ``build_publish_plan``; any error is logged as a
+    loud warning and nothing is written, so it can never fail the audit run.
+    """
+    try:
+        plan, _dates, placeholders = _build_first_party_plan(
+            project_base=project_base,
+            route_selected=route_selected,
+            drive_cfg=drive_cfg,
+            drive_plan=drive_plan,
+            social_posts_per_lf=social_posts_per_lf,
+            drive_schedule=drive_schedule,
+            youtube_uploads=youtube_uploads,
+            per_lf_recording_date=per_lf_recording_date,
+            shorts_paths_by_lf=shorts_paths_by_lf,
+            synthetic_parents=True,
+        )
+        payload = asdict(plan)
+        for record in payload.get("shorts", []):
+            record.pop("generated_at", None)
+            record["placeholders"] = placeholders.get(record["short_index"], [])
+        payload = {"kind": "publish_preview", "not_for_publish": True, **payload}
+        preview_path = output_base / f"{project_base}_publish_preview.json"
+        preview_path.write_text(
+            json.dumps(payload, sort_keys=True, indent=2, default=_json_datetime_default) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:  # noqa: BLE001 -- preview must never fail the run
+        logger.warning(
+            "  D-publish-preview: PREVIEW NOT WRITTEN -- %s: %s (no preview of the Shorts payload)",
+            type(exc).__name__,
+            exc,
+        )
+        return
+    logger.warning(
+        "  D-publish-preview: wrote %s -- PREVIEW ONLY, not a publish plan "
+        "(placeholder parent fields are listed per short; never enqueue it)",
+        preview_path.name,
+    )
+
+
 def _emit_publish_plan_sidecar(
     *,
     output_base: Path,
@@ -865,6 +1045,18 @@ def _emit_publish_plan_sidecar(
             "  D-publish-plan: DEFERRED -- audit pass (youtube_upload off); only a "
             "publish pass writes the plan, where the place and title gates enforce"
         )
+        _emit_publish_preview_sidecar(
+            output_base=output_base,
+            project_base=project_base,
+            route_selected=route_selected,
+            drive_cfg=drive_cfg,
+            drive_plan=drive_plan,
+            social_posts_per_lf=social_posts_per_lf,
+            drive_schedule=drive_schedule,
+            youtube_uploads=youtube_uploads,
+            per_lf_recording_date=per_lf_recording_date,
+            shorts_paths_by_lf=shorts_paths_by_lf,
+        )
         return None
     # A publish pass that uploaded nothing (--skip-youtube-upload) records no
     # LF video id, and every short's parent link needs one (plan_builder raises
@@ -875,51 +1067,31 @@ def _emit_publish_plan_sidecar(
             "  D-publish-plan: DEFERRED -- no YouTube upload recorded for any LF "
             "(skip-upload run?); the sidecar is written on the upload run"
         )
+        _emit_publish_preview_sidecar(
+            output_base=output_base,
+            project_base=project_base,
+            route_selected=route_selected,
+            drive_cfg=drive_cfg,
+            drive_plan=drive_plan,
+            social_posts_per_lf=social_posts_per_lf,
+            drive_schedule=drive_schedule,
+            youtube_uploads=youtube_uploads,
+            per_lf_recording_date=per_lf_recording_date,
+            shorts_paths_by_lf=shorts_paths_by_lf,
+        )
         return None
 
-    from ...publishing.media_fingerprint import fingerprint_media
-    from ...publishing.plan_builder import build_publish_plan
-
-    slots_by_idx: dict[int, object] = {
-        s.short_index: s for s in (drive_schedule.shorts_slots if drive_schedule else [])
-    }
-    parent_ids: dict[int, str] = {}
-    parent_publish_at: dict[int, str] = {}
-    shorts_by_lf: dict[int, list] = {}
-    for lf in drive_plan.regular_lfs:
-        posts = social_posts_per_lf.get(lf.index, [])
-        shorts_by_lf[lf.index] = posts
-        _rec = youtube_uploads.get(lf.index) or {}
-        vid = _rec.get("video_id", "")
-        _pub_at = _rec.get("publish_at")
-        for p in posts:
-            parent_ids[p.short_index] = vid
-            if _pub_at:
-                parent_publish_at[p.short_index] = _pub_at
-
-    recording_dates_by_short_idx = _build_recording_dates_by_short_index(
-        shorts_by_lf=shorts_by_lf,
-        per_lf_recording_date=per_lf_recording_date,
-    )
-
-    local_paths = _build_local_media_paths_by_short_index(
-        social_posts_per_lf=social_posts_per_lf,
-        shorts_paths_by_lf=shorts_paths_by_lf,
-    )
-    media_by_short_index = {
-        short_idx: fingerprint_media(Path(path)) for short_idx, path in local_paths.items()
-    }
-
-    plan = build_publish_plan(
-        project_name=project_base,
-        shorts_by_lf=shorts_by_lf,
-        slots_by_short_index=slots_by_idx,
-        media_by_short_index=media_by_short_index,
-        parent_lf_video_id_by_short_index=parent_ids,
-        parent_recording_date_by_short_index=recording_dates_by_short_idx,
-        parent_publish_at_by_short_index=parent_publish_at,
+    plan, recording_dates_by_short_idx, _ = _build_first_party_plan(
+        project_base=project_base,
         route_selected=route_selected,
-        tiktok_privacy_level=getattr(drive_cfg, "publishing_tiktok_privacy_level", "SELF_ONLY"),
+        drive_cfg=drive_cfg,
+        drive_plan=drive_plan,
+        social_posts_per_lf=social_posts_per_lf,
+        drive_schedule=drive_schedule,
+        youtube_uploads=youtube_uploads,
+        per_lf_recording_date=per_lf_recording_date,
+        shorts_paths_by_lf=shorts_paths_by_lf,
+        synthetic_parents=False,
     )
 
     plan_path = output_base / f"{project_base}_publish_plan.json"

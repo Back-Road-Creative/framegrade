@@ -7,8 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from seo_manager.analytics.final_text_surfaces import compose_description, compose_tags
+
 from ...config import Config
+from ..drive_text_adapter import attach_drive_text
 from ..exceptions import YouTubeQuotaError
+from ..final_text_record import FinalTextReviewError, build_final_text_review, reviewed_text
+from ..title_decision import (
+    TitleDecisionMismatchError,
+    TitleDecisionMissingError,
+    decide_title,
+)
 
 # Logger keeps phase_d's name so caplog assertions still flow.
 logger = logging.getLogger("gomoveshift.pipeline.drive_phases.phase_d")
@@ -88,6 +97,8 @@ def _upload_lf_to_youtube(
     # When absent (legacy records) we pass None — the uploader skips
     # the field, matching prior behavior.
     recording_date = metadata.get("recording_date") if isinstance(metadata, dict) else None
+    # I-8: the text sent is the text Waypost composed and the review bound.
+    description, tags = reviewed_text(metadata, description, tags)
     try:
         return yt.upload_if_needed(
             state=state,
@@ -107,13 +118,21 @@ def _upload_lf_to_youtube(
             config=config,
             recording_date=recording_date,
             persist=persist,
+            plan_lf=lf,
         )
     except _RefreshError:
         raise RuntimeError(
             f"YouTube auth failed for LF {lf.index} "
             "— re-run `gomoveshift youtube-auth` to refresh credentials"
         ) from None
-    except YouTubeQuotaError:
+    except (
+        YouTubeQuotaError,
+        TitleDecisionMismatchError,
+        TitleDecisionMissingError,
+        FinalTextReviewError,
+    ):
+        # U5: a title that is not Waypost's decision is a pipeline bug, never
+        # a per-LF skip. G2: neither is text no agreeing review covers.
         raise
     except _HttpError as e:
         logger.warning("  LF %d: YouTube upload HTTP error: %s", lf.index, e)
@@ -121,6 +140,71 @@ def _upload_lf_to_youtube(
     except Exception as e:
         logger.error("  LF %d: YouTube upload unexpected error: %s", lf.index, e)
         return None
+
+
+def superlong_final_text_inputs(state, part_key: str, record: dict, metadata: dict):
+    """``(review_state, plan_lf)`` that make ``upload_if_needed`` re-verify one
+    superlong part's text before ``videos.insert``, through its existing
+    ``state``/``plan_lf``/``metadata`` arguments.
+
+    Puts the part's Waypost title decision and final-text review into
+    ``metadata``. A review already on the record (``final_text_review``, made
+    earlier) is carried and re-verified against what is sent now; otherwise one
+    is built from the part's own retained-route claim. A part with no
+    description, or a GPS day whose part has no route claim, is refused here.
+    A GPS-less day has nothing to review (the existing GPS-less rule)."""
+    part_index = int(record.get("part_index") or 0)
+    title = record.get("title") or ""
+    if not str(record.get("description") or "").strip():
+        raise FinalTextReviewError(part_key, ["description_missing"], "the part has no description")
+    claim = record.get("route_claim")
+    if record.get("has_gps") and not claim:
+        raise FinalTextReviewError(
+            part_key, ["route_record_missing"], "a GPS day's part carries no retained-route claim"
+        )
+    metadata["title_decision"] = decide_title("superlong", title, None, suffix="")
+    date = part_key.split(":", 1)[0]
+    # The review state reads per-LF tables by the LF index (build) and by the
+    # part key (upload_if_needed), so each table answers to both.
+    both = (part_index, part_key)
+    plan_lf = SimpleNamespace(
+        index=part_index,
+        segments=[
+            SimpleNamespace(
+                source_file_index=0,
+                start_time=0.0,
+                end_time=float(record.get("duration_sec") or 0.0),
+            )
+        ],
+    )
+    review_state = SimpleNamespace(
+        episode_files=getattr(state, "episode_files", None) or [Path(str(record["path"]))],
+        ost_audit_passed=getattr(state, "ost_audit_passed", None),
+        ost_audit_hash=getattr(state, "ost_audit_hash", None),
+        per_lf_ost_text=dict.fromkeys(both, record.get("location") or ""),
+        per_lf_recording_date=dict.fromkeys(both, date),
+        per_lf_location_evidence=None,
+        per_lf_route_record=(
+            dict.fromkeys(
+                both, {"record": claim, "region_claims": claim.get("region_claims") or []}
+            )
+            if claim
+            else None
+        ),
+    )
+    attach_drive_text(
+        review_state.per_lf_route_record and review_state.per_lf_route_record[part_index],
+        metadata,
+        record.get("location") or "",
+        final_seconds=float(record.get("duration_sec") or 0.0),
+        recording_date=date,
+        us=str(getattr(state, "region", "") or "").lower() == "usa",
+    )
+    carried = record.get("final_text_review")
+    metadata["final_text_review"] = (
+        carried if carried else build_final_text_review(review_state, plan_lf, metadata)
+    )
+    return review_state, plan_lf
 
 
 def _upload_superlong_parts_to_youtube(
@@ -213,12 +297,26 @@ def _upload_superlong_parts_to_youtube(
             "format": "superlong",
         }
         try:
+            # U4: the part's text is re-verified against its own review just
+            # before the insert; a part that cannot be reviewed never uploads.
+            ft_state, ft_lf = superlong_final_text_inputs(state, part_key, record, metadata)
+            # The text sent is the text Waypost composed and the review bound
+            # (robust by construction); a part with no entries is refused by
+            # the review (layout_missing) before it gets here.
+            entries = metadata.get("final_text_description")
+            description, tags = (
+                (compose_description(entries), compose_tags(entries))
+                if entries
+                else (record.get("description", ""), tags)
+            )
+            ft_state.youtube_uploads = sidecar_uploads
             record_out = yt.upload_if_needed(
-                state=SimpleNamespace(youtube_uploads=sidecar_uploads),
+                state=ft_state,
+                plan_lf=ft_lf,
                 lf_idx=part_key,
                 video_path=Path(record["path"]),
                 title=record.get("title", ""),
-                description=record.get("description", ""),
+                description=description,
                 tags=tags,
                 category_id="2",
                 publish_at=publish_at,

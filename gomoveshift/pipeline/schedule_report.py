@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from . import volume_source
 from .content_ledger import ContentLedger, next_free_superlong_slot
 from .schedule_constants import (
     EST,
@@ -34,7 +35,22 @@ def _regions(config) -> list[str]:
     return sorted(waypost_cadence(config).regions)
 
 
-def _availability_matrix(ledger: ContentLedger, config, now: datetime) -> tuple[dict, list]:
+def _shorts_target(per_location_cap: Optional[int]) -> Optional[int]:
+    """The shorts a drive plans per LF: Waypost's decision, trimmed (never raised) by the
+    brand's per-location cap -- the same two steps ``day_pipeline`` takes. ``None`` when
+    the decision store is unreadable, so the report never prints a guessed count."""
+    try:
+        decided = volume_source.shorts_per_lf().value
+    except volume_source.VolumeSourceUnreadableError:
+        return None
+    if per_location_cap is not None and per_location_cap < decided:
+        return per_location_cap
+    return decided
+
+
+def _availability_matrix(
+    ledger: ContentLedger, config, now: datetime, per_location_cap: Optional[int] = None
+) -> tuple[dict, list]:
     """seo_manager's availability report over the ledger, plus the GMS-only shorts columns.
 
     Each region lists ITS OWN Waypost days at Waypost's designed time (the packaged seed
@@ -42,6 +58,7 @@ def _availability_matrix(ledger: ContentLedger, config, now: datetime) -> tuple[
     ``shorts_times`` (dealt by ``drive_share``), looked up by the row's region and day.
     """
     core = build_report(ledger, config, now)
+    target = _shorts_target(per_location_cap)
     matrix: list[dict] = []
     for row in core["next_available"]:
         matrix.append(
@@ -52,7 +69,8 @@ def _availability_matrix(ledger: ContentLedger, config, now: datetime) -> tuple[
                 "shorts_windows": list(
                     resolve_shorts_times_for_region(config, row["region"], row["day"])
                 ),
-                "shorts_required": required_shorts_per_lf(config, row["region"], row["day"]),
+                "shorts_required": target,
+                "shorts_slots": required_shorts_per_lf(config, row["region"], row["day"]),
                 "earliest_for_region": row["earliest_for_region"],
             }
         )
@@ -88,6 +106,7 @@ def build_schedule_report(
     config,
     *,
     after: Optional[datetime] = None,
+    per_location_cap: Optional[int] = None,
 ) -> dict:
     """Return the publishing-schedule report as a plain dict (CLI only renders).
 
@@ -106,10 +125,15 @@ def build_schedule_report(
     ``"unassigned"`` bucket for entries whose ``region`` is ``None`` -- a
     legacy/anonymous short is never silently attributed to a region, and never
     dropped from the total either.
+
+    Each ``next_available`` row's ``shorts_required`` is the count a drive plans for that
+    LF (Waypost's decision, trimmed by ``per_location_cap``, the brand policy's cap the
+    caller passes; ``None`` when the decision store is unreadable); ``shorts_slots`` is the
+    slot capacity of its windows over the publish interval, never a target.
     """
     now = after or datetime.now(EST)
     ledger.reload()
-    core, matrix = _availability_matrix(ledger, config, now)
+    core, matrix = _availability_matrix(ledger, config, now, per_location_cap)
     days = list(core["designed_days"])
 
     upcoming = sorted(ledger.get_scheduled(now), key=lambda e: (e.date, e.time))

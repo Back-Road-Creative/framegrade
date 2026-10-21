@@ -87,9 +87,10 @@ def test_real_cli_renders_typed_stills_and_resumes_without_rewriting(tmp_path):
     workspace = tmp_path / "projects"
     service = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(service), os.environ.get("PYTHONPATH", "")) if part
-    )
+    # Only the service itself: Waypost (seo_manager) and gps-journey come from
+    # the venv's pinned installs, and an inherited PYTHONPATH entry could shadow
+    # a pin.
+    environment["PYTHONPATH"] = str(service)
     environment["GMS_NIGHT_ADMISSION_LOCK"] = str(tmp_path / "admission.lock")
     command = [
         sys.executable,

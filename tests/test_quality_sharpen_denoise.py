@@ -197,3 +197,22 @@ def test_cache_with_different_opt_out_is_not_reused(tmp_path):
             assert str(e) == "reanalyze"
         else:
             raise AssertionError("stale cache reused despite --no-sharpen")
+
+
+def test_sharpen_below_visible_floor_is_skipped():
+    # ENC-1: near the crisp end the ramp gives amounts like 0.01-0.015. At 0.01
+    # an 11x11 unsharp on the 4K LF master measured 63.8 dB PSNR against no
+    # unsharp (invisible) while costing ~42% of the filter chain's CPU, so any
+    # amount under SHARPEN_MIN_AMOUNT is dropped, radius included.
+    from gomoveshift.pipeline.quality import SHARPEN_MIN_AMOUNT
+
+    near_crisp = 900.0  # log10 2.954 -> raw ramp amount 0.015
+    assert sharpen_amount_for(near_crisp, 3840, disabled=False) == (0.0, 0.0)
+    kept = sharpen_amount_for(MID, 3840, disabled=False)
+    assert kept[0] >= SHARPEN_MIN_AMOUNT and kept[1] > 0.0
+
+
+def test_near_crisp_master_builds_no_unsharp_stage():
+    params = compute_correction(_stats(detail_score=900.0), frame_width=3840)
+    assert params.sharpen_amount == 0.0
+    assert "unsharp" not in build_filter_chain([params])

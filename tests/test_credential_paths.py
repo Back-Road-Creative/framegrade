@@ -243,3 +243,95 @@ class TestMetricsCollectorThreadsBrand:
         mc = MetricsCollector()
 
         assert mc.tiktok._brand is None
+
+
+class TestPrivateInputsPreferred:
+    """The operator's sealed tokens live in ``$SEO_INPUTS_DIR``, outside the
+    publishable tree. A file there wins over the ``seo.credentials_dir`` parent
+    for the configured default dir only; that parent stays the fallback."""
+
+    @staticmethod
+    def _configure(monkeypatch, base):
+        class _FakeSeo:
+            credentials_dir = str(base)
+
+        class _FakeConfig:
+            seo = _FakeSeo()
+
+        monkeypatch.setattr("gomoveshift.config.get_config", lambda: _FakeConfig(), raising=True)
+        monkeypatch.setattr(
+            "gomoveshift.publishing.credential_paths.configured_base",
+            lambda: Path(base),
+            raising=True,
+        )
+
+    def _layout(self, tmp_path, monkeypatch):
+        base = tmp_path / "seo" / "credentials"
+        base.mkdir(parents=True)
+        private = tmp_path / "private"
+        private.mkdir()
+        monkeypatch.setenv("SEO_INPUTS_DIR", str(private))
+        self._configure(monkeypatch, base)
+        return base, private
+
+    def test_a_private_copy_wins_for_the_configured_dir(self, tmp_path, monkeypatch):
+        base, private = self._layout(tmp_path, monkeypatch)
+        (private / "tiktok_publishing.json.enc").write_text("x")
+        (base.parent / "tiktok_publishing.json.enc").write_text("old")
+
+        assert resolve_sops_file("tiktok_publishing.json.enc", None, base) == (
+            private / "tiktok_publishing.json.enc"
+        )
+        assert resolve_sops_file("tiktok_publishing.json.enc", None) == (
+            private / "tiktok_publishing.json.enc"
+        )
+
+    def test_no_private_copy_falls_back_to_the_legacy_path(self, tmp_path, monkeypatch):
+        base, _ = self._layout(tmp_path, monkeypatch)
+
+        assert resolve_sops_file("meta_publishing.json.enc", None, base) == (
+            base.parent / "meta_publishing.json.enc"
+        )
+
+    def test_an_explicit_other_dir_never_reads_the_private_copy(self, tmp_path, monkeypatch):
+        _, private = self._layout(tmp_path, monkeypatch)
+        (private / "meta_publishing.json.enc").write_text("x")
+        other = tmp_path / "elsewhere" / "credentials"
+        other.mkdir(parents=True)
+
+        assert resolve_sops_file("meta_publishing.json.enc", None, other) == (
+            other.parent / "meta_publishing.json.enc"
+        )
+
+    def test_an_explicit_dir_never_reloads_the_config(self, tmp_path, monkeypatch):
+        # The console settings page resolves with an explicit dir while the
+        # environment holds values get_config() would reject; resolving a
+        # path must not re-validate the whole config (it never did before).
+        base, private = self._layout(tmp_path, monkeypatch)
+        (private / "youtube_upload_token.json.enc").write_text("x")
+
+        def _refuse():
+            raise AssertionError("get_config() called for an explicit dir")
+
+        monkeypatch.setattr("gomoveshift.config.get_config", _refuse, raising=True)
+
+        assert resolve_sops_file("youtube_upload_token.json.enc", None, base) == (
+            private / "youtube_upload_token.json.enc"
+        )
+
+    def test_a_brand_scoped_dir_still_wins(self, tmp_path, monkeypatch):
+        base, private = self._layout(tmp_path, monkeypatch)
+        (private / "meta_publishing.json.enc").write_text("x")
+        (base / "brands" / "acme" / "creds").mkdir(parents=True)
+
+        assert resolve_sops_file("meta_publishing.json.enc", "acme", base) == (
+            base / "brands" / "acme" / "meta_publishing.json.enc"
+        )
+
+    def test_the_default_inputs_dir_is_seo_under_the_gms_inputs_dir(self, tmp_path, monkeypatch):
+        from gomoveshift.publishing.credential_paths import seo_inputs_dir
+
+        monkeypatch.delenv("SEO_INPUTS_DIR", raising=False)
+        monkeypatch.setenv("GMS_INPUTS_DIR", str(tmp_path))
+
+        assert seo_inputs_dir() == tmp_path / "seo"

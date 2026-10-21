@@ -53,9 +53,9 @@ class TestGeocodingEnvVar:
 
         assert mock_cache.called
         cache_path = str(mock_cache.call_args.kwargs["cache_path"])
-        from gomoveshift.paths import gms_cache_home
+        from gomoveshift.paths import gms_geocoding_cache_dir
 
-        assert cache_path.startswith(str(gms_cache_home() / "geocoding"))
+        assert cache_path.startswith(str(gms_geocoding_cache_dir()))
         assert not cache_path.startswith("geocoding_cache.json")
 
 

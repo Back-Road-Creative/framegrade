@@ -15,6 +15,9 @@ dependencies = [
     # therefore pins them to the SAME version so the shared files can never skew.
     "opencv-python-headless>=4.8.0",
     "numpy>=1.24.0",
+    # Retained-route county/state proof loads exact Census polygons and checks
+    # conservative distance to their boundaries before a location can burn.
+    "shapely>=2.1.2",
     # astro_geometry: scipy.optimize.least_squares (soft_l1 loss, sparse
     # Jacobian, lsmr trust-region solver) for the joint lens+rotation
     # solve. Already resolved transitively (scikit-image), declared
@@ -34,7 +37,7 @@ dependencies = [
     # or HEIC. rawpy floor 0.24.0 = lowest release verified to import against the
     # locked numpy 2.4.2 (numpy-2 ABI wheels, cp310+cp312 manylinux). pillow-heif
     # floor 1.0.0 = first line requiring pillow>=11.1.0, so it tracks the locked
-    # pillow 12.3.0 instead of the pre-1.0 releases capped below pillow 12.
+    # pillow 13.0.0 instead of the pre-1.0 releases capped below pillow 12.
     "rawpy>=0.24.0",
     "pillow-heif>=1.0.0",
     # ``--format tiff16`` masters: Pillow has no 48-bit RGB mode and OpenCV cannot
@@ -80,14 +83,16 @@ dependencies = [
     # (``preflight.check_blur_inference_provider``).
     "onnxruntime-gpu[cuda,cudnn]==1.22.0",
     "deface>=1.5.0",
-    # Sibling projects (gps-journey, seo-manager) — bare names; pip resolves to
-    # whichever is already installed in the venv. Local dev and CI must
-    # pre-install both from a checkout of each project (`pip install -e <checkout>`)
-    # before installing this project.
-    # Neither is on PyPI; a file:// URL would either bake in one
-    # developer's home directory or pull a stale cached wheel.
-    "seo-manager",
-    "gps-journey",
+    # Waypost (distribution name seo-manager) and gps-journey — former workspace
+    # siblings, now published as public repos. Pinned to a COMMIT, not a tag:
+    # neither repo has cut a release tag that carries the reviewed code yet, and
+    # a bare name either resolves to whatever copy happens to be installed or
+    # 404s on PyPI. The initial extraction moved both pins to reviewed commits;
+    # subsequent features may update either independently. Like the four libraries below,
+    # requirements.lock carries no entry for them (an unnamed `git+` line is
+    # rejected by `uv pip install --constraint`).
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@c1e24a1cd53ec00d4e5d3fd3ff24189d7f9ccc4e",
+    "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@6a529ee6c13642f5f95a120bd285095ae7c69f24",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at
     # an instant), pycube-lut (.cube / HALD / 1D LUT read + apply), keycut
@@ -95,10 +100,9 @@ dependencies = [
     # privacy-blur chain — tiled face/plate/vehicle/person detection, optical-flow
     # tracking, region timeline, mask video and the independent cabin-coverage
     # verifier). PEP 508 direct references,
-    # deliberately NOT bare names like the two siblings above: those two get
-    # preinstalled from the checkout before this project resolves, and nothing
-    # preinstalls these four, so a bare name goes to PyPI and 404s ("No matching
-    # distribution found for pycube-lut"). The URL both names and pins the
+    # deliberately NOT bare names: nothing preinstalls these four, so a bare name
+    # goes to PyPI and 404s ("No matching distribution found for pycube-lut").
+    # The URL both names and pins the
     # revision, which is why requirements.lock carries no entry for them — a
     # `git+https://…` line there is an *unnamed* requirement and CI feeds that
     # file to `uv pip install --constraint`, which rejects it outright.

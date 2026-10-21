@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import sqlite3
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS deliveries (
     published_at TEXT,
     published_at_source TEXT,
     destination_account TEXT,
+    recovers_delivery_id INTEGER,
+    recovery_authorized_by TEXT,
+    recovery_evidence TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
     UNIQUE (project_name, short_index, platform, plan_hash)
 );
@@ -90,7 +94,10 @@ CREATE TABLE IF NOT EXISTS response_log (
 #: and ``dispatch._select_due`` each guard on "not one of these" -- a status
 #: added here without touching all three would let a drain still pick up a
 #: row an operator believed was done, which is worse than no guard at all.
-TERMINAL_STATUSES = ("published", "failed_permanent", "cancelled")
+#: ``missing_remote`` (U-R1): a YouTube row whose video the channel no longer
+#: returns. Terminal so nothing re-uploads it unasked; ``mark_missing_remote``.
+STATUS_MISSING_REMOTE = "missing_remote"
+TERMINAL_STATUSES = ("published", "failed_permanent", "cancelled", STATUS_MISSING_REMOTE)
 _TERMINAL_SQL = "(" + ", ".join(f"'{s}'" for s in TERMINAL_STATUSES) + ")"
 
 #: The active-delivery uniqueness index. Deliberately NOT part of
@@ -204,7 +211,16 @@ STATUS_AWAITING_MANUAL_PUBLISH = "awaiting_manual_publish"
 #: ``next_attempt_at`` has arrived; a manual-publish row parks its own
 #: ``next_attempt_at`` far enough out that it is never due again on its own.
 AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = "9999-01-01T00:00:00+00:00"
+
+#: An Instagram publish Graph refused with "Media ID is not available". The
+#: text can mean the post went live, so the row is neither retried blind nor
+#: failed: it parks (same 9999 wait) until ``dispatch.reconcile_awaiting_ig``
+#: scans the account. Not terminal; ``_select_due`` excludes it by status.
+STATUS_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
+#: Its wait reason: only the account scan may end it, never retry-now.
+NEXT_ATTEMPT_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
 _NEXT_ATTEMPT_REASONS = (
+    NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
     NEXT_ATTEMPT_RETRY_BACKOFF,
     NEXT_ATTEMPT_PLATFORM_THROTTLE,
     NEXT_ATTEMPT_PLATFORM_DEFERRAL,
@@ -358,6 +374,15 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
                 "ALTER TABLE deliveries ADD COLUMN first_comment_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        for recovery_col, recovery_type in (
+            # ``recover_terminal_delivery``: NULL on every row that is not a
+            # recovery row -- an honest "not a recovery", never backfilled.
+            ("recovers_delivery_id", "INTEGER"),
+            ("recovery_authorized_by", "TEXT"),
+            ("recovery_evidence", "TEXT"),
+        ):
+            if recovery_col not in cols:
+                conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
         pause_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(platform_pauses)").fetchall()
         }
@@ -392,6 +417,8 @@ def enqueue(
     ``plan_hash`` after the first already published. If a published row
     exists for the 3-tuple, its id is returned and nothing new is written —
     same idempotent shape as the exact-4-tuple case above, never raises.
+    A ``missing_remote`` row counts the same way (U-R1): its video was
+    uploaded once, and re-uploading it is a human decision, never a re-plan.
 
     ``shadow=True`` marks the row as a rehearsal that must never be
     published. ``dispatch._select_due`` cannot see such a row, so no drain
@@ -432,8 +459,8 @@ def enqueue(
             return int(existing["id"])
         published = conn.execute(
             "SELECT id FROM deliveries WHERE project_name=? AND short_index=? "
-            "AND platform=? AND status='published'",
-            (project_name, short_index, platform),
+            "AND platform=? AND status IN ('published', ?)",
+            (project_name, short_index, platform, STATUS_MISSING_REMOTE),
         ).fetchone()
         if published is not None:
             return int(published["id"])
@@ -1015,7 +1042,11 @@ def log_response(
 #: queue's own upload-budget deferral, or a pre-migration NULL, which is
 #: treated as the common case, an ordinary backoff) is an eligible retry.
 _NEXT_ATTEMPT_REASONS_RETRY_REFUSES = frozenset(
-    {NEXT_ATTEMPT_PLATFORM_THROTTLE, NEXT_ATTEMPT_AWAITING_MANUAL}
+    {
+        NEXT_ATTEMPT_PLATFORM_THROTTLE,
+        NEXT_ATTEMPT_AWAITING_MANUAL,
+        NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
+    }
 )
 
 
@@ -1051,6 +1082,63 @@ def retry_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[str
         return cur.rowcount == 1
 
 
+#: The only rows ``mark_missing_remote`` moves: a YouTube upload that went
+#: through (``uploaded``) or was recorded as done (``published``).
+_MISSING_REMOTE_FROM = ("uploaded", "published")
+
+
+def mark_missing_remote(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    *,
+    evidence: Dict[str, Any],
+    now: Optional[str] = None,
+) -> bool:
+    """U-R1: record that YouTube no longer returns this row's video.
+
+    Moves an ``uploaded``/``published`` YouTube row that carries a
+    ``platform_upload_id`` to the terminal ``missing_remote`` and appends a
+    ``response_log`` audit row; returns ``False`` (writing nothing) for any
+    other row. A direct UPDATE because ``transition`` refuses to move a
+    ``published`` row. The upload id stays on the row as the receipt of what
+    went missing. Nothing remote is touched: no delete, no re-upload."""
+    now = now or _now_iso()
+    with conn:
+        row = conn.execute(
+            "SELECT platform, platform_upload_id FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None or row["platform"] != "youtube" or not row["platform_upload_id"]:
+            return False
+        video_id = row["platform_upload_id"]
+        cur = conn.execute(
+            "UPDATE deliveries SET status=?, error_class='MissingRemote', error_detail=?, "
+            "updated_at=? WHERE id=? AND status IN (?, ?)",
+            (
+                STATUS_MISSING_REMOTE,
+                f"YouTube returns no video {video_id} for this delivery",
+                now,
+                delivery_id,
+                *_MISSING_REMOTE_FROM,
+            ),
+        )
+        if cur.rowcount != 1:
+            return False
+        conn.execute(
+            "INSERT INTO response_log (at, platform, state, cap, action, mode, reason) "
+            "VALUES (?, 'youtube', ?, 0, 'mark_missing_remote', 'live', ?)",
+            (
+                now,
+                STATUS_MISSING_REMOTE,
+                json.dumps(
+                    {"delivery_id": delivery_id, "video_id": video_id, "evidence": evidence},
+                    sort_keys=True,
+                    default=str,
+                ),
+            ),
+        )
+    return True
+
+
 def find_delivery(
     conn: sqlite3.Connection,
     project_name: str,
@@ -1065,3 +1153,115 @@ def find_delivery(
         (project_name, short_index, platform),
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+class RecoveryRefusedError(Exception):
+    """A ``recover_terminal_delivery`` precondition did not hold; nothing was
+    written. The message is the one-line reason the CLI prints."""
+
+
+#: A recovery row's ``plan_hash`` is derived from the terminal row's, which
+#: keeps ``UNIQUE (project_name, short_index, platform, plan_hash)`` satisfied
+#: AND makes a second recovery of the same row impossible by construction:
+#: the derived hash is identical, so the second INSERT is a constraint
+#: violation, not an application-level race. Nothing reads ``plan_hash`` back
+#: to compare against a sidecar (the drain loads records by project/index).
+RECOVERY_PLAN_HASH_TAG = "#recovers-"
+
+#: Terminal statuses ``check_recoverable`` lets through; the caller pairs each
+#: with its platform (``cli/handlers/queue_recover.py``).
+_RECOVERABLE_STATUSES = ("failed_permanent", STATUS_MISSING_REMOTE)
+
+
+def check_recoverable(conn: sqlite3.Connection, delivery_id: int) -> sqlite3.Row:
+    """The terminal row, or ``RecoveryRefusedError``: only a ``failed_permanent``
+    or ``missing_remote`` row not already recovered qualifies. ``retry_delivery``
+    refuses terminal rows by design; this is the one audited way past that, and
+    it never mutates the row it recovers."""
+    row = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    if row is None:
+        raise RecoveryRefusedError(f"no delivery with id {delivery_id}")
+    if row["status"] not in _RECOVERABLE_STATUSES:
+        raise RecoveryRefusedError(
+            f"delivery {delivery_id} is {row['status']!r}; only failed_permanent or "
+            "missing_remote can be recovered"
+        )
+    prior = conn.execute(
+        "SELECT id FROM deliveries WHERE recovers_delivery_id=?", (delivery_id,)
+    ).fetchone()
+    if prior is not None:
+        raise RecoveryRefusedError(
+            f"delivery {delivery_id} was already recovered by row {prior['id']}"
+        )
+    return row
+
+
+def recover_terminal_delivery(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    *,
+    authorized_by: str,
+    evidence: Dict[str, Any],
+    now: Optional[str] = None,
+) -> int:
+    """Insert ONE new ``queued`` delivery for the same short/platform, linked
+    to the terminal row by ``recovers_delivery_id``; returns its
+    id. The terminal row (status, receipts, ids, ``attempt_count``) is not
+    touched. The caller is responsible for the gates (see
+    ``cli/handlers/queue_recover.py``); this re-checks status and
+    single-recovery inside the write so a stale caller cannot double-insert.
+    Also appends an audit row to ``response_log``."""
+    if not (authorized_by or "").strip():
+        raise RecoveryRefusedError("--authorized-by must be a non-empty statement")
+    now = now or _now_iso()
+    evidence_json = json.dumps(evidence, sort_keys=True, default=str)
+    try:
+        with conn:
+            old = check_recoverable(conn, delivery_id)
+            cur = conn.execute(
+                "INSERT INTO deliveries "
+                "(project_name, short_index, platform, plan_hash, status, attempt_count, "
+                " shadow, sidecar_path, scheduled_at, first_comment_text, "
+                " recovers_delivery_id, recovery_authorized_by, recovery_evidence, "
+                " created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    old["project_name"],
+                    old["short_index"],
+                    old["platform"],
+                    f"{old['plan_hash']}{RECOVERY_PLAN_HASH_TAG}{delivery_id}",
+                    old["shadow"],
+                    old["sidecar_path"],
+                    now,
+                    old["first_comment_text"],
+                    delivery_id,
+                    authorized_by.strip(),
+                    evidence_json,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO response_log (at, platform, state, cap, action, mode, reason) "
+                "VALUES (?, ?, 'recovered', 0, 'recover_terminal', 'live', ?)",
+                (
+                    now,
+                    old["platform"],
+                    json.dumps(
+                        {
+                            "recovered": delivery_id,
+                            "new": cur.lastrowid,
+                            "authorized_by": authorized_by.strip(),
+                            "evidence": evidence,
+                        },
+                        sort_keys=True,
+                        default=str,
+                    ),
+                ),
+            )
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError as exc:
+        raise RecoveryRefusedError(
+            f"delivery {delivery_id} cannot be recovered: an active delivery exists for the "
+            f"same short/platform or it was already recovered ({exc})"
+        ) from exc

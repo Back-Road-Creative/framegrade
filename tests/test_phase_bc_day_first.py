@@ -584,8 +584,15 @@ class TestRealLFPlansThreaded:
         geocoder.reverse_geocode_detailed.side_effect = _detailed_by_lat
 
         seen_at_call_time: dict = {}
+        approval_order = []
+        real_approve = phase_bc_day_first_mod._approve_waypost_titles_before_encode
+
+        def _approve_before_encode(*args, **kwargs):
+            approval_order.append("approve")
+            return real_approve(*args, **kwargs)
 
         def _fake_run_all_days(**kwargs):
+            approval_order.append("encode")
             # Snapshot the audit-visible state at the moment the day loop
             # (which fires the OST audit gate) is entered.
             seen_at_call_time["titles"] = dict(state.get("per_lf_titles") or {})
@@ -614,6 +621,11 @@ class TestRealLFPlansThreaded:
                 "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
                 side_effect=_fake_run_all_days,
             ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first"
+                "._approve_waypost_titles_before_encode",
+                side_effect=_approve_before_encode,
+            ),
         ):
             phase.run(state, probe_duration_fn=lambda p: 100.0)
 
@@ -622,6 +634,7 @@ class TestRealLFPlansThreaded:
         assert set(seen_at_call_time["titles"].keys()) == {1, 2}
         assert all(v for v in seen_at_call_time["titles"].values())
         assert seen_at_call_time["dates"] == {1: "2026-02-20", 2: "2026-02-20"}
+        assert approval_order == ["approve", "encode"]
 
     def test_lf_plans_partitioned_by_date_across_days(self, tmp_path):
         """4 LFs where LF 1-2 belong to day 1 (ep 0) and LF 3-4 belong
@@ -1998,9 +2011,10 @@ class TestPerLFOSTCanonicalText:
         return m
 
     def test_per_lf_ost_uses_route_not_county(self, tmp_path):
-        """When start town, end town, and road all resolve, per_lf_ost_text
-        uses canonical ``"{start} to {end} via {road}, {state}"`` — NOT
-        the county-level label that ``derive_per_lf_locations`` produces.
+        """When start and end towns resolve, per_lf_ost_text uses the
+        canonical ``"{start} to {end}, {state}"`` — NOT the county-level
+        label that ``derive_per_lf_locations`` produces. A geocoded road is
+        never burned: no caller measures its retained-time coverage.
         """
         state, output_base, stages_dir = self._base_state(tmp_path, dates=("2026-02-20",))
         # Two LFs at identical centroids → road suffix kicks in on
@@ -2063,9 +2077,10 @@ class TestPerLFOSTCanonicalText:
             f"LF 1 OST text must be canonical endpoint format; "
             f"got {ost_text.get(1)!r}. per_lf_locations={per_lf_locations!r}"
         )
-        # LF 2: start + end + road → canonical Level 1
-        assert ost_text.get(2) == "Frogmore to Saint Helena via Sea Island Parkway, SC", (
-            f"LF 2 OST text must be canonical endpoint + road format; "
+        # LF 2: start + end + an unmeasured road → the road is omitted
+        assert ost_text.get(2) == "Frogmore to Saint Helena, SC", (
+            f"LF 2 OST text must be canonical endpoint format with no "
+            f"unmeasured road; "
             f"got {ost_text.get(2)!r}. per_lf_locations={per_lf_locations!r}"
         )
         # Regression gate — must NOT be the coarser county-level label
@@ -2701,7 +2716,9 @@ class TestPreEncodeLocationInvariant:
 
         with pytest.raises(RuntimeError) as exc:
             _assert_pre_encode_location_invariant(
-                {3: "Drive in Colleton County"}, {3: self._resolved()}
+                {3: "Drive in Colleton County"},
+                {3: self._resolved()},
+                evidence_by_lf={3: {"corroborations": 1}},
             )
         msg = str(exc.value)
         assert "Pre-encode location invariant HARD FAIL" in msg
@@ -2716,6 +2733,7 @@ class TestPreEncodeLocationInvariant:
         _assert_pre_encode_location_invariant(
             {3: "Charleston County, South Carolina Scenic Drive"},
             {3: self._resolved()},
+            evidence_by_lf={3: {"corroborations": 1}},
         )
 
     def test_lf_without_resolved_model_is_skipped(self):
@@ -2724,4 +2742,6 @@ class TestPreEncodeLocationInvariant:
         )
 
         # GPS-less / quorum-degraded LF has no model → no-op (Phase D parity).
-        _assert_pre_encode_location_invariant({3: "Drive in Colleton County"}, {})
+        _assert_pre_encode_location_invariant(
+            {3: "Drive in Colleton County"}, {}, evidence_by_lf={}
+        )

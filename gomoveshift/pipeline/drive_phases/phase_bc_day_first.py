@@ -39,11 +39,13 @@ from typing import Optional
 import numpy as np
 
 from ...analysis.unified_scorer import COL_TIMESTAMP
-from ...config import Config
+from ...config import Config, resolve_lf_mode
 from ...models import DrivePlan, RegularLFPlan
 from .. import volume_source
 from ..day_grouper import group_episodes_by_day
 from ..day_pipeline import DayArtifacts, _enforce_shorts_contract, run_all_days
+from ..forward_geocode import forward_geocode as _ladder_forward_geocode
+from ..forward_geocode import forward_geocode_places as _forward_geocode_places
 from ..gps_enrichment import (
     _assert_per_lf_locations_resolvable,
     _build_drive_gps_points,
@@ -67,6 +69,7 @@ from ..media_api import (
     deliverables_to_state,
     lift_artifacts,
 )
+from ..place_shape import _road_ref_members, normalize_state_abbr, render_degraded_tier_label
 from ..post_encoding_invariants import (
     _assert_mapping_complete,
     _assert_per_lf_distance_complete,
@@ -89,7 +92,8 @@ from ..state_invariants import (
     assert_phase_bc_per_lf_complete,
 )
 from ..stop_mask import build_stop_mask, mask_summary, stop_mask_kwargs
-from ..title_builder import build_lf_title, ensure_unique_titles
+from ..title_kit import TitleKit, require_title_kit
+from ..trail_opening import attach_trail_opening
 from .trail_film import attach_trail_film, make_span_location, retry_trail_skip
 
 # Re-export the moved helpers for backward compatibility — multiple
@@ -135,6 +139,17 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def flatten_ost_text(per_lf_ost_text_by_date: dict) -> dict[int, str]:
+    """``{date: {lf: text}}`` -> ``{lf: text}``: the burn, title and thumbnail
+    source, so a label ``enforce_route_claims`` broadened reaches all three."""
+    return {
+        int(idx): text
+        for day_map in per_lf_ost_text_by_date.values()
+        for idx, text in day_map.items()
+        if text
+    }
 
 
 def _probe_master_integrity(
@@ -257,7 +272,15 @@ def _maybe_drop_day_master(artifacts, state, stages_dir: Path) -> None:
 # per-day stop mask (parked-footage exclusion), attenuate-only audio, and
 # privacy blur changes. The orchestrator's resume path re-runs phase_bc when the
 # persisted version differs from this constant — mirrors ``PHASE_D_CODE_VERSION``.
-PHASE_BC_CODE_VERSION = 1
+# Also bumped when the persisted ``per_lf_route_record`` changes meaning: phase D
+# only reads it, so a stale record survives every phase-D re-run (2 = the
+# unresolved/outside sample split; 3 = the place gate's bins + windows_key; renders
+# are reused by their own fingerprints).
+PHASE_BC_CODE_VERSION = 3
+
+# Fixes reverse-geocoded per LF for its title evidence. Every fix costs a
+# geocoder call, so the trace is sampled evenly (first and last fix kept).
+EVIDENCE_SAMPLE_MAX = 48
 
 
 class PhaseBCDayFirst:
@@ -271,8 +294,11 @@ class PhaseBCDayFirst:
 
     name = "phase_bc_day_first"
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, title_kit: Optional[TitleKit] = None) -> None:
         self.config = config
+        # Publish-side title / chapter / brand inputs, handed in by the caller
+        # (``DrivePipelineOrchestrator``) so the engine imports no publishing code.
+        self.title_kit = title_kit
 
     def run(self, state, probe_duration_fn=None, state_save_fn=None) -> None:
         _probe = probe_duration_fn or _probe_duration
@@ -466,27 +492,20 @@ class PhaseBCDayFirst:
         # population still runs after ``run_all_days`` (with the
         # on-the-fly fallback + recording-date invariant), so the guarded
         # ``if`` assignments never regress the happy path.
-        _preseed_ost_text: dict[int, str] = {}
-        for _day_map in per_lf_ost_text_by_date.values():
-            for _lf_idx, _canonical in _day_map.items():
-                if _canonical:
-                    _preseed_ost_text[int(_lf_idx)] = _canonical
+        _preseed_ost_text = flatten_ost_text(per_lf_ost_text_by_date)
         # Refresh the dedup ledger from the channel ONCE per run, so a
         # BC that starts before the previous upload's Phase D sync doesn't
         # dedup against a stale on-disk ledger. Reused at every
         # ``load_published_titles`` site below. Degrades to {} on any
         # credential/API failure.
-        from ..longform_metadata import refresh_channel_title_ledger
-
-        _channel_title_ids = refresh_channel_title_ledger()
+        kit = require_title_kit(self.title_kit)
+        _channel_title_ids = kit.refresh_title_ledger()
 
         if _preseed_ost_text:
-            from ..longform_metadata import load_published_titles
-
             state.per_lf_ost_text = dict(_preseed_ost_text)
-            state.per_lf_titles = ensure_unique_titles(
+            state.per_lf_titles = kit.unique_titles(
                 dict(_preseed_ost_text),
-                published_titles=load_published_titles() | set(_channel_title_ids),
+                published_titles=kit.published_titles() | set(_channel_title_ids),
                 published_title_ids=_channel_title_ids,
             )
         _preseed_recording_date = _build_per_lf_recording_date_map(lf_plans_by_date)
@@ -535,11 +554,28 @@ class PhaseBCDayFirst:
                 state=state,
             )
             if _demoted:
-                _apply_demoted_labels(_demoted, _preseed_ost_text, per_lf_ost_text_by_date, state)
+                _apply_demoted_labels(
+                    _demoted,
+                    _preseed_ost_text,
+                    per_lf_ost_text_by_date,
+                    state,
+                    kit,
+                    title_ids=_channel_title_ids,
+                )
             _assert_pre_encode_location_invariant(
                 _preseed_ost_text,
                 state.per_lf_resolved_location or {},
                 evidence_by_lf=_ladder_evidence,
+            )
+            # The retained route and final OST labels are known here. Choose
+            # Waypost's YouTube title now, before run_all_days can encode.
+            _approve_waypost_titles_before_encode(
+                state,
+                _preseed_ost_text,
+                _flat_lf_plans,
+                gps_points_by_lf,
+                geocoder,
+                enrichment.route_claims_by_lf,
             )
 
         # Sibling gate, one question further out: the invariant above reconciles
@@ -550,6 +586,16 @@ class PhaseBCDayFirst:
         _assert_sign_verify(state, self.config)
 
         if remaining_batches:
+            # A trace too sparse to clear the chapter floor fails here, in
+            # minutes, not at Phase D's metadata gate after the encode.
+            _chapter_plan = _build_drive_plan_from_state(self.config, state)
+            if _chapter_plan is not None:
+                from .phase_d_metadata import assert_chapter_floor_before_encode
+
+                assert_chapter_floor_before_encode(
+                    self.config, _chapter_plan, state, drive_wide_location, stages_dir
+                )
+
             # The insert flags are per-invocation, so a resume must carry the ones its
             # finished days were rendered with (refused otherwise), and the inserts are
             # planned against EVERY day while only the remaining ones are rendered.
@@ -599,6 +645,13 @@ class PhaseBCDayFirst:
             from ..validation.content_gates import _make_short_regions_fn
 
             short_regions_fn = _make_short_regions_fn(geocoder)
+            # Per-short route claim over the clip's retained GPS (fix-to-fix
+            # gaps, every resolved place named, else broader label or refusal).
+            from ..route_claims import make_short_route_fn, make_superlong_route_fn
+
+            short_route_fn = make_short_route_fn(geocoder)
+            # The same check per superlong part, over that part's own ranges.
+            superlong_route_fn = make_superlong_route_fn(geocoder)
 
             fresh_artifacts = run_all_days(
                 day_batches=remaining_batches,
@@ -626,7 +679,10 @@ class PhaseBCDayFirst:
                 gps_points_by_date=gps_points_by_date or None,
                 short_ost_text_fn=short_ost_text_fn,
                 short_regions_fn=short_regions_fn,
+                short_route_fn=short_route_fn,
+                superlong_route_fn=superlong_route_fn,
                 state=state,
+                kit=kit,
                 on_day_complete=_on_day_complete,
                 # Persist the front-load OST hash markers before the first
                 # master encode so a mid-encode kill can't lose them.
@@ -911,11 +967,7 @@ class PhaseBCDayFirst:
         # pre-run_all_days derivation (e.g. ``lf_plans_by_date`` missed
         # the day) gets an on-the-fly build_lf_title() using its
         # rendered segments + per_lf_location.
-        per_lf_ost_text: dict[int, str] = {}
-        for _date_key, day_map in per_lf_ost_text_by_date.items():
-            for lf_idx, canonical in day_map.items():
-                if canonical:
-                    per_lf_ost_text[int(lf_idx)] = canonical
+        per_lf_ost_text = flatten_ost_text(per_lf_ost_text_by_date)
         # For LFs on completed/skipped days, prefer the persisted
         # (already-burned) OST text over this run's fresh derivation — the
         # single source of truth Phase D reads for title + thumbnail. This runs
@@ -943,6 +995,16 @@ class PhaseBCDayFirst:
             per_lf_ost_text=per_lf_ost_text,
             endpoint_loss_by_lf=endpoint_loss_by_lf,
         )
+        # Preserve the exact facts Waypost saw before encode. Legacy/GPS-less
+        # resume paths may still need evidence for a newly discovered LF.
+        location_evidence = state.per_lf_location_evidence or {}
+        missing_evidence_lfs = [lf for lf in skeleton_lfs if int(lf.index) not in location_evidence]
+        if missing_evidence_lfs:
+            location_evidence = {
+                **location_evidence,
+                **_build_location_evidence_per_lf(missing_evidence_lfs, gps_points_by_lf, geocoder),
+            }
+        state.per_lf_location_evidence = location_evidence or None
         resolved_by_lf = state.per_lf_resolved_location or {}
         # Defensive on-the-fly fallback for any skeleton_lf missing a
         # canonical entry (degraded path: real LF plans were missing
@@ -988,7 +1050,7 @@ class PhaseBCDayFirst:
                     per_lf_ost_text[lf_idx] = canonical
                 continue
             try:
-                canonical = build_lf_title(
+                canonical = kit.lf_title(
                     segments,
                     geocoder=geocoder,
                     per_lf_location=lf_location,
@@ -1063,16 +1125,14 @@ class PhaseBCDayFirst:
                 "_derive_per_lf_recording_date_from_paths should cover "
                 "any LF that the partition path missed."
             )
-        from ..longform_metadata import load_published_titles
-
         state.per_lf_ost_text = dict(per_lf_ost_text)
         # Dedup via (Part N of M) suffix on collisions — TITLE ONLY. Also
         # dedup FINAL titles against already-published channel titles so an
         # upload can't silently duplicate a live video's title.
         # ``_channel_title_ids`` was refreshed once, earlier in this method.
-        per_lf_titles = ensure_unique_titles(
+        per_lf_titles = kit.unique_titles(
             dict(per_lf_ost_text),
-            published_titles=load_published_titles() | set(_channel_title_ids),
+            published_titles=kit.published_titles() | set(_channel_title_ids),
             published_title_ids=_channel_title_ids,
         )
         state.per_lf_titles = per_lf_titles
@@ -1435,7 +1495,7 @@ def _build_drive_plan_from_state(config: Config, state) -> Optional[DrivePlan]:
     # same GPS-speed/optical knobs the day pipeline uses. best_moments keeps
     # its threshold path unchanged (the day pipeline masks its own shorts).
     stop_mask = None
-    if getattr(config.drive, "lf_selection_mode", "best_moments") == "full_drive":
+    if resolve_lf_mode(config.drive) == "full_drive":
         stop_mask = _build_drive_stop_mask(config, state)
     try:
         if (
@@ -1544,37 +1604,6 @@ def _build_per_lf_recording_date_map(lf_plans_by_date) -> dict:
     return out
 
 
-def _ladder_forward_geocode(town: str):
-    """Defensive forward-geocode for the ladder's endpoint-proximity check.
-
-    Wraps ``_nominatim_search`` (the one (name)->(lat, lon) geocoder in the
-    codebase) so any failure — import, network, malformed response — degrades
-    to ``None`` and the gate skips the check instead of crashing pre-encode.
-    """
-    try:
-        from ..chapters import nominatim_source
-
-        return nominatim_source._nominatim_search(town)
-    except Exception:  # noqa: BLE001 — a geocoder failure never blocks an encode
-        return None
-
-
-def _forward_geocode_places(query: str) -> list:
-    """Defensive settlement-candidate lookup for trace-verifying label endpoints.
-
-    Wraps ``_nominatim_places`` so any failure degrades to ``[]`` — nothing
-    verified, and the location invariant then fails closed exactly as before.
-    The failure is logged so it is not mistaken for "no settlement of that name".
-    """
-    try:
-        from ..chapters import nominatim_source
-
-        return nominatim_source._nominatim_places(query)
-    except Exception as exc:  # noqa: BLE001 — unverified, never a crash
-        logger.warning("TRACE-UNVERIFIED-PLACE: %r — geocoder failed (%s)", query, exc)
-        return []
-
-
 def _verify_trace_places(rl, label, points, places_fn) -> None:
     """Stamp ``rl.trace_verified_places`` for ``label`` from the LF's own trace.
 
@@ -1610,8 +1639,9 @@ def _build_ladder_evidence(
     through ``_road_ref_members`` (raw OSM ``"I 81;US 11"`` would
     substring-match a hyphenated label 0% and false-fail a correct via-road),
     and a forward geocoder for the endpoint-proximity check. Missing
-    inputs omit their key → the gate no-ops that check. An LF with an operator
-    ``--per-lf-location`` override is ``authoritative`` (bypassed).
+    inputs omit their key → the gate no-ops that check. An operator
+    ``--per-lf-location`` label gets the same evidence record and the same
+    checks as a GPS label (no bypass).
 
     A below-tier-1 LF that still VOTED its OWN dominant county /
     state supplies a demotion signal FROM THAT MODEL — a voted county is the one
@@ -1625,8 +1655,6 @@ def _build_ladder_evidence(
     signal only bites below tier 1: ``award_tier`` returns tier 1 for
     coverage ≥ the tier-1 floor regardless of these keys.
     """
-    from ..title_builder import _road_ref_members
-
     gps_by_lf = gps_points_by_lf or {}
     resolved = resolved_by_lf or {}
     durations: dict[int, float] = {}
@@ -1704,7 +1732,6 @@ def _degrade_labels_to_awarded_tier(
     each burned label was awarded and on what evidence. Recording only — the
     demotion decision itself is untouched.
     """
-    from ..title_builder import normalize_state_abbr, render_degraded_tier_label
     from ..validation.content_gates import award_tier_for_evidence
 
     demoted: dict[int, str] = {}
@@ -1743,7 +1770,13 @@ def _degrade_labels_to_awarded_tier(
 
 
 def _apply_demoted_labels(
-    demoted: dict, per_lf_ost_text: dict, per_lf_ost_text_by_date: dict, state
+    demoted: dict,
+    per_lf_ost_text: dict,
+    per_lf_ost_text_by_date: dict,
+    state,
+    kit: TitleKit,
+    *,
+    title_ids: dict | None = None,
 ) -> None:
     """Write the demoted labels to every burn surface in lockstep: the flat
     pre-seed map (specificity-ladder gate + ``state.per_lf_ost_text``/``per_lf_titles`` for
@@ -1754,22 +1787,24 @@ def _apply_demoted_labels(
     (which does see the channel refresh) overwrites ``per_lf_titles``
     before Phase D reads it, so an unrefreshed ledger here is a missed
     early-preview detection at worst, never a shipped duplicate.
+    ``title_ids`` (the run's channel refresh) names the live video when
+    this preview refuses an exact duplicate.
     """
-    from ..longform_metadata import load_published_titles
-
     for lf_idx, label in demoted.items():
         per_lf_ost_text[int(lf_idx)] = label
         for day_map in (per_lf_ost_text_by_date or {}).values():
             if int(lf_idx) in day_map:
                 day_map[int(lf_idx)] = label
     state.per_lf_ost_text = dict(per_lf_ost_text)
-    state.per_lf_titles = ensure_unique_titles(
-        dict(per_lf_ost_text), published_titles=load_published_titles()
+    state.per_lf_titles = kit.unique_titles(
+        dict(per_lf_ost_text),
+        published_titles=kit.published_titles(),
+        published_title_ids=title_ids,
     )
 
 
 def _assert_pre_encode_location_invariant(
-    per_lf_ost_text: dict, resolved_by_lf: dict, evidence_by_lf: "dict | None" = None
+    per_lf_ost_text: dict, resolved_by_lf: dict, *, evidence_by_lf: dict
 ) -> None:
     """Refuse to START an encode whose burned OST/title text fails the
     location invariant (the pre-encode half of the gate) OR the
@@ -1784,9 +1819,10 @@ def _assert_pre_encode_location_invariant(
     ``assert_location_invariant_hard_fail``. LFs with no resolved model
     (GPS-less / quorum-degraded) skip, matching the Phase D no-op; Phase D's
     post-encode check remains the backstop for resume paths and late title
-    mutations (dedup suffixes). ``evidence_by_lf`` (production call site)
-    additionally reconciles each label against its RAW footage evidence via
-    :func:`check_specificity_ladder`; ``None`` is a full no-op (no ladder evidence).
+    mutations (dedup suffixes). ``evidence_by_lf`` is required: each modelled
+    LF's label is also reconciled against its RAW footage evidence via
+    :func:`check_specificity_ladder`, and an LF with no evidence record
+    fails closed -- never a silent skip.
     """
     from ..validation.content_gates import (
         check_location_invariant,
@@ -1808,12 +1844,11 @@ def _assert_pre_encode_location_invariant(
         )
         if not gate.passed:
             failures.append(f"  LF {lf_idx}: {gate.message}")
-        if evidence_by_lf is not None:
-            ladder = check_specificity_ladder(
-                {"title": ost_text, "location": ost_text}, evidence_by_lf.get(int(lf_idx))
-            )
-            if not ladder.passed:
-                failures.append(f"  LF {lf_idx}: {ladder.message}")
+        ladder = check_specificity_ladder(
+            {"title": ost_text, "location": ost_text}, (evidence_by_lf or {}).get(int(lf_idx))
+        )
+        if not ladder.passed:
+            failures.append(f"  LF {lf_idx}: {ladder.message}")
     if failures:
         raise RuntimeError(
             "Pre-encode location invariant HARD FAIL — at least one LF's "
@@ -1910,6 +1945,81 @@ def _assert_sign_verify(state, config) -> None:
             "or drop --sign-verify-strict if the signs are the wrong ones.\n"
             "Affected LFs:\n" + "\n".join(failures)
         )
+
+
+def _approve_waypost_titles_before_encode(
+    state, ost_text, lf_plans, gps_points_by_lf, geocoder, route_claims_by_lf
+) -> None:
+    """Persist Waypost decisions for retained GPS routes before any encode."""
+    from ..title_decision import PreRenderTitleError, approve_retained_title
+
+    location_evidence = _build_location_evidence_per_lf(lf_plans, gps_points_by_lf, geocoder)
+    state.per_lf_location_evidence = location_evidence or None
+    prior_decisions = state.per_lf_pre_render_title_decisions or {}
+    decisions = {}
+    plans_by_index = {int(lf.index): lf for lf in lf_plans}
+    for lf_idx, ost in sorted(ost_text.items()):
+        route_ev = (route_claims_by_lf or {}).get(lf_idx)
+        if route_ev is None:
+            if gps_points_by_lf.get(lf_idx):
+                raise PreRenderTitleError(
+                    f"LF {lf_idx} has retained GPS but no route evidence for title approval"
+                )
+            continue  # GPS-less titles keep their existing Phase D path.
+        lf = plans_by_index[lf_idx]
+        part = (
+            (lf.part_index, lf.part_count) if (getattr(lf, "part_count", None) or 1) > 1 else None
+        )
+        label = ost if part else state.per_lf_titles[lf_idx]
+        decision = approve_retained_title(
+            label,
+            route_ev,
+            location_evidence.get(lf_idx),
+            resolved=(state.per_lf_resolved_location or {}).get(lf_idx),
+            title_part=part,
+        )
+        decision["ost_text"] = ost
+        old = prior_decisions.get(lf_idx)
+        if old and all(
+            old.get(key) == decision.get(key)
+            for key in (
+                "baseline_title",
+                "input_label",
+                "ost_text",
+                "route_fingerprint",
+                "policy_version",
+                "chosen_title",
+                "reason",
+                "geo_rejected_index",
+            )
+        ):
+            decision = old
+        decisions[lf_idx] = decision
+    state.per_lf_pre_render_title_decisions = decisions or None
+
+
+def _build_location_evidence_per_lf(skeleton_lfs, gps_points_by_lf, geocoder) -> dict:
+    """One ``LocationEvidence`` record (dict form) per LF with GPS.
+
+    The trace is sampled to at most ``EVIDENCE_SAMPLE_MAX`` evenly spaced fixes,
+    first and last always kept, so the endpoints a title names stay in the
+    record. A GPS-less LF gets no record and keeps its baseline title.
+    """
+    from ..location_evidence import build_location_evidence
+
+    out: dict = {}
+    for lf in skeleton_lfs:
+        idx = int(getattr(lf, "index", 0))
+        points = list((gps_points_by_lf or {}).get(idx) or [])
+        if not points:
+            continue
+        if len(points) > EVIDENCE_SAMPLE_MAX:
+            step = (len(points) - 1) / (EVIDENCE_SAMPLE_MAX - 1)
+            points = [points[round(i * step)] for i in range(EVIDENCE_SAMPLE_MAX)]
+        out[idx] = build_location_evidence(
+            points, geocoder=geocoder, segment_id=f"lf{idx:02d}"
+        ).to_dict()
+    return out
 
 
 def _populate_resolved_locations(
@@ -2270,7 +2380,11 @@ def _resume_trail_films(
             prior = deliverables_from_state({**record, "date": d.date})
             d.trail_films = [f for f in prior.trail_films if Path(f.path).is_file()]
             d.trail_skips = list(prior.trail_skips)
-        if retry_trail_skip(d, state, config, steps=steps, span_location=span_location):
+            d.trail_openings = list(prior.trail_openings)
+        # A film whose LF still has its montage (a crash after the film, or an LF re-burned
+        # since) gets its opening now; a swap already done is a no-op.
+        opened = any(attach_trail_opening(d, f, config) for f in list(d.trail_films))
+        if retry_trail_skip(d, state, config, steps=steps, span_location=span_location) or opened:
             entry = recorded.get(d.date)
             if isinstance(entry, dict):
                 entry["deliverables"] = _deliverables_record(d, state)

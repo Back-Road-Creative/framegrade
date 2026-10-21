@@ -13,6 +13,42 @@ plan on disk untouched. Otherwise an audit re-run over an uploaded drive, which
 still holds every LF's video id, would hand `enqueue-plan --apply` shorts that
 no gate ever refused.
 
+## Publish preview (skip-upload / audit runs)
+
+The two deferral branches above (audit pass; publish pass with no LF video id)
+also call `_emit_publish_preview_sidecar`, which writes
+`<project>_publish_preview.json` so the final Short title, description and
+hashtags can be reviewed before any upload. It is **not a plan**: the name
+matches no `*_publish_plan.json` glob or `<project>_publish_plan.json`
+convention, the file carries `"kind": "publish_preview"` and
+`"not_for_publish": true`, and `load_publish_plan` raises
+`PublishPlanFormatError` on it. `_emit_publish_plan_sidecar` still returns
+`None` on those branches and the writer returns nothing.
+
+Both consumers refuse a preview on disk, even one copied over a plan's name
+(GMS-17a): `enqueue-plan` reads every sidecar before its dry-run exit as well
+as on `--apply`, so a preview is an `Error:` with exit 1 and nothing queued,
+never a "ready to spool" listing. `dispatch-queue`'s `SidecarRecordLoader`
+raises `PublishPlanFormatError` for a preview, whether it found the file by
+name or through a queue row's `sidecar_path`. Tests:
+`tests/test_publish_preview_consumers.py`.
+
+The same loader re-checks every real plan it reads (GMS-17c): each short's
+title hashtags must appear in its description, and the two `plan_gates`
+checks `build_publish_plan` runs at build time (in-region counties,
+no preposition splice) run again on load. A plan edited or written apart
+from the builder raises `PublishPlanFormatError` naming the file, in
+`enqueue-plan` (dry run and `--apply`) and in `dispatch-queue`. Detail:
+`docs/pipeline/157-dod-validator-and-plan-consistency.md`.
+
+It runs the same `build_publish_plan` gates over the same inputs. Differences
+are listed per short under `placeholders`: `parent_lf_video_id`
+(`PREVIEW-NO-LF-ID-<lf_index>`) and the YouTube description's parent link,
+`parent_lf_publish_at` (the drive schedule's LF slot, else the epoch), and
+`media` (not hashed, `PREVIEW-NOT-HASHED`). A build error (title, region or
+missing-slot gate) logs a `PREVIEW NOT WRITTEN` warning and writes nothing; it
+never fails the run.
+
 ## Inputs beyond the CSV path
 
 - `media_by_short_index: Dict[int, MediaFingerprint]` — real local media
@@ -27,6 +63,17 @@ no gate ever refused.
 
 ## Payload composition (per the mapping doc)
 
+- **Title decision (U5)**: every generated `SocialPost` carries Waypost's
+  `title_decision` (format `short`), and `youtube_title` is its
+  `chosen_title`. The plan builder refuses (`TitleDecisionMismatchError`) a
+  post whose `youtube_title` differs from that choice, so the hashtag append
+  below is the only change between Waypost's pick and the uploaded title.
+  A Short whose stamped title names its place, backed by one of the clip's
+  own GPS region votes, goes to Waypost as a single-place fact (U5c,
+  waypost#4: template ids `place` and `highlight_place`), each with an
+  evidence id per short; a place-free, hand or GPS-less Short records
+  `facts_unavailable` and keeps the composed title. A pre-U5 sidecar (no
+  decision) is not checked.
 - **YouTube**: `category`/`tags` from `SocialPost`. `description`
   = `SocialPost.youtube_description` + the parent-LF link
   (`https://youtu.be/<parent_video_id>`). `title` = `SocialPost.youtube_title`

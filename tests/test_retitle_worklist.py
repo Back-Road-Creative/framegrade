@@ -93,32 +93,43 @@ def test_build_rows_end_to_end(tmp_path):
     assert dup1_row["platform"] == "youtube"
 
 
-def test_compose_default_composes_duplicate_and_label_rows(tmp_path):
-    """compose=True (the default): duplicate/highlights/preposition rows get
-    a real, gate-passing suggestion pulled from their own title text."""
+def test_compose_default_never_reads_places_from_the_title(tmp_path):
+    """compose=True (the default): with no GPS evidence record, no row is
+    composed from the place text in its own title or its structured fields --
+    every flagged row stays needs-human (tests/test_retitle_from_evidence.py
+    covers composition from a record)."""
     videos = rw.load_videos(_yaml_fixture(tmp_path))
     rows = rw.build_rows(videos, [])
-    by_id: dict[str, dict[str, str]] = {}
-    for r in rows:
-        by_id.setdefault(r["video_id"], {})[r["reason"]] = r["suggested_title"]
+    assert rows
+    assert {r["suggested_title"] for r in rows} == {"needs-human"}
+    assert {r["location_evidence"] for r in rows} == {""}
 
-    dup1 = by_id["dup1"]["duplicate-title"]
-    dup2 = by_id["dup2"]["duplicate-title"]
-    assert dup1 != "needs-human" and dup2 != "needs-human"
-    assert dup1 != dup2  # disambiguated, never two identical retitles
-    assert dup1.startswith("Millbrook, PA (Part ")
-    assert dup2.startswith("Millbrook, PA (Part ")
 
-    highlights = by_id["highlights1"]["highlights-from"]
-    assert highlights not in ("needs-human", "")
-    assert "scenic drive" not in highlights.lower()
-
-    irish = by_id["irish1"]["preposition-led-label"]
-    assert irish == "Ballymore, County Cork"
-
-    # No route/place text survives stripping "Marlow County, NC Scenic
-    # Drive" -- insufficient data stays needs-human, never invented.
-    assert by_id["county1"]["county-only-title"] == "needs-human"
+def test_compose_disambiguates_duplicates_built_from_evidence():
+    record = {
+        "segment_id": "lf01",
+        "provenance": "gps",
+        "method": "reverse_geocode",
+        "places": [
+            {
+                "name": "Gettysburg",
+                "county": "Adams County",
+                "state": "Pennsylvania",
+                "scope": "in",
+                "method": "reverse_geocode",
+                "provenance": "gps",
+                "segment_id": "lf01",
+                "evidence_id": "ev-gettysburg",
+            }
+        ],
+        "conflicts": [],
+    }
+    videos = [
+        {"id": "dup1", "title": PA_DUP_TITLE, "location_evidence": record},
+        {"id": "dup2", "title": PA_DUP_TITLE, "location_evidence": record},
+    ]
+    titles = [r["suggested_title"] for r in rw.build_rows(videos, [])]
+    assert titles == ["Gettysburg, PA (Part 1 of 2)", "Gettysburg, PA (Part 2 of 2)"]
 
 
 def test_no_compose_flag_matches_plain_build_rows(tmp_path):

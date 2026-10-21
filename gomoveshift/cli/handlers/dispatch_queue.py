@@ -34,6 +34,7 @@ from ...publishing.dispatch import (
     TransientMediaError,
     drain_queue,
     merge_privacy_attestations,
+    reconcile_awaiting_ig,
     reconcile_awaiting_manual,
 )
 from ...publishing.enqueue_from_plan import backfill_first_comment_text
@@ -48,6 +49,7 @@ from ...publishing.queue import TERMINAL_STATUSES, open_queue_db
 from ...publishing.tiktok_pack import reconcile_packed, resolve_pack_dir, sweep_queued
 from ...publishing.tiktok_rendition import ensure_h264_rendition, ensure_instagram_rendition
 from ...publishing.youtube_comments import drain_first_comments
+from .pub_status import VALIDATE_COMMAND, gating_problems, record_ignore_validate
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +260,30 @@ def _routed(config, platform: str) -> bool:
     return getattr(config.drive, f"publishing_route_{platform}", "off") == "first_party"
 
 
+def _validate_held_scopes(conn, config, ignore: bool, reason: str) -> set:
+    """U-R2: the (platform, project) pairs this drain must hold because
+    ``publishing-status --validate`` names a problem on them. Computed after
+    the reconcilers so a row they just settled no longer holds its pair.
+    ``--ignore-validate --reason`` holds nothing and audits the override."""
+    credentials_dir = getattr(getattr(config, "seo", None), "credentials_dir", None)
+    problems = gating_problems(
+        conn,
+        credentials_dir,
+        storage_path=getattr(getattr(config, "seo", None), "storage_path", None),
+    )
+    if not problems:
+        return set()
+    if ignore:
+        record_ignore_validate(conn, problems, reason=reason, command="dispatch-queue")
+        print(f"warning: --ignore-validate: {len(problems)} validate problem(s) overridden")
+        return set()
+    print("validate gate: holding these platform/project pairs (other pairs drain normally):")
+    for problem in problems:
+        print(problem.line())
+    print(f"See: {VALIDATE_COMMAND}. Override only with --ignore-validate --reason '<why>'.")
+    return {(p.platform, p.project) for p in problems}
+
+
 def cmd_dispatch_queue(args, config) -> int:
     # A relative storage_path resolves against the CALLER's cwd, and
     # open_queue_db creates what it does not find -- so a drain started from
@@ -271,6 +297,12 @@ def cmd_dispatch_queue(args, config) -> int:
             "empty database than the one enqueue-plan wrote to. Set an absolute path in "
             "config.yaml, or run from the service directory where its config.yaml is found."
         )
+        return 1
+
+    ignore_validate = getattr(args, "ignore_validate", False)
+    ignore_reason = (getattr(args, "reason", None) or "").strip()
+    if ignore_validate and not ignore_reason:
+        print("Error: --ignore-validate needs --reason '<why>' (written to the audit log).")
         return 1
 
     sidecar_dir = Path(args.sidecar_dir) if args.sidecar_dir else Path(config.seo.storage_path)
@@ -348,6 +380,30 @@ def cmd_dispatch_queue(args, config) -> int:
                 print(f"first_comment_backfill: filled={bf.filled} skipped={bf.skipped}")
 
         loader = SidecarRecordLoader(sidecar_dir, conn=conn)
+        # U-R5(b): Instagram rows parked on "Media ID is not available" are
+        # decided by an account scan BEFORE the drain reads the queue, so a
+        # proven-absent row re-queued here is drained this same pass. Never a
+        # blind retry; never fatal -- a Graph blip must not stop the shorts.
+        if "instagram" in routed:
+            try:
+                recent_media = build_ig_media_scanner(config)
+            except Exception as exc:  # noqa: BLE001
+                recent_media = None
+                print(f"ig reconcile: skipped ({exc.__class__.__name__})")
+            if recent_media is not None:
+                ig = reconcile_awaiting_ig(
+                    conn,
+                    recent_media=recent_media,
+                    record_loader=loader,
+                    now=datetime.now(timezone.utc).isoformat(),
+                )
+                if ig.considered or ig.errors:
+                    print(
+                        f"ig reconcile: considered={ig.considered} published={ig.published} "
+                        f"retried={ig.retried} failed={ig.failed} unprovable={ig.unprovable}"
+                    )
+                for err in ig.errors:
+                    print(f"  error: {err}")
         # ONE identity for the pass. drain_queue takes the lease and the
         # adapters re-take it before their irreversible call; with two
         # different ids that second acquire can never succeed and every
@@ -361,11 +417,15 @@ def cmd_dispatch_queue(args, config) -> int:
         # Never fatal -- a missing drive must not stop today's other shorts.
         # The counts ride on the summary line (the only line the cron keeps).
         pack_counts = {"packed": 0, "errors": 0, "already": 0, "held": 0}
+        pack_reconcile_errors = 0
+        pack_reconcile_ambiguous = 0
+        tiktok_mode = None
         tiktok_mode_invalid = False
         pack_mode = False
         if "tiktok" in routed:
             try:
-                pack_mode = resolve_tiktok_mode() == "pack"
+                tiktok_mode = resolve_tiktok_mode()
+                pack_mode = tiktok_mode == "pack"
             except ValueError as exc:
                 # A bad mode takes TikTok out of this pass, nothing else: the
                 # other platforms still drain and the summary says so.
@@ -386,8 +446,11 @@ def cmd_dispatch_queue(args, config) -> int:
                     now=datetime.now(timezone.utc),
                 )
             except Exception as exc:  # noqa: BLE001
-                print(f"tiktok reconcile: skipped ({exc.__class__.__name__}: {exc})")
+                pack_reconcile_errors = 1
+                print(f"  error: tiktok reconcile: skipped ({exc.__class__.__name__}: {exc})")
             else:
+                pack_reconcile_errors = len(packed_rec.errors)
+                pack_reconcile_ambiguous = packed_rec.ambiguous
                 if packed_rec.considered or packed_rec.errors:
                     print(
                         f"tiktok reconcile: considered={packed_rec.considered} "
@@ -428,11 +491,13 @@ def cmd_dispatch_queue(args, config) -> int:
                     print(f"  error: {err}")
 
         handlers = _build_routed_handlers(conn, loader, config, routed, worker_id=worker_id)
+        held_scopes = _validate_held_scopes(conn, config, ignore_validate, ignore_reason)
         result = drain_queue(
             conn,
             handlers,
             owner=worker_id,
             privacy_attestations=privacy,
+            held_scopes=held_scopes,
         )
 
         # (who, result) for each first-comment drain that ran: added up onto
@@ -514,6 +579,16 @@ def cmd_dispatch_queue(args, config) -> int:
             f"skipped_leased={result.skipped_leased} "
             f"skipped_no_handler={result.skipped_no_handler} "
             f"awaiting_manual_publish={awaiting}"
+            # first_party names the adapter route, not proof of an API
+            # publish. Keep the actual mode and reconciliation uncertainty
+            # on the line cron retains; parked rows alone prove no outcome.
+            + (f" tiktok_mode={tiktok_mode}" if tiktok_mode else "")
+            + (f" tiktok_reconcile_errors={pack_reconcile_errors}" if pack_reconcile_errors else "")
+            + (
+                f" tiktok_reconcile_ambiguous={pack_reconcile_ambiguous}"
+                if pack_reconcile_ambiguous
+                else ""
+            )
             # Only when non-zero: the cron log is read by eye and a
             # permanent `throttled=0` trains everyone to skip the field.
             + (f" throttled={result.throttled}" if result.throttled else "")
@@ -548,6 +623,7 @@ def cmd_dispatch_queue(args, config) -> int:
             # means media whose required privacy classes were never verified
             # was refused at the irreversible step. Printed only when
             # non-zero so it never becomes a field nobody reads.
+            + (f" held_validate={result.held_validate}" if result.held_validate else "")
             + (
                 f" held_privacy_unverified={result.held_privacy_unverified}"
                 " Held: privacy classes unverified"
@@ -641,6 +717,17 @@ def _build_youtube_comments_service(config):
 
     creds = _build_credentials_obj(load_youtube_credentials(Path(config.seo.credentials_dir)))
     return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+def build_ig_media_scanner(config):
+    """``recent_media(limit)`` for ``reconcile_awaiting_ig``: the Instagram
+    adapter's account media listing. Decrypts the Meta credentials, so the
+    caller builds it only when Instagram is routed first_party."""
+    from ...publishing.instagram_adapter import InstagramReelsAdapter
+    from ...publishing.meta_auth import load_meta_credentials
+
+    adapter = InstagramReelsAdapter(load_meta_credentials(Path(config.seo.credentials_dir)))
+    return adapter.list_recent_media
 
 
 def _meta_comment_factories(config, routed):

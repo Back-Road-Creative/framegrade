@@ -11,8 +11,7 @@ import re
 import subprocess  # noqa: S404 — intentional sops subprocess
 from pathlib import Path
 
-from gomoveshift.config import get_config as _get_config
-from gomoveshift.publishing.credential_paths import resolve_sops_file
+from gomoveshift.publishing.credential_paths import configured_base, resolve_sops_file
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +22,33 @@ _SOPS_SENSITIVE_LINE = re.compile(
 )
 _SOPS_REDACTED = "[sops stderr redacted — see DEBUG log]"
 
+#: fbtrace_id is response data: only these characters, at most this many.
+_FBTRACE_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
+_FBTRACE_MAX = 64
+
+
+def graph_error_tag(status_code: int, error: dict) -> str:
+    """``[graph http=.. code=.. subcode=.. fbtrace=..]`` for a Graph error
+    response: its HTTP status and its ``error`` object.
+
+    Both Meta adapters lead every classified error's message with it, so
+    ``deliveries.error_detail`` keeps the fields that say WHY Meta refused
+    (the message alone often doesn't: "unknown Graph API error" is a 4xx
+    with no error object, where the status is the only evidence), and the
+    stored bound can never cut them. Missing fields read ``-``."""
+    code = error.get("code")
+    subcode = error.get("error_subcode")
+    trace = _FBTRACE_UNSAFE.sub("", str(error.get("fbtrace_id") or ""))[:_FBTRACE_MAX]
+    return (
+        f"[graph http={status_code} code={'-' if code is None else code} "
+        f"subcode={'-' if subcode is None else subcode} fbtrace={trace or '-'}]"
+    )
+
+
 #: Used only when a credential record omits ``graph_version``.
 DEFAULT_GRAPH_VERSION = "v21.0"
 _META_CREDENTIALS_FILENAME = "meta_publishing.json.enc"
-DEFAULT_CREDENTIALS_DIR = Path(_get_config().seo.credentials_dir)
+DEFAULT_CREDENTIALS_DIR = configured_base()
 
 
 def _sanitize_sops_stderr(stderr: str) -> str:

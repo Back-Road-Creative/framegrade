@@ -87,3 +87,22 @@ is also checked: `--publish`/`--lf-day` must be one of the region's Waypost days
 refuses and names them. An unreadable decision store halts planning with
 `CADENCE_SOURCE_UNREADABLE reason=... (planning halted)` rather than falling back to a guess.
 `tests/test_brand_seo_cadence.py` pins the seed's day times to `config.drive.publish_slots`.
+
+## Drive backlog
+
+`drive_backlog.yaml` lists the drives still to audit, in order: one row per recording day of
+raw GoPro chapters on D:. It is tenant data, so it lives in the operator's inputs directory (`GMS_INPUTS_DIR`) at
+`gomoveshift/console/brands/gomoveshift/drive_backlog.yaml` and is read through
+`gomoveshift.paths.drive_backlog_path()`. Its
+header names the re-cuts already public and the footage left out.
+`tests/test_drive_backlog_manifest.py` checks that the consumer resolves to it, that it
+parses, and that no chapter is queued twice.
+
+Consumers: `gomoveshift health check` rule 2b (`lf_slot_uncovered`) pages when a region's
+earliest free LF slot is within 7 days and the region has no ready drive, naming the
+manifest's next row for that region (or saying none is left). `seo-manager schedule
+backlog-next --manifest <path>` prints the same row. Nothing audits or renders a row on its
+own: an operator (or an agent session) runs `gomoveshift health backlog --region R` to launch
+the next eligible row as an audit-only drive (`docs/pipeline/156-health-check.md`); no cron
+calls it. The page reaches the operator only while the
+`gms-health` cron job is enabled on the host.

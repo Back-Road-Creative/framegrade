@@ -7,7 +7,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from _state_helpers import make_state
+from _state_helpers import make_state, decided
+
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
 
 
 @pytest.fixture
@@ -196,6 +205,7 @@ def test_upload_if_needed_forwards_recording_date(mock_service, fake_creds_dict,
             lf_idx=1,
             video_path=fake_video_file,
             title="t",
+            metadata=decided({}, "t"),
             description="d",
             tags=[],
             recording_date="2025-09-14",
@@ -263,6 +273,7 @@ def test_upload_if_needed_records_state(mock_service, fake_creds_dict, fake_vide
             lf_idx=3,
             video_path=fake_video_file,
             title="t",
+            metadata=decided({}, "t"),
             description="d",
             tags=["a"],
         )
@@ -880,6 +891,7 @@ def test_partial_upload_failure_resume_does_not_reupload_completed_lfs(
             lf_idx=1,
             video_path=lf_paths[0],
             title="LF 1",
+            metadata=decided({}, "LF 1"),
             description="d",
             tags=[],
         )
@@ -899,6 +911,7 @@ def test_partial_upload_failure_resume_does_not_reupload_completed_lfs(
                     lf_idx=2,
                     video_path=lf_paths[1],
                     title="LF 2",
+                    metadata=decided({}, "LF 2"),
                     description="d",
                     tags=[],
                 )
@@ -951,6 +964,7 @@ def test_partial_upload_failure_resume_does_not_reupload_completed_lfs(
                 lf_idx=idx,
                 video_path=lf_paths[idx - 1],
                 title=f"LF {idx}",
+                metadata=decided({}, f"LF {idx}"),
                 description="d",
                 tags=[],
             )

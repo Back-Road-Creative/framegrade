@@ -7,7 +7,7 @@
     <tr><th>Project</th><td>{{ row.project_name }}</td></tr>
     <tr><th>Short</th><td>{{ row.short_index }}</td></tr>
     <tr><th>Platform</th><td>{{ row.platform }}</td></tr>
-    <tr><th>Status</th><td>{{ row.status }}</td></tr>
+    <tr><th>Status</th><td>{{ row.delivery_state }}</td></tr>
     <tr><th>Shadow</th><td>
       {% if row.shadow %}<strong>This is a shadow (rehearsal) delivery -- not a real publication.</strong>{% else %}No -- this is a real delivery.{% endif %}
     </td></tr>
@@ -90,14 +90,15 @@
     </form>
     {% endif %}
   {% else %}
-  <p>This delivery is {{ row.status }} -- a finished delivery cannot be cancelled or retried.</p>
+  <p>This delivery is {{ row.delivery_state }} -- a finished delivery cannot be cancelled or retried.</p>
   {% endif %}
 
   <h2>What could be done next</h2>
   <p>
     {% if row.status == "awaiting_manual_publish" %}Once this is published from the TikTok app, an operator can confirm it from the delivery queue page.
     {% elif row.status == "failed_permanent" %}This delivery has failed permanently and will not retry on its own; a person would need to decide whether to re-enqueue it.
-    {% elif row.status == "published" %}No action is needed -- this delivery is complete.
+    {% elif row.delivery_state == "published" %}No action is needed -- this delivery is complete.
+    {% elif row.status == "published" %}The platform has not confirmed this delivery as live yet ({{ row.delivery_state }}); nothing more can be done from here.
     {% elif row.platform_paused %}{{ row.platform }} is paused: this delivery is not retried, and nothing is sent to it, until an operator resumes the platform on the delivery queue page.
     {% else %}This delivery is expected to retry automatically on the schedule shown above.{% endif %}
   </p>

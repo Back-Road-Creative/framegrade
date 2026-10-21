@@ -50,13 +50,44 @@ than re-implementing its upload/retry/token/quota handling.
   `videos.list` cost units in the combined 10,000/day bucket, not the
   `videos.insert` daily-upload budget above, so the scan never eats into
   upload capacity.
+- **Post-upload verify:** after a *fresh* `videos.insert`, before the
+  `published` write, the adapter looks the new id up with
+  `videos.list(part="status")`, and looks again once after
+  `VERIFY_RECHECK_SEC` if the first lookup comes back empty (list results can
+  lag an insert). Two empty answers mark the row `missing_remote`: terminal,
+  `platform_upload_id` kept, never re-uploaded, never re-enqueued under a new
+  plan hash. The drain counts it as `failed_permanent`, never published. A
+  lookup that *errors* proves nothing, so the row publishes, and the nightly
+  catalog pass (`queue mark-missing-remote`, see
+  `docs/social-publishing-queue.md`) checks it again.
 - **Queue states:** `queued` → `submitting` (worker lease held, insert in
-  flight) → `uploaded` (id persisted) → `published` (playlist assigned).
+  flight) → `uploaded` (id persisted) → `published` (playlist assigned), or
+  `uploaded` → `missing_remote` (terminal; the channel returns no such video).
   `YouTubeQuotaError` lands in `retry_wait` (`error_class="quota"`), not a
   permanent failure — the daily quota window resets.
 - **Worker lease:** a `submitting` delivery holds a lease
   (`queue.acquire_lease`, 15-minute ceiling); a live lease refuses a racing
   second insert, and an expired lease (killed worker) is reclaimable by the
   next attempt without a double `videos.insert`.
+- **Final-text review:** with `youtube_uploader.FINAL_TEXT_BIND_ON`
+  on (it is a code constant, not an env var), `publish()` builds the Short's
+  review from the clip's GPS region votes and runs `check_final_text` before
+  the lease and the `submitting` mark, so a refused Short never holds a lease.
+  A review carried on the record (`final_text_review`) is re-verified against a
+  context recomputed at publish time. The approval marker is the plan's
+  `reviewed_plan_hash`, and an empty one is refused. The review then goes to
+  `upload_video` (`final_text_review` / `final_text_context`) and binds the
+  title, description and tag bytes; the description sent is the one the review
+  composed, not a second build of it. With the constant off, `publish()` holds
+  the Short at that point, still queued, with `PublicationGateError`.
+- **Superlong parts — live without the bind:**
+  `external_systems_coordinator.superlong_final_text_inputs` gives
+  `upload_if_needed` each part's review state and `plan_lf`, so the part's
+  text is re-verified just before its `videos.insert`. A part with no
+  description (`description_missing`) or a GPS day's part with no
+  retained-route claim (`route_record_missing`) is refused before insert. A
+  GPS-less day has nothing to review. Shorts title rewrites:
+  `plan_title_sync.sync_plan_title` never rewrites an unpublished Short's
+  title.
 - The drive pipeline does not call `publish()` itself; the adapter is reached
   through the queue (`dispatch-queue`).

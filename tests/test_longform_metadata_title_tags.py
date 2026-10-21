@@ -148,34 +148,14 @@ class TestTitleTemplate:
         assert title.endswith(" in 4K"), f"Title {title!r} is not route-only 'in 4K'"
         assert "Scenic Drive" not in title
 
-    def test_seo_suffix_not_appended(self) -> None:
-        # The optimizer's title is consumed as tags, never appended.
-        title = LongFormMetadataGenerator._build_title(
-            location="Glenfable",
-            trim_ratio=None,
-            seo_suffix="Scenic Road Trip",
-        )
-        assert "Scenic Road Trip" not in title
-
-    def test_seo_suffix_dropped_when_too_long(self) -> None:
-        long_suffix = "X" * 200
-        title = LongFormMetadataGenerator._build_title(
-            location="Glenfable",
-            trim_ratio=None,
-            seo_suffix=long_suffix,
-        )
-        assert long_suffix not in title
-        assert len(title) <= 100
-
-    def test_seo_suffix_dropped_when_already_in_title(self) -> None:
-        # Suffix already present in core — must not be appended again.
-        title = LongFormMetadataGenerator._build_title(
-            location="Driving Glenfable",
-            trim_ratio=None,
-            seo_suffix="Driving",
-        )
-        # Even the more general invariant: no double-append.
-        assert title.count("Driving") <= 2  # one in verb, one in location
+    def test_optimizer_title_cannot_be_offered(self) -> None:
+        # The optimizer's title is consumed as tags, never appended; Waypost's
+        # select_title decides the title, and _build_title takes no optimizer
+        # suffix at all.
+        with pytest.raises(TypeError):
+            LongFormMetadataGenerator._build_title(
+                location="Dingle", trim_ratio=None, seo_suffix="Scenic Road Trip"
+            )
 
     def test_title_is_verb_less_regardless_of_trim(self) -> None:
         title = LongFormMetadataGenerator._build_title(

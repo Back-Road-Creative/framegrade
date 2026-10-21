@@ -117,21 +117,27 @@ def _run_sidecar_integrity_gate(
         assert_superlong_sidecar_integrity(output_base, state)
 
 
-def _default_picture_check(lf_path: Path, duration: float | None, source_sharpness, changed):
+def _default_picture_check(
+    lf_path: Path, duration: float | None, source_sharpness, changed, source_ringing=None
+):
     """Real picture gate (post-rendition softness / ringing); injectable like the spot-check."""
     from ..validation.longform_validator import picture_quality_gate
 
     return picture_quality_gate(
-        lf_path, duration or 0.0, source_sharpness=source_sharpness, changed=changed
+        lf_path,
+        duration or 0.0,
+        source_sharpness=source_sharpness,
+        changed=changed,
+        source_ringing=source_ringing,
     )
 
 
 def _lf_picture_inputs(state) -> dict:
-    """``{lf_index: (source_sharpness, picture_changed)}`` for the picture gate."""
+    """``{lf_index: (source_sharpness, source_ringing, picture_changed)}`` for the gate."""
     from ..quality import picture_inputs_from_state
 
-    sharpness, changed = picture_inputs_from_state(state)
-    return {idx: (sharpness, flag) for idx, flag in changed.items()}
+    sharpness, ringing, changed = picture_inputs_from_state(state)
+    return {idx: (sharpness, ringing, flag) for idx, flag in changed.items()}
 
 
 def _lf_day_records(state) -> dict:
@@ -287,9 +293,13 @@ def _run_final_validation_gate(
                     f"  LF {lf.index} ({lf_path.name}): {quality_gate.message}"
                 )
         # Post-rendition picture gate; ``picture_inputs`` maps LF index to
-        # ``(source_sharpness, picture_changed)``. Absent -> recorded as skipped.
-        source_sharpness, changed = (picture_inputs or {}).get(lf.index, (None, False))
-        picture_gate = picture_check(lf_path, lf.total_duration, source_sharpness, changed)
+        # ``(source_sharpness, source_ringing, picture_changed)``. Absent -> skipped.
+        source_sharpness, source_ringing, changed = (picture_inputs or {}).get(
+            lf.index, (None, None, False)
+        )
+        picture_gate = picture_check(
+            lf_path, lf.total_duration, source_sharpness, changed, source_ringing=source_ringing
+        )
         if picture_gate is not None and not picture_gate.passed:
             video_quality_failures.append(
                 f"  LF {lf.index} ({lf_path.name}): {picture_gate.message}"
@@ -375,9 +385,12 @@ def _assert_shorts_quality_gate(state, *, validator_cls, probe_duration_fn=None)
     )
     from ..quality import picture_inputs_from_state
 
-    _sharp, _by_lf = picture_inputs_from_state(state)
+    _sharp, _ring, _by_lf = picture_inputs_from_state(state)
     _qr = validator_cls().validate_short_files(
-        all_short_files, source_sharpness=_sharp, picture_changed=any(_by_lf.values())
+        all_short_files,
+        source_sharpness=_sharp,
+        source_ringing=_ring,
+        picture_changed=any(_by_lf.values()),
     )
     if not _qr.passed:
         # D-shorts-quality-gate identity preserved for log greps, but the

@@ -516,12 +516,16 @@ def check_location_invariant(metadata_json: dict) -> GateResult:
     )
 
 
-def _vote_label(key) -> str:
+def _vote_label(key) -> Optional[str]:
     """A vote key (``"County|State"`` from the vote, ``"County, State"`` from
-    ``ResolvedLocation.vote``) as the ``"County, State"`` label form."""
-    county, _sep, state = str(key).partition("|")
-    state = "" if state in ("", "None") else state
-    return f"{county}, {state}" if state else county.strip()
+    ``ResolvedLocation.vote``) as the ``"County, State"`` label form, or
+    ``None`` when the county slot is unresolved (never ``"None, Virginia"``)."""
+    from gomoveshift.pipeline.gps_enrichment import region_label
+
+    county, sep, state = str(key).partition("|")
+    if not sep:
+        county, _comma, state = str(key).rpartition(",") if "," in str(key) else (key, "", "")
+    return region_label(county, state)
 
 
 def _county_tokens(label: str) -> set[str]:
@@ -535,9 +539,10 @@ def _coverage_failures(metadata_json: dict, resolved: dict, title: str, location
     shipped claim names — see :func:`check_location_invariant`."""
     vote = resolved.get("vote") or {}
     material = [
-        (_vote_label(k), float(v))
+        (label, float(v))
         for k, v in vote.items()
         if isinstance(v, (int, float)) and float(v) >= LOCATION_MATERIAL_SHARE
+        if (label := _vote_label(k))
     ]
     if len(material) < 2:
         return []  # one material county: membership already covers it
@@ -677,6 +682,15 @@ def _town_place_tokens(text: str) -> set[str]:
 # of the LF trace; the forward geocoder only proposes candidates, the trace
 # decides.
 _TRACE_VERIFIED_PLACE_KM = 2.0
+
+
+def title_endpoints(label: str) -> Optional[tuple[str, str]]:
+    """The ``(start, end)`` towns an "A to B[ via R]" label claims, state
+    suffixes stripped, or ``None`` when the label names no endpoints."""
+    m = _TITLE_ENDPOINTS_RE.match(label or "")
+    if not m:
+        return None
+    return m.group("start").strip(), m.group("end").strip()
 
 
 def _endpoint_town_phrases(*texts: str) -> set[str]:
@@ -874,6 +888,9 @@ class _VotedRegions(list):
     def __init__(self):
         super().__init__()
         self.vote: dict = {}
+        #: The clip's OWN GPS road names, most-voted first; empty when
+        #: the clip voted no road. Never the parent LF's roads.
+        self.roads: list = []
 
 
 def _make_short_regions_fn(geocoder):
@@ -911,17 +928,12 @@ def _make_short_regions_fn(geocoder):
             return []
         regions = _VotedRegions()
         for key in dom.votes:
-            county, _, state = str(key).partition("|")
-            # Collapse an empty OR legacy-literal "None" state to no-state so
-            # a stateless county (Irish/independent-city) labels as the bare
-            # county, never a malformed "County, None". Redundant with the
-            # producer's empty-slot serialization; defense against any future
-            # second producer.
-            state = "" if state in ("", "None") else state
-            label = f"{county}, {state}" if state else county
+            label = _vote_label(key)
             if label and label not in regions:
                 regions.append(label)
                 regions.vote[label] = dom.votes[key]
+        road_votes = getattr(dom, "road_votes", None) or {}
+        regions.roads = [r for r, _n in sorted(road_votes.items(), key=lambda kv: (-kv[1], kv[0]))]
         return regions
 
     return _fn
@@ -1178,21 +1190,36 @@ def check_specificity_ladder(metadata_json: dict, evidence: Optional[dict] = Non
     evidence via four checks (in order below): locked-GPS coverage floor, via-road
     support, endpoint geocode proximity, and a stationary-footage guard.
 
-    OPT-IN / no-op — no ``evidence`` no-ops entirely, and each check fires ONLY
-    when its key is present AND contradicts the label, so a correct high-coverage
-    LF PASSES unchanged. There is no operator exemption: a
-    ``--per-lf-location`` label is checked like any other.
+    FAIL-CLOSED on a missing claim basis: no evidence
+    record, a blank label, or a record carrying neither a GPS trace nor a voted
+    corroboration fails — a location claim with nothing behind it never passes
+    as "skipped". Past that floor each check fires ONLY when its key is present
+    AND contradicts the label, so a correct high-coverage LF PASSES unchanged.
+    There is no operator exemption: a ``--per-lf-location`` label is checked
+    like any other.
     """
     from gomoveshift.pipeline import gps_quality as gq
     from gomoveshift.pipeline.title_builder import LOCKED_COVERAGE_TIER1_MIN
 
     label = (metadata_json.get("location") or metadata_json.get("title") or "").strip()
-    if not evidence or not label:
+    if not label:
         return GateResult(
-            gate="specificity_ladder", passed=True, message="no evidence / label (skipped)"
+            gate="specificity_ladder", passed=False, message="specificity ladder: blank label"
+        )
+    if not evidence:
+        return GateResult(
+            gate="specificity_ladder",
+            passed=False,
+            message=f"specificity ladder: no location evidence record for {label!r}",
         )
 
     gps_points = evidence.get("gps_points")
+    if not gps_points and not (evidence.get("corroborations") or evidence.get("has_bracket_route")):
+        return GateResult(
+            gate="specificity_ladder",
+            passed=False,
+            message=f"specificity ladder: {label!r} has no GPS trace or corroboration",
+        )
     window = evidence.get("window") or gq.trace_time_window(gps_points)
     endpoints = _TITLE_ENDPOINTS_RE.match(label)
     via = _VIA_ROAD_RE.search(label)

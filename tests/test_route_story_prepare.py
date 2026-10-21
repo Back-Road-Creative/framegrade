@@ -286,7 +286,7 @@ def _gpx(tmp_path: Path, text: str = GPX_TEXT) -> Path:
 # small the margin is, so every zoom 9-12 still gets real tiles, just far
 # fewer of them. Only `test_prepare_bundle_default_zoom_tile_count_is_bounded`
 # (which exists specifically to bound the default-margin tile count) calls
-# `prepare.prepare_bundle` directly, at the real default.
+# `prepare.prepare_bundle` directly, at the real default margin.
 _SMALL_REGIONAL_MARGIN_KM = 1.0
 
 # The margin above does not shrink the regional bands as far as it looks:
@@ -992,10 +992,19 @@ def test_prepare_bundle_default_zoom_tile_count_is_bounded(
     previously had no sharp raster at all, and it is a real one -- a full
     regional-sized prepare goes from roughly 240 to roughly 330 minutes. The
     bound stays a bound: raised deliberately, with the measured number
-    recorded, never widened until the suite goes quiet."""
+    recorded, never widened until the suite goes quiet.
+
+    Imagery runs at the real default margin and zooms; terrain is held at
+    ``_SMALL_TERRAIN_ZOOMS``. The imagery count does not depend on the
+    terrain zooms (5943 either way), and the default z9-13 terrain pyramid
+    cost ~100 s of this test's ~125 s for a number it never asserts."""
     session = FakeSession()
     report = prepare.prepare_bundle(
-        _gpx(tmp_path), session, _fake_fetch_maplibre, recorded_on=RECORDED_ON
+        _gpx(tmp_path),
+        session,
+        _fake_fetch_maplibre,
+        recorded_on=RECORDED_ON,
+        terrain_zooms=_SMALL_TERRAIN_ZOOMS,
     )
 
     assert 0 < report.imagery_tiles_written < 6500

@@ -13,7 +13,11 @@ overrides for a follow-up invocation that actually encodes.
 resolves each LF's *corrected* label through the real dominant-county
 reducer with the live geocoder and prints the label + county vote
 breakdown — the verification gate for confirming labels (e.g. after a
-mislabel report) before committing to an expensive re-encode.
+mislabel report) before committing to an expensive re-encode. It also
+prints each LF's assembled YouTube title and a greppable
+``TITLE-COLLISION`` line when that title is already live (on-disk ledger
+or live-catalog snapshot; never a network call), so a duplicate the
+Phase BC gate would refuse after the encode shows up before it.
 
 When ``config.drive.sign_verify`` is on, the dry-run additionally prints
 the road-sign evidence for each LF right beside the vote it is evidence
@@ -29,11 +33,17 @@ dry-run path is heavier (one geocode per sample) but still Phase-A bound.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import Counter
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+
+#: Written by ``--label-dry-run`` under the run's stages dir, never the repo.
+ROUTE_CLAIMS_DRY_RUN_FILE = "route_claims_dry_run.json"
 
 
 def print_lf_listing(config: Any, state: Any) -> None:
@@ -68,7 +78,7 @@ def print_lf_listing(config: Any, state: Any) -> None:
     print()
 
 
-def print_label_dry_run(config: Any, state: Any) -> None:
+def print_label_dry_run(config: Any, state: Any) -> bool:
     """Print each LF's *corrected* label without encoding (``--label-dry-run``).
 
     Unlike ``print_lf_listing`` (which only prints raw centroid coords to
@@ -78,6 +88,9 @@ def print_label_dry_run(config: Any, state: Any) -> None:
     the county vote breakdown. Lets an operator confirm the labels are right
     before committing to an expensive re-encode. Phase-A only; exits via the
     orchestrator short-circuit afterward.
+
+    Writes the per-LF route-claim record to ``<stages_base>/route_claims_dry_run.json``
+    and returns ``True`` when a route claim is refused (the run then fails).
     """
     from ..gps_enrichment import _build_gps_points_by_lf, _build_shared_geocoder
     from ..title_builder import _road_ref_members, dominant_location
@@ -91,7 +104,7 @@ def print_label_dry_run(config: Any, state: Any) -> None:
     if drive_plan is None or not getattr(drive_plan, "regular_lfs", None):
         print("  (no LFs detected in discovery — nothing to list)")
         print("=" * 64)
-        return
+        return False
     gps_points_by_lf = _build_gps_points_by_lf(drive_plan, getattr(state, "gps_per_episode", None))
     geocoder = _build_shared_geocoder()
     # Sign evidence is bucketed ONCE for the whole (unpartitioned) plan — the
@@ -106,6 +119,17 @@ def print_label_dry_run(config: Any, state: Any) -> None:
         except Exception as exc:  # noqa: BLE001 — advisory evidence never breaks the gate
             sign_error = str(exc)
             logger.warning("  sign evidence: bucketing failed (%s) — evidence unavailable", exc)
+    live_titles = _live_title_ids()
+    # The run's own stages dir, never the cwd (which may be the repo).
+    output_base = getattr(state, "output_base", None)
+    stages_base = getattr(state, "stages_base", None) or (
+        Path(output_base) / "_stages" if output_base else None
+    )
+    report: dict = {"path": Path(stages_base) / ROUTE_CLAIMS_DRY_RUN_FILE if stages_base else None}
+    ost_text = _render_ost_text_by_lf(
+        drive_plan.regular_lfs, gps_points_by_lf, geocoder, state, report=report
+    )
+    collisions = 0
     for lf in drive_plan.regular_lfs:
         idx = int(getattr(lf, "index", 0))
         pts = gps_points_by_lf.get(idx) if gps_points_by_lf else None
@@ -117,6 +141,7 @@ def print_label_dry_run(config: Any, state: Any) -> None:
         if dom.name:
             label = f"{dom.name}, {label}"
         print(f"  {idx:>3}  {label}")
+        collisions += _print_lf_title(ost_text.get(idx) or label, live_titles)
         votes = ", ".join(f"{k}={v}" for k, v in sorted(dom.votes.items(), key=lambda kv: -kv[1]))
         print(f"       county vote: {votes}")
         # Surface the resolved via-road + its per-member vote tally so the
@@ -144,7 +169,155 @@ def print_label_dry_run(config: Any, state: Any) -> None:
                 print(f"       sign evidence: unavailable ({exc})")
     print("=" * 64)
     print("  Labels reflect the dominant-county fix. No encode performed.")
+    if collisions:
+        print(
+            f"  TITLE-COLLISION: {collisions} LF title(s) already live — Phase BC will "
+            "refuse them after the encode; fix the label first."
+        )
     print()
+    return bool(report.get("refused"))
+
+
+def _render_ost_text_by_lf(
+    regular_lfs: list,
+    gps_points_by_lf: Any,
+    geocoder: Any,
+    state: Any,
+    *,
+    report: Optional[dict] = None,
+) -> dict:
+    """``{lf_index: canonical OST text}`` — what the render burns and titles from.
+
+    Calls the render's own ``canonical_lf_ost_text`` per LF (after the same
+    ``derive_per_lf_locations`` label and destination POI), then the sibling
+    differentiation pass, so the dry-run title is ``assemble_final_title`` of
+    the string the render uses.
+    The cross-LF ``unique_titles`` suffix pass is not reproduced (it needs the
+    full title set). An LF whose derivation fails is omitted; the caller then
+    falls back to its own county label.
+
+    ``report`` (``{"path": Path}``) receives ``refused`` and, at ``path``, the
+    per-LF route-claim record -- written before any refusal prints.
+    """
+    from ..gps_enrichment import (
+        _differentiate_and_revalidate_siblings,
+        _resolve_lf_destination,
+        canonical_lf_ost_text,
+        derive_per_lf_locations,
+    )
+
+    overrides = dict(getattr(state, "per_lf_overrides", None) or {})
+    day: dict[int, str] = {}
+    dest_source: dict[int, str] = {}
+    for lf in regular_lfs:
+        idx = int(getattr(lf, "index", 0))
+        dest_out: dict = {}
+        try:
+            labels = derive_per_lf_locations(
+                [lf],
+                geocoder=geocoder,
+                gps_fallback=None,
+                overrides=overrides,
+                gps_points_by_lf=gps_points_by_lf or None,
+            )
+            day[idx] = canonical_lf_ost_text(
+                lf,
+                lf_location=labels.get(idx, ""),
+                overrides=overrides,
+                geocoder=geocoder,
+                gps_points=(gps_points_by_lf or {}).get(idx),
+                destination=_resolve_lf_destination(lf, dest_out),
+            )
+        except Exception as exc:  # noqa: BLE001 — advisory; falls back to the county label
+            logger.warning("  render OST text: LF %s not derivable (%s)", idx, exc)
+        dest_source[idx] = dest_out.get("source", "none")
+    _differentiate_and_revalidate_siblings({"dry-run": day}, gps_points_by_lf or {}, geocoder)
+    # The render's retained-GPS claim check (route_claims): a fallback shows the
+    # label the render will burn; a refusal is printed here, before any encode.
+    from types import SimpleNamespace
+
+    from ..boundary_proof import CensusBoundaryProver
+    from ..final_text_record import boundary_review_available
+    from ..gps_enrichment import _build_route_windows_by_lf
+    from ..route_claims import RouteClaimRefusedError, enforce_route_claims
+
+    outcomes: dict = {}
+    refusal = ""
+    episode_dates = getattr(state, "episode_dates", None) or []
+    recording_dates = {}
+    for lf in regular_lfs:
+        dates = {
+            str(episode_dates[i])
+            for seg in getattr(lf, "segments", None) or []
+            if (i := int(getattr(seg, "source_file_index", -1))) >= 0 and i < len(episode_dates)
+        }
+        if len(dates) == 1:
+            recording_dates[int(lf.index)] = dates.pop()
+    try:
+        enforce_route_claims(
+            {"dry-run": day},
+            _build_route_windows_by_lf(
+                SimpleNamespace(regular_lfs=regular_lfs), getattr(state, "gps_per_episode", None)
+            ),
+            geocoder,
+            overrides=overrides,
+            outcomes=outcomes,
+            boundary_prover=CensusBoundaryProver(),
+            require_review_support=True,
+            review_support_available=boundary_review_available(),
+            recording_dates=recording_dates,
+        )
+    except RouteClaimRefusedError as exc:
+        refusal = str(exc)
+    if report is not None:
+        report["refused"] = bool(refusal)
+        if report.get("path"):
+            path = Path(report["path"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lfs = [
+                {**outcomes[k], "destination_source": dest_source.get(int(k), "none")}
+                for k in sorted(outcomes)
+            ]
+            blob = {"refused": bool(refusal), "lfs": lfs}
+            path.write_text(json.dumps(blob, indent=2, ensure_ascii=False) + "\n")
+            print(f"  route-claim record: {path}")
+    if refusal:
+        print(f"  ROUTE-CLAIM REFUSED — the render will stop before the burn:\n{refusal}")
+    return day
+
+
+def _live_title_ids() -> dict[str, str]:
+    """``{normalized_title: video_id_or_""}`` for every title already on the
+    channel, from the on-disk ledger plus the local live-catalog snapshot.
+
+    Network-free: the Phase BC duplicate-title gate refreshes the channel
+    itself, after the encode; the dry-run only reads what is on disk, so a
+    title published since the last snapshot can still slip past here.
+    """
+    from .. import longform_metadata as lm
+
+    titles: dict[str, str] = {}
+    try:
+        titles.update({t.strip().lower(): "" for t in lm.load_published_titles() if t.strip()})
+        titles.update(lm.live_catalog_title_ids())
+    except Exception as exc:  # noqa: BLE001 — advisory evidence never breaks the gate
+        logger.warning("  title check: published titles unreadable (%s)", exc)
+    return titles
+
+
+def _print_lf_title(label: str, live_titles: dict[str, str]) -> int:
+    """Print the LF's assembled YouTube title; return 1 when it is already live."""
+    from ..longform_metadata import assemble_final_title
+
+    title = assemble_final_title(label)
+    print(f"       title: {title}")
+    key = title.strip().lower()
+    if key not in live_titles:
+        return 0
+    video_id = live_titles[key] or "id unknown (on-disk ledger)"
+    print(f"       TITLE-COLLISION: already live as {video_id}")
+    logger.warning("TITLE-COLLISION: %r is already live as %s", title, video_id)
+    return 1
 
 
 def _sign_verify_enabled(config: Any, state: Any) -> bool:

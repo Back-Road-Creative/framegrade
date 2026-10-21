@@ -432,6 +432,172 @@ because "stop touching this platform" means something different to each:
 A row already leased or in flight when the pause takes effect is never touched by any of the
 three paths: the platform call it may be mid-flight on cannot be un-sent.
 
+## Recovering a terminal row (`queue recover-terminal`)
+
+`retry_delivery` and `cancel_delivery` refuse terminal rows by design, and raw SQL is not an
+approved way past that. `gomoveshift queue recover-terminal --id N --authorized-by "<who/when>"
+[--sidecar-dir DIR] [--apply]` is the audited one. It is an operator-only command: the hourly
+drain never calls it, and each invocation handles exactly one named row. Without `--apply` it is
+a dry run: every gate below runs (the same platform reads), it prints `dry run: delivery N passes
+every recovery gate; nothing written` and exits 0, and nothing is written. Re-queueing any
+specific row is the operator's per-row decision. It never edits row `N`: with `--apply`, on success it inserts ONE new
+`queued` delivery for the same short and platform (`scheduled_at` = now, so the next drain takes
+it), linked by `recovers_delivery_id`, carrying `recovery_authorized_by` and `recovery_evidence`
+(JSON), and appends a `response_log` row (`action=recover_terminal`). The old row's status,
+receipts, IDs and `attempt_count` stay byte-identical. Instagram recovers `failed_permanent`
+rows; YouTube recovers `missing_remote` rows (next section's gates); any other platform or
+pairing refuses.
+
+For Instagram it refuses (one `REFUSED:` line, exit 1, nothing written) unless all hold:
+
+1. the row is `failed_permanent` and not already recovered (the new row's `plan_hash` is
+   `<old>#recovers-<id>`, so a second recovery violates `UNIQUE(project_name, short_index,
+   platform, plan_hash)` -- impossible by construction, not by a racing check);
+2. the old container (`platform_upload_id`) reads `EXPIRED` or not-found from Graph (NULL id =
+   gone); any other state, including `PUBLISHED`, refuses;
+3. a fresh scan of the account's last 50 media finds no caption-prefix (40 chars, whitespace and
+   case folded) or sha256 match; an empty scan refuses because it cannot prove absence. Graph
+   exposes no media hash, so the live fingerprint leg can only match when a client supplies one;
+   the caption leg is the one that fires against the real account. A full page of 50 must reach
+   back past the row's `created_at`, or the scan refuses: a post the failed attempt made could
+   sit beyond it;
+4. the sidecar record loads and its media verifies and resolves to the same Instagram rendition
+   path the drain uploads (`ensure_instagram_rendition`; never the over-cap master);
+5. `dispatch.privacy_hold_reason` returns no hold on the run's merged attestations; an absent
+   attestation refuses, exactly as the drain holds it.
+
+The Graph reads are `InstagramReelsAdapter.check_container_status` and `list_recent_media`
+(read-only); tests inject fakes.
+
+For a YouTube `missing_remote` row it refuses unless all hold, in order:
+
+1. the row is `missing_remote` and not already recovered (same construction as above);
+2. a fresh `videos.list` on the old upload id still returns nothing; a video that is back
+   refuses, and so does a lookup that errors (unknown is not gone);
+3. the sidecar record loads and its media verifies (the file the drain uploads);
+4. the plan's YouTube slot (`schedule.scheduled_at_utc`) is still ahead of now. A passed slot
+   refuses: the upload is private with `publishAt`, and a past `publishAt` would never go public;
+5. privacy, exactly as for Instagram;
+6. the channel's last 200 uploads (`youtube_uploads_listing.list_uploads`) carry no video with the
+   plan's exact title; an empty listing refuses because it cannot prove absence.
+
+The recovered row is a fresh `queued` delivery with no upload id, so the next drain makes one
+`videos.insert` and the post-upload verify runs on it like any other upload.
+
+## Overdue manual TikTok slots (`queue reslot-overdue-manual`)
+
+A TikTok row still `awaiting_manual_publish` more than 24 h past its slot is named by
+`publishing-status` as `manual_publish_overdue`. `gomoveshift queue reslot-overdue-manual
+[--id N]` lists each with its old slot and the proposed one (the region's next Waypost shorts
+time, later than now + 20 minutes and not equal to another live TikTok row's slot); `--apply`
+moves it with `reschedule_delivery`. In pack mode it first appends a `RESLOTTED` block to the
+pack's `captions.txt` (`docs/social-publishing-tiktok.md`). Operator-only: the drain never
+calls it, it posts nothing and renames no file. A refused row prints
+`REFUSED: <id>: <reason>` and the exit code is 1; the others are still processed.
+
+## A YouTube short the channel does not return (`missing_remote`)
+
+`missing_remote` is a **terminal** status for a YouTube row the queue holds an upload id for
+but the channel does not return. Nothing re-uploads, deletes or rewrites the remote video in
+this wave: the row keeps its `platform_upload_id` as the receipt, `enqueue` returns the same
+row for a re-plan with a new hash (so no fresh `queued` row slips in beside it), and
+`publishing-status --validate` exits non-zero naming it and the command below. What to do
+next is the operator's per-row decision: dry-run `gomoveshift queue recover-terminal --id N
+--authorized-by "<who, when>"` (gates above), then re-run it with `--apply` to re-queue. A row with a recovery row linked to it no longer
+counts as a validate problem; the new row is validated like any other.
+
+Two writers move a row there, both through `queue.mark_missing_remote` (YouTube rows with an
+upload id, from `uploaded` or `published` only; one `response_log` row per mark):
+
+1. the adapter's post-upload verify (`docs/social-publishing-youtube.md`);
+2. the catalog pass:
+
+   ```bash
+   gomoveshift catalog-fetch --out live_catalog.json --known-ids-from-queue
+   gomoveshift queue mark-missing-remote --live-catalog live_catalog.json          # dry run
+   gomoveshift queue mark-missing-remote --live-catalog live_catalog.json --apply
+   ```
+
+   `--known-ids-from-queue` makes the fetch look up every published or uploaded YouTube id
+   in the queue by id, and the catalog records each one it asked about in `checked_ids`.
+   Only an id in `checked_ids` and absent from `videos` is marked; a published row whose id
+   the catalog never asked about is printed as `unchecked` and left alone, since absence
+   from a channel listing proves nothing. A catalog with no `checked_ids` (written before the post-upload verify existed) is refused.
+
+## A retitled short's plan title (`queue sync-plan-titles`)
+
+`tools/retitle_apply.py` writes each applied title into the short's publish-plan sidecar in
+the same step (docs/pipeline/77). For a retitle made before that, or a sync that failed:
+
+```bash
+gomoveshift queue sync-plan-titles --audit <worklist>.audit.jsonl          # dry run
+gomoveshift queue sync-plan-titles --audit <worklist>.audit.jsonl --apply
+```
+
+Each video's newest `APPLIED` title in the audit log(s) becomes `payloads.youtube.title` in the
+sidecar of every published YouTube delivery of that video. Local file writes only, never a
+YouTube call; each write is re-parsed through `load_publish_plan` first and logged as one
+`response_log` `sync_plan_title` row. `publishing-status --validate --live-catalog ...
+--retitle-audit <log>` names a lagging plan as `plan_stale_retitled` (report-only) until it runs.
+
+## A pre-review plan's tags (`queue sync-plan-tags`)
+
+A sidecar written before the final-text tag review keeps tags the dispatcher's
+`FinalTextReviewError` now refuses (`tag_unreviewable:<tag>`), so every queued YouTube short of
+that plan fails at dispatch and burns its attempts. Re-derive them from the plan's own evidence:
+
+```bash
+gomoveshift queue sync-plan-tags            # dry run: lists each row's dropped tags
+gomoveshift queue sync-plan-tags --apply
+```
+
+Each non-terminal YouTube row's `payloads.youtube.tags` is filtered through the same reviewer the
+dispatcher uses (`reviewable_short_tags` against that short's sampled regions and roads). Local
+file writes only, never a YouTube call; each write is re-parsed through `load_publish_plan` and
+logged as one `response_log` `sync_plan_tags` row. Rows already `failed_permanent` are not
+touched; recover those with `recover-terminal` only after confirming nothing posted.
+
+## Validate problems gate enqueue and dispatch
+
+A `publishing-status --validate` problem used to be a report nobody had to
+read: the drive kept spooling shorts for a project whose last short the
+channel never got, and the hourly drain kept publishing them. Now the
+problems the validator names (every kind except `stale_lease` and
+`manual_publish_overdue`) stop the
+publishing path, **per platform and per project** — a problem on
+`youtube`/`proj-a` never blocks `instagram`/`proj-a` or `youtube`/`proj-b`:
+
+- **`enqueue-plan --apply`** refuses the whole plan when any platform/project
+  pair it would write has a problem, and writes nothing. The drive's automatic
+  enqueue (`pipeline/auto_enqueue.py`) calls the same function, so a drive is
+  refused the same way. Shadow runs are not gated (they can never publish).
+- **`dispatch-queue --apply`** holds the due rows of each affected pair — no
+  lease, no transition, no attempt charged, the same contract as the privacy
+  hold — and drains every other pair normally. The summary line carries
+  `held_validate=N`. The gate is computed after the TikTok/Instagram
+  reconcilers, so a row they settle this pass no longer holds its pair.
+
+Each refusal prints one line per offending row:
+`delivery=<id> kind=<kind> platform=<platform> project=<project>: <detail>`,
+then the command to inspect it: `gomoveshift publishing-status --validate`.
+
+**Live-catalog drift gates too, from a snapshot.** Both commands also read
+`<seo.storage_path>/live_catalog.latest.json`, which only
+`gomoveshift catalog-fetch --known-ids-from-queue --out <path>` writes (it
+stamps `fetched_at`; a fetch without `--known-ids-from-queue` leaves the
+snapshot alone, because a pass that skipped a queue id could hold a pair for a
+video that still exists). When the snapshot is at most 24 h old its
+`published_video_missing` and `published_title_drift` rows hold their pair like
+any other problem. The gate never calls YouTube during a drain: a snapshot that
+is older, has no `fetched_at`, is absent or does not parse prints
+`warning: live_catalog_stale` / `live_catalog_missing` /
+`live_catalog_unreadable` with the refresh command, and holds nothing.
+
+The only escape is `--ignore-validate --reason '<why>'` on either command.
+Without `--reason` it is refused. With it, the run proceeds and one
+`response_log` row per platform is written (`action='ignore_validate'`,
+`reason` = JSON with the command, the reason and the overridden rows).
+
 ## Standalone assets
 
 A route-story film or other Waypost product with no drive run behind it has no
@@ -458,3 +624,9 @@ publisher (Metricool is retired); it is then spooled via
 
 The console's Publishing tab has a matching "Enqueue a standalone asset" form
 (`POST /publishing/enqueue-asset`), containment-checked like `/publishing/enqueue`.
+
+## Reconciliation view (console, read-only)
+
+`/publishing/reconcile` (`gomoveshift/console/reconcile.py`) sorts every non-shadow delivery into queued / uploaded / remotely scheduled (`published_at_source=platform_scheduled`, not yet a publication) / published (platform-confirmed or reconciled) / awaiting manual (e.g. TikTok pack or inbox) / unverified (operator-confirmed, legacy, `awaiting_ig_reconcile`, `missing_remote`). Coverage gaps list, per platform and format, each Eastern-time day inside the horizon (`tiktok_pack.SWEEP_HORIZON_DAYS`) with nothing queued, uploaded, scheduled, published or awaiting a person. Failures split into recovered (a later row names it in `recovers_delivery_id` and is published or remotely scheduled), recovery in flight, and unresolved; an unresolved Instagram failure also reports any earlier published row for the same short. The page never writes, retries or republishes.
+
+The Publishing tab uses the same split for a `published` row: its Status cell reads published, remotely scheduled or unverified (`pubqueue.published_kind`, shared with this view), never plain "published" for a row the platform has not confirmed.

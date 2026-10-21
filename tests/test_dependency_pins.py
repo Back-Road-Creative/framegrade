@@ -300,6 +300,19 @@ class TestOnnxruntimeBuild:
         assert len(core) == 1
         assert core[0].startswith("redactcam[gpu] @ git+"), core[0]
 
+    def test_waypost_and_gps_journey_are_pinned_to_public_commits(self):
+        """The two former workspace siblings ship from their public repos now. A
+        bare name resolves to whatever copy happens to be installed (or 404s on
+        PyPI), so each must be a direct reference pinned to a full commit SHA."""
+        core = {_req_name(r): r.strip() for r in _live_project()["dependencies"]}
+        for name, repo in (("seo-manager", "waypost"), ("gps-journey", "gps-journey")):
+            m = re.match(
+                rf"^{name} @ git\+https://github\.com/Back-Road-Creative/{repo}@(?P<rev>\S+)$",
+                core[name],
+            )
+            assert m, f"{name} must be a direct reference to the public {repo} repo: {core[name]}"
+            assert _COMMIT_SHA.match(m.group("rev")), f"{name} must pin a full commit SHA"
+
 
 def test_installed_vcs_pins_match_pyproject():
     """Live guard. Cannot fail in CI (CI installs from pyproject); its whole value is local."""

@@ -237,6 +237,11 @@ def _render_private_video(source: Path, output: Path, mask: Path) -> dict:
         person_conf=getattr(drive, "blur_person_conf", 0.35),
         person_min_height_frac=getattr(drive, "blur_person_min_height_frac", 0.0),
     )
+    # A detector miss must not unmask an object still in frame: hold it per object.
+    boxes = blur_gate.hold_missed_detections(
+        boxes,
+        sample_interval_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)),
+    )
     boxes = blur_gate.fill_detection_gaps(
         boxes, max_gap_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)) + 1
     )

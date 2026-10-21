@@ -22,6 +22,7 @@ from gomoveshift.pipeline.day_master_encoder import (
     REQUIRED_PRIVACY_CLASSES,
 )
 from gomoveshift.pipeline.drive_phases.phase_d import _emit_publish_plan_sidecar
+from gomoveshift.pipeline.title_decision import decide_title
 from gomoveshift.publishing.asset_plan import ASSET_ATTESTATION_FILENAME
 from gomoveshift.publishing.dispatch import privacy_hold_reason
 from gomoveshift.publishing.models import MediaFingerprint
@@ -61,7 +62,15 @@ def _kwargs(dates, route=True):
     return dict(
         project_base="p",
         drive_plan=SimpleNamespace(regular_lfs=[SimpleNamespace(index=i) for i in lfs]),
-        social_posts_per_lf={i: [SimpleNamespace(short_index=10 + i)] for i in lfs},
+        social_posts_per_lf={
+            i: [
+                SimpleNamespace(
+                    short_index=10 + i,
+                    title_decision=decide_title("short", "", None, suffix=""),
+                )
+            ]
+            for i in lfs
+        },
         drive_schedule=SimpleNamespace(
             shorts_slots=[
                 SimpleNamespace(short_index=10 + i, date="2026-03-15", time="08:00:00") for i in lfs

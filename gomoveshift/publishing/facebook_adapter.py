@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import requests
 
 from gomoveshift.publishing.first_comment import post_graph_comment
-from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION
+from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, graph_error_tag
 from gomoveshift.publishing.models import FacebookPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_RECONCILED as PLATFORM_RECONCILED
@@ -66,12 +66,13 @@ def _raise_for_graph_error(status_code: int, body: dict) -> None:
     error = (body or {}).get("error") or {}
     code, subcode = error.get("code"), error.get("error_subcode")
     message = str(error.get("message") or "unknown Graph API error")
+    tag = graph_error_tag(status_code, error)
     if code in _AUTH_ERROR_CODES or subcode in _AUTH_ERROR_SUBCODES:
-        raise FacebookAuthBlockedError("Meta access token expired or revoked; reauthorize")
+        raise FacebookAuthBlockedError(f"{tag} Meta access token expired or revoked; reauthorize")
     if code in _RATE_LIMIT_CODES or status_code >= 500:
-        raise FacebookRetryableError(f"transient Graph API error: {message}")
+        raise FacebookRetryableError(f"{tag} transient Graph API error: {message}")
     raise FacebookPermanentError(
-        f"Graph API rejected the request: {message} — "
+        f"{tag} Graph API rejected the request: {message} — "
         "review the media/description against Meta content policy and resubmit"
     )
 

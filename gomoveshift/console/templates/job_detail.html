@@ -6,6 +6,15 @@
   {% if job.liveness %}
   <p><em>{{ job.liveness }}</em></p>
   {% endif %}
+  {% if job.executor == "host" %}
+  <p><em>Runs on the host GPU worker, not in this console.</em></p>
+  {% if job.status in ("queued", "running") %}
+  <form method="post" action="/jobs/{{ job.id }}/cancel">
+    <button type="submit">Cancel</button>
+  </form>
+  {% endif %}
+  {% if job.host_error %}<p>Worker error: {{ job.host_error }}</p>{% endif %}
+  {% endif %}
   {% if job.rerun_of %}
   {# "Re-run" does two things an operator could tell apart, and the job
      row is the only place the difference is recorded. Say both halves rather

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gomoveshift.pipeline.uploader import PipelineUploader
+from gomoveshift.pipeline.uploader import _SSL_RETRY_DELAYS, PipelineUploader
 
 
 def _make_uploader(tmp_path):
@@ -162,10 +162,15 @@ class TestSSLRetry:
 
         uploader._upload_file = mock_upload
         uploader._build_drive_service = lambda: MagicMock()
-        result = uploader.upload_shorts([str(video)], folder_id="folder1")
+        sleeps = []
+        with patch("gomoveshift.pipeline.uploader.time.sleep", side_effect=sleeps.append):
+            result = uploader.upload_shorts([str(video)], folder_id="folder1")
         assert len(result) == 1
         assert "abc123" in result[0]
         assert call_count["n"] == 2
+        # one jittered wait, [0.5, 1.5) x the first delay, between the two attempts
+        assert len(sleeps) == 1
+        assert _SSL_RETRY_DELAYS[0] * 0.5 <= sleeps[0] < _SSL_RETRY_DELAYS[0] * 1.5
 
     def test_exhausted_ssl_retries_raises(self, tmp_path):
         """Three SSL failures → DriveUploadError raised."""
@@ -180,8 +185,14 @@ class TestSSLRetry:
         uploader._build_drive_service = lambda: MagicMock()
         from gomoveshift.pipeline.uploader import DriveUploadError
 
-        with pytest.raises(DriveUploadError):
-            uploader.upload_shorts([str(video)], folder_id="folder1")
+        sleeps = []
+        with patch("gomoveshift.pipeline.uploader.time.sleep", side_effect=sleeps.append):
+            with pytest.raises(DriveUploadError):
+                uploader.upload_shorts([str(video)], folder_id="folder1")
+        # a wait only BETWEEN attempts: none after the last one, which can only raise
+        assert len(sleeps) == len(_SSL_RETRY_DELAYS) - 1
+        for slept, base in zip(sleeps, _SSL_RETRY_DELAYS):
+            assert base * 0.5 <= slept < base * 1.5
 
     def test_sequential_upload_by_default(self, tmp_path):
         """upload_shorts runs files sequentially (no ThreadPoolExecutor) by default."""

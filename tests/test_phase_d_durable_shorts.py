@@ -144,6 +144,7 @@ class TestPhaseDRecordsTheDurablePath:
 
         from gomoveshift.config import DriveConfig
         from gomoveshift.pipeline.drive_phases.phase_d import _emit_publish_plan_sidecar
+        from gomoveshift.pipeline.title_decision import decide_title
         from gomoveshift.publishing.models import MediaFingerprint
 
         cache, out = tmp_path / "cache", tmp_path / "out"
@@ -159,7 +160,14 @@ class TestPhaseDRecordsTheDurablePath:
                 output_base=out,
                 project_base="p",
                 drive_plan=SimpleNamespace(regular_lfs=[SimpleNamespace(index=1)]),
-                social_posts_per_lf={1: [SimpleNamespace(short_index=10)]},
+                social_posts_per_lf={
+                    1: [
+                        SimpleNamespace(
+                            short_index=10,
+                            title_decision=decide_title("short", "", None, suffix=""),
+                        )
+                    ]
+                },
                 drive_schedule=SimpleNamespace(
                     shorts_slots=[
                         SimpleNamespace(short_index=10, date="2026-03-15", time="08:00:00")

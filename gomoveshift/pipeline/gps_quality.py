@@ -382,10 +382,26 @@ def trace_time_window(gps_points: Optional[Sequence]) -> Optional[tuple[float, f
     return (min(ts), max(ts)) if len(ts) >= 2 else None
 
 
+def _valid_fix(lat: float, lon: float) -> bool:
+    """Route-claim valid-fix rule (``route_claims._valid``): finite, in range, not 0,0."""
+    return (
+        math.isfinite(lat)
+        and math.isfinite(lon)
+        and abs(lat) <= 90
+        and abs(lon) <= 180
+        and (lat, lon) != (0.0, 0.0)
+    )
+
+
 def usable_fix_times(gps_points: Optional[Sequence]) -> list[float]:
     """Sorted timestamps of the fixes with usable lat/lon/time — the fixes a
-    short's place vote can count."""
-    return sorted(t for t, _, _ in _in_window_coords(gps_points, float("-inf"), float("inf")))
+    short's place vote can count. Uses the same valid-fix rule as the route-claim
+    gate, so the planner never sees a fix that gate rejects."""
+    return sorted(
+        t
+        for t, la, lo in _in_window_coords(gps_points, float("-inf"), float("inf"))
+        if _valid_fix(la, lo)
+    )
 
 
 def window_median_speed_mps(gps_points, w0: float, w1: float) -> Optional[float]:

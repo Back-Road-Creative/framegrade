@@ -187,3 +187,126 @@ class TestChapterNamesSeo:
         chapters = [{"timestamp": "0:00", "title": "Start - A"}]
         out = _pad_with(seq, chapters, video_duration=5.0, label="A")
         assert out == chapters
+
+
+# ── A chapter-floor shortfall is repaired in Phase D, not raised ─────────────
+
+from gomoveshift.pipeline.validation.content_gates import check_metadata_quality  # noqa: E402
+
+LONG_LF_SECONDS = 61 * 60  # a long LF that needs 4 middle chapters
+
+
+def _chapters(middles):
+    out = [{"timestamp": "0:00", "title": "Start - Cape Harrow"}]
+    out += [{"timestamp": f"{5 + i * 10}:00", "title": f"Place {i}"} for i in range(middles)]
+    out.append({"timestamp": "60:45", "title": "Finish - Harbor Town"})
+    return out, "\n".join(f"{c['timestamp']} {c['title']}" for c in out)
+
+
+class TestChapterFloorSelfHeal:
+    def test_sparse_first_pass_is_regenerated_and_clears_the_gate(self, tmp_path, caplog):
+        config = MagicMock()
+        drive_plan = SimpleNamespace(regular_lfs=[_lf(1, total_duration=LONG_LF_SECONDS)])
+        gpx = tmp_path / "lf1.gpx"
+        gpx.write_text("<gpx></gpx>")
+        meta_per_lf = {1: {"description": "Hook line", "video_duration": LONG_LF_SECONDS}}
+        with (
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_d._generate_chapters_for_lf",
+                side_effect=[_chapters(2), _chapters(4)],
+            ) as gen_mock,
+            patch(
+                "gomoveshift.pipeline.validation.content_gates.check_description_redundancy",
+                return_value=SimpleNamespace(passed=True, message=""),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            _generate_chapters_all_lfs(
+                config=config,
+                drive_plan=drive_plan,
+                state=make_state(per_lf_gpx_path={1: str(gpx)}),
+                metadata_per_lf=meta_per_lf,
+                location="x",
+                project_base="p",
+                output_base=tmp_path,
+                stages_dir=tmp_path,
+            )
+        assert gen_mock.call_count == 2
+        assert len(meta_per_lf[1]["chapters"]) == 6
+        gate = check_metadata_quality(meta_per_lf[1])
+        assert "intermediate chapter" not in gate.message, gate.message
+        assert any("first pass under the chapter floor" in r.getMessage() for r in caplog.records)
+
+    def test_floor_met_on_first_pass_generates_once(self, tmp_path):
+        config = MagicMock()
+        drive_plan = SimpleNamespace(regular_lfs=[_lf(1, total_duration=LONG_LF_SECONDS)])
+        gpx = tmp_path / "lf1.gpx"
+        gpx.write_text("<gpx></gpx>")
+        with (
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_d._generate_chapters_for_lf",
+                return_value=_chapters(4),
+            ) as gen_mock,
+            patch(
+                "gomoveshift.pipeline.validation.content_gates.check_description_redundancy",
+                return_value=SimpleNamespace(passed=True, message=""),
+            ),
+        ):
+            _generate_chapters_all_lfs(
+                config=config,
+                drive_plan=drive_plan,
+                state=make_state(per_lf_gpx_path={1: str(gpx)}),
+                metadata_per_lf={1: {"description": "Hook line"}},
+                location="x",
+                project_base="p",
+                output_base=tmp_path,
+                stages_dir=tmp_path,
+            )
+        assert gen_mock.call_count == 1
+
+
+# ── The chapter floor is checked before the master encode starts ─────────────
+
+import inspect  # noqa: E402
+
+import pytest  # noqa: E402
+
+from gomoveshift.pipeline.drive_phases import phase_bc_day_first  # noqa: E402
+from gomoveshift.pipeline.drive_phases.phase_d_metadata import (  # noqa: E402
+    assert_chapter_floor_before_encode,
+)
+
+
+def _preflight(tmp_path, side_effect, *, gpx=True):
+    path = tmp_path / "lf1.gpx"
+    path.write_text("<gpx></gpx>")
+    state = make_state(per_lf_gpx_path={1: str(path)} if gpx else {})
+    with patch(
+        "gomoveshift.pipeline.drive_phases.phase_d._generate_chapters_for_lf",
+        side_effect=side_effect,
+    ) as gen_mock:
+        assert_chapter_floor_before_encode(
+            MagicMock(),
+            SimpleNamespace(regular_lfs=[_lf(1, total_duration=LONG_LF_SECONDS)]),
+            state,
+            "x",
+            tmp_path,
+        )
+    return gen_mock
+
+
+class TestChapterFloorBeforeEncode:
+    def test_unchapterable_trace_refuses_the_encode(self, tmp_path):
+        with pytest.raises(RuntimeError, match=r"refusing to start the encode.*LF 1: 2 middle"):
+            _preflight(tmp_path, [_chapters(2), _chapters(2)])
+
+    def test_retry_that_clears_the_floor_lets_the_encode_start(self, tmp_path):
+        assert _preflight(tmp_path, [_chapters(2), _chapters(4)]).call_count == 2
+
+    def test_lf_without_gps_is_not_gated(self, tmp_path):
+        assert _preflight(tmp_path, [], gpx=False).call_count == 0
+
+    def test_runs_before_the_encode_in_phase_bc(self):
+        src = inspect.getsource(phase_bc_day_first.PhaseBCDayFirst.run)
+        assert "assert_chapter_floor_before_encode(" in src
+        assert src.index("assert_chapter_floor_before_encode(") < src.index("run_all_days(")

@@ -6,6 +6,7 @@ which happens in CI environments where the full dependency chain
 """
 
 import atexit
+import functools
 import os
 import pwd
 import shutil
@@ -88,6 +89,9 @@ for _home_var in (
     "GMS_INPUTS_DIR",
 ):
     os.environ.pop(_home_var, None)
+# Sealed seo tokens prefer $SEO_INPUTS_DIR (credential_paths.seo_inputs_dir); an
+# empty dir here keeps every test off any real operator inputs.
+os.environ["SEO_INPUTS_DIR"] = os.path.join(_TEST_HOME, "seo-inputs-empty")
 
 try:
     import gomoveshift  # noqa: F401
@@ -106,7 +110,13 @@ except ImportError:
 
 from pathlib import Path
 
+import freezegun
 import pytest
+
+# pytest 9 times each phase through ``_pytest.timing``; freezegun's default
+# ignore list does not name it, so a frozen clock poisoned ``--durations``
+# (setup "durations" of ~1.79e9 s). Keep pytest's own timer on the real clock.
+freezegun.configure(extend_ignore_list=["_pytest.timing"])
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -390,6 +400,15 @@ def isolate_publishing_spool_from_workspace(tmp_path, monkeypatch):
     def _isolated_load(cls, config_path=None):
         config = original_load(cls, config_path)
         config.seo.storage_path = str(tmp_path)
+        if config_path is None:
+            # The host's user config.yaml may set full_drive part bounds, which
+            # now infer full_drive (LF-POLICY-MIGRATION) and make synthetic
+            # short-day fixtures refuse. A test that wants a policy states it.
+            drive = config.drive
+            drive.full_drive_part_min_sec = drive.full_drive_part_max_sec = None
+            drive.lf_selection_mode = None
+            drive.lf_mode_source = "default"
+            drive.lf_selection_mode = "best_moments"
         return config
 
     monkeypatch.setattr(Config, "load", classmethod(_isolated_load))
@@ -526,6 +545,31 @@ def restore_schedule_constants_identity():
 
 
 @pytest.fixture(autouse=True)
+def default_title_kit(request, monkeypatch):
+    """Run the engine's title-kit consumers on the real GMS kit when a test passes none.
+
+    Production threads a ``TitleKit`` ``DrivePipelineOrchestrator`` ->
+    ``PhaseBCDayFirst`` -> ``run_all_days`` -> ``RunSpec`` -> ``run_day_pipeline``;
+    a test that calls ``run_day_pipeline`` / ``PhaseBCDayFirst`` directly would
+    otherwise have to build one. Opt-out: ``@pytest.mark.no_default_title_kit``
+    (the "a run without a kit fails loudly" tests).
+    """
+    if not HAS_GOMOVESHIFT:
+        return
+    if request.node.get_closest_marker("no_default_title_kit"):
+        return
+    from gomoveshift.pipeline import day_pipeline
+    from gomoveshift.pipeline.drive_phases import phase_bc_day_first
+    from gomoveshift.publishing.title_kit import build_title_kit
+
+    def _require(kit=None):
+        return kit if kit is not None else build_title_kit()
+
+    monkeypatch.setattr(day_pipeline, "require_title_kit", _require)
+    monkeypatch.setattr(phase_bc_day_first, "require_title_kit", _require)
+
+
+@pytest.fixture(autouse=True)
 def hermetic_forward_geocode(request, monkeypatch):
     """Stub ``_nominatim_search`` to ``None`` and ``_nominatim_places`` to
     ``[]`` — no live Nominatim from tests.
@@ -548,10 +592,12 @@ def hermetic_forward_geocode(request, monkeypatch):
         return
     if request.node.get_closest_marker("real_forward_geocode"):
         return
+    from gomoveshift.pipeline import forward_geocode
     from gomoveshift.pipeline.chapters import nominatim_source
 
-    monkeypatch.setattr(nominatim_source, "_nominatim_search", lambda _q: None)
-    monkeypatch.setattr(nominatim_source, "_nominatim_places", lambda _q, **_kw: [])
+    for module in (forward_geocode, nominatim_source):
+        monkeypatch.setattr(module, "_nominatim_search", lambda _q: None)
+        monkeypatch.setattr(module, "_nominatim_places", lambda _q, **_kw: [])
 
 
 _LIVE_NETWORK_OPT_IN_MARKERS = (
@@ -951,6 +997,11 @@ def pytest_configure(config):
         "markers",
         "real_content_ledger: opt out of the conftest hermetic-ledger redirect "
         "and resolve the real default ``ContentLedger`` path.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "no_default_title_kit: opt out of the conftest fixture that supplies the real "
+        "TitleKit to the engine when a test passes none.",
     )
     config.addinivalue_line(
         "markers",
@@ -1367,3 +1418,24 @@ def waypost_lf_days(tmp_path):
             )
 
     return _set
+
+
+@pytest.fixture(autouse=True)
+def orchestrator_run_defaults_to_force(monkeypatch):
+    """Every test drives ``DrivePipelineOrchestrator.run`` headless, where the
+    preflight refuses without ``--force`` (PREFLIGHT-NO-OPERATOR). Default
+    ``force=True`` once here so no test file needs its own copy; a test of the
+    refusal or the prompt passes ``force=False`` explicitly, which wins."""
+    if not HAS_GOMOVESHIFT:
+        return
+    from gomoveshift.pipeline.drive_orchestrator import DrivePipelineOrchestrator
+
+    original_run = DrivePipelineOrchestrator.run
+
+    # wraps keeps run()'s signature visible to the tests that inspect it.
+    @functools.wraps(original_run)
+    def _run(self, *args, **kwargs):
+        kwargs.setdefault("force", True)
+        return original_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(DrivePipelineOrchestrator, "run", _run)

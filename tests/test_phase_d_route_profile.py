@@ -23,12 +23,13 @@ def generator():
             return gen
 
 
-def _generate_with_profile(generator, location, route_profile=None):
+def _generate_with_profile(generator, location, route_profile=None, **kw):
     """Call generate() with ContentValidator mocked out."""
     with patch("gomoveshift.pipeline.longform_metadata.ContentValidator"):
         return generator.generate(
             location=location,
             route_profile=route_profile,
+            **kw,
         )
 
 
@@ -92,7 +93,9 @@ class TestPhaseDRouteProfileMetadata:
             ],
             "features": [],
         }
-        result = _generate_with_profile(generator, "Town A, SC", route_profile=profile)
+        result = _generate_with_profile(
+            generator, "Town A, SC", route_profile=profile, road_coverage_measured=True
+        )
         desc = result.get("description", "")
         assert "US-5" in desc
         assert "US-6" not in desc
@@ -135,7 +138,9 @@ class TestPhaseDRouteProfileMetadata:
             ],
             "features": [],
         }
-        result = _generate_with_profile(generator, "West Cork", route_profile=profile)
+        result = _generate_with_profile(
+            generator, "West Cork", route_profile=profile, road_coverage_measured=True
+        )
         desc = result.get("description", "")
         tags = result.get("tags", [])
         assert "Oliver Plunkett Street" not in desc
@@ -161,7 +166,9 @@ class TestPhaseDRouteProfileStateKey:
             "roads_traversed": ["US-50"],
             "features": [],
         }
-        enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+        enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+            result, profile, road_coverage_measured=True
+        )
         assert "TestTown" in enriched["description"]
         assert "TestTown" in enriched["tags"]
         assert "US-50" in enriched["tags"]

@@ -190,3 +190,52 @@ def test_wrong_typed_tuple_field_names_the_field(tmp_path):
     with pytest.raises(PublishPlanFormatError) as exc:
         load_publish_plan(path)
     assert "sampled_regions" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# GMS-17c: consistency gate on load (upstream of enqueue / dispatch)
+# ---------------------------------------------------------------------------
+
+
+def _yt(title, description, tags=("a", "b")):
+    return PlatformPayloads(
+        youtube=YouTubePayload(title, description, tags, "2"),
+        instagram=InstagramPayload("cap"),
+        tiktok=TikTokPayload("tt", "SELF_ONLY"),
+    )
+
+
+def test_consistent_title_hashtags_load(tmp_path):
+    rec = _record(
+        payloads=_yt("Coast road #Goleen #POVDriving", "Coast road.\n\n#POVDriving #Goleen")
+    )
+    loaded = load_publish_plan(_write(tmp_path, PublishPlan(shorts=(rec,)))).shorts[0]
+    assert loaded.payloads == rec.payloads
+
+
+def test_title_hashtag_absent_from_description_is_refused(tmp_path):
+    """The builder takes a Short's title hashtags from its own description;
+    a title that carries a hashtag its description lacks was edited apart
+    from it, so title and description no longer agree."""
+    rec = _record(payloads=_yt("Coast road #Kenmare", "Coast road.\n\n#POVDriving #Goleen"))
+    path = _write(tmp_path, PublishPlan(shorts=(rec,)))
+    with pytest.raises(PublishPlanFormatError, match="#Kenmare") as exc:
+        load_publish_plan(path)
+    assert str(path) in str(exc.value)
+
+
+def test_place_claim_outside_the_clips_regions_is_refused(tmp_path):
+    """A county the short's own sampled regions never visited, named in its
+    tags and title, is refused on load as it is at build time."""
+    rec = _record(
+        sampled_regions=("Goleen, County Cork",),
+        payloads=_yt("Roads of County Kerry", "Coast road.", tags=("County Kerry",)),
+    )
+    with pytest.raises(PublishPlanFormatError, match="CROSS-REGION"):
+        load_publish_plan(_write(tmp_path, PublishPlan(shorts=(rec,))))
+
+
+def test_spliced_text_is_refused(tmp_path):
+    rec = _record(payloads=_yt("t", "A drive through To Clonakilty."))
+    with pytest.raises(PublishPlanFormatError, match="GRAMMAR"):
+        load_publish_plan(_write(tmp_path, PublishPlan(shorts=(rec,))))

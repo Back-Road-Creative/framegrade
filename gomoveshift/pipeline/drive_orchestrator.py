@@ -8,6 +8,7 @@ Public API preserved:
   - from gomoveshift.pipeline._drive_helpers import differentiate_duplicate_ost
 """
 
+import json
 import logging
 import re
 import signal
@@ -17,8 +18,9 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from ..analysis.unified_scorer import UnifiedSegmentScorer
-from ..config import Config, get_config
+from ..config import Config, get_config, resolve_lf_mode
 from ..models import DrivePipelineResult
+from ..publishing.title_kit import build_title_kit
 from ._drive_state import load_drive_state, save_drive_state
 from .auto_enqueue import auto_enqueue_shorts
 from .drive_phases.phase_a import PhaseA
@@ -356,6 +358,62 @@ PHASE_SPECS: tuple[PhaseSpec, ...] = (
 PHASE_ARTIFACTS: dict[str, list[str]] = {s.name: list(s.artifacts) for s in PHASE_SPECS}
 
 
+LF_POLICY_STAMP = "lf_policy.json"
+# Phases that hold output built under an LF policy: the plan (phase_bc) and
+# everything downstream of it.
+_LF_POLICY_DEPENDENT_PHASES = ("phase_bc_day_first", "phase_d")
+
+
+def write_lf_policy_stamp(stages_dir: Path, drive_cfg) -> None:
+    """Record the LF policy (mode + part bounds) the saved plan was built under."""
+    from ..config import lf_policy_snapshot
+
+    path = Path(stages_dir) / LF_POLICY_STAMP
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(lf_policy_snapshot(drive_cfg), sort_keys=True))
+
+
+def reconcile_lf_policy_on_resume(stages_dir: Path, resumed_phases: list, drive_cfg) -> list:
+    """Never let a resumed plan silently keep an old LF mode / part bounds.
+
+    Neither ``pipeline_state.json`` nor the CLI<->state flag registry carries the
+    LF mode or bounds: a resumed run always reads the CURRENT resolved config.
+    What survives is the saved PLAN (``drive_plan.json``, a phase_bc artifact)
+    built under whatever policy was live then. A stamp (``lf_policy.json``,
+    written when phase_bc completes) records that policy. If it differs from the
+    current one, phase_bc and what depends on it are dropped so they re-run under
+    the current policy (``LF-POLICY-RESUME-MISMATCH``); with no stamp (a
+    pre-stamp checkpoint) the plan is kept but named loudly
+    (``LF-POLICY-RESUME-UNSTAMPED``).
+    """
+    from ..config import lf_policy_snapshot
+
+    if "phase_bc_day_first" not in resumed_phases:
+        return resumed_phases
+    current = lf_policy_snapshot(drive_cfg)
+    path = Path(stages_dir) / LF_POLICY_STAMP
+    try:
+        saved = json.loads(path.read_text())
+    except (OSError, ValueError):
+        logger.warning(
+            "LF-POLICY-RESUME-UNSTAMPED: the saved plan has no recorded LF policy; "
+            "keeping it, but it may have been built under a different mode/bounds "
+            "than the current %s. Use --fresh to re-plan.",
+            current,
+        )
+        return resumed_phases
+    if saved == current:
+        return resumed_phases
+    logger.warning(
+        "LF-POLICY-RESUME-MISMATCH: saved plan was built under %s but the current "
+        "policy is %s -- re-running %s under the current policy.",
+        saved,
+        current,
+        ", ".join(_LF_POLICY_DEPENDENT_PHASES),
+    )
+    return [p for p in resumed_phases if p not in _LF_POLICY_DEPENDENT_PHASES]
+
+
 def preserve_per_lf_overrides_on_resume(state, cli_overrides: Optional[dict]) -> None:
     """Re-apply a non-empty CLI ``--per-lf-location`` override after the resume
     merge so operator intent wins over a saved-empty ``per_lf_overrides``.
@@ -404,6 +462,22 @@ def reset_force_sidecar_reset_after_resume(state, cli_value: Optional[bool]) -> 
     state.force_sidecar_reset = True if cli_value else None
 
 
+def reset_ost_opt_ins_after_resume(
+    state, ost_audit_confirmed: Optional[bool], ost_system_review: Optional[bool]
+) -> None:
+    """Put the two per-run OST gate signals back to THIS invocation's flags,
+    AFTER the resume merge.
+
+    ``ost_audit_confirmed_this_run`` (``--ost-audit-confirmed``) and
+    ``ost_system_review_this_run`` (``--ost-system-review``) are in
+    ``_UNSERIALIZED_FIELDS``, which stops writes only: ``_try_resume`` still
+    reads a legacy or edited ``pipeline_state.json``, so a saved ``true``
+    would stand in for a flag this run never passed. Mutates ``state``.
+    """
+    state.ost_audit_confirmed_this_run = True if ost_audit_confirmed else None
+    state.ost_system_review_this_run = True if ost_system_review else None
+
+
 def run_phase_a_ost_gate(state) -> None:
     """OST uniqueness/validity gate after Phase A — fail fast before encoding.
 
@@ -440,7 +514,7 @@ class DrivePipelineOrchestrator:
         self._phases = {
             "phase_a": PhaseA(self.config),
             "phase_b_preview": PhaseBPreview(self.config),
-            "phase_bc_day_first": PhaseBCDayFirst(self.config),
+            "phase_bc_day_first": PhaseBCDayFirst(self.config, title_kit=build_title_kit()),
             "phase_d": PhaseD(self.config),
         }
 
@@ -574,6 +648,12 @@ class DrivePipelineOrchestrator:
             state,
             skip_invariants=getattr(self, "_skip_invariants", False),
         )
+        phases = getattr(state, "phases_completed", None)
+        # A labels-only run renders nothing; it must not move the recipe a heal resumes from.
+        if phases and not getattr(self, "_labels_only", False):
+            from ..health.resume import mark_phase  # noqa: PLC0415 -- never fails the save
+
+            mark_phase(Path(state_file).parent, phases[-1])
         # Also mirror youtube_uploads into the durable sidecar so a future
         # state reset can't erase upload history.
         output_base = getattr(state, "output_base", None)
@@ -665,9 +745,11 @@ class DrivePipelineOrchestrator:
         list_lfs: bool = False,
         label_dry_run: bool = False,
         ost_audit_confirmed: Optional[bool] = None,
+        ost_system_review: Optional[bool] = None,
         gate_cd_confirmed: Optional[bool] = None,
         no_youtube_upload: Optional[bool] = None,
         skip_audio: Optional[bool] = None,
+        lf_mode: Optional[str] = None,
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
     ) -> DrivePipelineResult:
@@ -695,8 +777,9 @@ class DrivePipelineOrchestrator:
           prompt ``Proceed? [y/N]``. Any answer other than ``y``/``yes``
           (case-insensitive) aborts gracefully with ``success=True`` and
           no stages completed.
-        * ``force=False`` AND not a tty → print the plan and proceed;
-          never block a background run waiting for input.
+        * ``force=False`` AND no operator can see the prompt (stdin not a
+          tty, or tty with no visible channel) → named refusal
+          ``PREFLIGHT-NO-OPERATOR``; never auto-answered.
 
         """
         # Register SIGTERM/SIGHUP handlers before any I/O so
@@ -743,6 +826,7 @@ class DrivePipelineOrchestrator:
         # success calc below short-circuits to True and the DoD validator
         # is skipped (no LFs encoded → nothing to validate).
         ost_audit_pending = False
+        self.waiting_gate = None
         # Pre-initialize so the ``finally`` sentinel below can
         # reference these names on every exit path, including early
         # returns before the phase manifest is assembled.
@@ -843,7 +927,7 @@ class DrivePipelineOrchestrator:
         # to whatever single phase was requested.
         skip_gpu_lock = (
             self._labels_only
-            and (getattr(self.config.drive, "lf_selection_mode", "best_moments") == "full_drive")
+            and (resolve_lf_mode(self.config.drive) == "full_drive")
             and not self.config.drive.preview
             and phase is None
         )
@@ -890,9 +974,11 @@ class DrivePipelineOrchestrator:
                 allow_seo_degraded=allow_seo_degraded,
                 per_lf_overrides=per_lf_overrides,
                 ost_audit_confirmed=ost_audit_confirmed,
+                ost_system_review=ost_system_review,
                 gate_cd_confirmed=gate_cd_confirmed,
                 no_youtube_upload=no_youtube_upload,
                 skip_audio=skip_audio,
+                lf_mode=lf_mode,
                 superlong_enabled=superlong_enabled,
                 superlong_publish_day=superlong_publish_day,
             )
@@ -949,6 +1035,8 @@ class DrivePipelineOrchestrator:
             # See ``reset_force_sidecar_reset_after_resume`` docstring — must
             # run here, after ``_try_resume``'s ``merge_on_resume`` call.
             reset_force_sidecar_reset_after_resume(state, force_sidecar_reset)
+            # Same for the per-run OST signals (see its docstring).
+            reset_ost_opt_ins_after_resume(state, ost_audit_confirmed, ost_system_review)
             # ── Stale-schedule recompute on resume ──────────────────────────
             # The fingerprint re-runs phase_d when CLI FLAGS change, but a
             # saved ``drive_schedule`` whose region no longer matches the
@@ -1098,6 +1186,7 @@ class DrivePipelineOrchestrator:
                 stages_completed=stages_completed,
                 config=self.config,
                 emit_summary=self._emit_pipeline_summary,
+                labels_only=self._labels_only,
             )
             if early is not None:
                 return early
@@ -1367,6 +1456,14 @@ class DrivePipelineOrchestrator:
         if code_valid != resumed_phases:
             resumed_phases = code_valid
             saved["phases_completed"] = list(resumed_phases)
+        # An explicit --lf-mode from the original run is persisted (flag registry);
+        # a resume without the flag keeps that operator choice, sourced as such.
+        if saved.get("lf_mode") and self.config.drive.lf_mode_source != "cli":
+            self.config.drive.set_lf_mode(saved["lf_mode"], "resumed-state")
+        lf_valid = reconcile_lf_policy_on_resume(stages_dir, resumed_phases, self.config.drive)
+        if lf_valid != resumed_phases:
+            resumed_phases = lf_valid
+            saved["phases_completed"] = list(resumed_phases)
         # Single registry-driven merge path: replaces
         # the hand-wired ``user_args`` / ``schedule_overrides`` allowlists and
         # the resume-authoritative shorts_target/shorts_gap special case. CLI↔state
@@ -1515,8 +1612,9 @@ class DrivePipelineOrchestrator:
             # full encode because only the fresh-run branch short-circuited.
             from .drive_phases.lf_listing import print_label_dry_run, print_lf_listing
 
+            refused = False
             if label_dry_run:
-                print_label_dry_run(self.config, state)
+                refused = print_label_dry_run(self.config, state) is True
             else:
                 print_lf_listing(self.config, state)
             self._emit_pipeline_summary(
@@ -1527,14 +1625,16 @@ class DrivePipelineOrchestrator:
                 total_time=time.time() - start_time,
             )
             return DrivePipelineResult(
-                success=True,
+                success=not refused,
                 source_dir=source_dir,
                 output_dir=project_dir,
                 drive_plan=None,
                 regular_lf_paths=[],
                 shorts_per_lf={},
                 stages_completed=stages_completed,
-                errors=[],
+                errors=["ROUTE-CLAIM REFUSED: see route_claims_dry_run.json in the stages dir"]
+                if refused
+                else [],
                 timings=timings,
             )
 
@@ -1549,8 +1649,12 @@ class DrivePipelineOrchestrator:
                             return _print_labels_and_return(), ost_audit_pending
                     continue
                 t0 = time.time()
+                logger.info(
+                    "PHASE START %s (%d/%d)", phase_name, len(stages_completed) + 1, len(phase_defs)
+                )
                 phase_fn(state)
                 timings[phase_name] = time.time() - t0
+                logger.info("PHASE DONE %s in %.0fs", phase_name, timings[phase_name])
                 ok, reason = self._phase_produced_required_artifacts(phase_name, state)
                 if ok:
                     stages_completed.append(phase_name)
@@ -1562,6 +1666,8 @@ class DrivePipelineOrchestrator:
                     # Stamp phase_a/phase_bc code versions so a later resume can
                     # detect a planner/audio/blur rule change and re-run.
                     persist_phase_code_version(state, phase_name)
+                    if phase_name == "phase_bc_day_first":
+                        write_lf_policy_stamp(state_file.parent, self.config.drive)
                     state.phases_completed = list(stages_completed)
                 else:
                     # Silent failures (e.g. BC ran but produced 0
@@ -1593,7 +1699,7 @@ class DrivePipelineOrchestrator:
                     # phase_bc plans — gate_a falls back to printing the
                     # drive-wide label in that case.
                     skeleton_lf_indices: list[int] | None = None
-                    if self.config.drive.lf_selection_mode == "full_drive":
+                    if resolve_lf_mode(self.config.drive) == "full_drive":
                         skeleton_lf_indices = full_drive_skeleton_indices(
                             self.config.drive,
                             getattr(getattr(state, "drive_plan", None), "regular_lfs", None),
@@ -1626,6 +1732,7 @@ class DrivePipelineOrchestrator:
             # ``stages_completed`` so the next resume re-checks the
             # gate.
             logger.info("OST audit gate pending: %s", e)
+            self.waiting_gate = str(e)
             state.phases_completed = list(stages_completed)
             self._save_state(state_file, state)
             ost_audit_pending = True
@@ -1692,12 +1799,14 @@ class DrivePipelineOrchestrator:
         allow_seo_degraded: Optional[bool],
         per_lf_overrides: Optional[dict],
         ost_audit_confirmed: Optional[bool],
+        ost_system_review: Optional[bool] = None,
         gate_cd_confirmed: Optional[bool] = None,
         no_youtube_upload: Optional[bool] = None,
         no_ledger_reconcile: Optional[bool] = None,
         sign_verify: Optional[bool] = None,
         sign_verify_strict: Optional[bool] = None,
         skip_audio: Optional[bool] = None,
+        lf_mode: Optional[str] = None,
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
     ) -> tuple[PipelineState, bool, bool, bool]:
@@ -1767,6 +1876,7 @@ class DrivePipelineOrchestrator:
                 "gate_cd_confirmed": gate_cd_confirmed,
                 "no_youtube_upload": no_youtube_upload,
                 "skip_audio": skip_audio,
+                "lf_mode": lf_mode,
                 "superlong_enabled": superlong_enabled,
                 "superlong_publish_day": superlong_publish_day,
             },
@@ -1776,6 +1886,8 @@ class DrivePipelineOrchestrator:
         # Non-persisted (see _UNSERIALIZED_FIELDS): only a live flag bypasses the
         # OST gate without a hash — a resume relies on the hash-bound markers.
         state.ost_audit_confirmed_this_run = True if ost_audit_confirmed else None
+        # --ost-system-review is per-invocation too (never persisted).
+        state.ost_system_review_this_run = True if ost_system_review else None
         return state, upload_flag_explicit, skip_upload, youtube_upload
 
     def _run_dod_validator(
@@ -1799,8 +1911,8 @@ class DrivePipelineOrchestrator:
         loop already failed (``success=False``) we do not run the validator —
         the root cause is already visible. ``ost_audit_pending=True`` also
         skips the gate (no LFs encoded yet → nothing to validate).
-        ``config.drive.skip_validation`` is the explicit operator escape
-        hatch (emergency only).
+        ``config.drive.skip_validation`` is honoured only on a skip-upload
+        run; on a live upload run it raises (GMS-17c).
 
         Single-phase path (``--phase phase_d``) MUST run the validator —
         skipping it would silently pass the
@@ -1810,7 +1922,14 @@ class DrivePipelineOrchestrator:
         if not gate_applies:
             return
         if self.config.drive.skip_validation:
-            logger.warning("DoD validation SKIPPED via --skip-validation (never use in production)")
+            # GMS-17c: honoured only on a skip-upload (audit/preview) run. On a
+            # live upload run a skipped check must never read as a PASS.
+            if not getattr(state, "skip_upload", False):
+                raise PipelineValidationError(
+                    "--skip-validation refused: this run uploads (no --skip-upload), "
+                    "and the DoD validator gates every live upload run"
+                )
+            logger.warning("DoD validation SKIPPED via --skip-validation (skip-upload run)")
             return
         project_slug = project_dir.name
         snapshot_dir = stages_base.parent / "_snapshot_pre_fix"
@@ -1823,7 +1942,7 @@ class DrivePipelineOrchestrator:
         # the default 1800s cap is calibrated for best_moments highlights.
         # Without this branch, every full_drive run >30 min hard-fails the DoD
         # duration check even though the planner accepted the duration upstream.
-        if self.config.drive.lf_selection_mode == "full_drive":
+        if resolve_lf_mode(self.config.drive) == "full_drive":
             max_lf_duration = float(self.config.drive.full_drive_max_duration_sec)
         else:
             max_lf_duration = 1800.0

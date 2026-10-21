@@ -45,7 +45,7 @@ def _sampler(monkeypatch, sharp, ring):
     calls = []
 
     def fake(path, duration, n=5):
-        calls.append(path)
+        calls.append((path, n))
         return sharp, ring
 
     monkeypatch.setattr(quality, "sample_delivered_picture", fake)
@@ -130,24 +130,24 @@ def _run_gate(tmp_path, picture_check_fn, inputs):
 def test_phase_d_aborts_on_failed_picture_quality(tmp_path):
     seen = []
 
-    def check(path, duration, source_sharpness, changed):
-        seen.append((source_sharpness, changed))
+    def check(path, duration, source_sharpness, changed, source_ringing=None):
+        seen.append((source_sharpness, source_ringing, changed))
         return SimpleNamespace(gate="picture_quality", passed=False, message="delivered 10 < 300")
 
     with pytest.raises(RuntimeError, match="delivered 10 < 300"):
-        _run_gate(tmp_path, check, {1: (400.0, True)})
-    assert seen == [(400.0, True)]
+        _run_gate(tmp_path, check, {1: (400.0, 0.012, True)})
+    assert seen == [(400.0, 0.012, True)]
 
 
 def test_phase_d_passes_when_no_inputs(tmp_path):
     seen = []
 
-    def check(path, duration, source_sharpness, changed):
-        seen.append((source_sharpness, changed))
+    def check(path, duration, source_sharpness, changed, source_ringing=None):
+        seen.append((source_sharpness, source_ringing, changed))
         return SimpleNamespace(gate="picture_quality", passed=True, message="skipped")
 
     _run_gate(tmp_path, check, None)
-    assert seen == [(None, False)]
+    assert seen == [(None, None, False)]
 
 
 # ── production plumbing ───────────────────────────────────────────────────
@@ -165,9 +165,9 @@ def _state(tmp_path, amount, sharpness=(400.0, None, 600.0)):
 
 
 def test_picture_inputs_from_state_reads_cache_and_median(tmp_path):
-    sharp, changed = quality.picture_inputs_from_state(_state(tmp_path, 0.4))
-    assert sharp == 500.0 and changed == {1: True}
-    assert quality.picture_inputs_from_state(_state(tmp_path, 0.0))[1] == {1: False}
+    sharp, ring, changed = quality.picture_inputs_from_state(_state(tmp_path, 0.4))
+    assert sharp == 500.0 and ring is None and changed == {1: True}
+    assert quality.picture_inputs_from_state(_state(tmp_path, 0.0))[2] == {1: False}
     assert quality.picture_changed_for_day(tmp_path / "absent.json") is False
 
 
@@ -175,7 +175,7 @@ def test_final_gate_gets_real_inputs_and_fails_on_soft_delivery(tmp_path, monkey
     from gomoveshift.pipeline.drive_phases.phase_d_gates import _lf_picture_inputs
 
     inputs = _lf_picture_inputs(_state(tmp_path, 0.4))
-    assert inputs == {1: (500.0, True)}
+    assert inputs == {1: (500.0, None, True)}
     _sampler(monkeypatch, [50.0, 60.0], [0.0, 0.0])
     with pytest.raises(RuntimeError, match="delivered sharpness"):
         _run_gate(tmp_path, None, inputs)
@@ -191,3 +191,86 @@ def test_soft_short_fails_through_the_facade(monkeypatch):
     pv._shorts = sv
     result = pv.validate_short_files([Path("s.mp4")], source_sharpness=400.0, picture_changed=True)
     assert not result.passed
+
+
+# ── judged against the source, measured the same way (Kingsport 2026-10-13) ──
+# Real numbers: 25 frames of the three raw GoPro sources gave sharpness 1450.1 and
+# ringing 0.0152; 25 frames of the delivered LF gave 1289.6 and 0.0151. The old
+# gate compared a 5-frame source figure (2056.2) and an absolute ringing max that
+# the untouched source itself exceeds, and failed a faithful encode.
+
+
+def test_ringing_is_judged_against_the_source(monkeypatch):
+    _sampler(monkeypatch, [1289.6] * 3, [0.0151] * 3)
+    v = _validator()
+    kingsport = v.check_picture_quality(
+        Path("f.mp4"), source_sharpness=1450.1, source_ringing=0.0152, changed=True
+    )
+    assert kingsport.passed, kingsport.message
+
+    added = v.check_picture_quality(
+        Path("f.mp4"), source_sharpness=1450.1, source_ringing=0.005, changed=True
+    )
+    assert not added.passed and "ringing 0.0151" in added.message
+
+    unmeasured = v.check_picture_quality(Path("f.mp4"), source_sharpness=1450.1, changed=True)
+    assert not unmeasured.passed and "ringing 0.0151" in unmeasured.message
+
+
+def test_halo_on_a_ringing_source_still_fails(monkeypatch):
+    limit = 0.0152 * (1 + quality.RINGING_SOURCE_MARGIN)
+    _sampler(monkeypatch, [1400.0] * 3, [limit + 0.002] * 3)
+    gate = _validator().check_picture_quality(
+        Path("f.mp4"), source_sharpness=1450.1, source_ringing=0.0152, changed=True
+    )
+    assert not gate.passed and "ringing" in gate.message
+
+
+def test_delivered_side_samples_the_gate_frame_count(monkeypatch):
+    calls = _sampler(monkeypatch, [1400.0], [0.0])
+    _validator().check_picture_quality(Path("f.mp4"), source_sharpness=1450.1, changed=True)
+    assert calls == [(Path("f.mp4"), quality.PICTURE_GATE_SAMPLES)]
+    assert quality.PICTURE_GATE_SAMPLES >= 25
+
+
+def _episode_state(tmp_path, amount, durations=(300.0, 100.0)):
+    state = _state(tmp_path, amount, sharpness=(2056.2,))
+    files = []
+    for i, _ in enumerate(durations):
+        f = tmp_path / f"episode_{i:02d}.mp4"
+        f.write_bytes(b"x")
+        files.append(str(f))
+    state.episode_files = files
+    state.file_durations = list(durations)
+    return state
+
+
+def test_source_is_remeasured_from_the_episodes_with_the_gate_sampler(tmp_path, monkeypatch):
+    seen = []
+
+    def fake(path, duration, n=5):
+        seen.append((Path(path).name, duration, n))
+        return [1450.1] * n, [0.0152] * n
+
+    monkeypatch.setattr(quality, "sample_delivered_picture", fake)
+    sharp, ring, changed = quality.picture_inputs_from_state(_episode_state(tmp_path, 0.011))
+    assert (sharp, ring, changed) == (1450.1, 0.0152, {1: True})
+    # Duration-weighted share of the gate's frame count, every episode sampled.
+    assert [s[0] for s in seen] == ["episode_00.mp4", "episode_01.mp4"]
+    assert sum(s[2] for s in seen) >= quality.PICTURE_GATE_SAMPLES
+    assert seen[0][2] > seen[1][2]
+
+
+def test_unchanged_picture_never_samples_the_source(tmp_path, monkeypatch):
+    calls = _sampler(monkeypatch, [1.0], [1.0])
+    sharp, ring, changed = quality.picture_inputs_from_state(_episode_state(tmp_path, 0.0))
+    assert calls == [] and changed == {1: False}
+    assert (sharp, ring) == (2056.2, None)
+
+
+def test_missing_episode_falls_back_to_the_recorded_sharpness(tmp_path, monkeypatch):
+    calls = _sampler(monkeypatch, [1.0], [1.0])
+    state = _episode_state(tmp_path, 0.4)
+    state.episode_files = [str(tmp_path / "gone.mp4")]
+    sharp, ring, _ = quality.picture_inputs_from_state(state)
+    assert calls == [] and (sharp, ring) == (2056.2, None)

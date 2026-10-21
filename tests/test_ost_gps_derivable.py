@@ -157,7 +157,8 @@ CASES = [
         [_seg(52.06, -9.51), _seg(52.14, -9.70)],
         ["Killarney", "Dingle"],
         "Killarney, Kerry (N86)",
-        "Killarney to Dingle via N86, Kerry",
+        # The geocoded road has no measured coverage, so it is omitted.
+        "Killarney to Dingle, Kerry",
     ),
     _Case(
         "ireland_no_road",
@@ -171,7 +172,7 @@ CASES = [
         [_seg(32.3, -80.6), _seg(32.4, -80.7)],
         ["Port Royal", "Lady's Island"],
         "Beaufort County, South Carolina (Sea Island Parkway)",
-        "Port Royal to Lady's Island via Sea Island Parkway, SC",
+        "Port Royal to Lady's Island, SC",
     ),
     _Case(
         "us_no_road",

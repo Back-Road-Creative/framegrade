@@ -85,8 +85,9 @@ class TestSpecificityLadder:
         assert res.passed is False
         assert "LADDER-OVERRIDE" not in res.message
 
-    def test_no_evidence_is_noop(self):
-        assert check_specificity_ladder({"location": _LF5}, None).passed is True
+    def test_no_evidence_fails_closed(self):
+        # U1: a label with no evidence record is an unsupported claim, not a skip.
+        assert check_specificity_ladder({"location": _LF5}, None).passed is False
 
     def test_county_form_label_not_flagged_on_low_coverage(self):
         # Already-demoted county form makes no tier-1 claim → low coverage is fine.
@@ -207,8 +208,9 @@ class TestPreEncodeLadderIntegration:
             {5: _LF5}, {5: _resolved()}, evidence_by_lf={5: {"gps_points": _moving(), "window": _W}}
         )
 
-    def test_no_evidence_is_backward_compatible(self):
-        _assert_pre_encode_location_invariant({5: _LF5}, {5: _resolved()})
+    def test_missing_evidence_refuses_the_encode(self):
+        with pytest.raises(RuntimeError, match="no location evidence"):
+            _assert_pre_encode_location_invariant({5: _LF5}, {5: _resolved()}, evidence_by_lf={})
 
 
 def _rl_with_road(road="I-81"):

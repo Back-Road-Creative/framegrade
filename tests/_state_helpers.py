@@ -166,3 +166,10 @@ def verified_shorts_per_lf(
         json.dumps({"date": date, "shorts": entries})
     )
     return out
+
+
+def decided(metadata, title):
+    """``metadata`` plus the Waypost title decision that chose ``title``."""
+    from gomoveshift.pipeline.title_decision import decide_title
+
+    return {**metadata, "title_decision": decide_title("longform", title, None, suffix="")}

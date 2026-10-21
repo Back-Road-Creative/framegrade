@@ -26,7 +26,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Union
+
+from gomoveshift.pipeline.text_format import hashtags_in
 
 from .models import (
     FORMAT_SHORT,
@@ -42,6 +45,7 @@ from .models import (
     TikTokPayload,
     YouTubePayload,
 )
+from .plan_gates import assert_plan_text_grammar, assert_shorts_metadata_in_region
 
 
 class PublishPlanFormatError(ValueError):
@@ -76,6 +80,13 @@ def _str_tuple(raw: Any, key: str, path: Path, ctx: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise _fail(path, f"{key!r} must be a list of strings ({ctx})")
     return tuple(value)
+
+
+def _str_tuple_or_empty(raw: Any, key: str, path: Path, ctx: str) -> tuple[str, ...]:
+    """``_str_tuple`` for a key plans written before it existed may lack."""
+    if key not in raw:
+        return ()
+    return _str_tuple(raw, key, path, ctx)
 
 
 def _media(media_raw: Dict[str, Any], path: Path, ctx: str) -> MediaFingerprint:
@@ -212,6 +223,7 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
             ),
             recording_date=raw["recording_date"],
             sampled_regions=_str_tuple(raw, "sampled_regions", path, ctx),
+            sampled_roads=_str_tuple_or_empty(raw, "sampled_roads", path, ctx),
             parent_lf_video_id=raw["parent_lf_video_id"],
             parent_lf_publish_at=_dt(raw, "parent_lf_publish_at", path, ctx),
             payloads=_payloads(_obj(raw, "payloads", path, ctx), path, ctx),
@@ -249,6 +261,70 @@ def load_publish_plan(sidecar_path: Union[str, Path]) -> PublishPlan:
         raise _fail(path, f"unreadable: {exc}") from exc
     except json.JSONDecodeError as exc:
         raise _fail(path, f"not valid JSON: {exc}") from exc
+    if isinstance(raw, dict) and (
+        raw.get("kind") == "publish_preview" or raw.get("not_for_publish")
+    ):
+        raise _fail(
+            path,
+            "is a publish_preview (not_for_publish): a review-only payload preview "
+            "with placeholder parent ids, never a plan",
+        )
     if not isinstance(raw, dict) or not isinstance(raw.get("shorts"), list):
         raise _fail(path, "missing a 'shorts' list")
-    return PublishPlan(shorts=tuple(_record(r, path, i) for i, r in enumerate(raw["shorts"])))
+    plan = PublishPlan(shorts=tuple(_record(r, path, i) for i, r in enumerate(raw["shorts"])))
+    _assert_consistent(plan, path)
+    return plan
+
+
+def _gate_view(record: ShortPublishRecord) -> SimpleNamespace:
+    """A loaded record in the ``SocialPost`` shape the build-time plan gates
+    read, so the loader reuses them instead of re-implementing them."""
+    p = record.payloads
+    captions = {}
+    if p.instagram is not None:
+        captions["instagram"] = p.instagram.caption
+    if p.facebook is not None:
+        captions["facebook"] = p.facebook.description
+    if p.tiktok is not None:
+        captions["tiktok"] = p.tiktok.caption
+    return SimpleNamespace(
+        short_index=record.short_index,
+        sampled_regions=list(record.sampled_regions),
+        youtube_title=p.youtube.title if p.youtube else "",
+        youtube_description=p.youtube.description if p.youtube else "",
+        youtube_tags=",".join(p.youtube.tags) if p.youtube else "",
+        tiktok_title=p.tiktok.title if p.tiktok else "",
+        caption="",
+        captions=captions,
+    )
+
+
+def _assert_consistent(plan: PublishPlan, path: Path) -> None:
+    """GMS-17c: the upstream gate before enqueue and dispatch. A plan edited
+    or written apart from ``build_publish_plan`` is refused when its text no
+    longer agrees with itself or with the short's own evidence:
+
+    - every hashtag in a YouTube title appears in that short's description
+      (the builder takes title hashtags from the description);
+    - no surface names a county outside the clip's sampled regions
+      (``assert_shorts_metadata_in_region``);
+    - no surface carries a preposition splice (``assert_plan_text_grammar``).
+    """
+    by_lf: Dict[int, list] = {}
+    for record in plan.shorts:
+        yt = record.payloads.youtube
+        if yt is not None:
+            described = {tag.lower() for tag in hashtags_in(yt.description)}
+            missing = [t for t in hashtags_in(yt.title) if t.lower() not in described]
+            if missing:
+                raise _fail(
+                    path,
+                    f"short #{record.short_index}: title hashtag(s) {missing} absent from "
+                    "its description; title and description were edited apart",
+                )
+        by_lf.setdefault(record.lf_index, []).append(_gate_view(record))
+    try:
+        assert_shorts_metadata_in_region(by_lf)
+        assert_plan_text_grammar(by_lf)
+    except (ValueError, AssertionError) as exc:
+        raise _fail(path, str(exc)) from exc

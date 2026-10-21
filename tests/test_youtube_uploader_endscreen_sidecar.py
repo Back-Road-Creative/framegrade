@@ -19,6 +19,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from _state_helpers import decided
+
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
 
 
 CHECKLIST_FILENAME = "operator_checklist.txt"
@@ -112,7 +122,7 @@ def test_first_upload_creates_checklist_file_and_logs_line(fake_creds_dict, tmp_
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "t"),
             config=cfg,
         )
 
@@ -142,7 +152,7 @@ def test_second_upload_appends_does_not_truncate(fake_creds_dict, tmp_path):
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "t"),
             config=cfg,
         )
         up.upload_video_with_playlist(
@@ -150,7 +160,7 @@ def test_second_upload_appends_does_not_truncate(fake_creds_dict, tmp_path):
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "t"),
             config=cfg,
         )
 
@@ -177,7 +187,7 @@ def test_no_reference_video_id_uses_apply_template_form(fake_creds_dict, tmp_pat
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "X, Ireland"},
+            metadata=decided({"location": "X, Ireland"}, "t"),
             config=cfg,
         )
 

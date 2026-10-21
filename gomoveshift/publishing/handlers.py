@@ -23,7 +23,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from .dispatch import PermanentDeliveryError, ThrottledDeliveryError, _release_own_lease
+from .dispatch import (
+    PermanentDeliveryError,
+    ThrottledDeliveryError,
+    _detail,
+    _release_own_lease,
+)
 from .facebook_adapter import (
     FacebookAuthBlockedError,
     FacebookPermanentError,
@@ -38,6 +43,8 @@ from .models import FORMAT_CAROUSEL, FORMAT_PHOTO, MediaFingerprint, ShortPublis
 from .photo_adapter import PhotoAuthBlockedError, PhotoCarouselAdapter, PhotoPermanentError
 from .queue import (
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
+    NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
+    STATUS_AWAITING_IG_RECONCILE,
     STATUS_AWAITING_MANUAL_PUBLISH,
     acquire_lease,
     find_delivery,
@@ -109,6 +116,29 @@ def make_youtube_handler(
     return handler
 
 
+#: Graph's message for a media id it cannot resolve at publish time.
+_MEDIA_NOT_AVAILABLE = "Media ID is not available"
+
+
+def _park_for_ig_reconcile(conn, delivery_id: int, exc: Exception) -> bool:
+    """Move the row, from its LIVE status (the adapter moved it), to
+    ``awaiting_ig_reconcile``. ``False`` when nothing was written (the row is
+    terminal or gone), so the caller falls back to the terminal path."""
+    live = conn.execute("SELECT status FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    if live is None:
+        return False
+    return transition(
+        conn,
+        delivery_id,
+        live["status"],
+        STATUS_AWAITING_IG_RECONCILE,
+        next_attempt_at=AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
+        next_attempt_reason=NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
+        error_class=type(exc).__name__,
+        error_detail=_detail(exc),
+    )
+
+
 def make_instagram_handler(
     adapter: InstagramShortsAdapter,
     conn,
@@ -128,14 +158,23 @@ def make_instagram_handler(
     ``InstagramRetryableError`` / ``InstagramPublishingLimitError`` (the
     account-level quota refusal — the window self-heals) are NOT
     translated, nor is any exception this module doesn't recognise: both
-    propagate as themselves."""
+    propagate as themselves.
+
+    One permanent refusal is NOT terminal: "Media ID is not available" can
+    mean the post went live, so the row parks at ``awaiting_ig_reconcile``
+    for ``dispatch.reconcile_awaiting_ig``'s account scan to decide. Failing
+    it lost a possibly-live post; retrying it blind risked a duplicate."""
 
     def handler(row: Dict[str, Any]) -> None:
         record = record_loader(row["project_name"], row["short_index"])
         video_bytes = video_bytes_loader(record)
         try:
             adapter.publish(record, conn=conn, delivery_id=row["id"], video_bytes=video_bytes)
-        except (InstagramPermanentError, InstagramAuthBlockedError) as exc:
+        except InstagramPermanentError as exc:
+            if _MEDIA_NOT_AVAILABLE in str(exc) and _park_for_ig_reconcile(conn, row["id"], exc):
+                return
+            raise PermanentDeliveryError(str(exc)) from exc
+        except InstagramAuthBlockedError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
 
     return handler

@@ -42,7 +42,9 @@ def test_single_town_single_state_fallback_form():
         "start_town": None,
         "end_town": None,
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "Driving through Beaufort on US-21." in desc
     # Single state — no spans line
@@ -65,7 +67,9 @@ def test_multi_state_drive_emits_spans_line():
         "start_town": "South Lake Tahoe",
         "end_town": "Stateline",
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "Spans 2 states: California, Nevada." in desc
 
@@ -84,7 +88,9 @@ def test_journey_arc_sentence_appears():
         "start_town": "Monterey",
         "end_town": "Morro Bay",
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "Started in Monterey, ended in Morro Bay" in desc
     # Intermediate towns (not the endpoints) appear in "passing through ..."
@@ -122,7 +128,9 @@ def test_journey_arc_names_a_revisited_town_once():
         "start_town": "Liberty Township",
         "end_town": "Cumberland Township",
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "passing through Freedom Township, Gettysburg." in desc
     assert "Gettysburg, Gettysburg" not in desc
@@ -139,7 +147,9 @@ def test_journey_arc_skipped_when_endpoints_match():
         "start_town": "Beaufort",
         "end_town": "Beaufort",
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "Started in" not in desc
     assert "Driving through Beaufort" in desc
@@ -159,7 +169,9 @@ def test_features_appear_in_description_body_and_tags():
         "start_town": None,
         "end_town": None,
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "Highlights along the route: Hunting Island State Park, Penn Center." in desc
     tags = enriched["tags"]
@@ -176,7 +188,9 @@ def test_features_capped_at_five_in_body():
         "features": [f"POI {i}" for i in range(8)],
         "states_traversed": ["South Carolina"],
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     # First 5 in, 6th out of the body
     assert "POI 4" in desc
@@ -202,7 +216,9 @@ def test_roads_listed_up_to_five_in_body():
         "start_town": None,
         "end_town": None,
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     desc = enriched["description"]
     assert "R5" in desc
     assert "R6" not in desc
@@ -223,7 +239,9 @@ def test_empty_route_profile_no_body_change():
         "start_town": None,
         "end_town": None,
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     assert enriched["description"] == original_desc
 
 
@@ -239,7 +257,9 @@ def test_none_fields_handled_gracefully():
         "end_town": None,
     }
     # Should not raise
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     assert "description" in enriched
     # No body added
     assert "Driving through" not in enriched["description"]
@@ -262,7 +282,9 @@ def test_chapter_towns_threaded_back_for_gate():
         "start_town": "Monterey",
         "end_town": "Big Sur",
     }
-    enriched = LongFormMetadataGenerator._enrich_with_route_profile(result, profile)
+    enriched = LongFormMetadataGenerator._enrich_with_route_profile(
+        result, profile, road_coverage_measured=True
+    )
     nouns = enriched.get("chapter_towns") or []
     # Endpoints, intermediates, features all available as nouns
     assert "Monterey" in nouns

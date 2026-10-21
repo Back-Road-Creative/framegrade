@@ -11,6 +11,9 @@ import sys
 # Re-export config helper that some handlers reference via the old module path
 from ..config import get_config
 from .handlers.analysis import cmd_analyze, cmd_find_stops, cmd_process, cmd_scan
+from .handlers.catalog_classify import cmd_catalog_classify
+from .handlers.catalog_fetch import cmd_catalog_fetch
+from .handlers.catalog_inventory import cmd_catalog_inventory
 from .handlers.cleanup import cmd_cleanup
 from .handlers.comments import cmd_comments
 from .handlers.console import cmd_console
@@ -19,6 +22,7 @@ from .handlers.doctor import cmd_doctor
 from .handlers.drive import cmd_drive
 from .handlers.enqueue_asset import cmd_enqueue_asset
 from .handlers.enqueue_plan import cmd_enqueue_plan
+from .handlers.health import cmd_health
 from .handlers.ingest import cmd_batch, cmd_ingest
 from .handlers.library_hygiene import cmd_library_hygiene
 from .handlers.metrics import cmd_metrics
@@ -28,6 +32,7 @@ from .handlers.platform_decline import cmd_platform_decline
 from .handlers.post_anomaly import cmd_post_anomaly
 from .handlers.pub_status import cmd_publishing_status
 from .handlers.publish_journal import cmd_publish_journal
+from .handlers.queue_recover import cmd_queue
 from .handlers.reconcile_playlists import cmd_reconcile_playlists
 from .handlers.route_story_film import cmd_route_story_film
 from .handlers.route_story_prepare import cmd_route_story_prepare
@@ -64,8 +69,12 @@ __all__ = [
     "cmd_post_anomaly",
     "cmd_process",
     "cmd_dispatch_queue",
+    "cmd_queue",
     "cmd_enqueue_asset",
     "cmd_enqueue_plan",
+    "cmd_catalog_classify",
+    "cmd_catalog_inventory",
+    "cmd_catalog_fetch",
     "cmd_publishing_status",
     "cmd_publish_journal",
     "cmd_reconcile_playlists",
@@ -74,6 +83,7 @@ __all__ = [
     "cmd_route_story_verify",
     "cmd_route_story_film",
     "cmd_scan",
+    "cmd_health",
     "cmd_schedule",
     "cmd_sync_site",
     "cmd_upload",
@@ -103,9 +113,13 @@ _COMMAND_MAP = {
     "photos": cmd_photos,
     "publish-journal": cmd_publish_journal,
     "dispatch-queue": cmd_dispatch_queue,
+    "queue": cmd_queue,
     "enqueue-plan": cmd_enqueue_plan,
     "enqueue-asset": cmd_enqueue_asset,
     "publishing-status": cmd_publishing_status,
+    "catalog-classify": cmd_catalog_classify,
+    "catalog-inventory": cmd_catalog_inventory,
+    "catalog-fetch": cmd_catalog_fetch,
     "metrics": cmd_metrics,
     "platform-decline": cmd_platform_decline,
     "post-anomaly": cmd_post_anomaly,
@@ -114,6 +128,7 @@ _COMMAND_MAP = {
     "route-story-proof": cmd_route_story_proof,
     "route-story-verify": cmd_route_story_verify,
     "route-story-film": cmd_route_story_film,
+    "health": cmd_health,
     "schedule": cmd_schedule,
     "sync-site": cmd_sync_site,
     "library-hygiene": cmd_library_hygiene,

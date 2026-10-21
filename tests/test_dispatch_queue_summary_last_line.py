@@ -66,3 +66,62 @@ def test_summary_is_last_line_and_carries_the_pack_counts(tmp_path, capsys, monk
     assert lines[-1].startswith("attempted=1 succeeded=1")
     assert "tiktok_packed=2 tiktok_pack_errors=1" in lines[-1]
     assert "  error: delivery 9: drive offline" in lines[:-1]
+
+
+def test_pack_reconcile_failure_reaches_cron_and_leaves_other_platforms_draining(
+    tmp_path, capsys, monkeypatch
+):
+    """A credential failure cannot look like a healthy hour with four manual chores."""
+    from gomoveshift.publishing.tiktok_pack import PackSweepResult
+
+    monkeypatch.setenv("GMS_TIKTOK_MODE", "pack")
+    with (
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.build_pack_reconciler",
+            side_effect=RuntimeError("fixture refresh encryption failed"),
+        ),
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.sweep_queued",
+            return_value=PackSweepResult(),
+        ),
+    ):
+        lines = _run(tmp_path, capsys, DrainResult(attempted=1, succeeded=1))
+
+    assert lines[-1].startswith("attempted=1 succeeded=1")
+    assert "tiktok_mode=pack" in lines[-1]
+    assert "tiktok_reconcile_errors=1" in lines[-1]
+    assert any(
+        line.startswith("  error: tiktok reconcile:")
+        and "fixture refresh encryption failed" in line
+        for line in lines[:-1]
+    )
+
+
+@pytest.mark.parametrize("ambiguous, errors", [(1, []), (0, ["delivery 9: sidecar missing"])])
+def test_pack_reconcile_uncertainty_survives_cron_summary(
+    tmp_path, capsys, monkeypatch, ambiguous, errors
+):
+    from gomoveshift.publishing.tiktok_pack import PackReconcileResult, PackSweepResult
+
+    monkeypatch.setenv("GMS_TIKTOK_MODE", "pack")
+    with (
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.build_pack_reconciler",
+            return_value=(mock.Mock(), mock.Mock()),
+        ),
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.reconcile_packed",
+            return_value=PackReconcileResult(considered=1, ambiguous=ambiguous, errors=errors),
+        ),
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.sweep_queued",
+            return_value=PackSweepResult(),
+        ),
+    ):
+        lines = _run(tmp_path, capsys, DrainResult())
+
+    assert "tiktok_mode=pack" in lines[-1]
+    if ambiguous:
+        assert "tiktok_reconcile_ambiguous=1" in lines[-1]
+    if errors:
+        assert "tiktok_reconcile_errors=1" in lines[-1]

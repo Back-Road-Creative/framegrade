@@ -1436,3 +1436,92 @@ def test_pack_reconcile_does_not_run_in_the_other_modes(tmp_path, monkeypatch, m
     _, calls, rec = _reconcile_run(tmp_path, monkeypatch, build=build, mode=mode)
     build.assert_not_called()
     rec.assert_not_called()
+
+
+# --- U-R5(b): parked Instagram rows are decided before the drain ---------------
+
+
+def _ig_result(**over):
+    base = dict(considered=0, published=0, retried=0, failed=0, unprovable=0, errors=[])
+    return SimpleNamespace(**{**base, **over})
+
+
+def test_ig_reconcile_runs_before_the_drain_when_instagram_is_routed(tmp_path, capsys):
+    """A parked 'Media ID is not available' row is decided by the account
+    scan BEFORE the drain reads the queue, so a proven-absent row re-queued
+    this pass is drained this pass, and the result rides the cron log."""
+    conn = open_queue_db(tmp_path)
+    enqueue(conn, "proj", 3, "instagram", "HASH1")
+    conn.close()
+    _sidecar(tmp_path, _record(selected=("instagram",)))
+    calls = []
+    scan = mock.Mock(return_value=[])
+
+    with (
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.build_ig_media_scanner",
+            return_value=scan,
+        ),
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.reconcile_awaiting_ig",
+            side_effect=lambda *a, **k: (
+                calls.append(("ig", k["recent_media"])) or _ig_result(considered=1, unprovable=1)
+            ),
+        ),
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.drain_queue",
+            side_effect=lambda *a, **k: calls.append(("drain", None)) or DrainResult(),
+        ),
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue._build_routed_handlers"),
+    ):
+        rc = cmd_dispatch_queue(_args(apply=True), _config(tmp_path, instagram="first_party"))
+
+    assert rc == 0
+    assert calls == [("ig", scan), ("drain", None)]
+    assert "ig reconcile: considered=1" in capsys.readouterr().out
+
+
+def test_an_ig_scanner_that_cannot_be_built_does_not_stop_the_drain(tmp_path, capsys):
+    conn = open_queue_db(tmp_path)
+    enqueue(conn, "proj", 3, "instagram", "HASH1")
+    conn.close()
+    _sidecar(tmp_path, _record(selected=("instagram",)))
+
+    with (
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.build_ig_media_scanner",
+            side_effect=FileNotFoundError("no creds"),
+        ),
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.reconcile_awaiting_ig") as rec,
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.drain_queue") as drain,
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue._build_routed_handlers"),
+    ):
+        rc = cmd_dispatch_queue(_args(apply=True), _config(tmp_path, instagram="first_party"))
+
+    assert rc == 0
+    rec.assert_not_called()
+    drain.assert_called_once()
+    assert "ig reconcile: skipped (FileNotFoundError)" in capsys.readouterr().out
+
+
+def test_an_unrouted_instagram_never_builds_the_scanner(tmp_path):
+    """No first-party Instagram route means no Graph client and no SOPS
+    decrypt for it."""
+    conn = open_queue_db(tmp_path)
+    enqueue(conn, "proj", 3, "youtube", "HASH1")
+    conn.close()
+    _sidecar(tmp_path, _record())
+
+    with (
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.build_ig_media_scanner") as build,
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.reconcile_awaiting_ig") as rec,
+        mock.patch(
+            "gomoveshift.cli.handlers.dispatch_queue.drain_queue", return_value=DrainResult()
+        ),
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue._build_routed_handlers"),
+    ):
+        rc = cmd_dispatch_queue(_args(apply=True), _config(tmp_path, youtube="first_party"))
+
+    assert rc == 0
+    build.assert_not_called()
+    rec.assert_not_called()

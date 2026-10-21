@@ -27,8 +27,11 @@ from . import (
     photos,
     pubqueue,
     pubqueue_calendar,
+    reconcile,
     route_story,
+    runs,
     schedule,
+    schedule_model,
     seo,
     shorts,
     tenant,
@@ -179,6 +182,7 @@ def create_app() -> FastAPI:
     # global is right here because it is brand-level configuration fixed for the
     # life of the app, not per-request state.
     templates.env.globals["nav_entries"] = nav_entries
+    templates.env.filters["et"] = schedule_model.eastern
 
     def _require_tab(slug: str) -> None:
         """404 a direct GET/POST to a tab this brand doesn't enable."""
@@ -204,6 +208,12 @@ def create_app() -> FastAPI:
                 "message": exc.detail,
             },
             status_code=exc.status_code,
+        )
+
+    @app.exception_handler(jobs.HostRefusedError)
+    async def _host_refused_handler(request: Request, exc: jobs.HostRefusedError):
+        return await _http_exception_handler(
+            request, HTTPException(status_code=409, detail=f"Not started: {exc}")
         )
 
     @app.exception_handler(Exception)
@@ -239,7 +249,12 @@ def create_app() -> FastAPI:
         brands = known_brands() or ["gomoveshift"]
         ticker = getattr(app.state, "console_ticker", None)
         ticker_alive = ticker.is_alive() if ticker is not None else None
-        notify_configured = bool(os.environ.get("GMS_CONSOLE_NOTIFY_URL", "").strip())
+        # The same resolver notify() sends through (env OR the notify_url file), so health can
+        # never say "configured" about a destination the sender would not use. Never the topic.
+        from . import notify as _notify  # noqa: PLC0415 -- keep the import list untouched
+
+        destination = _notify.destination_status()
+        outbox = _notify.outbox_status()
         observer_ok = (
             None if ticker is None else not _stale(ticker.last_observer_ok_at, ticker.started_at)
         )
@@ -248,7 +263,14 @@ def create_app() -> FastAPI:
             "brands": brands,
             "ticker_alive": ticker_alive,
             "observer_ok": observer_ok,
-            "notify_configured": notify_configured,
+            "notify_configured": destination["configured"],
+            "notify_source": destination["source"],
+            "notify_pending": outbox["pending"],
+            "notify_exhausted": outbox["exhausted"],
+            "notify_delivery_failures": outbox["delivery_failures"],
+            "notify_last_failure_at": outbox["last_failure_at"],
+            "notify_last_success_at": outbox["last_success_at"],
+            "observer_failures": None if ticker is None else ticker.observer_failures,
         }
         degraded = ticker_enabled and (
             ticker_alive is False
@@ -394,6 +416,19 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.post("/jobs/{job_id}/cancel")
+    def job_cancel(job_id: int):
+        store = _job_store()
+        if jobs.get_job(store, job_id) is None:
+            raise HTTPException(status_code=404, detail=f"Unknown job: {job_id}")
+        try:
+            jobs.cancel_job(store, job_id)
+        except jobs.HostRefusedError:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
     @app.post("/jobs/{job_id}/rerun")
     def job_rerun(job_id: int):
         store = _job_store()
@@ -536,6 +571,9 @@ def create_app() -> FastAPI:
         region: str = Form(""),
         dry_run: bool = Form(False),
         no_review: bool = Form(False),
+        skip_upload: bool = Form(False),
+        confirm_plan: bool = Form(False),
+        ost_system_review: bool = Form(False),
         publish: str = Form(""),
         lf_day: str = Form(""),
         lf_mode: str = Form(""),
@@ -556,6 +594,9 @@ def create_app() -> FastAPI:
             "region": region,
             "dry_run": dry_run,
             "no_review": no_review,
+            "skip_upload": skip_upload,
+            "confirm_plan": confirm_plan,
+            "ost_system_review": ost_system_review,
             "publish": publish,
             "lf_day": lf_day,
             "lf_mode": lf_mode,
@@ -581,12 +622,20 @@ def create_app() -> FastAPI:
             return _refuse(f"Brand: {slug!r} is not a brand this console knows.")
         try:
             _require_schedule(publish, lf_day)
+            if not dry_run and not confirm_plan:
+                raise ValueError("Confirm the dry-run plan before launching a full render.")
+            unreadable = drives.unreadable_source_media(directory)
+            if unreadable:
+                raise ValueError("Source media the render cannot read: " + "; ".join(unreadable))
             argv = drives.build_drive_argv(
                 directory,
                 output_dir=output_dir,
                 region=region or None,
                 dry_run=dry_run,
                 no_review=no_review,
+                skip_upload=skip_upload,
+                confirm_plan=confirm_plan,
+                ost_system_review=ost_system_review,
                 publish=publish or None,
                 lf_day=lf_day or None,
                 lf_mode=lf_mode or None,
@@ -603,8 +652,11 @@ def create_app() -> FastAPI:
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
     def _console_output_dirs() -> "list[str]":
-        rows = jobs.list_jobs(_job_store())
-        return drives.output_dirs_from_job_argvs([row["argv"] for row in rows])
+        """Output dirs the console may touch: its own jobs' plus registered backend runs
+        (CLI/cron/unknown) found under the configured output root."""
+        store = _job_store()
+        jobs.reap_finished(store)
+        return runs.known_output_dirs(store)
 
     @app.get("/drives/preview", response_class=HTMLResponse)
     def drives_preview(request: Request, output_dir: str):
@@ -628,6 +680,9 @@ def create_app() -> FastAPI:
     def drives_gates_pending(request: Request):
         _require_tab("drives")
         pending = drives.list_pending_gates(_console_output_dirs())
+        origins = runs.origins_by_dir(_job_store())
+        for row in pending:
+            row["origin"] = origins.get(row["output_dir"], "console")
         return templates.TemplateResponse(
             request, "drives_gates_pending.html", {"pending": pending}
         )
@@ -724,15 +779,20 @@ def create_app() -> FastAPI:
                 "brands": known_brands() or ["gomoveshift"],
                 "brand": current_brand(),
                 "weekdays": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                "form": {},
             },
         )
 
     @app.post("/shorts/run")
     def shorts_run(
+        request: Request,
         directory: str = Form(...),
         output_dir: str = Form(...),
         region: str = Form(""),
         dry_run: bool = Form(False),
+        confirm_plan: bool = Form(False),
+        skip_upload: bool = Form(False),
+        ost_system_review: bool = Form(False),
         publish: str = Form(""),
         lf_day: str = Form(""),
         shorts_target: str = Form(""),
@@ -743,20 +803,50 @@ def create_app() -> FastAPI:
         slug = brand or current_brand()
         if slug not in (known_brands() or ["gomoveshift"]):
             raise HTTPException(status_code=400, detail=f"unknown brand: {slug!r}")
+        form = {
+            "brand": slug,
+            "directory": directory,
+            "output_dir": output_dir,
+            "region": region,
+            "dry_run": dry_run,
+            "confirm_plan": confirm_plan,
+            "skip_upload": skip_upload,
+            "ost_system_review": ost_system_review,
+            "publish": publish,
+            "lf_day": lf_day,
+            "shorts_target": shorts_target,
+            "shorts_gap": shorts_gap,
+        }
         try:
             _require_schedule(publish, lf_day)
+            if not dry_run and not confirm_plan:
+                raise ValueError("Confirm the dry-run plan before launching a full render.")
             argv = shorts.build_shorts_argv(
                 directory,
                 output_dir=output_dir,
                 region=region or None,
                 dry_run=dry_run,
+                confirm_plan=confirm_plan,
+                skip_upload=skip_upload,
+                ost_system_review=ost_system_review,
                 publish=publish or None,
                 lf_day=lf_day or None,
                 shorts_target=int(shorts_target) if shorts_target.strip() else None,
                 shorts_gap=float(shorts_gap) if shorts_gap.strip() else None,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return templates.TemplateResponse(
+                request,
+                "shorts.html",
+                {
+                    "brands": known_brands() or ["gomoveshift"],
+                    "brand": current_brand(),
+                    "weekdays": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                    "form": form,
+                    "error": str(exc),
+                },
+                status_code=400,
+            )
         job_id = jobs.launch(
             _job_store(), "shorts", argv, _log_dir(), env=brand_launch_env(slug), brand=slug
         )
@@ -1096,6 +1186,11 @@ def create_app() -> FastAPI:
         _require_tab("publishing")
         return templates.TemplateResponse(request, "pubqueue.html", _publishing_context(page))
 
+    @app.get("/publishing/reconcile", response_class=HTMLResponse)
+    def publishing_reconcile(request: Request):
+        _require_tab("publishing")
+        return templates.TemplateResponse(request, "reconcile.html", {"report": reconcile.report()})
+
     @app.get("/publishing/calendar", response_class=HTMLResponse)
     def publishing_calendar(request: Request, week: "str | None" = None):
         _require_tab("publishing")
@@ -1366,8 +1461,15 @@ def create_app() -> FastAPI:
         # The journey selection follows an operator here from
         # /library or /photos via ?journey=, the same query parameter --
         # never a second convention.
+        report = schedule.schedule_view(journey=journey or None)
+        try:
+            model = schedule_model.volume_model(report, schedule_model._config())
+            model_error = None
+        except Exception as exc:  # noqa: BLE001 -- the tab still renders the report, and says why
+            logger.exception("console schedule volume model failed")
+            model, model_error = None, str(exc) or type(exc).__name__
         return templates.TemplateResponse(
-            request, "schedule.html", {"report": schedule.schedule_view(journey=journey or None)}
+            request, "schedule.html", {"report": report, "model": model, "model_error": model_error}
         )
 
     @app.get("/{slug}", response_class=HTMLResponse)

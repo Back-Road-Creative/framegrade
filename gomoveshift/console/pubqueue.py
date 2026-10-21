@@ -23,6 +23,8 @@ from ..publishing.models import KNOWN_PLATFORMS
 from ..publishing.plan_io import PublishPlanFormatError, load_publish_plan
 from ..publishing.queue import (
     PUBLISHED_AT_OPERATOR_CONFIRMED,
+    PUBLISHED_AT_PLATFORM_CONFIRMED,
+    PUBLISHED_AT_PLATFORM_RECONCILED,
     PUBLISHED_AT_PLATFORM_SCHEDULED,
     TERMINAL_STATUSES,
     cancel_delivery,
@@ -405,6 +407,31 @@ _PUBLISH_CONFIRMATION_LABELS = {
 }
 
 
+#: ``published_at_source`` values that prove the platform itself published.
+_PLATFORM_PROVEN = (PUBLISHED_AT_PLATFORM_CONFIRMED, PUBLISHED_AT_PLATFORM_RECONCILED)
+
+
+def published_kind(row: Dict[str, Any]) -> str:
+    """What a ``status == "published"`` row really is: ``published`` (the platform
+    confirmed it), ``remotely_scheduled`` (accepted, goes live later) or
+    ``unverified`` (operator-confirmed, or a legacy row with no source)."""
+    source = row.get("published_at_source")
+    if source == PUBLISHED_AT_PLATFORM_SCHEDULED:
+        return "remotely_scheduled"
+    if source in _PLATFORM_PROVEN:
+        return "published"
+    return "unverified"
+
+
+def delivery_state(row: Dict[str, Any]) -> str:
+    """The label the Publishing tab shows in the Status cell: the row's status,
+    except that ``published`` is split by ``published_kind`` so a coverage claim
+    never counts a scheduled or unconfirmed row as out."""
+    if row.get("status") == "published":
+        return published_kind(row).replace("_", " ")
+    return str(row.get("status"))
+
+
 def _publish_confirmation(row: Dict[str, Any]) -> str:
     return _PUBLISH_CONFIRMATION_LABELS.get(row.get("published_at_source"), "unknown (legacy)")
 
@@ -418,6 +445,7 @@ def rows_by_state(rows: List[Dict[str, Any]]) -> List[tuple]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in enrich_rows_with_sidecar(rows):
         row["publish_confirmation"] = _publish_confirmation(row)
+        row["delivery_state"] = delivery_state(row)
         grouped.setdefault(row["status"], []).append(row)
     return [(status, grouped[status]) for status in sorted(grouped, key=_state_sort_key)]
 
@@ -503,6 +531,7 @@ def delivery_by_id(delivery_id: int, config: Optional[Any] = None) -> Dict[str, 
         conn.close()
     enriched = enrich_rows_with_sidecar([row])[0]
     enriched["platform_paused"] = paused
+    enriched["delivery_state"] = delivery_state(enriched)
     enriched["publish_confirmation"] = _publish_confirmation(enriched)
     enriched["lease_state"] = _lease_state(enriched)
     enriched["error_explanation"] = _error_explanation(enriched)

@@ -816,6 +816,15 @@ class ChapterGenerator:
         )
 
         chapters = merge(waypoints_with_towns, bands)
+        # Still under the floor when no GPS sample names a new place (rural
+        # West Cork, 2026-10-12): add trace-spaced chapters so the gate clears
+        # by construction instead of failing after a multi-day render.
+        chapters = self._pad_to_gate_floor(
+            chapters,
+            video_duration,
+            self._gps_samples(journey, gps_duration, original_duration),
+            self._trace_km_at(journey, gps_duration, original_duration),
+        )
 
         logger.info(f"Generated {len(chapters)} chapters")
         return self._pad_to_min_chapters(chapters, video_duration, start_location)
@@ -1103,6 +1112,84 @@ class ChapterGenerator:
             video_duration / 60,
         )
         return best
+
+    def _trace_km_at(self, journey: Journey, gps_duration: float, original_duration: float):
+        """Return ``f(video_time) -> km driven along the trace by then``."""
+        j_start = journey.start_date
+        times: list[float] = []
+        kms: list[float] = []
+        total, prev = 0.0, None
+        for wp in journey.waypoints:
+            if prev is not None:
+                total += _haversine_m(prev.latitude, prev.longitude, wp.latitude, wp.longitude)
+            prev = wp
+            times.append(
+                self._map_to_edited_time(
+                    self._scale_gps_to_video(
+                        (wp.timestamp - j_start).total_seconds(), gps_duration, original_duration
+                    )
+                )
+            )
+            kms.append(total / 1000.0)
+
+        def km_at(t: float) -> float:
+            if not times:
+                return 0.0
+            i = min(range(len(times)), key=lambda k: abs(times[k] - t))
+            return kms[i]
+
+        return km_at
+
+    def _pad_to_gate_floor(
+        self,
+        chapters: list[dict],
+        video_duration: float,
+        samples: list[tuple[float, Location]],
+        km_at,
+    ) -> list[dict]:
+        """Insert trace-spaced chapters until the gate's middle-chapter floor holds.
+
+        Each pad sits midway in the widest gap whose halves both clear the
+        merger's 60 s rule, and is named by the reverse-geocoded GPS sample
+        nearest it plus the distance driven by then ("West Cork, County Cork —
+        24 km in"), so it only names where the car was. No geocoded sample at
+        all leaves the list short and the gate refuses it, as before.
+        """
+        floor = min_intermediate_chapters(video_duration)
+        if len(intermediate_chapters(chapters)) >= floor:
+            return chapters
+        named = [(t, label) for t, loc in samples if (label := self._sample_label(loc))]
+        if not named:
+            return chapters
+        chapters = sorted(chapters, key=lambda c: self._parse_timestamp(c["timestamp"]))
+        titles = {c["title"] for c in chapters}
+        while len(intermediate_chapters(chapters)) < floor:
+            times = [self._parse_timestamp(c["timestamp"]) for c in chapters]
+            gaps = [(b - a, i) for i, (a, b) in enumerate(zip(times, times[1:])) if b - a >= 120]
+            if not gaps:
+                break
+            _, i = max(gaps)
+            t = (times[i] + times[i + 1]) // 2
+            label = min(named, key=lambda s: abs(s[0] - t))[1]
+            title = f"{label} — {km_at(t):.0f} km in"
+            if title in titles:
+                title = f"{label} — {km_at(t):.1f} km in"
+            if title in titles:
+                break
+            titles.add(title)
+            chapters.insert(i + 1, {"timestamp": self._format_timestamp(t), "title": title})
+        logger.info(
+            "Chapter floor: %d middle chapters after trace-spaced padding (need %d)",
+            len(intermediate_chapters(chapters)),
+            floor,
+        )
+        return chapters
+
+    def _sample_label(self, loc: Optional[Location]) -> str:
+        """A geocoded sample's chapter label: its place, else its county."""
+        if loc is None:
+            return ""
+        return self._format_location(loc) or (loc.county or "")
 
     def _prioritize_chapters(
         self, chapters: list[tuple[float, Location]], max_count: int

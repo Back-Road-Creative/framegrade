@@ -51,6 +51,7 @@ from typing import Any, Callable, Optional
 from .. import fs_safety
 from ..media_api import Deliverables, TrailFilm
 from ..route_story.preflight import TerrainRendererUnavailableError
+from ..trail_opening import attach_trail_opening
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +396,10 @@ def attach_trail_film(
     if getattr(getattr(config, "drive", None), "trail", None) is False:
         return d
     try:
-        d.trail_films.append(_render(d, state, config, steps or default_steps(span_location)))
+        film = _render(d, state, config, steps or default_steps(span_location))
+        d.trail_films.append(film)
+        # The film exists now: it can open the LF it was placed from, in place of the montage.
+        attach_trail_opening(d, film, config)
     except _SkipError as skip:
         reason = f"trail film skipped for {d.date}: {skip}"
         explicit = getattr(getattr(config, "drive", None), "trail", None) is True

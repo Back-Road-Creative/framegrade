@@ -99,7 +99,7 @@ def test_every_window_the_veto_leaves_open_holds_two_fixes():
     times, t = [], 0.0
     while t < 3600:
         times.append(t)
-        t += float(rng.choice([1, 1, 1, 2, 5, 7, 8, 12, 40, 150]))
+        t += float(rng.choice([1] * 40 + [2] * 10 + [5] * 5 + [6, 7, 8, 12, 40, 150]))
     pts = [(tt, _LAT0 + tt * _STEP_DEG, _LON0) for tt in times]
     mask = build_gps_gap_mask(3600, pts)
     width = int(DEFAULT_MIN_DURATION_SEC)
@@ -230,3 +230,57 @@ def test_a_gap_short_on_a_gps_day_fails_before_any_burn(tmp_path, render_patches
                 per_lf_overrides={1: "Gettysburg Battlefield, PA"},
             )
     assert burned == []
+
+
+# ── the veto agrees with the route-claim gate by construction ──────────────
+# Regression: a 3.9 s dropout inside a 6.0 s fix
+# interval passed the planner (veto was > 7 s) and then the route-claim gate
+# (gap is > 5 s, Shorts need 100% coverage) refused the Short after 12.5 h.
+
+
+def _with_interval(gap_s: float):
+    """1 Hz fixes with one fix-to-fix interval of ``gap_s`` seconds at 100 -> 100+gap."""
+    end = 100 + gap_s
+    return _trace((0, 100)) + [
+        (float(t), _LAT0 + t * _STEP_DEG, _LON0) for t in np.arange(end, 300.0 + 1e-9, 1.0)
+    ]
+
+
+def test_default_veto_threshold_is_the_route_claim_gap():
+    import inspect
+
+    from gomoveshift.pipeline import route_claims
+
+    assert GPS_MAX_FIX_GAP_S == route_claims.GAP_S
+    assert (
+        inspect.signature(build_gps_gap_mask).parameters["max_gap_s"].default == route_claims.GAP_S
+    )
+
+
+def test_a_six_second_fix_gap_is_vetoed():
+    mask = build_gps_gap_mask(300, _with_interval(6.0))
+    assert mask[101:106].all()
+    assert not mask[:100].any()
+    assert not mask[107:].any()
+
+
+def test_exactly_the_gap_limit_is_not_vetoed():
+    assert not build_gps_gap_mask(300, _with_interval(5.0)).any()
+
+
+@pytest.mark.parametrize(
+    "bad", [(0.0, 0.0), (float("nan"), -77.0), (91.0, 10.0), (39.0, 181.0), (39.0, float("inf"))]
+)
+def test_planner_ignores_fixes_the_route_claim_gate_rejects(bad):
+    """A fix route_claims calls invalid must not close a gap for the planner."""
+    pts = [(t, la, lo) for t, la, lo in _trace((0, 299)) if not 100 < t < 110]
+    pts.append((105.0, *bad))
+    mask = build_gps_gap_mask(300, pts)
+    assert mask[101:110].all()
+
+
+def test_usable_fix_rule_matches_route_claims_valid():
+    from gomoveshift.pipeline import route_claims
+
+    for lat, lon in [(1.0, 2.0), (0.0, 0.0), (float("nan"), 1.0), (95.0, 1.0), (1.0, -181.0)]:
+        assert bool(usable_fix_times([(1.0, lat, lon)])) == route_claims._valid(lat, lon)

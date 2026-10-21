@@ -70,3 +70,72 @@ def test_photos_tab_carries_the_selected_journey_across_navigation():
     # ... and threaded onto the journey-stage links so the selection survives
     # a hop to the review/schedule screens and back.
     assert "journey=example-2026" in body
+
+
+# --- trail film and inserts rows -----------------------------------------
+
+
+def test_capability_status_lists_trail_and_inserts(tmp_path, monkeypatch):
+    cache = tmp_path / "bundles"
+    (cache / "0123456789abcdef").mkdir(parents=True)
+    (cache / "0123456789abcdef" / "manifest.json").write_text("{}")
+    monkeypatch.setenv("GMS_ROUTE_STORY_CACHE_DIR", str(cache))
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    trail, inserts = _row("Trail film"), _row("Inserts")
+    for row in (trail, inserts):
+        assert set(row) == set(_row("Reel")) | {"reason"}
+        assert row["console"] is False
+        assert row["installed"] is True and row["reason"] == ""
+    assert trail["command"].startswith("gomoveshift drive") and "--trail" in trail["command"]
+    assert "--insert-photos" in inserts["command"]
+
+
+def test_trail_row_says_why_when_no_bundle_is_prepared(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_ROUTE_STORY_CACHE_DIR", str(tmp_path / "missing"))
+    row = _row("Trail film")
+    assert row["installed"] is False
+    assert "prepared imagery bundle" in row["reason"]
+
+
+def test_trail_row_says_why_when_a_dependency_is_missing(monkeypatch):
+    real = photos.importlib.util.find_spec
+    monkeypatch.setattr(
+        photos.importlib.util,
+        "find_spec",
+        lambda m, *a: None if m == "gomoveshift.pipeline.route_story.proof" else real(m, *a),
+    )
+    row = _row("Trail film")
+    assert row["installed"] is False
+    assert "gomoveshift.pipeline.route_story.proof" in row["reason"]
+
+
+def test_inserts_row_says_why_without_ffmpeg(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    row = _row("Inserts")
+    assert row["installed"] is False
+    assert "ffmpeg" in row["reason"]
+
+
+def test_trail_row_ignores_cache_dirs_that_are_not_bundles(tmp_path, monkeypatch):
+    # prepare also keeps ``shared/`` (blue marble) and ``gnis/`` beside the
+    # content-addressed bundles, and a bundle is a dir holding manifest.json.
+    cache = tmp_path / "bundles"
+    (cache / "shared" / "blue-marble").mkdir(parents=True)
+    (cache / "gnis").mkdir()
+    (cache / "0123456789abcdef").mkdir()  # an interrupted fetch: no manifest
+    monkeypatch.setenv("GMS_ROUTE_STORY_CACHE_DIR", str(cache))
+    row = _row("Trail film")
+    assert row["installed"] is False
+    assert "prepared imagery bundle" in row["reason"]
+
+
+def test_trail_row_says_why_when_numpy_is_missing(monkeypatch):
+    real = photos.importlib.util.find_spec
+    monkeypatch.setattr(
+        photos.importlib.util,
+        "find_spec",
+        lambda m, *a: None if m == "numpy" else real(m, *a),
+    )
+    row = _row("Trail film")
+    assert row["installed"] is False
+    assert "numpy" in row["reason"]

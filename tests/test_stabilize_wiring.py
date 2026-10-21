@@ -197,7 +197,7 @@ def test_stabilised_day_counts_as_picture_changed(tmp_path):
         master_record={},
         regular_lf_indices=[3],
     )
-    _, changed = picture_inputs_from_state(SimpleNamespace(day_artifacts=[art]))
+    _, _, changed = picture_inputs_from_state(SimpleNamespace(day_artifacts=[art]))
     assert changed == {3: True}
 
 

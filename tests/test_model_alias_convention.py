@@ -38,7 +38,7 @@ def _scoped_files() -> list[Path]:
 def _hits(matcher) -> list[str]:
     found: list[str] = []
     for path in _scoped_files():
-        rel = path.relative_to(SERVICE_ROOT)
+        rel = path.relative_to(SERVICE_ROOT.parents[1])
         for lineno, line in enumerate(path.read_text().splitlines(), start=1):
             note = matcher(line)
             if note is not None:

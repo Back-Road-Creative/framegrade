@@ -203,18 +203,21 @@ def credential_status() -> list[dict]:
     return out
 
 
-def brand_launch_env(slug: Optional[str] = None) -> dict:
-    """``os.environ`` merged with ``slug``'s (default: ``current_brand()``)
-    saved overrides -- only registry names, and only non-null overrides win.
-    For ``jobs.launch(..., env=...)`` so a launched job sees the same
-    per-brand settings the console itself renders."""
+def brand_env_overrides(slug: Optional[str] = None) -> dict:
+    """``slug``'s (default: ``current_brand()``) saved overrides -- only registry
+    names, only non-null values, as strings. No ``os.environ``."""
     slug = slug if slug is not None else current_brand()
     registry_names = {s.name for s in load_registry()}
     overrides = load_brand_settings(slug)
+    return {k: str(v) for k, v in overrides.items() if k in registry_names and v is not None}
+
+
+def brand_launch_env(slug: Optional[str] = None) -> dict:
+    """``os.environ`` merged with ``slug``'s saved overrides (see
+    ``brand_env_overrides``). For ``jobs.launch(..., env=...)`` so a launched
+    job sees the same per-brand settings the console itself renders."""
     env = dict(os.environ)
-    for name, value in overrides.items():
-        if name in registry_names and value is not None:
-            env[name] = str(value)
+    env.update(brand_env_overrides(slug))
     return env
 
 

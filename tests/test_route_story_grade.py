@@ -5,8 +5,11 @@ from __future__ import annotations
 import colorsys
 import functools
 import hashlib
+import inspect
 import json
 import os
+import pwd
+import shutil
 import subprocess
 import sys
 import time
@@ -345,13 +348,24 @@ def _raw_fixtures_present() -> bool:
 # ``grade_still``'s full-resolution haze/exposure/vibrance/s-curve pipeline
 # (slow under load) are both pure functions of
 # the fixture filename -- memoize them on DISK, keyed by fixture name +
-# cropped flag + a hash of grade.py/hud.py's own source bytes (so an edit
-# to the pipeline invalidates stale entries) + the raw file's size and mtime, so
+# cropped flag + a hash of grade.py's source bytes and the source of hud's
+# RAW-preview helpers (so an edit to the pipeline invalidates stale entries,
+# while an unrelated HUD-drawing edit keeps the cache warm) + the raw file's size and mtime, so
 # the tests below -- several of which reload or literally re-grade the SAME
 # preview -- don't repeat that real work even when xdist's worksteal
 # scheduler spreads them across separate worker processes that share no
-# memory. The cache lives under the session's shared ``tmp_path_factory``
-# basetemp, so it never outlives this pytest session. A per-key claim file
+# memory. The cache PERSISTS across sessions in
+# ``~/.cache/gomoveshift-test-grade`` (``GMS_TEST_GRADE_CACHE_DIR``
+# overrides; a sibling of ``~/.cache/gomoveshift``, whose subdirectories
+# drive cleanup treats as per-drive stage caches), where ``~`` is the passwd
+# home: conftest points HOME at a fresh fake home per process, and a cache
+# under that one was cold on every run (the slowest tests re-graded real RAW
+# files at 95-150s each), in one generation
+# directory per pipeline identity -- that source hash plus the numpy, cv2,
+# Pillow, rawpy and Python versions the pixels also depend on -- so an
+# unchanged grade costs nothing on the next run while any edit or library bump
+# starts a cold generation; only the newest ``_GRADE_CACHE_GENERATIONS`` are
+# kept, which bounds the disk. A per-key claim file
 # (``O_CREAT | O_EXCL``, holding the claimant's pid) lets exactly one worker
 # compute each entry; every other worker waits for the file to land, then
 # reads it. A waiter that finds the claimant dead (xdist worker crash: the
@@ -360,10 +374,37 @@ def _raw_fixtures_present() -> bool:
 # ``.copy()`` so no test can mutate another's cached input/output.
 @functools.lru_cache(maxsize=1)
 def _pipeline_source_hash() -> str:
+    import PIL
+    import rawpy
+
     digest = hashlib.sha256()
-    for module in (grade_module, hud_module):
-        digest.update(Path(module.__file__).read_bytes())
+    digest.update(Path(grade_module.__file__).read_bytes())
+    # Only hud's RAW-preview path feeds the cached pixels, not the rest of hud.py.
+    for func in (hud_module._embedded_thumb, hud_module._camera_preview):
+        digest.update(inspect.getsource(func).encode())
+    digest.update(repr((hud_module.CAMERA_PREVIEW_MIN_WIDTH, hud_module._ROT90_BY_FLIP)).encode())
+    for version in (np.__version__, cv2.__version__, PIL.__version__, rawpy.__version__):
+        digest.update(f"|{version}".encode())
+    digest.update(f"|{sys.version}".encode())
     return digest.hexdigest()[:16]
+
+
+_GRADE_CACHE_GENERATIONS = 3
+
+
+def _grade_cache_generation(root: Path, identity: str) -> Path:
+    """``root``'s directory for ``identity``, marked newest; older ones beyond the cap go."""
+    current = root / identity
+    current.mkdir(parents=True, exist_ok=True)
+    os.utime(current)
+    others = sorted(
+        (path for path in root.iterdir() if path.is_dir() and path != current),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in others[_GRADE_CACHE_GENERATIONS - 1 :]:
+        shutil.rmtree(stale, ignore_errors=True)
+    return current
 
 
 _CLAIM_WAIT_SECONDS = 900.0
@@ -438,14 +479,17 @@ def _fixture_cache_key(name: str, purpose: str) -> str:
     )
 
 
+def _grade_cache_root() -> Path:
+    override = os.environ.get("GMS_TEST_GRADE_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    # passwd home, not ``$HOME``: conftest's fake HOME is per process and removed at exit.
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "gomoveshift-test-grade"
+
+
 @pytest.fixture(scope="session")
-def grade_cache_dir(tmp_path_factory) -> Path:
-    base = tmp_path_factory.getbasetemp()
-    if os.environ.get("PYTEST_XDIST_WORKER"):
-        base = base.parent
-    cache_dir = base / "route_story_grade_cache"
-    cache_dir.mkdir(exist_ok=True)
-    return cache_dir
+def grade_cache_dir() -> Path:
+    return _grade_cache_generation(_grade_cache_root(), _pipeline_source_hash())
 
 
 def _cached_preview(cache_dir: Path, name: str) -> Image.Image:
@@ -501,6 +545,90 @@ def test_disk_memoize_image_caches_by_key_and_returns_independent_copies(tmp_pat
     assert len(calls) == 2
     assert fourth.mode == "RGB"
     assert np.array_equal(np.asarray(fourth), np.asarray(second))
+
+
+def test_grade_cache_generation_persists_across_sessions_and_keeps_only_recent_ones(tmp_path):
+    root = tmp_path / "grade-cache"
+    first = _grade_cache_generation(root, "ident-a")
+    assert first == root / "ident-a" and first.is_dir()
+    (first / "entry.png").write_bytes(b"kept")
+    # A second session with the same pipeline identity reuses the same entries.
+    assert _grade_cache_generation(root, "ident-a") == first
+    assert (first / "entry.png").read_bytes() == b"kept"
+
+    # A fixed moment long past: only the order of mtimes matters, and the
+    # current generation is stamped with the present by the call itself.
+    old = 1_000_000_000.0
+    for index, name in enumerate(("ident-b", "ident-c", "ident-d")):
+        (root / name).mkdir()
+        os.utime(root / name, (old - index, old - index))
+    _grade_cache_generation(root, "ident-e")
+    survivors = sorted(path.name for path in root.iterdir())
+    # The current generation plus the most recently used others, never more.
+    assert len(survivors) == _GRADE_CACHE_GENERATIONS
+    assert "ident-e" in survivors and "ident-a" in survivors
+    assert "ident-d" not in survivors
+
+
+def test_grade_cache_root_is_the_real_home_not_conftests_fake_one(monkeypatch):
+    """conftest points HOME at a fresh fake home per process (one per xdist
+    worker, removed at exit), so ``~`` there would make this cache cold on
+    every run and unshared between workers -- each real NEF re-graded at
+    ~40-50s. The root is the passwd home's, which persists across sessions."""
+    monkeypatch.delenv("GMS_TEST_GRADE_CACHE_DIR", raising=False)
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert Path(os.environ["HOME"]) != real_home  # conftest's fake home is in force
+    assert _grade_cache_root() == real_home / ".cache" / "gomoveshift-test-grade"
+
+    monkeypatch.setenv("GMS_TEST_GRADE_CACHE_DIR", "/srv/grade-cache")
+    assert _grade_cache_root() == Path("/srv/grade-cache")
+
+
+def test_pipeline_identity_changes_with_the_imaging_libraries(monkeypatch):
+    _pipeline_source_hash.cache_clear()
+    before = _pipeline_source_hash()
+    monkeypatch.setattr(np, "__version__", "0.0-identity-probe")
+    _pipeline_source_hash.cache_clear()
+    try:
+        assert _pipeline_source_hash() != before
+    finally:
+        monkeypatch.undo()
+        _pipeline_source_hash.cache_clear()
+    assert _pipeline_source_hash() == before
+
+
+def test_pipeline_identity_changes_with_the_preview_code(monkeypatch):
+    """The cached previews come from hud's RAW-preview helpers, so a change to
+    either one must start a cold generation."""
+    _pipeline_source_hash.cache_clear()
+    before = _pipeline_source_hash()
+
+    def _camera_preview(path):  # a different body under the same name
+        return None
+
+    monkeypatch.setattr(hud_module, "_camera_preview", _camera_preview)
+    _pipeline_source_hash.cache_clear()
+    try:
+        assert _pipeline_source_hash() != before
+    finally:
+        monkeypatch.undo()
+        _pipeline_source_hash.cache_clear()
+
+
+def test_pipeline_identity_ignores_unrelated_hud_code(monkeypatch, tmp_path):
+    """hud.py is mostly HUD drawing the cached pixels never touch. An edit there
+    must not throw away every runner's warm grade cache (~1 h cold per runner)."""
+    _pipeline_source_hash.cache_clear()
+    before = _pipeline_source_hash()
+    edited = tmp_path / "hud.py"
+    edited.write_text(Path(hud_module.__file__).read_text() + "\n# unrelated HUD edit\n")
+    monkeypatch.setattr(hud_module, "__file__", str(edited))
+    _pipeline_source_hash.cache_clear()
+    try:
+        assert _pipeline_source_hash() == before
+    finally:
+        monkeypatch.undo()
+        _pipeline_source_hash.cache_clear()
 
 
 @pytest.mark.skipif(not _raw_fixtures_present(), reason="real camera fixtures not present")

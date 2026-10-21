@@ -148,6 +148,20 @@ def gms_inputs_dir() -> Path:
     return path
 
 
+def drive_backlog_path() -> Path:
+    """The tenant's ``drive_backlog.yaml`` (drives still to audit, in order) in the
+    operator's inputs directory: ``gms_inputs_dir()`` mirrors the service tree, so it
+    sits at ``gomoveshift/console/brands/gomoveshift/drive_backlog.yaml`` under it."""
+    return (
+        gms_inputs_dir()
+        / "gomoveshift"
+        / "console"
+        / "brands"
+        / "gomoveshift"
+        / "drive_backlog.yaml"
+    )
+
+
 def assert_required_paths_exist() -> None:
     """Validate that env-resolved required paths exist on disk.
 
@@ -212,6 +226,37 @@ def __getattr__(name: str) -> str:
         return _LAZY_DEFAULTS[name]()
     except KeyError:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
+
+# The single reverse-geocode cache namespace (``DriveConfig.geocoding_cache_dir``).
+# Expanded at call time, not import time, so a test's HOME takes effect.
+_DEFAULT_GEOCODING_CACHE_DIR = "~/.cache/gomoveshift/geocoding"
+
+# An earlier default location for the geocode cache. While a cache file exists
+# there it wins, even over one at the current default, so a warm cache keeps
+# resolving every coordinate as before and no live cache has to move. Empty
+# (the default) means there is no earlier location to honour.
+_LEGACY_GEOCODING_CACHE_DIR = ""
+_GEOCODING_CACHE_FILE = "geocoding_cache.json"
+
+
+def gms_geocoding_cache_dir() -> Path:
+    """Default directory of the single geocode-cache namespace.
+
+    ``GMS_GEOCODING_CACHE_DIR`` when set and non-blank; otherwise the earlier
+    location while it holds a cache file; otherwise
+    ``~/.cache/gomoveshift/geocoding``.
+    """
+    raw = os.environ.get("GMS_GEOCODING_CACHE_DIR", "")
+    if raw.strip():
+        return Path(raw)
+    # os.path, not Path.is_file: every DriveConfig() runs this, including
+    # under tests that patch pathlib.Path.stat.
+    if _LEGACY_GEOCODING_CACHE_DIR and os.path.isfile(
+        os.path.join(_LEGACY_GEOCODING_CACHE_DIR, _GEOCODING_CACHE_FILE)
+    ):
+        return Path(_LEGACY_GEOCODING_CACHE_DIR)
+    return Path(os.path.expanduser(_DEFAULT_GEOCODING_CACHE_DIR))
 
 
 def gms_intermediate_base() -> Path:

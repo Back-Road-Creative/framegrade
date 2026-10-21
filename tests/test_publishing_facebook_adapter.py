@@ -351,3 +351,10 @@ def test_http_200_with_error_body_is_classified_not_returned():
     adapter = FacebookReelsAdapter(CREDS, session=session)
     with pytest.raises(FacebookPermanentError):
         adapter.start_upload()
+
+
+def test_permanent_graph_error_leads_with_code_subcode_and_fbtrace():
+    body = {"error": {"code": 100, "error_subcode": 33, "message": "m", "fbtrace_id": "SYNTHfb01"}}
+    with pytest.raises(FacebookPermanentError) as exc_info:
+        _raise_for_graph_error(400, body)
+    assert str(exc_info.value).startswith("[graph http=400 code=100 subcode=33 fbtrace=SYNTHfb01] ")

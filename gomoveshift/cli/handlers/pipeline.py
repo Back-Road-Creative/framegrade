@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 
+from ... import run_origin
 from ..logging_setup import configure_logging
 from ..tmux import is_in_tmux, launch_in_tmux, require_supervision, tmux_available
 
@@ -63,6 +64,7 @@ def cmd_pipeline(args, config):
     # Set up logging to both stdout and a log file in the output directory
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    run_origin.write_sidecar(output_dir, sys.argv)
     log_file = output_dir / "pipeline.log"
     configure_logging(log_file=log_file, json_log=getattr(args, "log_json", False))
 

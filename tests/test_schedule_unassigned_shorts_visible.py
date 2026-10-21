@@ -36,7 +36,9 @@ def _report(**over) -> dict:
 
 
 def _render(monkeypatch, report) -> str:
-    monkeypatch.setattr(console_schedule, "build_schedule_report", lambda ledger, config: report)
+    monkeypatch.setattr(
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: report
+    )
     resp = TestClient(create_app()).get("/schedule")
     assert resp.status_code == 200
     return resp.text

@@ -47,10 +47,12 @@ def test_per_lf_location_override_fails_coverage():
     rl = _radford()
     evidence = _build_ladder_evidence({1: MONT}, {1: _SPARSE}, {1: MONT}, resolved_by_lf={1: rl})
     with pytest.raises(RuntimeError, match="Roanoke County"):
-        _assert_pre_encode_location_invariant({1: MONT}, {1: rl}, evidence)
+        _assert_pre_encode_location_invariant({1: MONT}, {1: rl}, evidence_by_lf=evidence)
 
 
 def test_correct_operator_label_passes():
     rl = _radford()
     label = "Christiansburg to Salem via US-11, VA"
-    _assert_pre_encode_location_invariant({1: label}, {1: rl}, None)
+    _assert_pre_encode_location_invariant(
+        {1: label}, {1: rl}, evidence_by_lf={1: {"corroborations": 1}}
+    )

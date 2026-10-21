@@ -9,9 +9,9 @@
       {% if row.date_key %}
       <a href="/drives/gates?output_dir={{ row.output_dir }}&date_key={{ row.date_key }}">
         {{ row.output_dir }} -- {{ row.gate_id }}
-      </a>: {{ row.question }}
+      </a> [origin: {{ row.origin }}]: {{ row.question }}
       {% else %}
-      {{ row.output_dir }} -- {{ row.gate_id }}: {{ row.question }}
+      {{ row.output_dir }} -- {{ row.gate_id }} [origin: {{ row.origin }}]: {{ row.question }}
       {% endif %}
     </li>
     {% endfor %}

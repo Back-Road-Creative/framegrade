@@ -113,6 +113,11 @@ class BlurDetectionStage(BaseStage):
             # detect_and_track leaves frames between samples with no entry at all,
             # and the renderer reads "no entry" as "nothing to blur". Fill those
             # gaps before the timeline is built — see fill_detection_gaps.
+            # A detector miss must not unmask an object still in frame: hold it per object.
+            frame_boxes = blur_gate.hold_missed_detections(
+                frame_boxes,
+                sample_interval_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)),
+            )
             frame_boxes = blur_gate.fill_detection_gaps(
                 frame_boxes,
                 max_gap_frames=math.ceil(fps / max(drive.blur_sample_fps, 1e-6)) + 1,

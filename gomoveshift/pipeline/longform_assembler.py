@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import DriveConfig
+from ..config import DriveConfig, resolve_lf_mode
 from ..models import DrivePlan, LFSegment, RegularLFPlan
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,39 @@ def _has_gps(gps_per_episode: Optional[list]) -> bool:
     return bool(gps_per_episode) and any(
         entry and entry[0] is not None for entry in gps_per_episode
     )
+
+
+def _with_gps_gap_mask(
+    day_scores: np.ndarray,
+    boundaries: list[tuple[float, float]],
+    gps_per_episode: Optional[list],
+    stop_mask: Optional[np.ndarray],
+) -> Optional[np.ndarray]:
+    """``stop_mask`` OR the GPS-gap veto, for ``full_drive`` planning.
+
+    A place named in viewer text means every retained second is provably inside
+    it, so a span with no usable fix for longer than the route-claim gap
+    (``stop_mask.GPS_MAX_FIX_GAP_S`` == ``route_claims.GAP_S``) must not be
+    retained: the claim gate would refuse it and the drive could not label any
+    LF. Same veto the shorts planner uses. ``None`` mask stays ``None`` (the
+    planner refuses it); a GPS-less day masks nothing extra (operator label).
+    """
+    if stop_mask is None or len(day_scores) == 0 or not _has_gps(gps_per_episode):
+        return stop_mask
+    from .gps_enrichment import _build_drive_gps_points
+    from .stop_mask import build_gps_gap_mask
+
+    points = _build_drive_gps_points(boundaries, gps_per_episode)
+    base = float(day_scores[0, COL_TIMESTAMP])
+    points = [(t - base, lat, lon) for t, lat, lon in points]
+    gap = build_gps_gap_mask(len(day_scores), points)
+    merged = np.asarray(stop_mask, dtype=bool) | gap
+    extra = int(np.count_nonzero(merged)) - int(np.count_nonzero(stop_mask))
+    if extra:
+        logger.info(
+            "[full_drive] GPS-gap mask: %d additional s cut (no fix within route-claim gap)", extra
+        )
+    return merged
 
 
 def _absolute_floor_filter(segments: list[LFSegment], floor: float) -> list[LFSegment]:
@@ -829,7 +862,7 @@ class LongFormAssembler:
         # Full-drive mode bypasses the adaptive-threshold scoring
         # path entirely. One LF per day spanning the day's full processed
         # timeline. plan_regular_lfs enforces min/max duration upstream.
-        if getattr(self.config, "lf_selection_mode", "best_moments") == "full_drive":
+        if resolve_lf_mode(self.config) == "full_drive":
             return self._build_full_drive_plan_per_day(
                 scores=scores,
                 processed_files=processed_files,
@@ -988,7 +1021,7 @@ class LongFormAssembler:
         # legacy non-day-first path is not first-class, but completeness
         # avoids a future invocation that hits this method and silently
         # falls back to highlights logic.
-        if getattr(self.config, "lf_selection_mode", "best_moments") == "full_drive":
+        if resolve_lf_mode(self.config) == "full_drive":
             return self._build_full_drive_plan(
                 scores=scores,
                 processed_files=processed_files,
@@ -1253,6 +1286,10 @@ class LongFormAssembler:
             # Slice the drive-wide stop mask to this day with the SAME
             # boolean selector used for day_scores, so rows stay aligned.
             day_stop_mask = stop_mask[mask] if stop_mask is not None else None
+            day_gps_eps = [gps_per_episode[i] for i in file_indices] if gps_per_episode else None
+            day_stop_mask = _with_gps_gap_mask(
+                day_scores, day_boundaries, day_gps_eps, day_stop_mask
+            )
 
             # Raises ValueError on missing mask / under-min / over-max —
             # robust-by-construction. With the part bounds set the day is
@@ -1264,6 +1301,7 @@ class LongFormAssembler:
                 stop_mask=day_stop_mask,
                 part_min_sec=part_min,
                 part_max_sec=part_max,
+                day=date,
             )
             parts = [p for p in parts if p]
             if not parts:
@@ -1366,6 +1404,16 @@ class LongFormAssembler:
         # Raises on missing mask / out-of-bounds
         part_min = getattr(self.config, "full_drive_part_min_sec", None)
         part_max = getattr(self.config, "full_drive_part_max_sec", None)
+        if part_min is not None and part_max is not None:
+            # This legacy path plans the whole drive as one timeline and cannot
+            # see day boundaries; with the per-day policy bounds set it would
+            # join days into one LF. One LF covers one calendar day.
+            raise ValueError(
+                "full_drive part bounds are per calendar day; the legacy (non-day-first) "
+                "full_drive planner would join days. Use the day-first path or unset "
+                "full_drive_part_min_sec/full_drive_part_max_sec."
+            )
+        stop_mask = _with_gps_gap_mask(scores, file_boundaries, gps_per_episode, stop_mask)
         parts = plan_full_drive_parts(
             scores,
             min_duration_sec=self.config.min_lf_duration,

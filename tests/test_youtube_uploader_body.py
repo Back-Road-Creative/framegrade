@@ -17,6 +17,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
+
+
 @pytest.fixture
 def fake_creds_dict():
     return {

@@ -37,6 +37,7 @@ from typing import Iterable, Optional
 from ._atomic_write import atomic_write_json
 from .blur_gate import _gray_frames
 from .encoding_constants import SHORTS_HEIGHT, SHORTS_WIDTH
+from .ost_system_review import SURFACE_FIELDS, surface_review_passes, system_review_passes
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,9 @@ def format_shorts_ost_audit(date: str, entries: Iterable[dict]) -> dict:
                 "start_sec": float(e.get("start_sec", 0.0) or 0.0),
                 "end_sec": float(e.get("end_sec", 0.0) or 0.0),
                 "regions": [str(r) for r in (e.get("regions") or []) if str(r).strip()],
+                # The clip's own GPS road names (evidence for road tags,
+                # not burned text, so excluded from the audit hash below).
+                "roads": [str(r).strip() for r in (e.get("roads") or []) if str(r).strip()],
                 "median_speed_mps": _num_or_none(e.get("median_speed_mps")),
                 # Which source won this short's burned text — "clip_gps"
                 # (the clip's OWN GPS vote) or "lf_label" (inherited from the
@@ -293,7 +297,13 @@ def write_shorts_ost_audit(output_base: Path, date: str, entries: Iterable[dict]
 # kind of annotation — it records WHICH input won ``ost_text``, not a burn
 # input of its own; a genuine change in the winning source always changes
 # ``ost_text`` too, which already reopens the gate.
-_HASH_EXCLUDED_ENTRY_KEYS = ("median_speed_mps", "measured_lufs", "path", "place_source")
+_HASH_EXCLUDED_ENTRY_KEYS = (
+    "median_speed_mps",
+    "measured_lufs",
+    "path",
+    "place_source",
+    "roads",
+)
 
 
 def _strip_hash_excluded(entries) -> list:
@@ -329,6 +339,33 @@ def compute_shorts_ost_audit_hash(payload: dict) -> str:
     }
     serialised = json.dumps(content, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()
+
+
+def _payload_text(payload: dict) -> dict:
+    """``{lf_index: ost_text}`` -- the exact burn text an audit payload covers."""
+    return {int(e["lf_index"]): e["ost_text"] for e in payload.get("lfs", [])}
+
+
+def write_system_review_copy(output_dir: Path, date: str, state) -> Path:
+    """Write the G2-burn record that passed this gate to
+    ``<output_dir>/ost_system_review_<date>.json`` for review, and log its
+    path and hash. Audit copy only: no gate ever reads it."""
+    record = (_state_field(state, "ost_system_review") or {}).get(date) or {}
+    path = Path(output_dir) / f"ost_system_review_{date}.json"
+    atomic_write_json(path, record)
+    logger.info("OST system review record %s: %s", record.get("ost_hash"), path)
+    return path
+
+
+def write_surface_review_copy(output_base: Path, surface: str, date: str, state) -> Path:
+    """G2b: write the Shorts / superlong system record that passed its gate to
+    ``<output_base>/<surface>_ost_system_review_<date>.json`` and log its path
+    and hash. Audit copy only: no gate ever reads it."""
+    record = (_state_field(state, SURFACE_FIELDS[surface]) or {}).get(date) or {}
+    path = Path(output_base) / f"{surface}_ost_system_review_{date}.json"
+    atomic_write_json(path, record)
+    logger.info("OST %s system review record %s: %s", surface, record.get("text_hash"), path)
+    return path
 
 
 def lf_gate_or_raise(
@@ -393,6 +430,8 @@ def lf_gate_or_raise(
     elif passed_map.get(date) is True and hash_map.get(date) == current_hash:
         gate_passes = True
         reason = "state['ost_audit_passed'] + matching hash"
+    else:
+        gate_passes, reason = system_review_passes(state, date, _payload_text(payload))
 
     if not gate_passes:
         sidecar_path = write_ost_audit(Path(output_dir), date, payload)
@@ -405,8 +444,10 @@ def lf_gate_or_raise(
         raise OstAuditPendingError(
             f"OST audit pending for day {date}: review {sidecar_path} "
             f"and create {confirmed_file} (or re-run with "
-            f"--ost-audit-confirmed) before OST burn-in."
+            f"--ost-audit-confirmed) before OST burn-in." + (f" {reason}." if reason else "")
         )
+    if reason.startswith("system review record"):
+        write_system_review_copy(Path(output_dir), date, state)
 
     if state is not None:
         pm = _state_field(state, "ost_audit_passed")
@@ -455,22 +496,31 @@ def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:
     prior_hash = hash_map.get(date) or read_confirmed_hash(confirmed_file)
     stale = confirmation_is_stale(prior_hash, current_hash)
     gate_passes = False
+    reason = ""
     if stale:
         gate_passes = False  # explicit: a material burn-text change reopens the gate
     elif cli_confirmed:
         gate_passes = True
+        reason = "--ost-audit-confirmed"
     elif confirmed_file.exists():
         gate_passes = True
+        reason = f"{confirmed_file.name} on disk"
     elif passed_map.get(date) is True and hash_map.get(date) == current_hash:
         gate_passes = True
+        reason = "state['shorts_ost_audit_passed'] + matching hash"
+    else:
+        # G2b: the opt-in system review, over the Shorts' own record.
+        gate_passes, reason = surface_review_passes(state, "shorts", date, entries)
 
     if not gate_passes:
         sidecar_path = write_shorts_ost_audit(Path(output_base), date, entries)
         raise OstAuditPendingError(
             f"Shorts OST audit pending for day {date}: review {sidecar_path} "
             f"and create {confirmed_file} (or re-run with --ost-audit-confirmed) "
-            "before the irreversible shorts burn."
+            "before the irreversible shorts burn." + (f" {reason}." if reason else "")
         )
+    if reason.startswith("system review record"):
+        write_surface_review_copy(Path(output_base), "shorts", date, state)
 
     # Persist the pass marker + hash so a resume short-circuits via state.
     if state is not None:
@@ -487,6 +537,7 @@ def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:
     # Bind the marker so a later changed burn reads a stale binding.
     if confirmed_file.exists():
         stamp_confirmed(confirmed_file, current_hash)
+    logger.info("Shorts OST audit gate passed for day %s (%s).", date, reason)
 
 
 def format_superlong_ost_audit(date: str, parts: Iterable[dict]) -> dict:
@@ -577,23 +628,33 @@ def superlong_gate_or_raise(output_base: Path, date: str, parts, state) -> list:
     stale = confirmation_is_stale(prior_hash, current_hash)
 
     gate_passes = False
+    reason = ""
     if stale:
         gate_passes = False  # explicit: a material burn-text change reopens the gate
     elif cli_confirmed:
         gate_passes = True
+        reason = "--ost-audit-confirmed"
     elif confirmed_file.exists():
         gate_passes = True
+        reason = f"{confirmed_file.name} on disk"
+    else:
+        # G2b: the opt-in system review, over the parts' own record. It
+        # persists no pass: a resume without the flag re-parks (D8c).
+        gate_passes, reason = surface_review_passes(state, "superlong", date, parts)
 
     if not gate_passes:
         sidecar_path = write_superlong_ost_audit(Path(output_base), date, parts)
         raise OstAuditPendingError(
             f"Superlong OST audit pending for day {date}: review {sidecar_path} "
             f"and create {confirmed_file} (or re-run with --ost-audit-confirmed) "
-            "before the irreversible superlong part burn."
+            "before the irreversible superlong part burn." + (f" {reason}." if reason else "")
         )
+    if reason.startswith("system review record"):
+        write_surface_review_copy(Path(output_base), "superlong", date, state)
 
     if confirmed_file.exists():
         stamp_confirmed(confirmed_file, current_hash)
+    logger.info("Superlong OST audit gate passed for day %s (%s).", date, reason)
     return parts
 
 

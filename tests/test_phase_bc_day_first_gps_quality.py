@@ -197,6 +197,19 @@ class TestGPSQualityFilterAtDeriveStage:
                 "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
                 side_effect=_fake_run_all_days,
             ),
+            # Fixes 50 s apart are all GPS gap to the retained-route check;
+            # that check has its own tests (test_retained_gps_claims.py) and
+            # this one covers the quality-filter wiring only.
+            patch(
+                "gomoveshift.pipeline.route_claims.enforce_route_claims",
+                return_value={},
+            ),
+            # This test deliberately bypasses route measurement, so title
+            # approval has no route record to consume either.
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first"
+                "._approve_waypost_titles_before_encode",
+            ),
             patch.object(
                 gps_quality_mod,
                 "filter_high_quality_points",
@@ -315,6 +328,16 @@ class TestGPSQualityFilterAtDeriveStage:
             patch(
                 "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
                 side_effect=_fake_run_all_days,
+            ),
+            # A MagicMock geocoder resolves no retained place; the route
+            # check has its own tests (test_retained_gps_claims.py).
+            patch(
+                "gomoveshift.pipeline.route_claims.enforce_route_claims",
+                return_value={},
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first"
+                "._approve_waypost_titles_before_encode",
             ),
         ):
             phase.run(state, probe_duration_fn=lambda p: 100.0)

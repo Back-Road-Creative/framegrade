@@ -1,13 +1,16 @@
 """Console job runner: SQLite-backed record of console-launched CLI jobs.
 
 ``launch()`` only Popens an allowlisted argv list (never a shell string); no
-background thread, the live ``Popen`` is reaped on read.
+background thread, the live ``Popen`` is reaped on read. A GPU subcommand is not
+Popen'd at all when a host spool is configured: it is written to the spool for
+the host worker (``hostspool``) and its progress is read back from status files.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import subprocess
 import sys
@@ -16,10 +19,13 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import drives, notify, settings
+from .. import run_origin
+from . import hostspool, notify, runs, settings
 from .night_job_evidence import project_outcome
 
 logger = logging.getLogger(__name__)
+
+HostRefusedError = hostspool.HostRefusedError
 
 #: Subcommands the console is allowed to launch (with a real argv the
 #: caller built). ``status`` is NOT a top-level ``gomoveshift`` subcommand
@@ -108,6 +114,7 @@ class JobStore:
         self._ensure_brand_column()
         self._ensure_liveness_columns()
         self._ensure_rerun_column()
+        self._ensure_host_columns()
         self._conn.commit()
 
     def _ensure_brand_column(self) -> None:
@@ -149,6 +156,20 @@ class JobStore:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(jobs)")}
         if "rerun_of" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN rerun_of INTEGER")
+
+    def _ensure_host_columns(self) -> None:
+        """Host-executor jobs: which executor ran it (NULL = this process), its name in the
+        spool, the worker's last progress/phase, and the worker's error text."""
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(jobs)")}
+        for name, kind in (
+            ("executor", "TEXT"),
+            ("spool_id", "TEXT"),
+            ("progress", "REAL"),
+            ("phase", "TEXT"),
+            ("host_error", "TEXT"),
+        ):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {kind}")  # noqa: S608
 
     def create(
         self,
@@ -260,8 +281,14 @@ def launch(
     env: dict | None = None,
     brand: str | None = None,
     rerun_of: int | None = None,
+    executor: str | None = None,
 ) -> int:
     """Validate ``argv``, Popen it with output appended to a log file, record it.
+
+    ``executor="host"`` (the default for a GPU subcommand when ``GMS_HOST_SPOOL_DIR`` is set)
+    writes a request for the host worker instead of forking, and raises ``HostRefusedError``
+    -- never falling back to a local Popen -- when the spool is unusable, the worker's
+    heartbeat is stale, or the same argv for the same brand is already pending or running.
 
     ``env=None`` (the default) inherits this process's environment, same as
     before; pass ``settings.brand_launch_env()`` to apply the launching
@@ -276,14 +303,20 @@ def launch(
     moments, and the column is what lets a reader see that they are.
     """
     _validate_argv(argv)
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
     if brand is None:
         brand = settings.current_brand()
+    if executor is None and hostspool.is_gpu_argv(argv) and hostspool.spool_dir() is not None:
+        executor = "host"
+    if executor == "host":
+        return _launch_host(store, name, argv, brand, rerun_of)
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
     job_id = store.create(name, argv, log_path="", brand=brand, rerun_of=rerun_of)
     log_path = log_dir / f"{job_id}.log"
     log_fh = log_path.open("ab")
-    proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, env=env)
+    # The child records itself as console-launched, so its own run_origin.json agrees with the job row.
+    child_env = {**(os.environ if env is None else env), run_origin.ORIGIN_ENV: "console"}
+    proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, env=child_env)
     _track(store, job_id, proc)
     # ``getattr`` rather than ``proc.pid`` -- test doubles that fake a
     # finished ``Popen`` don't always implement ``.pid``.
@@ -296,6 +329,35 @@ def launch(
         pid=pid,
         started_fingerprint=fingerprint,
     )
+    return job_id
+
+
+def _launch_host(
+    store: JobStore, name: str, argv: list[str], brand: str | None, rerun_of: int | None
+) -> int:
+    spool = hostspool.require_ready(hostspool.spool_dir())
+    key = hostspool.dedupe_key(argv, brand)
+    twin = hostspool.active_duplicate(spool, key)
+    if twin is not None:
+        raise HostRefusedError(
+            f"the same command for this brand is already queued or running ({twin}); "
+            "wait for it to finish or cancel it"
+        )
+    job_id = store.create(name, argv, log_path="", brand=brand, rerun_of=rerun_of)
+    sid = hostspool.spool_id(brand, job_id)
+    store.update(
+        job_id,
+        executor="host",
+        spool_id=sid,
+        log_path=str(hostspool.log_path(spool, sid)),
+    )
+    try:
+        hostspool.write_request(
+            spool, sid, brand, argv, key, env=settings.brand_env_overrides(brand)
+        )
+    except OSError as exc:
+        store.update(job_id, status="failed", finished_at=_now(), host_error=str(exc))
+        raise HostRefusedError(f"could not write the request to the host spool: {exc}") from exc
     return job_id
 
 
@@ -323,7 +385,58 @@ def _process_matches(pid: int, fingerprint: str | None) -> bool:
     return fingerprint is not None and _read_proc_starttime(pid) == fingerprint
 
 
+#: The host worker stopped reporting while a job was in flight, or its request vanished
+#: without a status. Like the other evidence values this is what was SEEN.
+EVIDENCE_HOST_WORKER_LOST = "host_worker_lost"
+
+
+def _is_host(row: dict | None) -> bool:
+    return bool(row) and row.get("executor") == "host"
+
+
+def _reap_host(store: JobStore, row: dict) -> None:
+    """Settle a host job from the worker's status file (the console never has an exit code
+    of its own for it)."""
+    job_id = row["id"]
+    spool = hostspool.spool_dir()
+    if spool is None or row["status"] not in ("queued", "running"):
+        return
+    sid = row["spool_id"]
+    status = hostspool.read_status(spool, sid)
+    state = (status or {}).get("state")
+    if state in hostspool.TERMINAL_STATES:
+        rc = status.get("exit_code")
+        fields = {"progress": status.get("progress"), "phase": status.get("phase")}
+        if state == "succeeded":
+            store.update(job_id, status="done", rc=rc, finished_at=_now(), **fields)
+            return
+        error = status.get("error")
+        if state == "cancelled":
+            store.update(job_id, status="cancelled", rc=rc, finished_at=_now(), **fields)
+            return
+        store.update(job_id, status="failed", rc=rc, finished_at=_now(), host_error=error, **fields)
+        notify.notify_job_failed(store.get(job_id))
+        return
+    if state == "running":
+        store.update(
+            job_id,
+            status="running",
+            progress=status.get("progress"),
+            phase=status.get("phase"),
+        )
+        if hostspool.worker_gone_reason(spool):
+            _mark_interrupted(store, job_id, EVIDENCE_HOST_WORKER_LOST)
+        return
+    if not hostspool.request_present(spool, sid):
+        # Neither queued nor running nor a status: it was taken and lost, or deleted.
+        _mark_interrupted(store, job_id, EVIDENCE_HOST_WORKER_LOST)
+
+
 def _reap(store: JobStore, job_id: int) -> None:
+    row = store.get(job_id)
+    if _is_host(row):
+        _reap_host(store, row)
+        return
     proc = tracked_process(store, job_id)
     rc = proc.poll() if proc is not None else None
     if proc is None or rc is None:
@@ -370,6 +483,10 @@ _EVIDENCE_SENTENCES = {
     EVIDENCE_NO_PID_RECORDED: (
         "this console never recorded a process id for this job, so whether it "
         "finished its work is unknown"
+    ),
+    EVIDENCE_HOST_WORKER_LOST: (
+        "the host worker stopped reporting for this job (or its request disappeared) before "
+        "it wrote a final status, so whether it finished its work is unknown"
     ),
     EVIDENCE_EXITED_WHILE_WATCHED: (
         "the process this job launched was running and has since exited; this "
@@ -427,6 +544,8 @@ def sweep_orphaned_jobs(store: JobStore) -> list[int]:
     for row in store.list():
         if row["status"] != "running" or tracked_process(store, row["id"]) is not None:
             continue
+        if _is_host(row):
+            continue
         pid = row["pid"]
         if pid is None:
             if _mark_interrupted(store, row["id"], EVIDENCE_NO_PID_RECORDED):
@@ -445,6 +564,8 @@ def _reconcile_untracked_running(store: JobStore) -> None:
     for row in store.list():
         if row["status"] != "running" or tracked_process(store, row["id"]) is not None:
             continue
+        if _is_host(row):
+            continue
         pid = row["pid"]
         if pid is not None and not _process_matches(pid, row["started_fingerprint"]):
             _mark_interrupted(store, row["id"], EVIDENCE_EXITED_WHILE_WATCHED)
@@ -460,7 +581,28 @@ def reap_finished(store: JobStore) -> None:
     with no ``Popen`` handle -- see ``_reconcile_untracked_running``."""
     for job_id in _tracked_job_ids(store):
         _reap(store, job_id)
+    for row in store.list():
+        if _is_host(row) and row["status"] in ("queued", "running"):
+            _reap_host(store, row)
     _reconcile_untracked_running(store)
+
+
+def cancel_job(store: JobStore, job_id: int) -> None:
+    """Ask the host worker to stop a queued or running host job by writing its cancel marker.
+
+    The worker does the stopping; the row settles to ``cancelled`` on a later reap, from the
+    worker's status file. Only host jobs can be cancelled this way."""
+    row = store.get(job_id)
+    if row is None:
+        raise ValueError(f"Unknown job: {job_id}")
+    if not _is_host(row):
+        raise ValueError(
+            f"job {job_id} did not run on the host worker; it cannot be cancelled here"
+        )
+    if row["status"] not in ("queued", "running"):
+        raise ValueError(f"job {job_id} has already finished ({row['status']})")
+    spool = hostspool.require_ready(hostspool.spool_dir())
+    hostspool.write_cancel(spool, row["spool_id"])
 
 
 #: The one status a rerun must refuse. Everything else -- done, failed,
@@ -509,6 +651,18 @@ def _format_age(seconds: int) -> str:
     return f"{seconds // 60}m"
 
 
+def _host_liveness(row: dict) -> str:
+    progress, phase = row.get("progress"), row.get("phase")
+    if progress is None and not phase:
+        return "running on the host worker (no progress reported yet)"
+    parts = []
+    if progress is not None:
+        parts.append(f"{round(float(progress) * 100)}%")
+    if phase:
+        parts.append(str(phase))
+    return "running on the host worker: " + " -- ".join(parts)
+
+
 def liveness_label(row: dict, now: datetime | None = None) -> str | None:
     """Evidence about a running job's log, or ``None`` when there is none.
 
@@ -522,6 +676,8 @@ def liveness_label(row: dict, now: datetime | None = None) -> str | None:
     unchanged. A missing or unreadable ``log_path`` yields ``None``, never
     a "stalled" claim it cannot back up.
     """
+    if _is_host(row):
+        return _host_liveness(row)
     log_path = row.get("log_path")
     if not log_path:
         return None
@@ -542,6 +698,8 @@ def _with_liveness(row: dict | None) -> dict | None:
     """Add a ``liveness`` key to ``row`` when (and only when) it is
     ``running`` -- every other status renders exactly as before, with no
     new key at all, not merely one that happens to be falsy."""
+    if row is not None and _is_host(row) and row.get("status") == "queued":
+        return {**row, "liveness": "waiting for the host worker to pick this up"}
     if row is None or row.get("status") != "running":
         return row
     return {**row, "liveness": liveness_label(row)}
@@ -567,6 +725,17 @@ def add_schedule(store: JobStore, name: str, subcommand: str, interval_minutes: 
     if interval_minutes < 1:
         raise ValueError(f"Interval (minutes): {interval_minutes} is not at least 1")
     argv = build_argv(subcommand)  # raises ValueError on a non-allowlisted subcommand
+    # A second identical POST (double-click, retry) used to add a second row that ran twice.
+    for row in store.list_schedules():
+        if (row["name"], row["subcommand"], row["interval_minutes"]) == (
+            name,
+            subcommand,
+            interval_minutes,
+        ):
+            raise ValueError(
+                f"A schedule named {name!r} for {subcommand} every {interval_minutes} "
+                "minutes already exists"
+            )
     return store.create_schedule(name, subcommand, argv, interval_minutes)
 
 
@@ -645,11 +814,17 @@ class Ticker:
         #: can leave the thread ``is_alive()`` forever.
         self.last_tick_ok_at: datetime | None = None
         self.last_observer_ok_at: datetime | None = None
+        self.observer_failures = 0
         self.last_night_ok_at: datetime | None = None
         self.last_night_error: str | None = None
         #: Process-start reference for /healthz -- a never-completed first
         #: pass otherwise looks healthy forever (``last_tick_ok_at is None``).
         self.started_at: datetime = datetime.now(timezone.utc)
+
+    def _observe_gates(self) -> None:
+        """Alert for pending review gates in every known run dir -- console jobs and runs the
+        console did not launch (CLI/cron), via the backend-run registry."""
+        notify.check_pending_gates(runs.known_output_dirs(self._store))
 
     def start(self) -> None:
         self._thread.start()
@@ -688,14 +863,13 @@ class Ticker:
                 notify.check_queue_regressions()
                 self.last_observer_ok_at = datetime.now(timezone.utc)
             except Exception:  # noqa: BLE001 -- an observer must never kill the drain
+                self.observer_failures += 1
                 logger.exception("console ticker queue observer skipped; continuing")
             try:
-                output_dirs = drives.output_dirs_from_job_argvs(
-                    [row["argv"] for row in self._store.list()]
-                )
-                notify.check_pending_gates(output_dirs)
+                self._observe_gates()
                 self.last_observer_ok_at = datetime.now(timezone.utc)
             except Exception:  # noqa: BLE001 -- an observer must never kill the drain
+                self.observer_failures += 1
                 logger.exception("console ticker gate observer skipped; continuing")
             try:
                 # The only observer that fires on something NOT happening.
@@ -704,6 +878,7 @@ class Ticker:
                 notify.check_missed_slots()
                 self.last_observer_ok_at = datetime.now(timezone.utc)
             except Exception:  # noqa: BLE001 -- an observer must never kill the drain
+                self.observer_failures += 1
                 logger.exception("console ticker missed-slot observer skipped; continuing")
             self._wait(self._tick_seconds)
 

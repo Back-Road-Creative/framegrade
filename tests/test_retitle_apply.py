@@ -25,13 +25,39 @@ def _write_worklist(tmp_path: Path, rows: list[dict]) -> Path:
     return path
 
 
+def _place(name: str, scope: str) -> dict:
+    return {
+        "name": name,
+        "county": "County Cork",
+        "state": None,
+        "scope": scope,
+        "method": "reverse_geocode",
+        "provenance": "gps",
+        "segment_id": "lf01",
+        "evidence_id": f"ev-{name.lower()}",
+    }
+
+
+# The segment's GPS record backing the default title (synthetic places).
+_EVIDENCE = json.dumps(
+    {
+        "segment_id": "lf01",
+        "provenance": "gps",
+        "method": "reverse_geocode",
+        "places": [_place("Clonmel", "in"), _place("Clonakilty", "in")],
+        "conflicts": [],
+    }
+)
+
+
 def _row(**kw):
     base = {
         "video_id": "vid1",
-        "current_title": "To Ballymore in 4K",
+        "current_title": "To Clonakilty in 4K",
         "reason": "preposition-led-label",
-        "suggested_title": "Kilbarry to Ballymore, County Cork",
+        "suggested_title": "Clonmel to Clonakilty, County Cork",
         "platform": "youtube",
+        "location_evidence": _EVIDENCE,
     }
     base.update(kw)
     return base
@@ -52,6 +78,7 @@ class _FakeVideos:
 
     def update(self, part, body):
         self.update_calls.append(body)
+        self.snippets[body["id"]] = body["snippet"]  # a live update lands
         return _req({})
 
 
@@ -74,9 +101,9 @@ def test_read_worklist_parses_rows(tmp_path):
     [
         ("needs-human", None, "no usable suggested title"),
         ("X" * 101, None, "exceeds"),
-        ("To Ballymore in 4K", None, "bare preposition"),
+        ("To Clonakilty in 4K", None, "bare preposition"),
         ("Kingstown, County Cork", PlaceCorrections(denylist=("Kingstown",)), "denylisted"),
-        ("Kilbarry to Ballymore, County Cork", None, None),  # clean -> no issues
+        ("Clonmel to Clonakilty, County Cork", None, None),  # clean -> no issues
     ],
 )
 def test_evaluate_row_gates(title, corrections, expect_substr):
@@ -94,7 +121,7 @@ def test_dry_run_marks_refused_rows(capsys):
 
 def test_main_dry_run_never_touches_service(tmp_path):
     path = _write_worklist(tmp_path, [_row()])
-    service = FakeService({"vid1": {"title": "To Ballymore in 4K", "categoryId": "19"}})
+    service = FakeService({"vid1": {"title": "To Clonakilty in 4K", "categoryId": "19"}})
     rc = ra.main(["--worklist", str(path)], service=service)
     assert rc == 0
     assert service.videos().update_calls == []
@@ -102,13 +129,14 @@ def test_main_dry_run_never_touches_service(tmp_path):
 
 def _audit_records(path):
     audit_path = path.with_suffix(".audit.jsonl")
-    return [json.loads(line) for line in audit_path.read_text().splitlines()]
+    records = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    return [r for r in records if r["result"] != "SNAPSHOT"]  # outcome lines only
 
 
 def test_apply_preserves_snippet_fields_and_writes_audit(tmp_path):
     path = _write_worklist(tmp_path, [_row()])
     snippet = {
-        "title": "To Ballymore in 4K",
+        "title": "To Clonakilty in 4K",
         "description": "desc",
         "tags": ["ireland"],
         "categoryId": "19",
@@ -117,7 +145,7 @@ def test_apply_preserves_snippet_fields_and_writes_audit(tmp_path):
     rc = ra.main(["--worklist", str(path), "--apply", "--yes-live"], service=service)
     assert rc == 0
     body = service.videos().update_calls[0]["snippet"]
-    assert body == {**snippet, "title": "Kilbarry to Ballymore, County Cork"}
+    assert body == {**snippet, "title": "Clonmel to Clonakilty, County Cork"}
     records = _audit_records(path)
     assert records[0]["result"] == ra.APPLIED
     assert records[0]["video_id"] == "vid1"
@@ -138,23 +166,20 @@ def test_apply_requires_both_flags(tmp_path):
     assert rc == 2
 
 
-def test_composed_worklist_rows_round_trip_as_approved(tmp_path):
-    """retitle_worklist's --compose output must clear retitle_apply's own
-    gates -- a composed title stays needs-human (never REFUSED) at the source."""
+def test_composed_worklist_rows_round_trip_as_approved():
+    """A title retitle_worklist composes from the GPS record clears
+    retitle_apply's own gates, evidence check included."""
+    import io
+
     from tools import retitle_worklist as rw
 
     videos = [
-        {"id": "dup1", "title": "Pennsylvania Scenic Drive in 4K | Millbrook, PA"},
-        {"id": "dup2", "title": "Pennsylvania Scenic Drive in 4K | Millbrook, PA"},
-        {"id": "irish1", "title": "To Ballymore, County Cork in 4K"},
+        {"id": "irish1", "title": "To Clonakilty in 4K", "location_evidence": json.loads(_EVIDENCE)}
     ]
     rows = rw.build_rows(videos, [])
-    composed = [r for r in rows if r["suggested_title"] != "needs-human"]
-    assert composed
-    import io
-
-    results = ra.dry_run(composed, out=io.StringIO())
-    assert all(r["verdict"] == ra.APPROVED for r in results)
+    assert [r["suggested_title"] for r in rows] == ["Clonmel to Clonakilty, County Cork"]
+    results = ra.dry_run(rows, out=io.StringIO())
+    assert [r["verdict"] for r in results] == [ra.APPROVED]
 
 
 # --- descriptions: the wrong place lives in the description too -------------
@@ -191,14 +216,14 @@ def test_evaluate_row_without_description_columns_is_unchanged():
 
 def test_apply_writes_title_and_description_in_one_update(tmp_path):
     path = _write_worklist(tmp_path, [_desc_row()])
-    snippet = {"title": "To Ballymore in 4K", "description": OLD_DESC, "categoryId": "19"}
+    snippet = {"title": "To Clonakilty in 4K", "description": OLD_DESC, "categoryId": "19"}
     service = FakeService({"vid1": snippet})
     rc = ra.main(["--worklist", str(path), "--apply", "--yes-live"], service=service)
     assert rc == 0
     [call] = service.videos().update_calls
     assert call["snippet"] == {
         **snippet,
-        "title": "Kilbarry to Ballymore, County Cork",
+        "title": "Clonmel to Clonakilty, County Cork",
         "description": NEW_DESC,
     }
     [record] = _audit_records(path)
@@ -209,7 +234,7 @@ def test_apply_writes_title_and_description_in_one_update(tmp_path):
 def test_apply_skips_row_whose_live_description_drifted(tmp_path):
     path = _write_worklist(tmp_path, [_desc_row()])
     snippet = {
-        "title": "To Ballymore in 4K",
+        "title": "To Clonakilty in 4K",
         "description": "edited in Studio",
         "categoryId": "19",
     }

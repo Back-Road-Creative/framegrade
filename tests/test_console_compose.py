@@ -35,6 +35,8 @@ REQUIRED_HOST_VARS = (
     "GMS_SEO_STORAGE_DIR",
     "GMS_SEO_CREDENTIALS_DIR",
     "GMS_SEO_YT_TOKEN_ENC",
+    "GMS_INPUTS_HOST_DIR",
+    "GMS_HOST_SPOOL_HOST_DIR",
 )
 
 #: Container-side targets of the credential mounts (fixed literals) and the env
@@ -231,6 +233,8 @@ def _render_env(tmp_path, **overrides):
         "GMS_SEO_STORAGE_DIR": tmp_path / "seo" / "data",
         "GMS_SEO_CREDENTIALS_DIR": tmp_path / "seo" / "credentials",
         "GMS_SEO_YT_TOKEN_ENC": tmp_path / "seo" / "youtube_upload_token.json.enc",
+        "GMS_INPUTS_HOST_DIR": tmp_path / "inputs",
+        "GMS_HOST_SPOOL_HOST_DIR": tmp_path / "spool",
         "GMS_SITE_HOST_PATH": tmp_path / "site",
         "GMS_NIGHT_HOST_ROOT": tmp_path / "cards",
         EXTRA_OUTPUT_VAR: tmp_path / "output2",
@@ -475,3 +479,77 @@ def test_no_port_mapping_omits_a_host_bind_even_in_comments():
             f"port mapping {mapping} has no host address, so it publishes on every "
             "interface; use ${GMS_CONSOLE_BIND:-127.0.0.1}:<host>:<container>"
         )
+
+
+def test_operator_inputs_are_mounted_read_only_where_the_app_reads_them():
+    """The operator's inputs (route-story profiles, playlist overrides, known
+    video ids) are outside the image's build context, so the console bind-mounts
+    them read-only and points GMS_INPUTS_DIR at the mount."""
+    base = _compose()["services"]["console-base"]
+    env = dict(entry.split("=", 1) for entry in base["environment"])
+    target = env["GMS_INPUTS_DIR"]
+    mounts = [v for v in base["volumes"] if v.endswith(f":{target}:ro")]
+    assert len(mounts) == 1, base["volumes"]
+    assert "GMS_INPUTS_HOST_DIR" in mounts[0]
+
+
+def test_host_worker_spool_is_mounted_where_the_app_reads_it():
+    """The console has no GPU: it hands GPU jobs to the host worker through a
+    spool directory, mounted read-write at the path GMS_HOST_SPOOL_DIR names."""
+    base = _compose()["services"]["console-base"]
+    env = dict(entry.split("=", 1) for entry in base["environment"])
+    target = env["GMS_HOST_SPOOL_DIR"]
+    mounts = [v for v in base["volumes"] if _target(v) == target]
+    assert len(mounts) == 1, base["volumes"]
+    assert "GMS_HOST_SPOOL_HOST_DIR" in mounts[0]
+    assert not mounts[0].endswith(":ro")
+
+
+# A checkout's host virtualenv can be several GB, and `COPY framegrade` would
+# carry it into the image. The image pip-installs its own packages, so no host
+# virtualenv or cache belongs in the build context. BuildKit reads
+# `<Dockerfile>.dockerignore` beside the Dockerfile, with patterns relative to
+# the build context root (the directory holding the sibling checkouts).
+_DOCKERIGNORE = DOCKER_DIR / "console.Dockerfile.dockerignore"
+
+
+def _ignored(rel: str) -> bool:
+    """Docker's last-match-wins exclusion for one context-relative path."""
+    excluded = False
+    for raw in _DOCKERIGNORE.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negate = line.startswith("!")
+        pat = (line[1:] if negate else line).strip("/")
+        rx = re.escape(pat).replace(r"\*\*/", "(?:.*/)?").replace(r"\*", "[^/]*")
+        if re.fullmatch(rx + "(?:/.*)?", rel):
+            excluded = not negate
+    return excluded
+
+
+def _copied_sources() -> list[str]:
+    return [
+        line.split()[1]
+        for line in _dockerfile_text().splitlines()
+        if line.startswith("COPY ") and not line.split()[1].startswith("--")
+    ]
+
+
+@pytest.mark.parametrize(
+    "junk", [".venv/bin/python", ".pytest_cache/v/x", ".coverage", "pkg/__pycache__/m.pyc"]
+)
+def test_build_context_excludes_host_virtualenvs_and_caches(junk: str):
+    checkouts = [s for s in _copied_sources() if "/" not in s]
+    assert checkouts, "expected COPYed checkout directories in console.Dockerfile"
+    for checkout in checkouts:
+        assert _ignored(f"{checkout}/{junk}"), (
+            f"{checkout}/{junk} would be copied into the console image"
+        )
+
+
+def test_build_context_keeps_what_the_image_needs():
+    for src in _copied_sources():
+        assert not _ignored(src), f"{src} is COPYed by console.Dockerfile but excluded"
+    for needed in ("framegrade/pyproject.toml", "framegrade/gomoveshift/__init__.py"):
+        assert not _ignored(needed), needed

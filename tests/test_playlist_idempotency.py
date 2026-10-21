@@ -24,6 +24,17 @@ from googleapiclient.errors import HttpError
 
 from _state_helpers import make_state
 
+from gomoveshift.pipeline.title_decision import decide_title
+
+
+@pytest.fixture(autouse=True)
+def _publication_gate_open(monkeypatch):
+    # The publication gate holds every insert until the final text is bound;
+    # these upload tests predate the gate, so they open it in-test only.
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.drive_phases.youtube_uploader.FINAL_TEXT_BIND_ON", True
+    )
+
 
 @pytest.fixture
 def fake_creds_dict():
@@ -138,7 +149,10 @@ def test_playlist_failure_persists_video_id_for_recovery(fake_creds_dict, fake_v
                 title="t",
                 description="d",
                 tags=[],
-                metadata={"location": "Somewhere"},
+                metadata={
+                    "location": "Somewhere",
+                    "title_decision": decide_title("longform", "t", None, suffix=""),
+                },
                 config=cfg,
             )
 
@@ -247,7 +261,10 @@ def test_first_run_persists_both_video_and_playlist_id(fake_creds_dict, fake_vid
             title="t",
             description="d",
             tags=[],
-            metadata={"location": "Somewhere"},
+            metadata={
+                "location": "Somewhere",
+                "title_decision": decide_title("longform", "t", None, suffix=""),
+            },
             config=cfg,
         )
 

@@ -37,6 +37,7 @@ _FAKE_REPORT = {
             "slot": "2026-08-18T16:00:00-04:00",
             "shorts_windows": ["14:00", "18:00"],
             "shorts_required": 2,
+            "shorts_slots": 14,
             "earliest_for_region": True,
         }
     ],
@@ -48,7 +49,7 @@ _FAKE_REPORT = {
 
 def test_schedule_view_returns_report_dict(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: _FAKE_REPORT
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: _FAKE_REPORT
     )
     result = console_schedule.schedule_view()
     assert result == _FAKE_REPORT
@@ -68,7 +69,7 @@ def test_schedule_view_missing_ledger_returns_empty_report_with_hint(monkeypatch
 
 def test_schedule_route_renders_booked_title_and_matrix(monkeypatch):
     monkeypatch.setattr(
-        console_schedule, "build_schedule_report", lambda ledger, config: _FAKE_REPORT
+        console_schedule, "build_schedule_report", lambda ledger, config, **_kw: _FAKE_REPORT
     )
     resp = _client().get("/schedule")
     assert resp.status_code == 200

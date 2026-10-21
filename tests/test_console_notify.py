@@ -439,12 +439,15 @@ def test_missed_slot_push_names_platform_project_short_and_eastern_time(
     assert "12:00 PM" in message and "EST" in message
 
 
-def test_first_run_seeds_silently_then_a_new_row_pushes_exactly_once(phone, tmp_path, monkeypatch):
+def test_first_run_notifies_the_actionable_backlog_once_then_new_rows_once(
+    phone, tmp_path, monkeypatch
+):
     monkeypatch.setenv("GMS_CONSOLE_NOTIFY_URL", _NTFY_URL)
-    _queue_row(tmp_path, "tiktok", status="failed_permanent")  # pre-existing
+    _queue_row(tmp_path, "tiktok", status="failed_permanent")  # pre-existing, still actionable
 
     notify.check_queue_regressions(tmp_path, _config(tmp_path))
-    assert phone.sent == []
+    notify.check_queue_regressions(tmp_path, _config(tmp_path))
+    assert len(phone.sent) == 1  # reconciled once, idempotent on the rerun
     assert (tmp_path / "notify_seen_queue.json").exists()
 
     conn = open_queue_db(tmp_path)
@@ -454,13 +457,14 @@ def test_first_run_seeds_silently_then_a_new_row_pushes_exactly_once(phone, tmp_
     notify.check_queue_regressions(tmp_path, _config(tmp_path))
     notify.check_queue_regressions(tmp_path, _config(tmp_path))
 
-    assert len(phone.sent) == 1
+    assert len(phone.sent) == 2
 
 
 def test_an_undelivered_push_is_not_recorded_so_the_next_pass_retries_it(
     phone, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("GMS_CONSOLE_NOTIFY_URL", _NTFY_URL)
+    monkeypatch.setenv("GMS_NOTIFY_BACKOFF_MIN", "0")  # retry on the very next pass
     _seeded(tmp_path)
     _queue_row(tmp_path, "tiktok", status="awaiting_manual_publish")
 
@@ -469,7 +473,8 @@ def test_an_undelivered_push_is_not_recorded_so_the_next_pass_retries_it(
 
     monkeypatch.setattr(notify.urllib.request, "urlopen", _down)
     notify.check_queue_regressions(tmp_path, _config(tmp_path))
-    assert json.loads((tmp_path / "notify_seen_queue.json").read_text()) == {}
+    seen = tmp_path / "notify_seen_queue.json"
+    assert not seen.exists() or json.loads(seen.read_text()) == {}
 
     monkeypatch.setattr(
         notify.urllib.request, "urlopen", lambda req, timeout=None: phone.sent.append(req)
