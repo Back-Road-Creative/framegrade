@@ -19,7 +19,7 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 
 from gomoveshift.pipeline._atomic_write import atomic_write_json
-from gomoveshift.pipeline.site_sync.known_ids import FROZEN_KNOWN_IDS
+from gomoveshift.pipeline.site_sync.known_ids import load_known_ids
 
 logger = logging.getLogger(__name__)
 
@@ -205,11 +205,11 @@ def build_channel_manifest(
     ``service`` is an already-built YouTube Data API client; ``now`` is a
     tz-aware timestamp stamped into ``generated_at``; ``known_ids`` are locally
     remembered ids forwarded to ``enumerate_uploads`` (private/unlisted videos),
-    defaulting to the frozen seed ``FROZEN_KNOWN_IDS`` (an explicit value, even
-    empty, replaces it).
+    defaulting to the operator's ``<GMS_INPUTS_DIR>/known_ids.txt``
+    (``load_known_ids``; an explicit value, even empty, replaces it).
     """
     if known_ids is None:
-        known_ids = FROZEN_KNOWN_IDS
+        known_ids = load_known_ids()
     by_id: dict[str, dict] = {
         video_id: {
             "id": video_id,

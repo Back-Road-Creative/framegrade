@@ -29,7 +29,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from ...paths import gms_output_dir
 from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
 from ...pipeline.site_sync.channel_manifest import enumerate_uploads, parse_iso8601_duration
-from ...pipeline.site_sync.known_ids import FROZEN_KNOWN_IDS
+from ...pipeline.site_sync.known_ids import load_known_ids
 from ...pipeline.social_generator import TERRAIN_DESCRIPTORS, TITLE_FRAME_TEMPLATES
 from ...publishing.anti_spam_gate import LEGACY_TITLE_POOL_RAW, PRE_POOL_TITLE_SHAPES
 from ...tracking.volume import (
@@ -134,11 +134,11 @@ def list_uploads(service: Any, known_ids: Optional[Iterable[str]] = None) -> Lis
     Ids come from the shared ``enumerate_uploads`` (uploads playlist unioned with
     its format-split siblings), so a video the plain listing omits is still seen,
     plus ``known_ids`` -- default the ids in the hygiene ledgers unioned with the
-    frozen seed ``FROZEN_KNOWN_IDS`` -- so a private
+    operator's ``<GMS_INPUTS_DIR>/known_ids.txt`` (``load_known_ids``) -- so a private
     video no listing returns still resolves (``--ids`` on it would otherwise
     refuse the whole batch as "not on this channel")."""
     if known_ids is None:
-        known_ids = list(dict.fromkeys([*ledger_video_ids(), *FROZEN_KNOWN_IDS]))
+        known_ids = list(dict.fromkeys([*ledger_video_ids(), *load_known_ids()]))
     ids = list(enumerate_uploads(service, known_ids=known_ids))
     videos: List[LiveVideo] = []
     for i in range(0, len(ids), 50):

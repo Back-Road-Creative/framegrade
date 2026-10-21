@@ -7,6 +7,12 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `<GMS_INPUTS_DIR>/known_ids.txt` lists the channel's private and unlisted
+  video ids that no uploads listing returns, one per line (`#` comments,
+  repeats dropped). `site_sync/known_ids.py` `load_known_ids()` reads it;
+  `build_channel_manifest` and `library-hygiene`'s `list_uploads` default to
+  it instead of the package seed `FROZEN_KNOWN_IDS`, which stays empty. An
+  absent file means no extra ids.
 - `GMS_INPUTS_DIR` names the operator's own inputs directory
   (`paths.gms_inputs_dir()`), default `operator-inputs/` under the data home.
   The console reads Route Story launch profiles from its `route_story_profiles/`
