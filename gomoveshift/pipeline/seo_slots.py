@@ -62,9 +62,9 @@ class CadenceSourceUnreadableError(RuntimeError):
 
 
 def _brand_yaml() -> Path:
-    from ..publishing.brand_policy import _SHIPPED_BRANDS_DIR
+    from ..publishing.brand_policy import brand_dir
 
-    return _SHIPPED_BRANDS_DIR / "gomoveshift" / "brand.yaml"
+    return brand_dir("gomoveshift") / "brand.yaml"
 
 
 def waypost_cadence(config) -> Cadence:
