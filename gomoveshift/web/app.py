@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from .. import __version__
 from ..analysis.pipeline import AnalysisPipeline
 from ..assembly.assembler import VideoAssembler
 from ..config import Config, get_config
@@ -280,7 +281,7 @@ def create_app(config: Optional[Config] = None, *, allow_remote: bool = False) -
     app = FastAPI(
         title="GoMoveShift Video Processor",
         description="Review and approve driving video edits",
-        version="0.1.0",
+        version=__version__,
     )
 
     # Restore jobs from disk so a restart doesn't lose tracked work.
