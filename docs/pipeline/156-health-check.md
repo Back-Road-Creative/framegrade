@@ -51,7 +51,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled`)
 **Recipe.** At start (`cmd_drive`, before the orchestrator runs) a drive writes
 `<stages dir>/resume.json` (schema `resume-recipe/1`; under the cache `_stages` dir, never
 tracked): `argv` (`python -m gomoveshift` + the drive's own args, `--fresh` removed), `cwd`, `sha`
-(git HEAD of the code root, null if unknown), `started_at`, `phase_reached` (updated by the
+(the product's own commit: HEAD of a source checkout, else the commit `pip` recorded for a git-ref install, else null; never an enclosing repo's HEAD), `started_at`, `phase_reached` (updated by the
 orchestrator's `_save_state` as phases complete). `env` records `GMS_INTERMEDIATE_DIR` when it was set: the staging
 override decides where the saved state lives, so `health heal` replays it as an `env K=V` prefix on
 the jobrun argv (shown in the dry run). No other variable is recorded or replayed. It also logs one stable line,
