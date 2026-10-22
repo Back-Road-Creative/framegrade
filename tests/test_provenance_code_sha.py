@@ -53,7 +53,7 @@ def test_shorts_sidecar_records_the_code_revision(tmp_path) -> None:
 
 
 def test_missing_git_metadata_is_null_with_a_reason(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(sidecar, "code_sha", lambda _root: None)
+    monkeypatch.setattr(sidecar, "product_sha", lambda: None)
     payload = json.loads(sidecar.write_lf_provenance_sidecar(tmp_path, _state_full()).read_text())
     assert payload["code_sha"] is None
     assert payload["null_reasons"]["code_sha"]
