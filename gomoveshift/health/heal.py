@@ -113,8 +113,18 @@ def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> 
     return key
 
 
-def launch_argv(code_root: Path, jobs_dir: Path, name: str, recipe_argv: List[str], letter: str):
+def launch_argv(
+    code_root: Path,
+    jobs_dir: Path,
+    name: str,
+    recipe_argv: List[str],
+    letter: str,
+    env: Optional[Dict[str, str]] = None,
+):
+    # ``env K=V`` in the argv itself, so a dry run shows the staging the resume will use.
+    prefix = ["env", *(f"{k}={v}" for k, v in sorted(env.items()))] if env else []
     return [
+        *prefix,
         "python3", str(job_runner(code_root)),
         "--name", name, "--heavy", "--detach", "--stall", _STALL_S,
         "--log-root", str(jobs_dir),
@@ -343,7 +353,9 @@ def run_heal(
                 att.update(action="refused", reason=cwd)
         if bound is not None:
             name = job_name(row["drive"], sha)
-            argv = launch_argv(code_root, jobs_dir, name, bound, letter)
+            argv = launch_argv(
+                code_root, jobs_dir, name, bound, letter, env=resume.recipe_env(recipe)
+            )
             att["interpreter"] = bound[0]
             if dry_run:  # the exact launch, so the evidence is gradeable before it runs
                 att.update(argv=argv, cwd=cwd, job_name=name, reason="dry run: would launch")

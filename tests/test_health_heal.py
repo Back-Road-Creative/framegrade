@@ -404,3 +404,23 @@ def test_job_runner_defaults_to_the_code_root_script_and_honours_the_env(tmp_pat
     rig.run()
     argv, _cwd = rig.launches[0]
     assert argv[:2] == ["python3", str(custom)]
+
+
+def test_resume_keeps_the_recipes_staging_override(tmp_path):
+    rig = Rig(tmp_path)
+    path = tmp_path / "stages" / "resume.json"
+    recipe = json.loads(path.read_text())
+    stages = "/mnt/c/Stages/demo-drive-a"
+    recipe["env"] = {"GMS_INTERMEDIATE_DIR": stages}
+    path.write_text(json.dumps(recipe))
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert argv[:2] == ["env", f"GMS_INTERMEDIATE_DIR={stages}"]
+    assert argv[2] == "python3" and argv[3].endswith("bin/job-runner.py")
+
+
+def test_resume_without_a_recorded_env_launches_the_job_runner_directly(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert argv[0] == "python3"

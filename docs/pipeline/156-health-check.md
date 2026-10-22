@@ -52,7 +52,9 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled`)
 `<stages dir>/resume.json` (schema `resume-recipe/1`; under the cache `_stages` dir, never
 tracked): `argv` (`python -m gomoveshift` + the drive's own args, `--fresh` removed), `cwd`, `sha`
 (git HEAD of the code root, null if unknown), `started_at`, `phase_reached` (updated by the
-orchestrator's `_save_state` as phases complete). It also logs one stable line,
+orchestrator's `_save_state` as phases complete). `env` records `GMS_INTERMEDIATE_DIR` when it was set: the staging
+override decides where the saved state lives, so `health heal` replays it as an `env K=V` prefix on
+the jobrun argv (shown in the dry run). No other variable is recorded or replayed. It also logs one stable line,
 `resume recipe: <path>`; `health check` parses that line from the drive log into the incident's
 `resume_recipe`, and uses its directory as the stages dir that links sibling runs. A
 single-`--phase` run logs the line but does not rewrite the file (so a heal run can't overwrite
