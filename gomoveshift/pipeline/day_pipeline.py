@@ -756,6 +756,7 @@ def _render_day_shorts(
     _render_specs: list = []
     # Per-rank route-claim outcomes for the Shorts system review record.
     _short_outcomes: dict = {}
+    _short_route_records: dict = {}  # rank -> RouteEvidence.record() for the place gate
     # Every Short whose retained GPS cannot support its text, reported together.
     _route_refusals: list = []
     # Degraded-derivation visibility: per-day counts feeding ONE summary
@@ -1028,6 +1029,8 @@ def _render_day_shorts(
             if _route_note:
                 logger.warning("Short rank %d (day %s): %s", rank, date, _route_note)
                 short_ost_text = _route_label
+            _record = getattr(short_route_fn, "last_record", None)
+            _short_route_records[rank] = _record if isinstance(_record, dict) else None
             # What this clip's own retained GPS was measured to support.
             _short_outcomes[rank] = {
                 "refused": False,
@@ -1166,6 +1169,7 @@ def _render_day_shorts(
                 "end_sec": float(short_range.end_sec),
                 "regions": list(_clip_regions or []),
                 "roads": list(getattr(_clip_regions, "roads", None) or []),
+                "route_record": _short_route_records.get(rank),
                 "median_speed_mps": _median_speed,
                 "place_source": "clip_gps" if _ost_from_clip_vote else "lf_label",
             }

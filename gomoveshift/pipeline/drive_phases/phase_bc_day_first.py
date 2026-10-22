@@ -396,26 +396,14 @@ class PhaseBCDayFirst:
 
         # -- Build or load the real DrivePlan (with real segments +
         #    montage peaks) so run_all_days can assemble LFs segment-
-        #    by-segment. Prefer an existing drive_plan.json on disk
-        #    (resume), fall back to building from drive_scores in-memory.
+        #    by-segment. Prefer an existing drive_plan.json on disk built by
+        #    this code (resume), fall back to building from drive_scores.
         drive_plan_path = stages_dir / "drive_plan.json"
-        real_plan: Optional[DrivePlan] = None
-        if drive_plan_path.exists():
-            try:
-                real_plan = DrivePlan.load(drive_plan_path)
-                logger.info(
-                    "  day-first: loaded existing drive_plan.json (%d LFs)",
-                    len(real_plan.regular_lfs),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "  day-first: failed to load drive_plan.json (%s), rebuilding",
-                    exc,
-                )
-                real_plan = None
+        real_plan = _load_current_drive_plan(drive_plan_path)
         if real_plan is None:
             real_plan = _build_drive_plan_from_state(self.config, state)
             if real_plan is not None:
+                real_plan.plan_code_version = PHASE_BC_CODE_VERSION
                 try:
                     real_plan.save(drive_plan_path)
                 except Exception as exc:  # noqa: BLE001
@@ -1470,6 +1458,33 @@ def _assert_skeleton_lf_has_location(
         f"override; refusing the drive-wide fallback label {drive_wide_location!r}. "
         f"Re-run with --list-lfs, then add --per-lf-location '{lf_idx}=<route>'."
     )
+
+
+def _load_current_drive_plan(drive_plan_path: Path) -> Optional[DrivePlan]:
+    """Load ``drive_plan.json`` only when this phase B+C code version built it.
+
+    A plan from older code (no stamp, or another version) is rebuilt rather
+    than reused: segment selection changes with the code (the GPS-gap mask),
+    and a reused pre-mask plan feeds the place gate footage the current
+    planner drops. Returns None for a missing, unreadable or stale plan.
+    """
+    if not drive_plan_path.exists():
+        return None
+    try:
+        plan = DrivePlan.load(drive_plan_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("  day-first: failed to load drive_plan.json (%s), rebuilding", exc)
+        return None
+    if plan.plan_code_version != PHASE_BC_CODE_VERSION:
+        logger.warning(
+            "  day-first: drive_plan.json was built by phase B+C code version %s "
+            "(current %d), rebuilding",
+            plan.plan_code_version,
+            PHASE_BC_CODE_VERSION,
+        )
+        return None
+    logger.info("  day-first: loaded existing drive_plan.json (%d LFs)", len(plan.regular_lfs))
+    return plan
 
 
 def _build_drive_plan_from_state(config: Config, state) -> Optional[DrivePlan]:

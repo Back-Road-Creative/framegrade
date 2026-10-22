@@ -388,6 +388,8 @@ class SocialPost:
     sampled_regions: list[str] = field(default_factory=list)
     #: The clip's OWN GPS road names; empty for an LF or a road-less clip.
     sampled_roads: list[str] = field(default_factory=list)
+    #: The clip's measured route record (``RouteEvidence.record()``) for the place gate.
+    route_record: Optional[dict] = None
     # Whether this short is flagged for the interactive family — the
     # generator withholds the place from ``youtube_title``, ``tiktok_title``,
     # every ``captions[...]``/``caption`` and ``youtube_tags`` by
@@ -1840,6 +1842,7 @@ class SocialGenerator:
         per_short_locations: Optional[List[str]] = None,
         per_short_regions: Optional[List[List[str]]] = None,
         per_short_roads: Optional[List[List[str]]] = None,
+        per_short_route_records: Optional[List[Optional[dict]]] = None,
         global_indexes: Optional[Sequence[int]] = None,
         per_short_title_facts: Optional[Sequence[Optional[TitleFacts]]] = None,
     ) -> List[SocialPost]:
@@ -1961,6 +1964,8 @@ class SocialGenerator:
                 if regions:
                     post.sampled_regions = list(regions)
                     post.sampled_roads = list(roads or [])
+                    if per_short_route_records and i - 1 < len(per_short_route_records):
+                        post.route_record = per_short_route_records[i - 1] or None
             # Apply the resolved global index (explicit list wins,
             # else the legacy offset) for multi-LF drives.
             if global_indexes is not None or index_offset:

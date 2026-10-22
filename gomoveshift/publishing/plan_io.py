@@ -224,6 +224,7 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
             recording_date=raw["recording_date"],
             sampled_regions=_str_tuple(raw, "sampled_regions", path, ctx),
             sampled_roads=_str_tuple_or_empty(raw, "sampled_roads", path, ctx),
+            route_record=raw.get("route_record") or None,
             parent_lf_video_id=raw["parent_lf_video_id"],
             parent_lf_publish_at=_dt(raw, "parent_lf_publish_at", path, ctx),
             payloads=_payloads(_obj(raw, "payloads", path, ctx), path, ctx),

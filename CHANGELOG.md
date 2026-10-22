@@ -46,6 +46,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Changed
 
+- Zero-tolerance place gate extended to a Short's title, description and tags: each Short's measured route record is persisted (audit sidecar, plan) and checked before upload; a GPS-bearing Short with no persisted bins is refused as unverifiable.
+- Waypost (`seo-manager`) and `gps-journey` pins move to their first release tags' commits: Waypost `v0.1.0` (`f879603d0275`, adds the `SEO_INPUTS_DIR` inputs layer) and gps-journey `v0.2.0` (`10f9f96ae2fd`, adds `GPS_INPUTS_DIR`), in `pyproject.toml` and `ci/siblings.txt`. Docs: `docs/pipeline/82-waypost-region-pin.md`.
 - Zero-tolerance place gate: a place named in an LF title, OST, description or
   tags must hold every retained second; `route_claims.recheck_place_text`
   re-checks a persisted record offline.
@@ -83,6 +85,8 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- A resumed drive now rebuilds a `drive_plan.json` written by older phase B+C code instead of reusing it, so planner fixes such as the GPS-gap mask apply to drives that were already planned.
+- Viewer-facing place names go through Waypost's locality rule (`seo_manager.core.locality`): a tract/vicinity name such as Longwood is dropped from `towns_traversed`, the per-LF place sequence (Route line, per-LF arc) and the description, an island named in its own geocode address stands in (else it is just dropped), and the "Driving through" sentence names each place once.
 - Superlong parts are route-checked over their own retained ranges.
 - Drive-text chapters bind to the first evidenced place in each title.
 - Phase D no longer crashes on a claim id with no matching evidence place.

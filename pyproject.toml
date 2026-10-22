@@ -84,15 +84,14 @@ dependencies = [
     "onnxruntime-gpu[cuda,cudnn]==1.22.0",
     "deface>=1.5.0",
     # Waypost (distribution name seo-manager) and gps-journey — former workspace
-    # siblings, now published as public repos. Pinned to a COMMIT, not a tag:
-    # neither repo has cut a release tag that carries the reviewed code yet, and
-    # a bare name either resolves to whatever copy happens to be installed or
-    # 404s on PyPI. The initial extraction moved both pins to reviewed commits;
-    # subsequent features may update either independently. Like the four libraries below,
-    # requirements.lock carries no entry for them (an unnamed `git+` line is
-    # rejected by `uv pip install --constraint`).
-    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@c1e24a1cd53ec00d4e5d3fd3ff24189d7f9ccc4e",
-    "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@6a529ee6c13642f5f95a120bd285095ae7c69f24",
+    # siblings, now public repos and the source of truth for that code. Pinned to
+    # the COMMIT of a release tag (waypost v0.1.0, gps-journey v0.2.0): a tag can
+    # be moved, a SHA cannot, and a bare name either resolves to whatever copy
+    # happens to be installed or 404s on PyPI. ci/siblings.txt pins the same
+    # commits. Like the four libraries below, requirements.lock carries no entry
+    # for them (an unnamed `git+` line is rejected by `uv pip install --constraint`).
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@f879603d0275ff001d7e630b9fa3796a54718b6d",
+    "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at
     # an instant), pycube-lut (.cube / HALD / 1D LUT read + apply), keycut

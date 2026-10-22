@@ -197,6 +197,11 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: The clip's OWN GPS road names, the evidence behind any road tag.
     #: Empty for a clip with no GPS road and for plans written before this field.
     sampled_roads: tuple[str, ...] = ()
+    #: The clip's measured route (``RouteEvidence.record()``: bins, gaps, proofs,
+    #: ``windows_key``) -- what the zero-tolerance place gate checks the Short's title,
+    #: description and tags against. ``None`` for a plan written before that gate; such a
+    #: GPS-bearing Short is refused as unverifiable. Excluded from equality and hashing.
+    route_record: Optional[dict] = field(default=None, compare=False, hash=False)
     #: Explicit publishable format -- one of KNOWN_FORMATS, or ``None`` for
     #: "not stated". ``None`` must never be READ as FORMAT_SHORT by any
     #: consumer -- that silent default is the defect this field exists to

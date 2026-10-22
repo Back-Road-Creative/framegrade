@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from _state_helpers import make_state
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 
 def _segment(file_idx: int, start: float = 0.0, end: float = 10.0):
@@ -90,6 +91,7 @@ def _build_state(tmp_path: Path, days_to_lf_indices: dict[str, list[int]]):
         "total_source_duration": sum(file_durations),
         "total_highlight_duration": 0.0,
         "best_moments_filtered": False,
+        "plan_code_version": PHASE_BC_CODE_VERSION,
     }
     for ep_idx, d in enumerate(dates):
         for lf_idx in days_to_lf_indices[d]:

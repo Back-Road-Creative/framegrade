@@ -1,7 +1,7 @@
 ## Waypost retained-region dependency
 
-GMS pins Waypost to merge commit `c1e24a1cd53ec00d4e5d3fd3ff24189d7f9ccc4e`,
-which contains Waypost #18's bounded Census region review, #19's separate
+GMS pins Waypost to `f879603d0275ff001d7e630b9fa3796a54718b6d`, the commit of
+release tag `v0.1.0`, which contains Waypost #18's bounded Census region review, #19's separate
 region-only long-form title policy, and #20's millisecond comparison of proof
 gap lengths (GMS rebuilds a gap end as start + length, so an exact-fit gap
 carried float noise and every bounded proof was refused).

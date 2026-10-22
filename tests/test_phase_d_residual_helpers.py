@@ -199,6 +199,7 @@ class TestBuildSocialPostsPerLf:
             per_short_locations=None,
             per_short_regions=None,
             per_short_roads=None,
+            per_short_route_records=None,
             per_short_title_facts=None,
         ):
             call = SimpleNamespace(

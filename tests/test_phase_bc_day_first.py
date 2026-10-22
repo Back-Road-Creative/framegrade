@@ -23,6 +23,7 @@ from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
 
 from gomoveshift.pipeline.drive_phases import phase_bc_day_first as phase_bc_day_first_mod
 from _state_helpers import make_state
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 
 class _Loc:
@@ -426,6 +427,7 @@ class TestRealLFPlansThreaded:
             "total_highlight_duration": 0.0,
             "highlight_ratio": 0.0,
             "best_moments_filtered": False,
+            "plan_code_version": PHASE_BC_CODE_VERSION,
         }
         path = stages_dir / "drive_plan.json"
         path.write_text(json.dumps(payload))
@@ -527,6 +529,125 @@ class TestRealLFPlansThreaded:
         labels = state.get("per_lf_locations") or {}
         assert len(labels) == 3
         assert len(set(labels.values())) == 3
+
+    def test_plan_from_older_code_is_rebuilt_and_stamped(self, tmp_path):
+        """A drive_plan.json written by older phase B+C code (no stamp) is
+        rebuilt from state, never reused: Ace Basin 2026-10-21 resumed a
+        pre-GPS-gap-mask plan and the place gate refused 825 s of gap that
+        the current planner drops. The rebuilt plan is saved stamped."""
+        from gomoveshift.config import Config
+        from gomoveshift.models import DrivePlan, RegularLFPlan
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
+            PHASE_BC_CODE_VERSION,
+            PhaseBCDayFirst,
+        )
+
+        output_base = tmp_path / "out"
+        stages_dir = output_base / "_stages"
+        stages_dir.mkdir(parents=True)
+        stale = [
+            _make_real_lf_dict(1, [_seg_dict(0, 100, 200, 35.0, -80.0)]),
+            _make_real_lf_dict(2, [_seg_dict(0, 500, 600, 34.0, -81.0)]),
+            _make_real_lf_dict(3, [_seg_dict(0, 1000, 1100, 33.0, -82.0)]),
+        ]
+        path = self._write_drive_plan(stages_dir, stale)
+        payload = json.loads(path.read_text())
+        del payload["plan_code_version"]
+        path.write_text(json.dumps(payload))
+        rebuilt = DrivePlan(
+            source_files=[],
+            processed_files=[],
+            regular_lfs=[
+                RegularLFPlan.from_dict(
+                    _make_real_lf_dict(1, [_seg_dict(0, 100, 200, 35.0, -80.0)])
+                )
+            ],
+            score_threshold=0.0,
+            total_source_duration=0.0,
+            total_highlight_duration=0.0,
+        )
+
+        ep = SimpleNamespace(
+            index=0,
+            concat_path=Path("/fake/ep_000.mp4"),
+            date="2026-02-20",
+            total_duration=1500.0,
+            gpx_path=None,
+            creation_time=None,
+        )
+        state = make_state(
+            output_base=output_base,
+            ingest_plan=SimpleNamespace(episodes=[ep]),
+            episode_files=["/fake/ep_000.mp4"],
+            episode_dates=["2026-02-20"],
+            episode_locations=[""],
+            file_durations=[1500.0],
+            region="usa",
+            location="SC Trip",
+            drive_scores=None,
+            file_boundaries=[(0.0, 1500.0)],
+        )
+        geocoder = MagicMock()
+        geocoder.reverse_geocode.side_effect = lambda lat, lon: _Loc(
+            "Asheville", state="SC", country="USA"
+        )
+        geocoder.reverse_geocode_detailed.side_effect = _detailed_by_lat
+        captured = {}
+
+        def _fake_run_all_days(**kwargs):
+            captured.update(kwargs)
+            return [
+                SimpleNamespace(
+                    date=b.date,
+                    master_path=Path(f"/fake/master_{b.date}.mp4"),
+                    regular_lf_paths=[],
+                    short_paths=[],
+                )
+                for b in kwargs["day_batches"]
+            ]
+
+        with (
+            patch(
+                "gomoveshift.pipeline.gps_enrichment._build_shared_geocoder",
+                return_value=geocoder,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
+                side_effect=_fake_run_all_days,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first._build_drive_plan_from_state",
+                return_value=rebuilt,
+            ),
+        ):
+            PhaseBCDayFirst(Config()).run(state, probe_duration_fn=lambda p: 100.0)
+
+        assert len(captured["lf_plans_by_date"]["2026-02-20"]) == 1
+        saved = json.loads(path.read_text())
+        assert saved["plan_code_version"] == PHASE_BC_CODE_VERSION
+        assert len(saved["regular_lfs"]) == 1
+
+    def test_only_a_plan_stamped_with_the_current_code_is_reused(self, tmp_path):
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
+            PHASE_BC_CODE_VERSION,
+            _load_current_drive_plan,
+        )
+
+        lfs = [_make_real_lf_dict(1, [_seg_dict(0, 100, 200, 35.0, -80.0)])]
+        path = self._write_drive_plan(tmp_path, lfs)
+        payload = json.loads(path.read_text())
+        del payload["plan_code_version"]
+        path.write_text(json.dumps(payload))
+        assert _load_current_drive_plan(path) is None
+        payload["plan_code_version"] = PHASE_BC_CODE_VERSION - 1
+        path.write_text(json.dumps(payload))
+        assert _load_current_drive_plan(path) is None
+        payload["plan_code_version"] = PHASE_BC_CODE_VERSION
+        path.write_text(json.dumps(payload))
+        plan = _load_current_drive_plan(path)
+        assert plan is not None and plan.plan_code_version == PHASE_BC_CODE_VERSION
+        assert plan.to_dict()["plan_code_version"] == PHASE_BC_CODE_VERSION
+        assert _load_current_drive_plan(tmp_path / "missing.json") is None
 
     def test_audit_visible_state_preseeded_before_run_all_days(self, tmp_path):
         """per_lf_titles + per_lf_recording_date must be populated
@@ -1652,6 +1773,7 @@ class TestPerLFLocationsThreadedToRunAllDays:
             "total_highlight_duration": 0.0,
             "highlight_ratio": 0.0,
             "best_moments_filtered": False,
+            "plan_code_version": PHASE_BC_CODE_VERSION,
         }
         path = stages_dir / "drive_plan.json"
         path.write_text(json.dumps(payload))
@@ -1980,6 +2102,7 @@ class TestPerLFOSTCanonicalText:
             "total_highlight_duration": 0.0,
             "highlight_ratio": 0.0,
             "best_moments_filtered": False,
+            "plan_code_version": PHASE_BC_CODE_VERSION,
         }
         path = stages_dir / "drive_plan.json"
         path.write_text(json.dumps(payload))

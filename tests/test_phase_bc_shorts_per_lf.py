@@ -37,6 +37,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from _state_helpers import make_state
+from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
 
 # ── Fixtures: build minimal plans + on-disk finals ────────────────────
@@ -161,6 +162,7 @@ def _build_state_with_drive_plan(
         "total_source_duration": sum(file_durations),
         "total_highlight_duration": 0.0,
         "best_moments_filtered": False,
+        "plan_code_version": PHASE_BC_CODE_VERSION,
     }
     for ep_idx, d in enumerate(dates):
         for pos, lf_idx in enumerate(days_to_lf_indices[d]):

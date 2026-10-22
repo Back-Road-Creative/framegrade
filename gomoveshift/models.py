@@ -379,6 +379,8 @@ class DrivePlan:
     total_source_duration: float
     total_highlight_duration: float
     best_moments_filtered: bool = False  # True when best_moments_mode filtered segments
+    # Phase B+C code version that built this plan; phase B+C rebuilds any other.
+    plan_code_version: Optional[int] = None
 
     @property
     def highlight_ratio(self) -> float:
@@ -396,6 +398,7 @@ class DrivePlan:
             "total_highlight_duration": self.total_highlight_duration,
             "highlight_ratio": self.highlight_ratio,
             "best_moments_filtered": self.best_moments_filtered,
+            "plan_code_version": self.plan_code_version,
         }
 
     def save(self, path: Path) -> None:
@@ -421,6 +424,7 @@ class DrivePlan:
             total_source_duration=d["total_source_duration"],
             total_highlight_duration=d["total_highlight_duration"],
             best_moments_filtered=d.get("best_moments_filtered", False),
+            plan_code_version=d.get("plan_code_version"),
         )
 
     @classmethod

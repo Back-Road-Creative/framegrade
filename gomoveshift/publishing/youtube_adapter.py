@@ -167,6 +167,10 @@ def short_final_text_context(record: ShortPublishRecord) -> dict:
         "visible": {SHORT_SURFACE: payload.title},
         # A Short's review covers its title only: no drive description layout.
         "description_layout": None,
+        # Zero tolerance: this GPS-bearing Short's title, description and tags are
+        # checked against its measured route; none persisted = unverifiable, refused.
+        "route_record": record.route_record,
+        "place_record_required": True,
         "source_fingerprint": _digest("src-", [record.media.sha256]),
         "plan_fingerprint": _digest(
             "plan-",
