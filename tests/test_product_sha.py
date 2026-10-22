@@ -61,13 +61,16 @@ def test_package_nested_in_unrelated_repo_is_not_that_repos_head(tmp_path):
         assert store.product_sha(package_dir=pkg) is None
 
 
+_COMMIT = "1111111111111111111111111111111111111111"  # synthetic commit id
+
+
 def test_installed_dist_commit_id_is_used(tmp_path):
     _repo(tmp_path / "other")
     pkg = _fake_pkg(tmp_path / "other" / "venv" / "site-packages")
     with mock.patch.object(
-        store.importlib.metadata, "distribution", return_value=_Dist(_direct_url("deadbeef1234"))
+        store.importlib.metadata, "distribution", return_value=_Dist(_direct_url(_COMMIT))
     ):
-        assert store.product_sha(package_dir=pkg) == "deadbeef1234"
+        assert store.product_sha(package_dir=pkg) == _COMMIT
 
 
 def test_dist_name_matches_pyproject():
