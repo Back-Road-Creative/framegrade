@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,9 @@ HOLD_NAME = "no-auto-resume"
 SCHEMA = "resume-recipe/1"
 LINE_PREFIX = "resume recipe: "
 _LINE_RE = re.compile(re.escape(LINE_PREFIX) + r"(\S.*?)\s*$")
+#: Environment a resume must keep: the staging override decides where the saved state lives, so a
+#: resume without it stages somewhere empty. Only these keys are recorded or replayed.
+RECIPE_ENV_KEYS = ("GMS_INTERMEDIATE_DIR",)
 
 
 def recipe_line(path: Path) -> str:
@@ -40,13 +44,15 @@ def write_recipe(
     stages_dir: Path, argv: List[str], *, cwd: str, sha: Optional[str], now_iso: str
 ) -> Optional[Path]:
     """Write the recipe: the drive's own CLI args (``argv`` excludes the program name) with
-    ``--fresh`` removed -- a resume must keep the prior state, not clear it."""
+    ``--fresh`` removed -- a resume must keep the prior state, not clear it -- plus the
+    ``RECIPE_ENV_KEYS`` set in this process's environment."""
     path = Path(stages_dir) / RECIPE_NAME
     try:
         body = {
             "schema": SCHEMA,
             "argv": [sys.executable, "-m", "gomoveshift", *[a for a in argv if a != "--fresh"]],
             "cwd": cwd,
+            "env": {k: os.environ[k] for k in RECIPE_ENV_KEYS if os.environ.get(k)},
             "sha": sha,
             "started_at": now_iso,
             "phase_reached": None,
@@ -80,6 +86,14 @@ def read_recipe(path: Path) -> Optional[Dict[str, Any]]:
     if not isinstance(data.get("cwd"), str):
         return None
     return data
+
+
+def recipe_env(recipe: Dict[str, Any]) -> Dict[str, str]:
+    """The recorded ``RECIPE_ENV_KEYS`` a resume must run with; anything else is ignored."""
+    env = recipe.get("env")
+    if not isinstance(env, dict):
+        return {}
+    return {k: env[k] for k in RECIPE_ENV_KEYS if isinstance(env.get(k), str) and env[k]}
 
 
 def mark_phase(stages_dir: Path, phase: str) -> None:

@@ -99,3 +99,27 @@ def test_orchestrator_save_state_marks_last_completed_phase(tmp_path):
     assert (
         json.loads((tmp_path / "resume.json").read_text())["phase_reached"] == "phase_bc_day_first"
     )
+
+
+def test_write_recipe_records_the_staging_override(tmp_path, monkeypatch):
+    # A drive staged by GMS_INTERMEDIATE_DIR must resume in the same stages dir: without it the
+    # resume stages under the home cache, finds no saved state and can fail the space preflight.
+    monkeypatch.setenv("GMS_INTERMEDIATE_DIR", "/mnt/c/Stages/demo-drive-a")
+    path = resume.write_recipe(tmp_path, ["drive"], cwd="/", sha=None, now_iso="t")
+    got = json.loads(path.read_text())
+    assert got["env"] == {"GMS_INTERMEDIATE_DIR": "/mnt/c/Stages/demo-drive-a"}
+    assert resume.recipe_env(resume.read_recipe(path)) == got["env"]
+
+
+def test_write_recipe_without_the_override_records_no_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_INTERMEDIATE_DIR", raising=False)
+    path = resume.write_recipe(tmp_path, ["drive"], cwd="/", sha=None, now_iso="t")
+    assert json.loads(path.read_text())["env"] == {}
+    assert resume.recipe_env(resume.read_recipe(path)) == {}
+
+
+def test_recipe_env_keeps_only_known_string_keys():
+    recipe = {"env": {"GMS_INTERMEDIATE_DIR": "/s", "PATH": "/evil", "GMS_X": 3}}
+    assert resume.recipe_env(recipe) == {"GMS_INTERMEDIATE_DIR": "/s"}
+    assert resume.recipe_env({"env": "GMS_INTERMEDIATE_DIR=/s"}) == {}
+    assert resume.recipe_env({}) == {}
