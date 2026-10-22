@@ -4,6 +4,7 @@ Schema ``health-incident/1`` (``new_incident`` is the single writer of the commo
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
@@ -15,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 SCHEMA = "health-incident/1"
 INCIDENTS_DIR_ENV = "GMS_HEALTH_INCIDENTS_DIR"
 DATA_ROOT_ENV = "GMS_DATA_ROOT"
+#: Distribution name, as ``[project] name`` in pyproject.toml (a test pins the two together).
+DIST_NAME = "gomoveshift-video"
 
 
 def utc_iso(epoch: Optional[float] = None) -> str:
@@ -62,6 +65,46 @@ def code_sha(code_root: Path) -> Optional[str]:
     except (OSError, subprocess.SubprocessError):
         return None
     return out or None
+
+
+def _git_toplevel(path: Path) -> Optional[Path]:
+    try:
+        out = subprocess.run(  # noqa: S603,S607 -- fixed argv
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return Path(out).resolve() if out else None
+
+
+def _installed_commit() -> Optional[str]:
+    """``vcs_info.commit_id`` from the installed distribution's PEP 610 ``direct_url.json``."""
+    try:
+        text = importlib.metadata.distribution(DIST_NAME).read_text("direct_url.json")
+        info = json.loads(text) if text else None
+    except (importlib.metadata.PackageNotFoundError, OSError, ValueError):
+        return None
+    vcs = info.get("vcs_info") if isinstance(info, dict) else None
+    commit = vcs.get("commit_id") if isinstance(vcs, dict) else None
+    return commit if isinstance(commit, str) and commit else None
+
+
+def product_sha(package_dir: Optional[Path] = None) -> Optional[str]:
+    """The commit of THIS product's code, or None. Never an enclosing repo's HEAD.
+
+    A source checkout (the directory holding the package is itself a git work tree's toplevel)
+    gives its HEAD; an install made from a git ref gives the commit pip recorded in
+    ``direct_url.json``; anything else is unknown. A package that merely sits inside some other
+    work tree (a venv under an unrelated repo) is not a checkout of this product."""
+    pkg = (package_dir or Path(__file__).resolve().parents[1]).resolve()
+    parent = pkg.parent
+    if _git_toplevel(parent) == parent:
+        return code_sha(parent)
+    return _installed_commit()
 
 
 def safe_name(text: str) -> str:

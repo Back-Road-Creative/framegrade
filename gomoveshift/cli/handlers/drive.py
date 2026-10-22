@@ -58,13 +58,12 @@ def _write_resume_recipe(args, config):
         return None
     try:
         from ...health import resume
-        from ...health.store import code_sha, utc_iso
+        from ...health.store import product_sha, utc_iso
 
         path = _stages_base(args, config) / resume.RECIPE_NAME
         if not getattr(args, "phase", None):
-            root = Path(__file__).resolve().parents[3]
             written = resume.write_recipe(
-                path.parent, sys.argv[1:], cwd=os.getcwd(), sha=code_sha(root), now_iso=utc_iso()
+                path.parent, sys.argv[1:], cwd=os.getcwd(), sha=product_sha(), now_iso=utc_iso()
             )
             if written is None:
                 return None

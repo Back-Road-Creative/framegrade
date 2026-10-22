@@ -62,7 +62,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..health.store import code_sha
+from ..health.store import product_sha
 from .cache import load_cached_json
 
 logger = logging.getLogger(__name__)
@@ -155,11 +155,11 @@ def build_lf_provenance_payload(state) -> dict:
 
 def _stamp_code_sha(payload: dict) -> None:
     """Record which code revision wrote ``payload`` (null-with-reason if unknown)."""
-    sha = code_sha(Path(__file__).resolve().parent)
+    sha = product_sha()
     payload["code_sha"] = sha
     if sha is None:
         payload.setdefault("null_reasons", {})["code_sha"] = (
-            "no git metadata reachable from the package"
+            "no git checkout or recorded install commit for the package"
         )
 
 
