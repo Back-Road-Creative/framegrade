@@ -49,12 +49,12 @@ UNPASSED_DETECT_AND_TRACK_DEFAULTS = {
     "track_assoc_min_gate_px": 72,
     "track_dedup_iou": 0.55,
     "plate_threads": 0,
-    # Crash-resume checkpointing is deliberately NOT wired up
-    # yet — wiring it means threading a path and a cadence through both blur call
-    # sites, which is its own change. Pinned rather than passed so the pipeline
-    # keeps its all-or-nothing single-pass behaviour until then, and so a future
+    # Crash-resume checkpointing: the day-master call site passes a path and a
+    # cadence (multi-hour passes, see BLUR_CHECKPOINT_EVERY_S); the single-video
+    # stage does not, so its defaults stay pinned — a future
     # redactcam that turns checkpointing ON by default fails here instead of
-    # silently writing state files beside a day master.
+    # silently writing state files beside a single-video master. The overlap is
+    # passed by neither and is what repairs the seam on a day-master resume.
     "checkpoint_path": None,
     "checkpoint_every_frames": 0,
     "checkpoint_overlap_frames": 90,
