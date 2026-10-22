@@ -16,7 +16,7 @@ The optional ``audio:`` block lives in ``brand.yaml`` beside the
 same "missing file/block/key falls back to disabled" rule. The engine
 never imports publishing code (``tests/test_media_boundary.py``), so the
 caller on the orchestration side passes the shipped-brands directory in
-(``brand_policy._SHIPPED_BRANDS_DIR``) and the two loaders cannot
+(``brand_policy.brand_dir(slug).parent``, which honours ``GMS_BRANDS_DIR``) and the two loaders cannot
 disagree about where a brand's config lives.
 """
 

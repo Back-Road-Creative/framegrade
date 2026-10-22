@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel
 
 from ..paths import gms_secret_path, gms_staging_dir
+from ..publishing.brand_policy import brand_dir, host_brands_dir
 
 _CONSOLE_ROOT = Path(__file__).parent
 _REGISTRY_PATH = _CONSOLE_ROOT / "registry" / "gms_settings.yaml"
@@ -45,7 +46,7 @@ def load_brand_settings(slug: str, data_dir: Optional[Path] = None) -> dict:
     use (never mutates the shipped copy), then return its contents."""
     path = _brand_settings_path(slug, data_dir)
     if not path.exists():
-        template = _SHIPPED_BRANDS_DIR / slug / "settings.yaml"
+        template = brand_dir(slug, _SHIPPED_BRANDS_DIR) / "settings.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(template.read_text() if template.exists() else "{}\n")
     return yaml.safe_load(path.read_text()) or {}
@@ -59,11 +60,13 @@ def save_brand_settings(slug: str, values: dict, data_dir: Optional[Path] = None
 
 
 def known_brands() -> list[str]:
-    """Brand slugs: the shipped template directories union any brand that
-    has ever saved an override file under the console data dir."""
+    """Brand slugs: the shipped template directories, any slug directory under
+    ``GMS_BRANDS_DIR``, and any brand that has ever saved an override file under the console data dir."""
     slugs: set[str] = set()
-    if _SHIPPED_BRANDS_DIR.exists():
-        slugs.update(p.name for p in _SHIPPED_BRANDS_DIR.iterdir() if p.is_dir())
+    host = host_brands_dir()
+    for root in (_SHIPPED_BRANDS_DIR, host):
+        if root is not None and root.exists():
+            slugs.update(p.name for p in root.iterdir() if p.is_dir())
     data_brands_dir = console_data_dir() / "brands"
     if data_brands_dir.exists():
         slugs.update(p.name for p in data_brands_dir.iterdir() if p.is_dir())
@@ -80,7 +83,7 @@ def brand_disabled_tabs(slug: str) -> set[str]:
     """Console nav slugs this brand hides (e.g. no drive pipeline enabled).
     A missing/empty ``brand.yaml`` means every tab stays enabled -- the
     gomoveshift brand ships none, so it is unaffected."""
-    path = _SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+    path = brand_dir(slug, _SHIPPED_BRANDS_DIR) / "brand.yaml"
     if not path.exists():
         return set()
     raw = yaml.safe_load(path.read_text()) or {}
@@ -104,7 +107,7 @@ def brand_kit(slug: str) -> Optional[dict]:
     ``kit.<field>`` — fail loudly rather than silently ignore a brand's
     misconfigured kit.
     """
-    path = _SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+    path = brand_dir(slug, _SHIPPED_BRANDS_DIR) / "brand.yaml"
     if not path.exists():
         return None
     raw = yaml.safe_load(path.read_text()) or {}

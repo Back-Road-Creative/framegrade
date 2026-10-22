@@ -14,6 +14,7 @@ Keys: ``per_location_cap``, ``weekly_ceiling``, ``daily_ladder``,
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -24,6 +25,27 @@ import yaml
 
 _CONSOLE_ROOT = Path(__file__).resolve().parent.parent / "console"
 _SHIPPED_BRANDS_DIR = _CONSOLE_ROOT / "brands"
+
+
+def host_brands_dir() -> Optional[Path]:
+    """``GMS_BRANDS_DIR`` (host brand templates), or ``None`` when unset/blank."""
+    raw = os.environ.get("GMS_BRANDS_DIR")
+    return Path(raw.strip()) if raw and raw.strip() else None
+
+
+def brand_dir(slug: str, shipped: Optional[Path] = None) -> Path:
+    """The directory holding ``slug``'s ``brand.yaml`` / ``settings.yaml``.
+
+    ``<GMS_BRANDS_DIR>/<slug>`` when that variable is set and the directory
+    exists, else ``<shipped>/<slug>`` (default: the package's own brands
+    dir). A whole-slug overlay: one directory is used for every file of the
+    brand, never a per-file merge.
+    """
+    host = host_brands_dir()
+    if host is not None and (host / slug).is_dir():
+        return host / slug
+    return (shipped if shipped is not None else _SHIPPED_BRANDS_DIR) / slug
+
 
 _KNOWN_POLICY_KEYS = frozenset(
     {
@@ -64,7 +86,7 @@ class BrandPolicy:
 
 
 def _load_raw_policy_block(slug: str) -> dict:
-    path = _SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+    path = brand_dir(slug) / "brand.yaml"
     if not path.exists():
         return {}
     raw = yaml.safe_load(path.read_text()) or {}
@@ -224,7 +246,7 @@ class MediaProfile:
 
 
 def _load_raw_media_block(slug: str) -> dict:
-    path = _SHIPPED_BRANDS_DIR / slug / "brand.yaml"
+    path = brand_dir(slug) / "brand.yaml"
     if not path.exists():
         return {}
     raw = yaml.safe_load(path.read_text()) or {}

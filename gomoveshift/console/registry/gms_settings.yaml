@@ -3,6 +3,7 @@
 - {name: GMS_DATA_HOME, default: null, description: "Root for inputs, outputs, photo state and the comments ledger; unset falls back to $XDG_DATA_HOME/gomoveshift, else ~/.local/share/gomoveshift."}
 - {name: GMS_CACHE_HOME, default: null, description: "Root for stage caches, geocode, Overpass and Route Story caches and lock files; unset falls back to $XDG_CACHE_HOME/gomoveshift, else ~/.cache/gomoveshift."}
 - {name: GMS_CONFIG_HOME, default: null, description: "Root for config.yaml and credential, token, key and SOPS-config files; unset falls back to $XDG_CONFIG_HOME/gomoveshift, else ~/.config/gomoveshift."}
+- {name: GMS_BRANDS_DIR, default: null, description: "Host brand-templates dir: <GMS_BRANDS_DIR>/<slug>/ (brand.yaml, settings.yaml) replaces the packaged template for that slug, whole-slug, and adds host-only brands; unset or blank uses the packaged templates."}
 - {name: GMS_STAGING_DIR, default: "<data home>/input", description: "Video staging/input dir."}
 - {name: GMS_OUTPUT_DIR, default: "<data home>/output", description: "Pipeline output dir; also backs the content ledger."}
 - {name: GMS_INPUTS_DIR, default: "<data home>/operator-inputs", description: "Operator's own inputs dir (Route Story launch profiles); if set it must be an existing directory."}
