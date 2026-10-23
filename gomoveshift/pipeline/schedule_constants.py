@@ -68,18 +68,19 @@ _DEFAULT_DRIVE = _default_drive_config()
 
 
 def _seed_cadence():
-    """Waypost's packaged seed cadence (``brand.yaml``), read with no decision db.
+    """Waypost's seed cadence (``brand.yaml``), read with no decision db.
+
+    The file comes from ``brand_policy.brand_dir("gomoveshift")``: the host's
+    ``GMS_BRANDS_DIR`` template when it holds that brand, else the packaged one.
 
     Import-time only: the mirrors below start from the seed so no hand-set default is
     left; the live answer (seed + ``lf_days`` decisions) is ``seo_slots.waypost_cadence``.
     """
-    from pathlib import Path
-
     from seo_manager.core.profile import load_cadence
 
-    return load_cadence(
-        Path(__file__).resolve().parent.parent / "console" / "brands" / "gomoveshift" / "brand.yaml"
-    )
+    from gomoveshift.publishing.brand_policy import brand_dir
+
+    return load_cadence(brand_dir("gomoveshift") / "brand.yaml")
 
 
 def _waypost_time(cadence, days) -> dt_time:

@@ -107,3 +107,37 @@ def test_audio_profile_reads_host_brand_dir(dirs):
         "examplebrand", brands_dir=brand_policy.brand_dir("examplebrand").parent
     )
     assert profile.enabled is True and profile.gain_db == -9.0
+
+
+_SEED_YAML = (
+    "seo:\n  cadence:\n    timezone: America/New_York\n    regions:\n"
+    '      north:\n        dow: [{dow}]\n        time: "09:00"\n        shorts_times: ["08:00"]\n'
+)
+
+
+def _seed_days():
+    from gomoveshift.pipeline import schedule_constants
+
+    return sorted(schedule_constants._seed_cadence().days(None))
+
+
+def test_seed_cadence_reads_host_brand_dir(tmp_path, monkeypatch):
+    _brand(tmp_path, "gomoveshift", **{"brand.yaml": _SEED_YAML.format(dow="thu")})
+    monkeypatch.setenv("GMS_BRANDS_DIR", str(tmp_path))
+    assert _seed_days() == [3]
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_seed_cadence_unset_or_blank_uses_packaged(monkeypatch, value):
+    monkeypatch.delenv("GMS_BRANDS_DIR", raising=False)
+    packaged = _seed_days()
+    if value is not None:
+        monkeypatch.setenv("GMS_BRANDS_DIR", value)
+    assert _seed_days() == packaged
+
+
+def test_seed_cadence_host_dir_without_brand_uses_packaged(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_BRANDS_DIR", raising=False)
+    packaged = _seed_days()
+    monkeypatch.setenv("GMS_BRANDS_DIR", str(tmp_path))
+    assert _seed_days() == packaged
