@@ -133,3 +133,10 @@ All notable changes to this project are recorded here. The format follows
   which resolves to `docs/pipeline/install.md` and 404s; it now links
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
+
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/Back-Road-Creative/framegrade/releases/tag/v0.3.0
