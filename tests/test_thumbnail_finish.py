@@ -189,10 +189,10 @@ def _spy_full_size_work(monkeypatch, full_shape):
             calls["apply"] += 1
         return real_pass(rgb, *a, **k)
 
-    def measure_spy(before, after):
+    def measure_spy(before, after, *stats):
         if before.shape == full_shape:
             calls["measure"] += 1
-        return real_measure(before, after)
+        return real_measure(before, after, *stats)
 
     monkeypatch.setattr(quality, "_finish_pass", pass_spy)
     monkeypatch.setattr(quality, "measure_finish_deltas", measure_spy)
@@ -270,3 +270,32 @@ def test_styles_do_not_share_drawn_pixels(tmp_path):
     out = str(tmp_path / "t.jpg")
     generate_single_style("unused.png", "Title", None, ThumbnailStyle.IMMERSIVE, out, bg=bg)
     assert np.array_equal(np.asarray(bg), before)
+
+
+@pytest.mark.parametrize("make", [lambda: _textured_scene(30), lambda: _clipped_scene(1280, 720)])
+def test_before_stats_are_computed_once_per_frame(monkeypatch, make):
+    """The before-frame's chroma/luma stats are a property of the input alone, so
+    the proxy and the full-size frame are each measured once however many gain
+    pairs, drift retries and band checks consult them."""
+    grab = make()
+    outputs = []  # keep every finished frame alive so ids stay unique
+    real_pass = quality._finish_pass
+
+    def pass_spy(rgb, *a, **k):
+        out = real_pass(rgb, *a, **k)
+        outputs.append(out)
+        return out
+
+    real_chroma = quality._chroma_mean
+    stat_calls = {}  # id(before frame) -> [frame, calls]
+
+    def chroma_spy(rgb):
+        if not any(rgb is o for o in outputs):
+            stat_calls.setdefault(id(rgb), [rgb, 0])[1] += 1
+        return real_chroma(rgb)
+
+    monkeypatch.setattr(quality, "_finish_pass", pass_spy)
+    monkeypatch.setattr(quality, "_chroma_mean", chroma_spy)
+    quality.thumbnail_finish(grab)
+    counts = {rgb.shape: n for rgb, n in stat_calls.values()}
+    assert counts == {grab.shape: 1, (225, 400, 3): 1}, counts
