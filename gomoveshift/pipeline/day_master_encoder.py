@@ -743,6 +743,25 @@ def _blur_evidence_path(regions_sidecar: Path) -> Path:
     return regions_sidecar.with_name(regions_sidecar.stem + "_evidence.json")
 
 
+# Seconds of video between detection checkpoints on the day master. A day blur
+# runs for hours; one GPU fault mid-pass otherwise discards all of it (one
+# 132 GB day: ~8 h lost to a CUDA 999 at 54%). Five minutes of video bounds the
+# loss to a few minutes of work while keeping snapshot writes rare.
+BLUR_CHECKPOINT_EVERY_S = 300.0
+
+
+def _blur_checkpoint_path(regions_sidecar: Path) -> Path:
+    """redactcam's mid-pass detection checkpoint for this day."""
+    return regions_sidecar.with_name(regions_sidecar.stem + "_detect_checkpoint.json")
+
+
+def _blur_checkpoint_binding_path(regions_sidecar: Path) -> Path:
+    """What the checkpoint was made under. redactcam only checks the source
+    fingerprint, so a resume with a new model or detector setting would union
+    stale boxes into the new pass; this sidecar is what refuses that."""
+    return regions_sidecar.with_name(regions_sidecar.stem + "_detect_checkpoint_binding.json")
+
+
 def _model_fingerprint(model_path) -> Optional[str]:
     """Cheap ``size:mtime`` identity of a resolved detector model file, or
     ``None`` when the model didn't resolve. Mirrors the concat fingerprint —
@@ -1069,36 +1088,51 @@ def _build_day_blur_mask(
         )
         return mask_path
 
+    detect_kwargs = dict(
+        sample_fps=drive.blur_sample_fps,
+        conf=drive.blur_conf,
+        face_conf=drive.blur_face_conf,
+        face_sample_fps=drive.blur_face_sample_fps,
+        face_confirm_min_detections=drive.blur_face_confirm_min_detections,
+        pre_roll_frames=drive.blur_pre_roll_frames,
+        plate_model_path=plate_model,
+        face_model_path=face_model,
+        tile_px=drive.blur_tile_px,
+        tile_overlap=drive.blur_tile_overlap,
+        plate_min_aspect=drive.blur_plate_min_aspect,
+        plate_max_aspect=drive.blur_plate_max_aspect,
+        plate_max_area_frac=drive.blur_plate_max_area_frac,
+        plate_boost_speed_px=drive.blur_plate_boost_speed_px,
+        plate_boost_max_run=drive.blur_plate_boost_max_run,
+        track_face_margin_frac=drive.blur_face_margin_frac,
+        track_face_motion_gain=drive.blur_face_motion_gain,
+        track_cabin_frac=drive.blur_vehicle_cabin_frac,
+        vehicle_model_path=vehicle_model,
+        vehicle_conf=drive.blur_vehicle_conf,
+        vehicle_min_height_frac=drive.blur_vehicle_min_height_frac,
+        vehicle_ignore_bottom_frac=drive.blur_vehicle_ignore_bottom_frac,
+        track_person=person_on and person_model is not None,
+        person_model_path=person_model,
+        person_conf=getattr(drive, "blur_person_conf", 0.35),
+        person_min_height_frac=getattr(drive, "blur_person_min_height_frac", 0.0),
+    )
+    checkpoint_path = _blur_checkpoint_path(regions_sidecar)
+    binding_path = _blur_checkpoint_binding_path(regions_sidecar)
+    binding = {
+        "evidence": current_evidence,
+        "detect": {k: str(v) if isinstance(v, Path) else v for k, v in detect_kwargs.items()},
+    }
+    if load_cached_json(binding_path) != binding:
+        checkpoint_path.unlink(missing_ok=True)
+        save_cache_json(binding_path, binding)
+
     try:
         fps, frame_count, w, h = br.probe_video(raw_concat)
         frame_boxes, decoded_count, n_faces, n_plates = detect_and_track(
             raw_concat,
-            sample_fps=drive.blur_sample_fps,
-            conf=drive.blur_conf,
-            face_conf=drive.blur_face_conf,
-            face_sample_fps=drive.blur_face_sample_fps,
-            face_confirm_min_detections=drive.blur_face_confirm_min_detections,
-            pre_roll_frames=drive.blur_pre_roll_frames,
-            plate_model_path=plate_model,
-            face_model_path=face_model,
-            tile_px=drive.blur_tile_px,
-            tile_overlap=drive.blur_tile_overlap,
-            plate_min_aspect=drive.blur_plate_min_aspect,
-            plate_max_aspect=drive.blur_plate_max_aspect,
-            plate_max_area_frac=drive.blur_plate_max_area_frac,
-            plate_boost_speed_px=drive.blur_plate_boost_speed_px,
-            plate_boost_max_run=drive.blur_plate_boost_max_run,
-            track_face_margin_frac=drive.blur_face_margin_frac,
-            track_face_motion_gain=drive.blur_face_motion_gain,
-            track_cabin_frac=drive.blur_vehicle_cabin_frac,
-            vehicle_model_path=vehicle_model,
-            vehicle_conf=drive.blur_vehicle_conf,
-            vehicle_min_height_frac=drive.blur_vehicle_min_height_frac,
-            vehicle_ignore_bottom_frac=drive.blur_vehicle_ignore_bottom_frac,
-            track_person=person_on and person_model is not None,
-            person_model_path=person_model,
-            person_conf=getattr(drive, "blur_person_conf", 0.35),
-            person_min_height_frac=getattr(drive, "blur_person_min_height_frac", 0.0),
+            **detect_kwargs,
+            checkpoint_path=checkpoint_path,
+            checkpoint_every_frames=max(1, math.ceil(fps * BLUR_CHECKPOINT_EVERY_S)),
         )
         # detect_and_track leaves frames between samples with no entry at all,
         # and the renderer reads "no entry" as "nothing to blur". Fill those
@@ -1135,6 +1169,9 @@ def _build_day_blur_mask(
         br.write_sidecar(regions_sidecar, timeline)
         save_cache_json(_blur_evidence_path(regions_sidecar), current_evidence)
         materialize_mask_video(timeline, mask_path)
+        # The finished mask is reused through the sidecar from here on.
+        checkpoint_path.unlink(missing_ok=True)
+        binding_path.unlink(missing_ok=True)
     except blur_gate.BlurGateError:
         raise
     except Exception as exc:

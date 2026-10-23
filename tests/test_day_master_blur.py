@@ -333,6 +333,93 @@ class TestBuildDayBlurMask:
         assert track_person_calls == [False, True]
 
 
+class TestBlurDetectionCheckpoint:
+    """A multi-hour day blur that dies mid-pass must resume, not restart: one
+    132.5 GB day lost ~8 h of detection to one CUDA
+    crash because nothing was saved. redactcam checkpoints on request; these pin
+    that the day master asks, and that a checkpoint made under different
+    evidence or detector settings is never unioned into a new pass."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        TestBuildDayBlurMask()._no_network_models(monkeypatch)
+        monkeypatch.setattr("redactcam.timeline.probe_video", lambda p: (30.0, 90, 1920, 1080))
+        monkeypatch.setattr(
+            "redactcam.materialize_mask_video",
+            lambda tl, p, **k: (p.write_bytes(b"mask"), p)[1],
+        )
+        raw = tmp_path / "raw.mp4"
+        raw.write_bytes(b"raw")
+        cfg = Config()
+        cfg.drive.blur_vehicle_cabin_frac = 0.0
+        return raw, cfg, tmp_path / "m.mkv", tmp_path / "day_d_blur_regions.json"
+
+    def _crashing_detect(self, seen):
+        """Writes a checkpoint the way redactcam does, then dies mid-pass."""
+
+        def _detect(*a, **k):
+            ckpt = Path(k["checkpoint_path"])
+            seen.append(ckpt.exists())
+            ckpt.write_text(json.dumps({"version": 1, "frames_done": 45}))
+            raise RuntimeError("CUDA failure 999")
+
+        return _detect
+
+    def test_detection_checkpoints_and_cleans_up_on_success(self, tmp_path, monkeypatch):
+        raw, cfg, mask, sidecar = self._setup(tmp_path, monkeypatch)
+        calls = []
+
+        def _detect(*a, **k):
+            calls.append(k)
+            Path(k["checkpoint_path"]).write_text("{}")
+            return ({0: [(10, 10, 20, 20)]}, 90, 1, 0)
+
+        monkeypatch.setattr("redactcam.detect_and_track", _detect)
+        dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+
+        ckpt = sidecar.with_name("day_d_blur_regions_detect_checkpoint.json")
+        assert calls[0]["checkpoint_path"] == ckpt
+        assert calls[0]["checkpoint_every_frames"] == int(30.0 * dme.BLUR_CHECKPOINT_EVERY_S)
+        # A finished mask is reused through the sidecar; the checkpoint is spent.
+        assert not ckpt.exists()
+
+    def test_checkpoint_survives_a_crash_and_is_resumed(self, tmp_path, monkeypatch):
+        raw, cfg, mask, sidecar = self._setup(tmp_path, monkeypatch)
+        seen = []
+        monkeypatch.setattr("redactcam.detect_and_track", self._crashing_detect(seen))
+        for _ in range(2):
+            with pytest.raises(blur_gate.BlurGateError, match="privacy detection failed"):
+                dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+        assert seen == [False, True]
+
+    def test_checkpoint_from_other_evidence_is_discarded(self, tmp_path, monkeypatch):
+        raw, cfg, mask, sidecar = self._setup(tmp_path, monkeypatch)
+        seen = []
+        monkeypatch.setattr("redactcam.detect_and_track", self._crashing_detect(seen))
+        with pytest.raises(blur_gate.BlurGateError):
+            dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+
+        # The person model now resolves: boxes found without person tracking
+        # must not be unioned into a pass that claims people are handled.
+        person_model = tmp_path / "person.onnx"
+        person_model.write_bytes(b"model")
+        monkeypatch.setattr("gomoveshift.analysis.resolve_person_model", lambda d: person_model)
+        with pytest.raises(blur_gate.BlurGateError):
+            dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+        assert seen == [False, False]
+
+    def test_checkpoint_from_other_detector_settings_is_discarded(self, tmp_path, monkeypatch):
+        raw, cfg, mask, sidecar = self._setup(tmp_path, monkeypatch)
+        seen = []
+        monkeypatch.setattr("redactcam.detect_and_track", self._crashing_detect(seen))
+        with pytest.raises(blur_gate.BlurGateError):
+            dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+
+        cfg.drive.blur_face_conf = cfg.drive.blur_face_conf / 2
+        with pytest.raises(blur_gate.BlurGateError):
+            dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+        assert seen == [False, False]
+
+
 class TestRunAllDaysPropagatesBlurGate:
     def test_blur_gate_error_is_reraised_not_skipped(self, tmp_path, monkeypatch):
         from gomoveshift.pipeline import day_pipeline
