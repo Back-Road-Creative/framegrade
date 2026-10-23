@@ -1,0 +1,27 @@
+# Weekly update PRs for the two things that are not otherwise watched: the
+# Python dependencies declared in pyproject.toml, and the pinned commit of each
+# GitHub Action in the workflows. Pins that live inside a workflow `run:` step
+# (uv, mypy, pip-audit) and ci/tools-requirements.txt are not seen by
+# Dependabot and are bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope

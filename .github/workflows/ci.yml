@@ -5,6 +5,8 @@
 # package index switched off, so a check cannot pass or fail on what it fetched.
 name: ci
 
+# A pull request run covers the PR head; the push run covers the merge result
+# on main. Different commits, so no commit runs twice.
 on:
   pull_request:
   push:
@@ -87,7 +89,9 @@ jobs:
           "$RUNNER_TEMP/ci-tools/bin/ruff" check . --output-format=github
           "$RUNNER_TEMP/ci-tools/bin/ruff" format . --check
 
-      - name: Type check
+      # pyproject.toml excludes gomoveshift/, tests/ and scripts/ from mypy, so
+      # this step covers only the scripts and CI helpers.
+      - name: Type check (tools, ci and bin only)
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
@@ -104,3 +108,32 @@ jobs:
       - name: Tree cleanliness (after build and tests)
         if: always()
         run: python3 -I tools/check_public_tree.py --check-clean
+
+  # The one job that needs the network after setup: it asks the vulnerability
+  # databases about the versions pinned in requirements.lock. Advisory
+  # (continue-on-error) until those pins are clean; then drop that line so a new
+  # advisory fails the build. Entries in .pip-audit-ignore are passed through.
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pip-audit
+        run: |
+          python3 -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install --quiet pip-audit==2.9.0
+
+      - name: Audit locked versions
+        run: |
+          ignore=()
+          while read -r id; do
+            ignore+=(--ignore-vuln "$id")
+          done < <(grep -E '^(PYSEC|GHSA|CVE)-[0-9A-Za-z-]+$' .pip-audit-ignore || true)
+          grep -v '^-e ' requirements.lock > "$RUNNER_TEMP/audit-requirements.txt"
+          "$RUNNER_TEMP/audit/bin/pip-audit" --no-deps --disable-pip \
+            -r "$RUNNER_TEMP/audit-requirements.txt" "${ignore[@]}"

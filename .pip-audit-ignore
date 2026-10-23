@@ -21,7 +21,5 @@
 # without a clean-venv scan that shows them firing: the locked versions of
 # those packages are outside the affected ranges.
 
-# reason: nltk downloader path traversal (Zip-Slip via zipfile.extractall) with
-# no published fix version. nltk.downloader is not invoked in CI or prod.
-# Re-evaluate on the next nltk release.
-PYSEC-2026-597
+# No entries. PYSEC-2026-597 (nltk downloader path traversal) was removed: a
+# scan of a clean venv built from requirements.lock no longer reports it.
