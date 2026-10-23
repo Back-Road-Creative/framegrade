@@ -5,7 +5,6 @@
 # constraints" — and publishing the repo never fixes it. Pin a non-PyPI package
 # with a PEP 508 direct reference in pyproject.toml instead (sun-track,
 # pycube-lut and keycut do). This file is for transitive version pins only.
-aiofiles==25.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
@@ -29,7 +28,6 @@ distro==1.9.0
 docstring_parser==0.17.0
 easyocr==1.7.2
 fastapi==0.139.2
-ffmpeg-python==0.2.0
 filelock==3.20.4
 fitdecode==0.10.0
 flexcache==0.3
@@ -38,7 +36,6 @@ folium==0.20.0
 freezegun==1.5.5
 frozenlist==1.8.0
 fsspec==2026.2.0
-future==1.0.0
 geographiclib==1.52
 geopy==2.5.0
 google-api-core==2.29.0
@@ -156,6 +153,5 @@ typing_extensions==4.15.0
 uritemplate==4.2.0
 urllib3==2.8.0
 uvicorn==0.41.0
-watchdog==6.0.0
 xyzservices==2025.11.0
 yarl==1.23.0
