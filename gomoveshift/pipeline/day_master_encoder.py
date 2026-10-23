@@ -59,6 +59,11 @@ logger = logging.getLogger(__name__)
 # minutes — 2.0s is still far below that threshold.
 DURATION_INTEGRITY_TOLERANCE_S = 2.0
 
+# Day-master bytes per raw-source byte for the disk check, an upper bound.
+# Recorded masters measure 0.63x to 0.89x their source; the old 1.5x rule
+# assumed 0.5x, so a tight volume passed the check and could fill mid-encode.
+MASTER_BYTES_PER_SOURCE_BYTE = 1.0
+
 
 # Hand-maintained generation counter for master-encode rule changes that are
 # NOT expressible as a constant — the shape of the encode itself (e.g. the
@@ -1452,8 +1457,11 @@ def encode_day_master(
             expected_duration,
         )
 
-    # Preflight disk space check: estimate total source size and require
-    # 1.5x headroom for the concat + single-pass encode intermediates.
+    # Preflight disk space check: require what is still to be written — the
+    # raw concat (~source size) plus the master. A raw already on disk (a resume
+    # after a crash) is reused below or freed when the concat rewrites it, so
+    # only its missing bytes count. The master is sized at
+    # MASTER_BYTES_PER_SOURCE_BYTE, an upper bound on measured masters.
     source_bytes = 0
     for p in concat_paths:
         try:
@@ -1461,7 +1469,13 @@ def encode_day_master(
         except OSError:
             pass
     if source_bytes > 0:
-        required_bytes = int(source_bytes * 1.5)
+        try:
+            raw_on_disk = min(raw_concat.stat().st_size, source_bytes)
+        except OSError:
+            raw_on_disk = 0
+        required_bytes = (source_bytes - raw_on_disk) + int(
+            source_bytes * MASTER_BYTES_PER_SOURCE_BYTE
+        )
         check_disk_space(output_dir, required_bytes)
 
     # Resume shortcut for the raw concat: a WSL or encoder crash landing
