@@ -698,6 +698,46 @@ class TestEncodeDayMasterResumeSkip:
                 config=Config(),
             )
 
+    def test_disk_space_check_sizes_what_is_still_to_write(self, tmp_path, monkeypatch):
+        """The check requires the raw concat still to be written plus a master of up
+        to the source's own size. Two failures it replaces:
+        - A resume after a crash found the day's raw already on disk and demanded
+          its bytes again, so a day on a tight volume could never resume.
+        - The old 1.5x rule assumed a master of half the source, but recorded
+          masters measure 0.63x-0.89x, so a tight volume passed the check and
+          could fill mid-encode."""
+        from gomoveshift.config import Config
+        from gomoveshift.pipeline.day_master_encoder import encode_day_master
+
+        import pytest
+
+        ep = tmp_path / "ep_001.mp4"
+        ep.write_bytes(b"x" * 10_000)
+        batch = _make_day_batch("2026-02-25", [ep])
+        output_dir = tmp_path / "days_out"
+        output_dir.mkdir()
+        raw = output_dir / "day_2026-02-25_raw.mp4"
+
+        seen = []
+
+        def fake_check(path, required):
+            seen.append(required)
+            raise RuntimeError("stop after the disk check")
+
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.day_master_encoder.check_disk_space",
+            fake_check,
+        )
+
+        for raw_bytes in (None, 6_000, 10_000):
+            if raw_bytes is not None:
+                raw.write_bytes(b"r" * raw_bytes)
+            with pytest.raises(RuntimeError, match="stop after the disk check"):
+                encode_day_master(day_batch=batch, output_dir=output_dir, config=Config())
+
+        # fresh: raw + master; partial raw: the rest of it + master; full raw: master
+        assert seen == [20_000, 14_000, 10_000]
+
     def test_existing_partial_master_is_reencoded(self, tmp_path, monkeypatch):
         """Master exists but its duration is far below expected → re-encode."""
         from gomoveshift.config import Config
