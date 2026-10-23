@@ -1,81 +1,37 @@
-# GoMoveShift Video Processing Service
+# Framegrade
 
-Python-based video processing service for travel footage automation.
+Framegrade is a media engine for driving video and photos. It grades footage,
+checks each finished file against delivery gates, builds route films from GPS
+tracks, develops photos, and queues finished shorts for publishing. The Python
+package and the command line are named `gomoveshift-video` and `gomoveshift`.
 
-## Purpose
+Releases are tagged on GitHub and recorded in [CHANGELOG.md](CHANGELOG.md).
 
-Automated video processing pipeline for GoMoveShift travel content. Handles frame extraction, sign detection via OCR (EasyOCR), dead spot removal, and intelligent video segmentation. Includes web UI for monitoring and control.
+## Install
 
-## Status
+```bash
+pip install "gomoveshift-video @ git+https://github.com/Back-Road-Creative/framegrade@v0.3.4"
+```
 
-Active - Development/testing phase with core processing capabilities implemented.
+This installs the tagged release together with its two sibling projects
+(`waypost` and `gps-journey`, pinned in `pyproject.toml`). Python, `ffmpeg` and
+GPU prerequisites, the CPU-only install and the Docker console are in
+[docs/install.md](docs/install.md).
 
-## Exit Condition
+## First run
 
-Project completes when video processing workflow is fully automated and stable, or replaced by alternative solution.
+```bash
+gomoveshift doctor      # checks the install: dependencies, ffmpeg, GPU, credentials, storage
+gomoveshift --help      # every command
+gomoveshift console     # local creator console on 127.0.0.1:8787
+```
 
-## Testing
+## Documentation
 
-### Retained route location checks
-
-Before encoding a long-form, the route claim gate checks the on-screen label
-against GPS samples from the footage the edit keeps. A title that names all
-visited places must also have a truthful state suffix: `Alder and Birch, VA`
-is refused if a retained sample resolves to West Virginia. A place list alone
-does not validate a trailing state abbreviation. GPS gaps still require their
-own evidence before a broader county or state fallback can be approved.
-Pinned Census polygons can supply a bounded region check for those gaps;
-the pipeline waits for a matching Waypost review contract before using it.
-See [retained-route region proof](docs/pipeline/80-census-boundary-proof.md).
-
-### Test isolation
-
-`tests/conftest.py` points `HOME` at an empty temp directory in a module-level
-block, before `import gomoveshift`, so the suite is blind by construction to
-the developer's real `~/.config/gomoveshift/config.yaml` from the moment
-collection starts importing test modules (a fixture only runs at test setup,
-after collection has already imported everything, including code paths like
-`gomoveshift/pipeline/longform_metadata.py` that read `Config.load()` at
-import time). The session-scoped `isolate_home_from_operator_config` fixture
-mirrors that same fake home onto `Path.home` for code that reads it directly.
-The same block drops `GMS_DATA_HOME`, `GMS_CACHE_HOME`, `GMS_CONFIG_HOME`,
-`GMS_INPUTS_DIR` and the XDG data/cache/config home variables so the per-user defaults cannot resolve into a real
-user directory. The fake home sits under `~/.cache/gms-test-homes/` (removed at
-exit), never `/tmp`: defaults such as `paths._DEFAULT_INTERMEDIATE_DIR` resolve
-under the home directory and are pinned by tests to stay off tmpfs.
-A real config file can carry operational overrides (e.g. a
-`publishing_route_youtube` flip) that have nothing to do with the code
-under test — without this isolation, a workstation with that file present fails
-differently than CI, and a developer's stale override silently changes their
-local suite result. See `tests/test_conftest_isolation.py` and
-`tests/test_conftest_hermetic_config.py`.
-
-The same block sets `SEO_INPUTS_DIR` to an empty directory. In normal runs
-`SEO_INPUTS_DIR` (default: `seo` under `GMS_INPUTS_DIR`)
-holds the operator's sealed seo tokens, and `credential_paths.resolve_sops_file`
-prefers a copy there over the legacy `seo.credentials_dir` parent (see
-`docs/install.md`); pointing it at an empty dir keeps every test off the box's
-real tokens.
-
-The operator's output root gets the same treatment: the autouse
-`isolate_output_root_from_operator` fixture points `GMS_OUTPUT_DIR` inside
-each test's own `tmp_path`, so a default-constructed `TrackingStore` (where
-`enqueue-plan --apply` registers every enqueued short) never writes the real
-output root. A test that needs a specific root still sets
-`GMS_OUTPUT_DIR` itself.
-
-**A test never reads the real clock.** A test that calls
-`datetime.now()`, `date.today()` or `time.time()` passes today and fails
-later — when the calendar week rolls, a slot passes, or a fixture ages out —
-and a flaky default branch stops every merge. Freeze the moment
-(`freeze_time`, `time_machine`) or pass it in as an argument.
-`tests/baselines/test-quality.json` lists the clock reads that predate the
-rule; a read you have checked is safe (a timeout loop, a timing measurement)
-belongs in that baseline, and fixing a listed test shrinks it.
-
-## Lint Config
-
-`ruff.toml` extends `pyproject.toml`'s `[tool.ruff]` select/ignore and adds `extend-select` for rule families that are already clean across the whole service — a ratchet so a passing family can never quietly regress. Add a family only after fixing every finding it reports today (`ruff check . --select <FAMILY>`); never add one with open findings.
+[docs/README.md](docs/README.md) is the index: install, the console, Route Story,
+photos, social publishing and metrics, and the numbered pipeline notes. The rest
+of this page holds the command and environment reference, then the notes for
+people working on the code (testing and lint).
 
 ## CLI Flag Semantics
 
@@ -94,6 +50,10 @@ When the flag is supplied:
 ### `--shorts-min-duration` / `--shorts-max-duration` / `--shorts-target-duration`
 
 Override the short-clip duration bounds `short_planner.plan_shorts` uses to build candidate windows — otherwise sourced from `config.drive.shorts_{min,max,target}_duration_sec` (defaults 30/45/38s, mirroring `short_planner.DEFAULT_{MIN,MAX,TARGET}_DURATION_SEC`). `shorts_max_duration_sec` may never exceed 60s (`video_types.SHORTS_MAX_DURATION`, the YouTube Shorts hard ceiling), and `min <= target <= max` is enforced at config construction — both raise `ValueError` on violation, whether set via CLI or `config.yaml`.
+
+### `--sign-verify` (opt-in, needs the `signs` extra)
+
+Off by default. `--sign-verify` reads the road signs in the raw footage and votes what they say against each long-form's resolved location as independent evidence; a corroborated disagreement warns at the label gate and never changes a location. `--sign-verify-strict` turns a corroborated state or county conflict into a pre-encode hard fail, and `--no-sign-verify` switches it off for a run, including a resume whose checkpoint saved it. It costs an extra decode pass over the day's footage and needs the OCR dependency: `pip install -e '.[signs]'` (it pulls torch, about 4.5 GB on Linux).
 
 ### `--ingest-mode gopro` (default) needs the `gopro` extra
 
@@ -230,6 +190,18 @@ tab lists the variables in the console registry file
 `gomoveshift/console/registry/gms_settings.yaml`. The Settings tab's form persists per-brand
 overrides (never the running environment) and every console-launched job applies them; see
 `docs/pipeline-internals.md`.
+
+## Retained route location checks
+
+Before encoding a long-form, the route claim gate checks the on-screen label
+against GPS samples from the footage the edit keeps. A title that names all
+visited places must also have a truthful state suffix: `Alder and Birch, VA`
+is refused if a retained sample resolves to West Virginia. A place list alone
+does not validate a trailing state abbreviation. GPS gaps still require their
+own evidence before a broader county or state fallback can be approved.
+Pinned Census polygons can supply a bounded region check for those gaps;
+the pipeline waits for a matching Waypost review contract before using it.
+See [retained-route region proof](docs/pipeline/80-census-boundary-proof.md).
 
 ## Route Story telemetry
 
@@ -402,12 +374,12 @@ Sweep time (UTC): 2030-01-01T12:00:00.000000+00:00
 
 ## Tools
 
-- `tools/enable_gpu_detection.sh [VENV]` — repair a venv whose GPU onnxruntime build was clobbered by the CPU
+- [`tools/enable_gpu_detection.sh [VENV]`](tools/enable_gpu_detection.sh) — repair a venv whose GPU onnxruntime build was clobbered by the CPU
   wheel: uninstalls `onnxruntime`, force-reinstalls the pinned `onnxruntime-gpu==1.22.0` (the same pin as
   `pyproject.toml`; CUDA 12) plus the `nvidia-*-cu12` runtime wheels, and verifies `CUDAExecutionProvider`
   loads. A fresh `pip install -e .` already gets those wheels from the pin's `[cuda,cudnn]` extras. Never install the CPU `onnxruntime` wheel into the pipeline venv; `tests/test_dependency_pins.py`
   keeps it out of the dependency spec.
-- `tools/retitle_worklist.py` — CSV worklist of live videos needing a retitle:
+- [`tools/retitle_worklist.py`](tools/retitle_worklist.py) — CSV worklist of live videos needing a retitle:
   duplicate/`Highlights from …`/county-only/`To X` titles. Reads `videos.yaml` + optional
   `--rss PATH` (no network); `suggested_title` uses only structured origin/destination/region/place fields, else `needs-human`.
 
@@ -416,6 +388,57 @@ Sweep time (UTC): 2030-01-01T12:00:00.000000+00:00
 Photos → Night projects provides resumable, private redevelopment of saved linear
 stacks through the same CLI/console backend. See [setup, commands and current
 boundaries](docs/night-projects.md). It does not publish or imply image-quality approval.
+
+## Testing
+
+### Test isolation
+
+`tests/conftest.py` points `HOME` at an empty temp directory in a module-level
+block, before `import gomoveshift`, so the suite is blind by construction to
+the developer's real `~/.config/gomoveshift/config.yaml` from the moment
+collection starts importing test modules (a fixture only runs at test setup,
+after collection has already imported everything, including code paths like
+`gomoveshift/pipeline/longform_metadata.py` that read `Config.load()` at
+import time). The session-scoped `isolate_home_from_operator_config` fixture
+mirrors that same fake home onto `Path.home` for code that reads it directly.
+The same block drops `GMS_DATA_HOME`, `GMS_CACHE_HOME`, `GMS_CONFIG_HOME`,
+`GMS_INPUTS_DIR` and the XDG data/cache/config home variables so the per-user defaults cannot resolve into a real
+user directory. The fake home sits under `~/.cache/gms-test-homes/` (removed at
+exit), never `/tmp`: defaults such as `paths._DEFAULT_INTERMEDIATE_DIR` resolve
+under the home directory and are pinned by tests to stay off tmpfs.
+A real config file can carry operational overrides (e.g. a
+`publishing_route_youtube` flip) that have nothing to do with the code
+under test — without this isolation, a workstation with that file present fails
+differently than CI, and a developer's stale override silently changes their
+local suite result. See `tests/test_conftest_isolation.py` and
+`tests/test_conftest_hermetic_config.py`.
+
+The same block sets `SEO_INPUTS_DIR` to an empty directory. In normal runs
+`SEO_INPUTS_DIR` (default: `seo` under `GMS_INPUTS_DIR`)
+holds the operator's sealed seo tokens, and `credential_paths.resolve_sops_file`
+prefers a copy there over the legacy `seo.credentials_dir` parent (see
+`docs/install.md`); pointing it at an empty dir keeps every test off the box's
+real tokens.
+
+The operator's output root gets the same treatment: the autouse
+`isolate_output_root_from_operator` fixture points `GMS_OUTPUT_DIR` inside
+each test's own `tmp_path`, so a default-constructed `TrackingStore` (where
+`enqueue-plan --apply` registers every enqueued short) never writes the real
+output root. A test that needs a specific root still sets
+`GMS_OUTPUT_DIR` itself.
+
+**A test never reads the real clock.** A test that calls
+`datetime.now()`, `date.today()` or `time.time()` passes today and fails
+later — when the calendar week rolls, a slot passes, or a fixture ages out —
+and a flaky default branch stops every merge. Freeze the moment
+(`freeze_time`, `time_machine`) or pass it in as an argument.
+`tests/baselines/test-quality.json` lists the clock reads that predate the
+rule; a read you have checked is safe (a timeout loop, a timing measurement)
+belongs in that baseline, and fixing a listed test shrinks it.
+
+## Lint Config
+
+`ruff.toml` extends `pyproject.toml`'s `[tool.ruff]` select/ignore, and its `extend-select` list is the ratchet for further rule families: it is empty today, and the families still carrying findings are listed in the file's header. Add a family only after fixing every finding it reports (`ruff check . --select <FAMILY>`); never add one with open findings.
 
 ## License
 
