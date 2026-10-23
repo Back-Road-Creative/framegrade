@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import requests
 
 from gomoveshift.publishing.first_comment import post_graph_comment
-from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, graph_error_tag
+from gomoveshift.publishing.meta_auth import graph_error_tag
+from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
 from gomoveshift.publishing.models import InstagramPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
@@ -101,8 +102,8 @@ class InstagramReelsAdapter:
     def __init__(self, credentials, session=None, graph_version=None):
         self._ig_user_id = credentials["ig_user_id"]
         self._access_token = credentials["page_access_token"]
-        graph_version = graph_version or credentials.get("graph_version") or DEFAULT_GRAPH_VERSION
-        self._base = f"https://graph.facebook.com/{graph_version}"
+        graph_version = graph_version or credentials.get("graph_version")
+        self._base = graph_base_url(graph_version)
         self._session = session or requests.Session()
 
     @property
@@ -119,34 +120,10 @@ class InstagramReelsAdapter:
         return {"Authorization": f"OAuth {self._access_token}"}
 
     def _post(self, url: str, **kwargs) -> dict:
-        response = self._session.post(url, **kwargs)
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-        # Graph can answer 200 with an `error` object in the body (the exact
-        # shape that hid the TikTok creator_info defect). Gating only on the
-        # status code lets such a body through as success: `body["id"]` then
-        # raises a bare KeyError, which the dispatcher classifies as RETRYABLE
-        # and retries a permanently-rejected post forever.
-        if response.status_code >= 400 or (body or {}).get("error"):
-            _raise_for_graph_error(response.status_code, body)
-        return body
+        return graph_post(self._session, url, _raise_for_graph_error, **kwargs)
 
     def _get(self, url: str, **kwargs) -> dict:
-        response = self._session.get(url, **kwargs)
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-        # Graph can answer 200 with an `error` object in the body (the exact
-        # shape that hid the TikTok creator_info defect). Gating only on the
-        # status code lets such a body through as success: `body["id"]` then
-        # raises a bare KeyError, which the dispatcher classifies as RETRYABLE
-        # and retries a permanently-rejected post forever.
-        if response.status_code >= 400 or (body or {}).get("error"):
-            _raise_for_graph_error(response.status_code, body)
-        return body
+        return graph_get(self._session, url, _raise_for_graph_error, **kwargs)
 
     def post_comment(self, object_id: str, text: str) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).

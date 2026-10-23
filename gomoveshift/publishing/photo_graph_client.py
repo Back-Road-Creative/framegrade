@@ -55,7 +55,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import requests
 
-from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, graph_error_tag
+from gomoveshift.publishing.meta_auth import graph_error_tag
+from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
 from gomoveshift.publishing.photo_adapter import (
     PhotoAuthBlockedError,
     PhotoPermanentError,
@@ -113,8 +114,8 @@ class MetaPhotoGraphClient:
     def __init__(self, credentials, session=None, graph_version=None, site_root=None):
         self._account_id = credentials["ig_user_id"]
         self._access_token = credentials["page_access_token"]
-        graph_version = graph_version or credentials.get("graph_version") or DEFAULT_GRAPH_VERSION
-        self._base = f"https://graph.facebook.com/{graph_version}"
+        graph_version = graph_version or credentials.get("graph_version")
+        self._base = graph_base_url(graph_version)
         self._session = session or requests.Session()
         if site_root is not None:
             self._site_root = site_root
@@ -131,27 +132,10 @@ class MetaPhotoGraphClient:
         return self._account_id
 
     def _post(self, url: str, **kwargs) -> dict:
-        response = self._session.post(url, **kwargs)
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-        # Graph can answer 200 with an `error` object in the body -- gating
-        # only on status code lets that through as success (the same defect
-        # class instagram_adapter.py's _post guards against).
-        if response.status_code >= 400 or (body or {}).get("error"):
-            _raise_for_photo_graph_error(response.status_code, body)
-        return body
+        return graph_post(self._session, url, _raise_for_photo_graph_error, **kwargs)
 
     def _get(self, url: str, **kwargs) -> dict:
-        response = self._session.get(url, **kwargs)
-        try:
-            body = response.json()
-        except ValueError:
-            body = {}
-        if response.status_code >= 400 or (body or {}).get("error"):
-            _raise_for_photo_graph_error(response.status_code, body)
-        return body
+        return graph_get(self._session, url, _raise_for_photo_graph_error, **kwargs)
 
     def _check_publishing_limit(self) -> None:
         """Live read of the account's rolling publishing-limit quota
