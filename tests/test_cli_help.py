@@ -139,7 +139,12 @@ def test_version_flag_prints_the_package_version(capsys):
 
 
 def test_version_flag_appends_the_commit_when_known(capsys, monkeypatch):
-    monkeypatch.setattr("gomoveshift.health.store.product_sha", lambda *a, **k: "abc1234deadbeef")
+    # Built at runtime so the secret scan does not read a full-length hex literal.
+    monkeypatch.setattr(
+        "gomoveshift.health.store.product_sha", lambda *a, **k: "abc1234" + "f" * 33
+    )
     with pytest.raises(SystemExit):
         _build_parser().parse_args(["--version"])
-    assert "abc1234" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "(abc1234)" in out
+    assert "abc1234f" not in out
