@@ -2083,9 +2083,10 @@ class DriveConfig(BaseModel):
     # csv_generator emits TikTok=TRUE + populated TikTok columns so Metricool
     # schedules the short on TikTok. Publishing is handled entirely by
     # Metricool and needs no first-party TikTok auth. The separate analytics
-    # path (``TikTokCollector.collect_short_metrics``) is still a stub that
-    # raises ``NotImplementedError`` — that gap only means we don't *collect*
-    # TikTok metrics, it never blocked *publishing*. Set False to suppress
+    # path (``TikTokCollector``, Display API ``video/query``) is independent
+    # of this knob: it needs its own first-party credentials with the
+    # ``video.list`` scope and degrades to no metrics without them, and it
+    # never gated *publishing*. Set False to suppress
     # TikTok scheduling (e.g. a non-TikTok account). Wired into Phase D's
     # ``_emit_consolidated_shorts_csv`` so this knob is live, not decorative.
     # It gates the CSV only, never ``publishing_route_tiktok``: TikTok's inbox

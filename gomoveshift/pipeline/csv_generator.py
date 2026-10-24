@@ -309,9 +309,8 @@ def build_consolidated_shorts_csv(
     TikTok. Metricool handles publishing — no first-party TikTok auth needed.
     Pass ``publish_tiktok=False`` to force the ``TikTok`` toggle to ``FALSE``
     and leave every TikTok-specific column empty (suppresses TikTok scheduling;
-    the analytics collector
-    ``tracking.collector.TikTokCollector.collect_short_metrics`` is still a stub
-    but never gated publishing). The 31-column GOLDEN header is unchanged either
+    the analytics collector ``tracking.collector.TikTokCollector`` is a
+    separate first-party path that never gated publishing). The 31-column GOLDEN header is unchanged either
     way — only the column *values* differ. The TikTok-specific columns are also
     left empty whenever the ``platforms`` dict itself carries ``"TikTok":
     "FALSE"`` (see below), not only via ``publish_tiktok`` — the two gates
