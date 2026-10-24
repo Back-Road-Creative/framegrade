@@ -30,6 +30,8 @@ import dataclasses
 from pathlib import Path
 from typing import Any, Optional
 
+from ..day_layout import day_date_from_lf_path
+
 # Sentinel for ``PipelineState.get(key, default)`` — distinguishes
 # "caller did not supply a default" from "caller supplied ``None`` as
 # default". Without this, ``state.get(key, default)`` cannot tell a
@@ -629,10 +631,10 @@ class PipelineState:
             lf_idx = getattr(lf, "index", None)
             if lf_idx is None:
                 continue
-            match = _DAY_DIR_DATE_RE.search(str(lf_path))
-            if match is None:
+            lf_date = day_date_from_lf_path(lf_path)
+            if lf_date is None:
                 continue
-            out[int(lf_idx)] = match.group(1)
+            out[int(lf_idx)] = lf_date
         if out:
             object.__setattr__(self, "per_lf_recording_date", out)
 
@@ -730,10 +732,9 @@ class PipelineState:
             lf_idx = getattr(lf, "index", None)
             if lf_idx is None:
                 continue
-            match = _DAY_DIR_DATE_RE.search(str(lf_path))
-            if match is None:
+            lf_date = day_date_from_lf_path(lf_path)
+            if lf_date is None:
                 continue
-            lf_date = match.group(1)
             gpx_idx = None
             for i, ep_date in enumerate(episode_dates):
                 if ep_date == lf_date and i < len(gpx_files) and gpx_files[i] is not None:
@@ -1181,9 +1182,7 @@ def _deserialize_numpy(v: Any) -> Any:
 # construction path (``from_dict``, direct ``cls(**kwargs)``, tests)
 # applies the same coercions. The methods are idempotent and short-circuit
 # when the relevant inputs are missing, so empty-state construction
-# stays cheap. Only the shared regex stays at module scope.
-
-_DAY_DIR_DATE_RE = __import__("re").compile(r"day_(\d{4}-\d{2}-\d{2})")
+# stays cheap.
 
 
 def _assert_canonical_key_shape(instance: "PipelineState") -> None:

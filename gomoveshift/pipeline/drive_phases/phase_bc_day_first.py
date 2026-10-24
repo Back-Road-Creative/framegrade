@@ -40,6 +40,7 @@ import numpy as np
 
 from ...analysis.unified_scorer import COL_TIMESTAMP
 from ...config import Config, resolve_lf_mode
+from ...day_layout import day_date_from_lf_path as _day_date_from_lf_path
 from ...models import DrivePlan, RegularLFPlan
 from .. import volume_source
 from ..day_grouper import group_episodes_by_day
@@ -2189,43 +2190,6 @@ def _populate_resolved_locations(
             "GPS/geocoder or pass an explicit --per-lf-location override.\n"
             "Affected LFs:\n" + "\n".join(derivation_failures)
         )
-
-
-# Anchored to the WHOLE component: the recording date is the
-# ``day_<YYYY-MM-DD>`` directory that is the IMMEDIATE parent of the
-# ``regular_lfs`` dir, never an arbitrary ``day_*`` token elsewhere in
-# the path (a relocated/nested path must not skew the date).
-_DAY_DIR_DATE_RE = __import__("re").compile(r"^day_(\d{4}-\d{2}-\d{2})$")
-
-
-def _day_date_from_lf_path(lf_path) -> "str | None":
-    """Extract ``YYYY-MM-DD`` from the ``day_<DATE>`` dir anchoring an LF path.
-
-    Canonical layout: ``<stages>/day_<YYYY-MM-DD>/regular_lfs/lf_NN.mp4``.
-    The date directory is the parent of the ``regular_lfs`` dir (i.e. the
-    LF file's grandparent). Anchoring to that exact component — rather than
-    ``re.search`` over the full path string — means a relocated path whose
-    ANCESTORS happen to contain a different ``day_*`` token can't skew the
-    derived date.
-
-    Falls back to scanning path components for a single ``day_<DATE>`` dir
-    when ``regular_lfs`` is absent (e.g. a flattened test fixture); returns
-    ``None`` when no anchored match exists.
-    """
-    from pathlib import Path
-
-    parts = Path(str(lf_path)).parts
-    # Preferred anchor: the dir immediately above ``regular_lfs``.
-    for i, comp in enumerate(parts):
-        if comp == "regular_lfs" and i > 0:
-            m = _DAY_DIR_DATE_RE.match(parts[i - 1])
-            if m is not None:
-                return m.group(1)
-    # Fallback: a single unambiguous ``day_<DATE>`` component anywhere.
-    matches = [m.group(1) for comp in parts if (m := _DAY_DIR_DATE_RE.match(comp))]
-    if len(matches) == 1:
-        return matches[0]
-    return None
 
 
 def _derive_per_lf_recording_date_from_paths(
