@@ -433,6 +433,51 @@ class TestEncodeDayMaster:
         for raw in raw_paths_seen:
             assert not raw.exists(), f"Raw concat {raw} was not cleaned up"
 
+    @pytest.mark.parametrize("failure", ["raises", "success_false"])
+    def test_raw_concat_kept_after_encode_failure(self, tmp_path, monkeypatch, failure):
+        """A failed master encode keeps the raw concat. The blur mask and the
+        cabin verdict are keyed on its size+mtime, so deleting it makes the
+        resume re-concat and redo hours of blur detection (Ace Basin
+        2026-10-24: a transient ENOMEM at encode open cost the 12.7 h blur
+        pass and the cabin check)."""
+        from gomoveshift.config import Config
+        from gomoveshift.pipeline.day_master_encoder import encode_day_master
+
+        ep = tmp_path / "ep_001.mp4"
+        ep.touch()
+        batch = _make_day_batch("2026-02-20", [ep])
+        raw_paths_seen = []
+
+        def fake_run(cmd, *args, **kwargs):
+            for tok in cmd:
+                if isinstance(tok, (str, Path)) and str(tok).endswith("_raw.mp4"):
+                    out = Path(tok)
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(b"raw")
+                    raw_paths_seen.append(out)
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        def failing_process(self, video_path, output_path, location, **kwargs):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"partial")
+            if failure == "raises":
+                raise RuntimeError("Error opening input files: Cannot allocate memory")
+            return MagicMock(success=False, output_path=None)
+
+        monkeypatch.setattr("gomoveshift.pipeline.day_master_encoder.subprocess.run", fake_run)
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.single_pass.SinglePassProcessor.process", failing_process
+        )
+
+        out = tmp_path / "days_out"
+        assert encode_day_master(day_batch=batch, output_dir=out, config=Config()) is None
+
+        assert raw_paths_seen, "No raw concat file was created during the test"
+        for raw in raw_paths_seen:
+            assert raw.exists(), f"Raw concat {raw} was deleted after a failed encode"
+        assert not (out / "day_2026-02-20_master.tmp.mp4").exists()
+        assert not (out / "day_2026-02-20_master.mp4").exists()
+
     def test_failed_single_pass_returns_none_and_leaves_no_partial_master(
         self,
         tmp_path,
