@@ -5,6 +5,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A failed day-master encode keeps the raw concat instead of deleting it. The blur mask and the cabin verdict are keyed on its size and mtime, so the resume now reuses all three instead of re-concatenating and redoing blur detection and the cabin check (hours on a 4K day).
+
 ## [0.3.5] - 2026-10-24
 
 ### Changed
