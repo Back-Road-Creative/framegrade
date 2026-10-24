@@ -207,6 +207,20 @@ def _capture_position(ins: Insert) -> Optional[tuple[float, float]]:
     return None
 
 
+def county_in_label(
+    county: str, state: Optional[str], label_counties: frozenset[tuple[str, str]]
+) -> bool:
+    """Whether a geocoded ``county`` / ``state`` is one of the LF label's counties."""
+    key = re.sub(r" county$", "", county.strip().lower())
+    st = (state or "").strip()
+    st = st.upper() if len(st) == 2 else US_STATE_ABBREVS.get(st.title(), "")
+    # Fail closed on state: a county name is only unique within its state. A label
+    # pair with a state needs an insert whose state is known and equal; a state-less
+    # pair matches on the name alone only when it is the label's sole state-less pair.
+    lone_stateless = sum(1 for _, s in label_counties if not s) == 1
+    return any(key == c and (st == s if s else lone_stateless) for c, s in label_counties)
+
+
 def _check_county(ins: Insert, gate: InsertGate) -> None:
     name = Path(ins.media).name
     pos = _capture_position(ins)
@@ -217,14 +231,7 @@ def _check_county(ins: Insert, gate: InsertGate) -> None:
         raise InsertError(f"{name}: capture county unresolved, refusing")
     if not gate.label_counties:
         raise InsertError(f"{name}: the LF label names no county to check against")
-    key = re.sub(r" county$", "", county.strip().lower())
-    st = (state or "").strip()
-    st = st.upper() if len(st) == 2 else US_STATE_ABBREVS.get(st.title(), "")
-    # Fail closed on state: a county name is only unique within its state. A label
-    # pair with a state needs an insert whose state is known and equal; a state-less
-    # pair matches on the name alone only when it is the label's sole state-less pair.
-    lone_stateless = sum(1 for _, s in gate.label_counties if not s) == 1
-    if not any(key == c and (st == s if s else lone_stateless) for c, s in gate.label_counties):
+    if not county_in_label(county, state, gate.label_counties):
         label = ", ".join(
             f"{c.title()} County, {s}".rstrip(", ") for c, s in sorted(gate.label_counties)
         )
@@ -527,17 +534,77 @@ def reconcile_insert_request(state, drive, completed_dates) -> None:
     state.insert_request = current
 
 
-def describe_drive_inserts(drive) -> list[str]:
-    """One preflight line per requested insert; raises on media that is not there."""
+def _photo_county(photo: Path, county_of) -> tuple[str, Optional[tuple[str, str]]]:
+    """``(text, (county, state) | None)`` for a photo's EXIF capture position."""
+    pos = _photo_gps(photo)
+    if pos is None:
+        return "no EXIF GPS", None
+    try:
+        county, state = county_of(*pos)
+    except Exception as exc:  # noqa: BLE001 - a dry-run note never breaks the plan
+        logger.warning("insert county lookup failed for %s: %s", photo.name, exc)
+        county, state = None, None
+    if not county:
+        return "county unresolved", None
+    st = (state or "").strip()
+    st = st.upper() if len(st) == 2 else US_STATE_ABBREVS.get(st.title(), st)
+    return (f"{county}, {st}" if st else county), (county, state or "")
+
+
+def describe_drive_inserts(drive, *, county_of=None) -> list[str]:
+    """One preflight line per requested insert; raises on media that is not there.
+
+    With ``county_of`` (a ``(lat, lon) -> (county, state)`` lookup) each photo line also
+    names the county it was captured in. Without it nothing leaves the machine.
+    """
     di = DriveInserts.from_drive(drive)
     if di is None:
         return []
-    lines = [f"photo  {p.name}  (placed by capture clock against the day's GPX)" for p in di.photos]
+    lines = []
+    for p in di.photos:
+        line = f"photo  {p.name}  (placed by capture clock against the day's GPX)"
+        if county_of is not None:
+            line += f"  captured in: {_photo_county(p, county_of)[0]}"
+        lines.append(line)
     for path, at in di.clips:
         lines.append(
             f"clip   {path.name}  at {int(at) // 60:02d}:{int(at) % 60:02d} of the first long-form"
         )
     return lines
+
+
+def describe_insert_label_match(drive, lf_labels: dict, county_of) -> list[str]:
+    """One line per insert photo: its capture county and the LFs whose label accepts it.
+
+    ``lf_labels`` is ``{lf_index: label}``. Empty when no photos were requested. The same
+    county test the insert gate runs, shown before any encode.
+    """
+    di = DriveInserts.from_drive(drive)
+    if di is None or not di.photos:
+        return []
+    counties = {idx: label_counties(label) for idx, label in lf_labels.items()}
+    lines = []
+    for p in di.photos:
+        text, found = _photo_county(p, county_of)
+        if found is None:
+            lines.append(f"{p.name}  {text}")
+            continue
+        ok = [idx for idx, c in sorted(counties.items()) if county_in_label(*found, c)]
+        verdict = (
+            "accepted by " + ", ".join(f"LF {i}" for i in ok) if ok else "outside every LF label"
+        )
+        lines.append(f"{p.name}  {text}  ->  {verdict}")
+    return lines
+
+
+def geocoder_county_of(geocoder) -> Callable[[float, float], tuple[Optional[str], Optional[str]]]:
+    """Adapt a ``reverse_geocode_detailed`` geocoder to the gate's ``county_of`` shape."""
+
+    def county_of(lat: float, lon: float):
+        detail = geocoder.reverse_geocode_detailed(lat, lon) or {}
+        return detail.get("county"), detail.get("state")
+
+    return county_of
 
 
 def master_to_lf_seconds(
