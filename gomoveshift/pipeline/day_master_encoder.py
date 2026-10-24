@@ -43,7 +43,7 @@ from .cache import (
     save_cache_json,
 )
 from .color_correction import GRADE_ALGO_VERSION
-from .ffmpeg_runner import check_disk_space
+from .ffmpeg_runner import check_disk_space, run_ffmpeg_retry_enomem
 
 logger = logging.getLogger(__name__)
 
@@ -688,7 +688,7 @@ def _concat_raw_episodes(
     # way a short splitter ceiling can. The rationale sits alongside the
     # constant so future readers find it.
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=3600)
+        result = run_ffmpeg_retry_enomem(cmd, output_path, timeout=3600, text=False)
     except subprocess.TimeoutExpired:
         logger.error("  Day concat timed out after 60 min")
         return False

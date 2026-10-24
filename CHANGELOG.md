@@ -10,6 +10,10 @@ All notable changes to this project are recorded here. The format follows
 - Preflight prints a non-blocking note beside the plan's ETA when the machine has fewer than 4 logical CPU cores or less than 8 GB total RAM (a machine sold as 8 GB is not flagged). The run is never refused for it.
 - `gomoveshift --help` ends with the commands grouped by what they do, and its usage line no longer lists every command.
 
+### Fixed
+
+- A raw stream-copy concat (the episode ingest concat and the day-master raw concat) retries once when ffmpeg fails with `Cannot allocate memory` (`error code: -12`), the transient write failure a WSL `/mnt/c` mount returns on a ~25 GB file with RAM free. The partial output is removed first and the retry is logged at WARNING; any other failure, or a second ENOMEM, still fails at once.
+
 ### Changed
 
 - `--publish` is checked when the command line is parsed: it takes a weekday (`mon`..`sun`, any case, or the full name) and anything else, such as a date, exits 2 with the accepted values instead of failing minutes into a run.
