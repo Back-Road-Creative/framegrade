@@ -16,9 +16,7 @@ README = ROOT / "README.md"
 DOCS = ROOT / "docs"
 INDEX = DOCS / "README.md"
 _LINK = re.compile(r"\]\(([^)#\s]+)(?:#[^)]*)?\)")
-_INSTALL = re.compile(
-    r"git\+https://github\.com/Back-Road-Creative/framegrade@(v\d+\.\d+\.\d+)"
-)
+_INSTALL = re.compile(r"git\+https://github\.com/Back-Road-Creative/framegrade@(v\d+\.\d+\.\d+)")
 
 
 def _links(md: Path) -> list[str]:
@@ -82,6 +80,4 @@ def test_docs_index_lists_every_top_level_page():
 
 
 def test_docs_index_points_into_the_numbered_pipeline_notes():
-    assert "pipeline/" in _links(INDEX) or any(
-        t.startswith("pipeline/") for t in _links(INDEX)
-    )
+    assert "pipeline/" in _links(INDEX) or any(t.startswith("pipeline/") for t in _links(INDEX))
