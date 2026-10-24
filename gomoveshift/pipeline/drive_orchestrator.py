@@ -10,7 +10,6 @@ Public API preserved:
 
 import json
 import logging
-import re
 import signal
 import time
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from typing import NamedTuple, Optional
 
 from ..analysis.unified_scorer import UnifiedSegmentScorer
 from ..config import Config, get_config, resolve_lf_mode
+from ..day_layout import date_from_day_dir_name
 from ..models import DrivePipelineResult
 from ..publishing.title_kit import build_title_kit
 from ._drive_state import load_drive_state, save_drive_state
@@ -175,13 +175,6 @@ def _eager_import_state_invariants() -> None:
         )
 
 
-# Canonical day-dir naming under ``stages_dir``: ``day_<YYYY-MM-DD>``.
-# ``phase_bc_day_first`` (and the day_pipeline runner) write to this
-# layout, so the auto-populate hook can match by directory name alone
-# without consulting drive_plan.json.
-_DAY_DIR_RE = re.compile(r"^day_(\d{4}-\d{2}-\d{2})$")
-
-
 # Run-lock helpers extracted to orchestrator_lock.
 # Re-exported here so callers and tests that import from drive_orchestrator
 # still resolve. Design rationale for the lock lives at the top of
@@ -243,10 +236,11 @@ def auto_populate_per_day_completed(state: dict, stages_dir: Path, *, fresh: boo
     for child in stages_dir.iterdir():
         if not child.is_dir():
             continue
-        m = _DAY_DIR_RE.match(child.name)
-        if not m:
+        # The auto-populate hook matches by directory name alone, without
+        # consulting drive_plan.json.
+        date = date_from_day_dir_name(child.name)
+        if date is None:
             continue
-        date = m.group(1)
         if date in per_day:
             continue
         if not _day_dir_has_finals(child):
