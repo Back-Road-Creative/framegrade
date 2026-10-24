@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gomoveshift.models import DrivePlan
 from gomoveshift.pipeline.uploader import UploadManifest as _UploadManifest
 
 from gomoveshift.pipeline.drive_state_model import PipelineState
@@ -200,8 +201,7 @@ class TestStateSerializationRoundTrip:
 class TestStateSerializationFindings:
     """Tests that document serialization findings.
 
-    youtube_uploads_sha and numpy arrays round-trip; the remaining xfail
-    (drive_plan dataclass re-hydration) is pending the _deserialize_value work.
+    youtube_uploads_sha, numpy arrays and the drive_plan dataclass round-trip.
     """
 
     def test_youtube_uploads_sha_survives_round_trip(self):
@@ -215,23 +215,23 @@ class TestStateSerializationFindings:
         loaded = PipelineState.from_dict(state.to_dict())
         assert loaded.get("youtube_uploads_sha") == "abc123def456"  # pragma: allowlist secret
 
-    @pytest.mark.xfail(
-        reason="drive_plan / ingest_plan deserialize as plain "
-        "dicts because from_dict has no class-re-hydration rule. Needs _deserialize_value.",
-        strict=False,
-    )
     def test_drive_plan_dataclass_preserved_on_round_trip(self):
-        """drive_plan field should re-hydrate as a DrivePlan, not a plain dict."""
-        try:
-            from gomoveshift.pipeline.drive_plan import DrivePlan  # type: ignore
-        except ImportError:
-            pytest.skip("DrivePlan module path unknown — skip until confirmed")
+        """drive_plan re-hydrates as a DrivePlan, not a plain dict."""
+        plan = DrivePlan(
+            source_files=[Path("a.mp4")],
+            processed_files=[Path("a.mp4")],
+            regular_lfs=[],
+            score_threshold=0.5,
+            total_source_duration=10.0,
+            total_highlight_duration=4.0,
+        )
         state = PipelineState()
-        state["drive_plan"] = SimpleNamespace(regular_lfs=[], shorts=[])
+        state["drive_plan"] = plan
         loaded = PipelineState.from_dict(state.to_dict())
         assert isinstance(loaded.drive_plan, DrivePlan), (
             f"drive_plan reloaded as {type(loaded.drive_plan).__name__}, not DrivePlan"
         )
+        assert loaded.drive_plan == plan
 
     def test_route_profiles_int_keys_preserved_on_round_trip(self):
         """Int keys on `route_profiles` must survive JSON round-trip.

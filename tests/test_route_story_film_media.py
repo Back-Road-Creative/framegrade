@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,12 @@ from gomoveshift.pipeline.route_story.layers import _draw_map_labels, _render_ma
 from gomoveshift.pipeline.route_story.metrics import RoutePoint
 from gomoveshift.pipeline.route_story.satellite import SatelliteRaster
 from gomoveshift.pipeline.route_story.terrain import TerrainGrid
+
+
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not installed",
+)
 
 
 def _tiny_gray_clip(path: Path) -> None:
@@ -76,14 +83,60 @@ def _sine_clip_with_audio(path: Path, duration: float = 1.0) -> None:
     )
 
 
-def _silent_frames_clip(tmp_path: Path, name: str, fps: int, frame_count: int) -> Path:
+def _silent_frames_clip(
+    tmp_path: Path, name: str, fps: int, frame_count: int, audio_overrun: float = 0.0
+) -> Path:
     frames_dir = tmp_path / f"{name}-frames"
     frames_dir.mkdir()
     for index in range(frame_count):
         Image.new("RGB", (64, 64), "#222222").save(frames_dir / f"{index:06d}.jpg")
     output = tmp_path / f"{name}.mp4"
     assembly_module._encode_frames(frames_dir, output, fps)
+    if audio_overrun:
+        # ``-shortest`` against an endless silent source is a race: under load
+        # the encode can keep a few extra audio packets, so a silent leg's audio
+        # runs longer than its picture. Reproduce that outcome on demand.
+        padded = tmp_path / f"{name}-padded.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(output),
+                "-c:v",
+                "copy",
+                "-af",
+                f"apad=pad_dur={audio_overrun}",
+                "-c:a",
+                "aac",
+                str(padded),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return padded
     return output
+
+
+def _audio_seconds(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(result.stdout.strip())
 
 
 def _mean_volume_db(path: Path, start: float, duration: float) -> float:
@@ -110,12 +163,16 @@ def _mean_volume_db(path: Path, start: float, duration: float) -> float:
     return float(match.group(1))
 
 
-def test_source_clip_audio_lands_in_place_between_silent_legs(tmp_path: Path):
+@needs_ffmpeg
+@pytest.mark.parametrize("audio_overrun", [0.0, 0.25])
+def test_source_clip_audio_lands_in_place_between_silent_legs(tmp_path: Path, audio_overrun: float):
     """The clip's own audio must land exactly at the clip's chapter in the
     assembled timeline, with the silent map legs before and after it staying
     silent -- never boosted, never bled across chapters."""
     fps = 4
-    leg_in = _silent_frames_clip(tmp_path, "leg-in", fps, frame_count=4)  # ~1.0s
+    leg_in = _silent_frames_clip(
+        tmp_path, "leg-in", fps, frame_count=4, audio_overrun=audio_overrun
+    )  # ~1.0s
     source = tmp_path / "source.mp4"
     _sine_clip_with_audio(source, duration=1.0)
     interlude = tmp_path / "interlude.mp4"
@@ -143,9 +200,13 @@ def test_source_clip_audio_lands_in_place_between_silent_legs(tmp_path: Path):
     stream_types = {stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]}
     assert "audio" in stream_types
 
+    # The tone starts where the first leg's audio ends. That is the leg's
+    # picture length (~1.0s) plus whatever extra audio its encode kept, so
+    # the windows follow the probed length instead of assuming exactly 1.0s.
+    tone_start = _audio_seconds(leg_in)
     before = _mean_volume_db(output, 0.1, 0.6)
-    during = _mean_volume_db(output, 1.2, 0.6)
-    after = _mean_volume_db(output, 2.2, 0.6)
+    during = _mean_volume_db(output, tone_start + 0.2, 0.6)
+    after = _mean_volume_db(output, tone_start + 1.2, 0.6)
 
     # The source clip's chapter (the middle window) carries the sine tone;
     # the silent legs before and after it (recap's chapter) stay near-silent.
@@ -251,6 +312,7 @@ def test_video_evidence_reads_optional_creation_time_and_gps_tags(monkeypatch, t
     assert (evidence.captured_at_s, evidence.latitude, evidence.longitude) == expected
 
 
+@needs_ffmpeg
 @pytest.mark.parametrize(
     "anchor_status",
     ["embedded_coordinates", "coordinate_time_conflict", None],
