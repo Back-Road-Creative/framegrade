@@ -13,7 +13,6 @@ periodic sync *is* the deferral mechanism (no ``pending_journal`` sidecar).
 
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -23,6 +22,7 @@ from types import SimpleNamespace
 import yaml
 from ruamel.yaml import YAMLError as RuamelYAMLError
 
+from ...atomic_io import write_text_atomic
 from .._atomic_write import atomic_write_text
 from ..journal_publisher import (
     MAX_TITLE_LEN,
@@ -167,11 +167,9 @@ def merge_routing(path: Path, entries: dict[str, dict]) -> None:
         routes[str(vid)] = {"journey": route["journey"], "date": route["date"]}
     doc["routes"] = routes
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(doc, sort_keys=True, default_flow_style=False, allow_unicode=True)
+    write_text_atomic(
+        p, yaml.safe_dump(doc, sort_keys=True, default_flow_style=False, allow_unicode=True)
     )
-    os.replace(tmp, p)
 
 
 def _existing_ids(doc: dict) -> set[str]:

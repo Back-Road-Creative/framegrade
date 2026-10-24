@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence
 
 from keycut import probe_keyframes
 
+from ..atomic_io import write_text_atomic
 from ..console.settings import current_brand
 from ..publishing.brand_policy import load_media_profile
 from .inserts import STILL_SUFFIXES, InsertError, MediaInfo, probe_media
@@ -77,9 +78,7 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, sort_keys=True))
-    os.replace(tmp, path)
+    write_text_atomic(path, json.dumps(data, sort_keys=True))
 
 
 def record_lead(

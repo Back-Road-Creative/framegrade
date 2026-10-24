@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..atomic_io import write_text_atomic
+
 logger = logging.getLogger(__name__)
 
 RECIPE_NAME = "resume.json"
@@ -58,9 +60,7 @@ def write_recipe(
             "phase_reached": None,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
+        write_text_atomic(path, json.dumps(body, indent=2, sort_keys=True))
     except OSError as exc:
         logger.warning("could not write resume recipe %s: %s", path, exc)
         return None
@@ -102,9 +102,7 @@ def mark_phase(stages_dir: Path, phase: str) -> None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         data["phase_reached"] = phase
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
+        write_text_atomic(path, json.dumps(data, indent=2, sort_keys=True))
     except FileNotFoundError:
         return
     except (OSError, ValueError) as exc:

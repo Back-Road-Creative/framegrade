@@ -19,13 +19,13 @@ so a re-run of the same pipeline updates rather than duplicates.
 from __future__ import annotations
 
 import json
-import os
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from ..atomic_io import write_text_atomic
 from ._file_lock import make_blocking_file_lock
 
 PENDING_FILENAME = "pending_journal.json"
@@ -70,12 +70,10 @@ def save_pending(path: Path, entries: Iterable[PendingEntry]) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic write: a torn/partial sidecar is unparseable and would strand
-    # every still-pending video. Write to a temp file then os.replace (atomic
+    # every still-pending video. Stage in a sibling file then swap it in (atomic
     # on the same filesystem) so a concurrent reader sees old-or-new, never
     # half. (Does not serialize concurrent read-modify-write; see merge_pending.)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps([asdict(e) for e in items], indent=2) + "\n")
-    os.replace(tmp, path)
+    write_text_atomic(path, json.dumps([asdict(e) for e in items], indent=2) + "\n")
 
 
 # The sidecar is keyed by ``pending_base`` (the drive output dir), not by
