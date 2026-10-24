@@ -28,14 +28,19 @@ _ASTRO_COMBINE_DEFAULT_SCOPE = "auto"
 
 
 _WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_FULL_TO_SHORT = dict(
+    zip(("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"), _WEEKDAYS)
+)
 
 
 def _weekday(raw: str) -> str:
-    """argparse ``type=`` for a publish weekday: any case in, lowercase out.
+    """argparse ``type=`` for a publish weekday: any case, the 3-letter or the full name in,
+    the lowercase 3-letter form out.
 
     A typo fails at parse time (exit 2 with the accepted values), not minutes into
     a run."""
     day = raw.strip().lower()
+    day = _FULL_TO_SHORT.get(day, day)
     if day not in _WEEKDAYS:
         raise argparse.ArgumentTypeError(
             f"invalid weekday {raw!r}: use one of {'/'.join(_WEEKDAYS)}"

@@ -277,9 +277,10 @@ is checked separately by `detect_nvenc`.
 On WSL the Windows volume behind the Linux disk must also keep 25 GB free, even
 when resuming. These are floors, not recommendations: a long day of footage needs
 more staging space than 30 GB, and preflight raises that number from the footage
-it is given. CPU cores and GPU memory are not checked; `gomoveshift doctor
---calibrate CLIP` measures how fast your machine encodes so the plan's ETA is
-based on it.
+it is given. GPU memory is not checked. Preflight prints a note, and never
+refuses the run, when the machine has fewer than 4 logical CPU cores or less than
+8 GB total RAM: it will run, only slower. `gomoveshift doctor --calibrate CLIP`
+measures how fast your machine encodes so the plan's ETA is based on it.
 
 ## Backup and restore
 

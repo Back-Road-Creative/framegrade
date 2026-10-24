@@ -81,6 +81,11 @@ def test_publish_accepts_a_weekday_in_any_case(command, raw, expected, tmp_path)
     assert args.publish == expected
 
 
+def test_publish_accepts_a_full_weekday_name(tmp_path):
+    args = _build_parser().parse_args(_publish_argv("drive", "Wednesday", tmp_path))
+    assert args.publish == "wed"
+
+
 # --- UI-7: the top-level help is discoverable -----------------------------------------------
 
 
@@ -88,11 +93,18 @@ def _top_level_help() -> str:
     return _build_parser().format_help()
 
 
+_EPILOG_COMMAND_COLUMN = 21  # two-space indent, then the 19-wide heading column
+
+
 def test_top_level_help_has_an_epilog_naming_every_command():
     """The epilog groups the commands; a command added without a group fails here."""
     parser = _build_parser()
     assert parser.epilog
-    epilog_words = set(parser.epilog.replace(",", " ").split())
+    # Only the command column counts: the group headings ("process a drive", "photos") also
+    # contain command names, and must not stand in for them.
+    lines = parser.epilog.splitlines()[1:]
+    column = " ".join(line[_EPILOG_COMMAND_COLUMN:] for line in lines)
+    epilog_words = set(column.replace(",", " ").split())
     commands = {path[0] for path in SUBCOMMAND_PATHS}
     assert commands - epilog_words == set()
 

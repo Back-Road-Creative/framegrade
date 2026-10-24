@@ -29,6 +29,15 @@ def test_no_advisory_at_or_above_the_recommendation():
     )
 
 
+def test_no_advisory_for_an_8gb_machine_that_reports_slightly_less():
+    # Firmware, kernel and an integrated GPU reserve some; "8 GB" reports about 7.6-7.8 GiB.
+    assert op.machine_spec_advisory(cpu_cores=8, total_ram_gb=7.7) is None
+
+
+def test_advisory_still_fires_for_a_clearly_smaller_machine():
+    assert op.machine_spec_advisory(cpu_cores=8, total_ram_gb=6.0) is not None
+
+
 def test_no_advisory_when_the_machine_cannot_be_read():
     assert op.machine_spec_advisory(cpu_cores=None, total_ram_gb=None) is None
 

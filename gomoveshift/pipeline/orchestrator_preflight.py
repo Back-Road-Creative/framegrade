@@ -25,6 +25,9 @@ logger = logging.getLogger("gomoveshift.pipeline.drive_orchestrator")
 #: below these still runs, slowly; the plan's ETA (measured by ``doctor --calibrate``) shows how slowly.
 RECOMMENDED_CPU_CORES = 4
 RECOMMENDED_RAM_GB = 8.0
+#: A machine sold as 8 GB reports about 7.6-7.8 GiB (firmware, kernel and the integrated GPU keep
+#: some), so the RAM check allows this much slack before it calls the machine under-spec.
+_RAM_REPORTING_SLACK = 0.9
 
 
 def _machine_spec() -> tuple[Optional[int], Optional[float]]:
@@ -53,7 +56,7 @@ def machine_spec_advisory(
     short = []
     if cpu_cores is not None and cpu_cores < RECOMMENDED_CPU_CORES:
         short.append(f"{cpu_cores} CPU cores (recommended {RECOMMENDED_CPU_CORES}+)")
-    if total_ram_gb is not None and total_ram_gb < RECOMMENDED_RAM_GB:
+    if total_ram_gb is not None and total_ram_gb < RECOMMENDED_RAM_GB * _RAM_REPORTING_SLACK:
         short.append(f"{total_ram_gb:.1f} GB RAM (recommended {RECOMMENDED_RAM_GB:g}+ GB)")
     if not short:
         return None
