@@ -16,7 +16,7 @@ packageurl-python==0.17.6
 packaging==26.3
 pip-requirements-parser==32.0.1
 pip_api==0.0.35
-pip-audit==2.9.0
+pip-audit==2.10.1
 platformdirs==4.13.5
 py-serializable==2.1.0
 Pygments==2.21.0
