@@ -22,25 +22,27 @@ build (`.github/workflows/ci.yml`). Older releases such as Ubuntu 24.04's 6.1 ma
 the blur composite's empty-mask pass inexact (`tests/test_blur_composite_depth.py`).
 
 ```bash
-git clone <this repo> framegrade
+git clone --branch v0.3.4 https://github.com/Back-Road-Creative/framegrade.git framegrade
 cd framegrade
 bash ci/install-cpu.sh        # CPU install into .venv
 ```
 
 `ci/install-cpu.sh` builds `.venv` from `requirements.lock` with the CPU
 inference wheels, which is what a machine without CUDA needs. It installs the
-two siblings from `ci/siblings.txt`; fill in the owner and revision
-placeholders there first, or point `SIBLINGS_FILE` at a file holding
-`-e ../waypost` and `-e ../gps-journey` when the three repositories sit side by
-side.
+two siblings from `ci/siblings.txt`, each pinned to one reviewed revision. Point
+`SIBLINGS_FILE` at a file holding `-e ../waypost` and `-e ../gps-journey` instead
+when the three repositories sit side by side and you want your own checkouts.
 
 **GPU host.** The default dependency set already pins `onnxruntime-gpu[cuda,cudnn]`
 (the CUDA 12 runtime wheels), so install the siblings and then this project
-into a fresh virtual environment instead of using the CPU script:
+into a fresh virtual environment instead of using the CPU script. The first
+install uses the same reviewed sibling revisions as the CPU script; to use your
+own side-by-side checkouts, run `.venv/bin/pip install -e ../waypost -e ../gps-journey`
+in its place:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ../waypost -e ../gps-journey
+.venv/bin/pip install -r ci/siblings.txt
 .venv/bin/pip install -e '.[dev]'
 ```
 
@@ -255,6 +257,29 @@ WARN on a machine without it. In the console container, install the
 and run the container with `--gpus all` (or the compose `deploy.resources`
 equivalent). The tests and commands that need such a machine are listed in
 [gpu-checks.md](gpu-checks.md).
+
+## Minimum machine
+
+Most of the checks below are what `gomoveshift drive` enforces before an encode
+(`run_preflight` in `gomoveshift/pipeline/preflight.py`); a run on a smaller
+machine stops before any encode and lists every check that failed. The NVENC row
+is checked separately by `detect_nvenc`.
+
+| resource | minimum |
+| --- | --- |
+| Free disk at the output directory | 50 GB |
+| Free disk at the staging directory | 30 GB |
+| Available RAM | 2 GB |
+| `ffmpeg` and `ffprobe` on `PATH` | present (8.1 or newer, per the local install above) |
+| NVENC-capable ffmpeg and GPU | required for the drive pipeline (see GPU (NVENC) above) |
+| CUDA execution provider for `onnxruntime` | required for a run with blur on |
+
+On WSL the Windows volume behind the Linux disk must also keep 25 GB free, even
+when resuming. These are floors, not recommendations: a long day of footage needs
+more staging space than 30 GB, and preflight raises that number from the footage
+it is given. CPU cores and GPU memory are not checked; `gomoveshift doctor
+--calibrate CLIP` measures how fast your machine encodes so the plan's ETA is
+based on it.
 
 ## Backup and restore
 
