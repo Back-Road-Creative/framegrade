@@ -10,11 +10,11 @@
 # Only use --ignore-vuln when the upstream has no fix available
 # and the vulnerability is not exploitable in our usage pattern.
 #
-# Every entry below was verified to FIRE in a clean project venv built from
-# requirements.lock; audit that environment. An entry that stops
+# Every entry below was verified to FIRE when auditing the pins in
+# requirements.lock (the dependency-audit job scans those pins only). An entry that stops
 # firing is dead and must be deleted rather than left to rot. Do not add an
-# entry from a scan of an ambient environment: audit a clean venv built from
-# the lock, otherwise advisories for packages the project does not ship end up
+# entry from a scan of an ambient environment: audit the lock's pins,
+# otherwise advisories for packages the project does not ship end up
 # suppressed.
 
 # Do not re-add suppressions for torch, starlette or cryptography advisories

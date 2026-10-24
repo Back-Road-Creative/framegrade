@@ -55,11 +55,27 @@ def test_audit_job_is_wired_to_the_ignore_file_and_the_lock():
     assert len(jobs) == 1, "expected exactly one job that runs pip-audit"
     job = jobs[0]
     # Advisory until the locked versions are clean; see the comment in ci.yml.
-    assert job.get("continue-on-error") is True
+    # The advisory lives on the audit step, so the job itself ends green: a
+    # job-level continue-on-error still leaves a red check on every PR.
+    assert not job.get("continue-on-error"), "job-level continue-on-error leaves a red check"
+    audit_steps = [s for s in job["steps"] if "pip-audit" in s.get("run", "") and "-r " in s["run"]]
+    assert len(audit_steps) == 1
+    assert audit_steps[0].get("continue-on-error") is True
     text = "\n".join(s.get("run", "") for s in job["steps"])
     assert ".pip-audit-ignore" in text
     assert "requirements.lock" in text
-    assert re.search(r"pip-audit==\d+\.\d+\.\d+", text), "pip-audit must be version-pinned"
+    assert "ci/audit-requirements.txt" in text, "the scanner and its dependencies come from a pinned file"
+
+
+def test_audit_tool_requirements_are_fully_pinned():
+    pins = [
+        line.strip()
+        for line in (ROOT / "ci" / "audit-requirements.txt").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert any(p.lower().startswith("pip-audit==") for p in pins)
+    for p in pins:
+        assert re.fullmatch(r"[A-Za-z0-9_.\-]+==[0-9][0-9A-Za-z.\-]*", p), p
 
 
 def test_ignore_file_entries_are_parseable_and_justified():
