@@ -693,34 +693,36 @@ def thumbnail_finish_measured(rgb: np.ndarray) -> tuple[np.ndarray, dict[str, fl
     else:
         proxy = rgb
     sigma = _finish_sigma(w) * (proxy.shape[1] / w)
+    proxy_stats = _frame_stats(proxy)
     cands = []
     for c_boost in THUMB_GAIN_BOOSTS:
         contrast = 1.0 + (THUMB_CONTRAST - 1.0) * c_boost
         for s_boost in THUMB_GAIN_BOOSTS:
             saturation = 1.0 + (THUMB_SATURATION - 1.0) * s_boost
             out = _finish_pass(proxy, contrast, saturation, sigma)
-            cands.append((contrast, saturation, measure_finish_deltas(proxy, out)))
+            cands.append((contrast, saturation, measure_finish_deltas(proxy, out, proxy_stats)))
+    full_stats = _frame_stats(rgb)
     drift = {"contrast": 0.0, "saturation": 0.0}
     result = None
     for _ in range(THUMB_FULL_RES_TRIES):
         scored = [
-            (_band_room(proxy, {k: pd[k] + drift[k] for k in drift}), -i, c, s, pd)
+            (_band_room(proxy_stats, {k: pd[k] + drift[k] for k in drift}), -i, c, s, pd)
             for i, (c, s, pd) in enumerate(cands)
         ]
         room, _, contrast, saturation, pd = max(scored, key=lambda t: t[:2])
         if room <= 0.0:
             break
         out = _finish_pass(rgb, contrast, saturation)
-        d = measure_finish_deltas(rgb, out)
+        d = measure_finish_deltas(rgb, out, full_stats)
         result = (out, d)
-        if finish_deltas_in_band(rgb, d):
+        if finish_deltas_in_band(rgb, d, full_stats):
             return result
         drift = {k: d[k] - pd[k] for k in drift}
         cands = [t for t in cands if t[:2] != (contrast, saturation)]
     if result is not None:
         return result
     out = _finish_pass(rgb, 1.0 + (THUMB_CONTRAST - 1.0), 1.0 + (THUMB_SATURATION - 1.0))
-    return out, measure_finish_deltas(rgb, out)
+    return out, measure_finish_deltas(rgb, out, full_stats)
 
 
 def _chroma_mean(rgb: np.ndarray) -> float:
@@ -728,35 +730,52 @@ def _chroma_mean(rgb: np.ndarray) -> float:
     return float((f.max(axis=-1) - f.min(axis=-1)).mean())
 
 
-def measure_finish_deltas(before: np.ndarray, after: np.ndarray) -> dict[str, float]:
-    """Fractional change in luma contrast (std) and mean chroma, after vs before."""
-    c0, c1 = float(_luma(before).std()), float(_luma(after).std())
-    s0, s1 = _chroma_mean(before), _chroma_mean(after)
+def _frame_stats(rgb: np.ndarray) -> tuple[float, float]:
+    """(luma std, mean chroma) of ``rgb``: the baseline every finish delta is read against."""
+    return float(_luma(rgb).std()), _chroma_mean(rgb)
+
+
+def measure_finish_deltas(
+    before: np.ndarray, after: np.ndarray, before_stats: tuple[float, float] | None = None
+) -> dict[str, float]:
+    """Fractional change in luma contrast (std) and mean chroma, after vs before.
+
+    ``before_stats`` (``_frame_stats(before)``) lets a caller that already holds the
+    baseline skip measuring it again.
+    """
+    c0, s0 = before_stats if before_stats is not None else _frame_stats(before)
+    c1, s1 = float(_luma(after).std()), _chroma_mean(after)
     return {
         "contrast": c1 / c0 - 1.0 if c0 > 0 else 0.0,
         "saturation": s1 / s0 - 1.0 if s0 > 0 else 0.0,
     }
 
 
-def _band_room(before: np.ndarray, d: dict[str, float]) -> float:
-    """Smallest distance from a measurable delta to its band edge (<= 0: out of band)."""
+def _band_room(before_stats: tuple[float, float], d: dict[str, float]) -> float:
+    """Smallest distance from a measurable delta to its band edge (<= 0: out of band).
+
+    ``before_stats`` is ``_frame_stats`` of the frame the deltas are read against.
+    """
+    luma_std, chroma = before_stats
     room = float("inf")
-    if _luma(before).std() >= 1.0:
+    if luma_std >= 1.0:
         lo, hi = THUMB_CONTRAST_BAND
         room = min(room, d["contrast"] - lo, hi - d["contrast"])
-    if _chroma_mean(before) >= 1.0:
+    if chroma >= 1.0:
         lo, hi = THUMB_SATURATION_BAND
         room = min(room, d["saturation"] - lo, hi - d["saturation"])
     return room
 
 
-def finish_deltas_in_band(before: np.ndarray, d: dict[str, float]) -> bool:
+def finish_deltas_in_band(
+    before: np.ndarray, d: dict[str, float], before_stats: tuple[float, float] | None = None
+) -> bool:
     """True when measured deltas ``d`` sit inside the accepted bands.
 
     An axis the source cannot express (a flat frame has no contrast to raise; a
     grey one has no chroma) is not measurable and passes.
     """
-    return _band_room(before, d) >= 0.0
+    return _band_room(before_stats if before_stats is not None else _frame_stats(before), d) >= 0.0
 
 
 def thumbnail_finish_in_band(before: np.ndarray, after: np.ndarray) -> bool:
