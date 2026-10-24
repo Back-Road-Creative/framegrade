@@ -6,6 +6,10 @@ tracks, develops photos, and queues finished shorts for publishing. The Python
 package and the command line are named `gomoveshift-video` and `gomoveshift`.
 
 Releases are tagged on GitHub and recorded in [CHANGELOG.md](CHANGELOG.md).
+To cut one, run `python3 -I tools/release.py X.Y.Z` on a branch off `main`
+(it bumps both version strings and dates the `[Unreleased]` entries), open a
+`chore(release): X.Y.Z` PR, and after it merges tag the merge commit
+`git tag -a vX.Y.Z -m "framegrade X.Y.Z" <sha>`.
 
 ## Install
 
