@@ -4,6 +4,7 @@ DrivePipelineOrchestrator."""
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -18,6 +19,52 @@ from .preflight import PreflightBlockedError, format_blockers, run_preflight
 from .preflight_plan import print_plan
 
 logger = logging.getLogger("gomoveshift.pipeline.drive_orchestrator")
+
+
+#: Advisory floor, not a gate: ``run_preflight`` only refuses on free disk and free RAM. A machine
+#: below these still runs, slowly; the plan's ETA (measured by ``doctor --calibrate``) shows how slowly.
+RECOMMENDED_CPU_CORES = 4
+RECOMMENDED_RAM_GB = 8.0
+#: A machine sold as 8 GB reports about 7.6-7.8 GiB (firmware, kernel and the integrated GPU keep
+#: some), so the RAM check allows this much slack before it calls the machine under-spec.
+_RAM_REPORTING_SLACK = 0.9
+
+
+def _machine_spec() -> tuple[Optional[int], Optional[float]]:
+    """(logical CPU cores, total RAM in GB); ``None`` for whatever cannot be read."""
+    cores = os.cpu_count()
+    total_gb: Optional[float] = None
+    try:
+        import psutil  # type: ignore
+
+        total_gb = psutil.virtual_memory().total / 1024**3
+    except Exception:  # noqa: BLE001 - psutil missing or unreadable: try /proc/meminfo
+        try:
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemTotal:"):
+                    total_gb = int(line.split()[1]) * 1024 / 1024**3
+                    break
+        except (OSError, ValueError, IndexError):
+            total_gb = None
+    return cores, total_gb
+
+
+def machine_spec_advisory(
+    *, cpu_cores: Optional[int], total_ram_gb: Optional[float]
+) -> Optional[str]:
+    """One advisory line naming each resource below the recommendation, or ``None``."""
+    short = []
+    if cpu_cores is not None and cpu_cores < RECOMMENDED_CPU_CORES:
+        short.append(f"{cpu_cores} CPU cores (recommended {RECOMMENDED_CPU_CORES}+)")
+    if total_ram_gb is not None and total_ram_gb < RECOMMENDED_RAM_GB * _RAM_REPORTING_SLACK:
+        short.append(f"{total_ram_gb:.1f} GB RAM (recommended {RECOMMENDED_RAM_GB:g}+ GB)")
+    if not short:
+        return None
+    return (
+        "NOTE: this machine is below the recommended spec: "
+        + "; ".join(short)
+        + ". The run is not blocked, but expect it to take longer than a well-provisioned machine."
+    )
 
 
 def _phase_a_done(state) -> bool:
@@ -340,6 +387,10 @@ def run_preflight_and_prompt(
     if insert_lines:
         plan_kwargs["insert_lines"] = insert_lines
     print_plan(state, stages_dir, **plan_kwargs)
+    cores, total_ram_gb = _machine_spec()
+    advisory = machine_spec_advisory(cpu_cores=cores, total_ram_gb=total_ram_gb)
+    if advisory:
+        print(advisory)
     if dry_run:
         logger.info("--dry-run: plan rendered, exiting before any phase work")
         emit_summary(

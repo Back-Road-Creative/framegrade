@@ -61,6 +61,20 @@ def test_minimum_machine_section_matches_preflight_defaults() -> None:
         )
 
 
+def test_minimum_machine_states_the_recommended_spec() -> None:
+    from gomoveshift.pipeline.orchestrator_preflight import (
+        RECOMMENDED_CPU_CORES,
+        RECOMMENDED_RAM_GB,
+    )
+
+    match = re.search(r"^## Minimum machine\n(.*?)(?=^## )", DOC, flags=re.MULTILINE | re.DOTALL)
+    assert match
+    section = match.group(1)
+    assert re.search(rf"\b{RECOMMENDED_CPU_CORES} logical (CPU )?cores\b", section)
+    assert re.search(rf"\b{RECOMMENDED_RAM_GB:g} GB total RAM\b", section)
+    assert "are not checked" not in section
+
+
 def test_minimum_machine_names_only_the_command_that_runs_preflight() -> None:
     match = re.search(r"^## Minimum machine\n(.*?)(?=^## )", DOC, flags=re.MULTILINE | re.DOTALL)
     assert match

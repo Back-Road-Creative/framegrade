@@ -55,3 +55,96 @@ def test_subcommand_help_builds_and_exits_zero(path, capsys):
     assert exc_info.value.code == 0
     out = capsys.readouterr().out
     assert out.strip() != ""
+
+
+# --- UI-6: --publish is validated at parse time ---------------------------------------------
+
+
+def _publish_argv(command: str, value: str, tmp_path) -> list[str]:
+    if command == "pipeline":
+        return ["pipeline", str(tmp_path / "v.mp4"), "--publish", value]
+    return [command, str(tmp_path), "--publish", value]
+
+
+@pytest.mark.parametrize("command", ["pipeline", "batch", "drive"])
+def test_publish_rejects_an_unknown_day_at_parse_time(command, tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(_publish_argv(command, "funday", tmp_path))
+    assert exc_info.value.code == 2
+    assert "mon/tue/wed/thu/fri/sat/sun" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["pipeline", "batch", "drive"])
+@pytest.mark.parametrize("raw,expected", [("mon", "mon"), ("Fri", "fri"), ("SUN", "sun")])
+def test_publish_accepts_a_weekday_in_any_case(command, raw, expected, tmp_path):
+    args = _build_parser().parse_args(_publish_argv(command, raw, tmp_path))
+    assert args.publish == expected
+
+
+def test_publish_accepts_a_full_weekday_name(tmp_path):
+    args = _build_parser().parse_args(_publish_argv("drive", "Wednesday", tmp_path))
+    assert args.publish == "wed"
+
+
+# --- UI-7: the top-level help is discoverable -----------------------------------------------
+
+
+def _top_level_help() -> str:
+    return _build_parser().format_help()
+
+
+_EPILOG_COMMAND_COLUMN = 21  # two-space indent, then the 19-wide heading column
+
+
+def test_top_level_help_has_an_epilog_naming_every_command():
+    """The epilog groups the commands; a command added without a group fails here."""
+    parser = _build_parser()
+    assert parser.epilog
+    # Only the command column counts: the group headings ("process a drive", "photos") also
+    # contain command names, and must not stand in for them.
+    lines = parser.epilog.splitlines()[1:]
+    column = " ".join(line[_EPILOG_COMMAND_COLUMN:] for line in lines)
+    epilog_words = set(column.replace(",", " ").split())
+    commands = {path[0] for path in SUBCOMMAND_PATHS}
+    assert commands - epilog_words == set()
+
+
+def test_top_level_usage_does_not_dump_every_command():
+    usage = _build_parser().format_usage()
+    assert "<command>" in usage
+    assert "{analyze," not in usage
+
+
+def test_server_help_says_what_the_server_is():
+    assert "review" in _server_help().lower()
+
+
+def _server_help() -> str:
+    for action in _build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return next(a.help for a in action._choices_actions if a.dest == "server")
+    raise AssertionError("no subparsers")
+
+
+# --- PROD-4: --version reads the package version ---------------------------------------------
+
+
+def test_version_flag_prints_the_package_version(capsys):
+    import gomoveshift
+
+    with pytest.raises(SystemExit) as exc_info:
+        _build_parser().parse_args(["--version"])
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.startswith(f"gomoveshift {gomoveshift.__version__}")
+
+
+def test_version_flag_appends_the_commit_when_known(capsys, monkeypatch):
+    # Built at runtime so the secret scan does not read a full-length hex literal.
+    monkeypatch.setattr(
+        "gomoveshift.health.store.product_sha", lambda *a, **k: "abc1234" + "f" * 33
+    )
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["--version"])
+    out = capsys.readouterr().out
+    assert "(abc1234)" in out
+    assert "abc1234f" not in out

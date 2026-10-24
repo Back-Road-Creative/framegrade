@@ -6,7 +6,6 @@ top-level parser definition stays readable.
 """
 
 import argparse
-import importlib.metadata
 import json
 import re
 from datetime import date, datetime
@@ -26,6 +25,27 @@ _LAYER_MASK_NAMES = ", ".join(LAYER_MASK_PARAMS)
 #: as `_LAYER_MASK_NAMES`: importing the photos pipeline here would drag it into every --help.
 _ASTRO_COMBINE_SCOPES = ("auto", "full", "scoped")
 _ASTRO_COMBINE_DEFAULT_SCOPE = "auto"
+
+
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_FULL_TO_SHORT = dict(
+    zip(("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"), _WEEKDAYS)
+)
+
+
+def _weekday(raw: str) -> str:
+    """argparse ``type=`` for a publish weekday: any case, the 3-letter or the full name in,
+    the lowercase 3-letter form out.
+
+    A typo fails at parse time (exit 2 with the accepted values), not minutes into
+    a run."""
+    day = raw.strip().lower()
+    day = _FULL_TO_SHORT.get(day, day)
+    if day not in _WEEKDAYS:
+        raise argparse.ArgumentTypeError(
+            f"invalid weekday {raw!r}: use one of {'/'.join(_WEEKDAYS)}"
+        )
+    return day
 
 
 def _per_lf_location_kv(raw: str) -> tuple[int, str]:
@@ -236,7 +256,9 @@ def _add_process_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_server_parser(subparsers: argparse._SubParsersAction) -> None:
-    p = subparsers.add_parser("server", help="Start web UI server")
+    p = subparsers.add_parser(
+        "server", help="Start the local video review web UI (no authentication; loopback only)"
+    )
     p.add_argument("-p", "--port", type=int, default=8765, help="Port to run on")
     p.add_argument("-H", "--host", default="127.0.0.1", help="Host to bind to")
     p.add_argument(
@@ -289,7 +311,12 @@ def _add_pipeline_parser(subparsers: argparse._SubParsersAction) -> None:
         "Optional when --gps is provided; auto-derived from GPS data",
     )
     p.add_argument(
-        "--publish", "-p", required=True, help="Publish day (mon/tue/wed/thu/fri/sat/sun)"
+        "--publish",
+        "-p",
+        required=True,
+        type=_weekday,
+        metavar="DAY",
+        help="Publish day (mon/tue/wed/thu/fri/sat/sun)",
     )
     p.add_argument(
         "--output-dir",
@@ -376,6 +403,8 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--publish",
         "-p",
         default=None,
+        type=_weekday,
+        metavar="DAY",
         help="Override publish day (default: the earliest configured long-form day). Implies "
         "--youtube-upload; pass --no-youtube-upload to opt out.",
     )
@@ -1158,7 +1187,14 @@ def _add_batch_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Ingest GoPro directory and run full pipeline on each episode",
     )
     p.add_argument("directory", type=Path, help="Directory with GoPro MP4 files")
-    p.add_argument("--publish", "-p", default="mon", help="Long-form publish day (default: mon)")
+    p.add_argument(
+        "--publish",
+        "-p",
+        default="mon",
+        type=_weekday,
+        metavar="DAY",
+        help="Long-form publish day (default: mon)",
+    )
     p.add_argument(
         "--shorts-time",
         default="12:00",
@@ -3400,15 +3436,56 @@ def _add_library_hygiene_parser(subparsers: argparse._SubParsersAction) -> None:
 # ---------------------------------------------------------------------------
 
 
+_COMMAND_GROUPS = """\
+command groups (run `gomoveshift <command> --help` for any of them):
+  process a drive    drive, pipeline, batch, ingest, upload, cleanup, find-stops
+  review and console server, console, doctor, health, library-hygiene
+  analyze a video    analyze, process, scan
+  route story        route-story-prepare, route-story-proof, route-story-verify, route-story-film
+  publishing queue   enqueue-plan, enqueue-asset, dispatch-queue, queue, publishing-status,
+                     publish-journal, schedule, sync-site, reconcile-playlists, youtube-auth
+  catalog            catalog-inventory, catalog-classify, catalog-fetch
+  metrics            metrics, platform-decline, post-anomaly, comments
+  photos             photos
+"""
+
+
+class _VersionAction(argparse.Action):
+    """``--version``: the package version, plus the commit when it is known.
+
+    Resolved when the flag is used, so building the parser stays cheap."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, **kw):
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help="Show version")
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .. import __version__
+
+        text = f"gomoveshift {__version__}"
+        try:
+            from ..health.store import product_sha
+
+            sha = product_sha()
+        except Exception:  # noqa: BLE001 - provenance is best effort; the version still prints
+            sha = None
+        if sha:
+            text += f" ({sha[:7]})"
+        print(text)
+        parser.exit()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct the full top-level argument parser.
 
     Extracted from ``main()`` so tests can exercise argument parsing in
     isolation without invoking the full CLI dispatch path.
     """
-    _version = importlib.metadata.version("gomoveshift-video")
-    parser = argparse.ArgumentParser(description="GoMoveShift - Driving Video Processor")
-    parser.add_argument("--version", action="version", version=f"gomoveshift {_version}")
+    parser = argparse.ArgumentParser(
+        description="GoMoveShift - Driving Video Processor",
+        epilog=_COMMAND_GROUPS,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--version", action=_VersionAction)
     # Emit the file handler as one JSON object per line for log
     # shippers / grep-by-field tooling. Stream handler stays human-
     # readable so ``tail -f`` is unaffected. Default off — feature flag.
@@ -3421,7 +3498,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "(keys: timestamp, level, logger, message, exception). "
         "Stream/stdout output stays human-readable.",
     )
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>", help="Commands")
 
     _add_analyze_parser(subparsers)
     _add_process_parser(subparsers)
