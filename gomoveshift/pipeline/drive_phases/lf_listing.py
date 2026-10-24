@@ -130,6 +130,7 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
         drive_plan.regular_lfs, gps_points_by_lf, geocoder, state, report=report
     )
     collisions = 0
+    lf_labels: dict[int, str] = {}
     for lf in drive_plan.regular_lfs:
         idx = int(getattr(lf, "index", 0))
         pts = gps_points_by_lf.get(idx) if gps_points_by_lf else None
@@ -141,6 +142,7 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
         if dom.name:
             label = f"{dom.name}, {label}"
         print(f"  {idx:>3}  {label}")
+        lf_labels[idx] = label
         collisions += _print_lf_title(ost_text.get(idx) or label, live_titles)
         votes = ", ".join(f"{k}={v}" for k, v in sorted(dom.votes.items(), key=lambda kv: -kv[1]))
         print(f"       county vote: {votes}")
@@ -168,6 +170,7 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
                 logger.warning("  sign evidence: LF %s comparison failed: %s", idx, exc)
                 print(f"       sign evidence: unavailable ({exc})")
     print("=" * 64)
+    _print_insert_counties(config, lf_labels, geocoder)
     print("  Labels reflect the dominant-county fix. No encode performed.")
     if collisions:
         print(
@@ -176,6 +179,33 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
         )
     print()
     return bool(report.get("refused"))
+
+
+def _print_insert_counties(config: Any, lf_labels: dict, geocoder: Any) -> None:
+    """Insert photos vs the dry-run labels above, so a county refusal shows before any encode.
+
+    The verdict uses the labels this dry run printed (dominant-county fix), not
+    ``--per-lf-location`` overrides, so it can differ from the insert gate for an LF
+    the operator relabelled.
+    """
+    from ..inserts import InsertError, describe_insert_label_match, geocoder_county_of
+
+    try:
+        lines = describe_insert_label_match(
+            getattr(config, "drive", None), lf_labels, geocoder_county_of(geocoder)
+        )
+    except InsertError as exc:
+        print(f"  Insert photos: {exc}")
+        return
+    if not lines:
+        return
+    print(
+        "  Insert photos vs the dry-run labels above (capture county, EXIF GPS;\n"
+        "  --per-lf-location overrides are not applied here)"
+    )
+    for line in lines:
+        print(f"    {line}")
+    print("=" * 64)
 
 
 def _render_ost_text_by_lf(
