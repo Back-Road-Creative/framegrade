@@ -5,6 +5,8 @@
 # package index switched off, so a check cannot pass or fail on what it fetched.
 name: ci
 
+# A pull request run covers the PR head; the push run covers the merge result
+# on main. Different commits, so no commit runs twice.
 on:
   pull_request:
   push:
@@ -87,7 +89,9 @@ jobs:
           "$RUNNER_TEMP/ci-tools/bin/ruff" check . --output-format=github
           "$RUNNER_TEMP/ci-tools/bin/ruff" format . --check
 
-      - name: Type check
+      # pyproject.toml excludes gomoveshift/, tests/ and scripts/ from mypy, so
+      # this step covers only the scripts and CI helpers.
+      - name: Type check (tools, ci and bin only)
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
@@ -104,3 +108,49 @@ jobs:
       - name: Tree cleanliness (after build and tests)
         if: always()
         run: python3 -I tools/check_public_tree.py --check-clean
+
+  # The one job that needs the network after setup: it asks the vulnerability
+  # databases about the versions pinned in requirements.lock. Coverage is those
+  # pins only: direct dependencies with no lock pin (git references, the GPU
+  # runtime) are not scanned. Advisory: continue-on-error sits on the audit step,
+  # so the job still ends green while advisories are open, and the report is in
+  # the step summary. Once the pins are clean, drop that line so a new advisory
+  # fails the build. Entries in .pip-audit-ignore are passed through.
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pip-audit
+        run: |
+          python3 -m pip install --quiet uv==0.11.17
+          uv venv "$RUNNER_TEMP/audit" --python python3 -q
+          uv pip install --python "$RUNNER_TEMP/audit/bin/python" -q -r ci/audit-requirements.txt
+
+      - name: Audit locked versions
+        continue-on-error: true
+        run: |
+          ignore=()
+          while read -r id; do
+            ignore+=(--ignore-vuln "$id")
+          done < <(grep -E '^(PYSEC|GHSA|CVE)-[0-9A-Za-z-]+$' .pip-audit-ignore || true)
+          grep -v '^-e ' requirements.lock > "$RUNNER_TEMP/audit-requirements.txt"
+          rc=0
+          "$RUNNER_TEMP/audit/bin/pip-audit" --no-deps --disable-pip \
+            -r "$RUNNER_TEMP/audit-requirements.txt" "${ignore[@]}" \
+            > "$RUNNER_TEMP/audit-report.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/audit-report.txt"
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo "### pip-audit (advisory)"
+              echo '```'
+              cat "$RUNNER_TEMP/audit-report.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::pip-audit found advisories in the locked versions (advisory step)"
+          fi
+          exit "$rc"
