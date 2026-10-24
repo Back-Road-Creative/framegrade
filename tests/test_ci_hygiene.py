@@ -64,7 +64,9 @@ def test_audit_job_is_wired_to_the_ignore_file_and_the_lock():
     text = "\n".join(s.get("run", "") for s in job["steps"])
     assert ".pip-audit-ignore" in text
     assert "requirements.lock" in text
-    assert "ci/audit-requirements.txt" in text, "the scanner and its dependencies come from a pinned file"
+    assert "ci/audit-requirements.txt" in text, (
+        "the scanner and its dependencies come from a pinned file"
+    )
 
 
 def test_audit_tool_requirements_are_fully_pinned():
