@@ -1629,13 +1629,14 @@ def encode_day_master(
         )
     except Exception as e:
         logger.error("  Day %s master encode raised: %s", date, e)
-        # Clean up partial tmp master, raw concat on failure
-        for partial in (tmp_master_path, raw_concat, graded_src):
-            if partial.exists():
-                try:
-                    partial.unlink()
-                except OSError:
-                    pass
+        # Clean up the partial tmp master only. The raw concat stays: the blur
+        # mask and cabin verdict are keyed on its size+mtime, so the resume
+        # reuses it instead of re-concatenating and re-detecting.
+        if tmp_master_path.exists():
+            try:
+                tmp_master_path.unlink()
+            except OSError:
+                pass
         return None
 
     if getattr(result, "tonemap", ""):
@@ -1645,15 +1646,6 @@ def encode_day_master(
     # pipeline restarts (the transient cache dies with the raw concat).
     if not picture_changed:
         _save_stable_color_cache(output_dir, date, raw_concat, concat_paths)
-
-    # Step 3: Clean up the intermediate raw concat file regardless of
-    # success so we don't leave ~multi-GB scratch files behind.
-    for scratch in (raw_concat, graded_src):
-        if scratch.exists():
-            try:
-                scratch.unlink()
-            except OSError as e:
-                logger.debug("  Could not unlink raw concat %s: %s", scratch, e)
 
     # Clean up the work directory if it's empty
     try:
@@ -1665,13 +1657,23 @@ def encode_day_master(
     if not result or not getattr(result, "success", False):
         # Encode failure — remove any partial tmp file. The final
         # `master_path` is never written to until success, so we only
-        # need to scrub the .tmp here.
+        # need to scrub the .tmp here. The raw concat stays for the resume
+        # (see the except branch above).
         if tmp_master_path.exists():
             try:
                 tmp_master_path.unlink()
             except OSError:
                 pass
         return None
+
+    # Step 3: Clean up the intermediate raw concat once the master encoded,
+    # so we don't leave ~multi-GB scratch files behind.
+    for scratch in (raw_concat, graded_src):
+        if scratch.exists():
+            try:
+                scratch.unlink()
+            except OSError as e:
+                logger.debug("  Could not unlink raw concat %s: %s", scratch, e)
 
     # Atomic promotion: only now does the final filename appear on disk.
     # `os.replace` is atomic on POSIX when src/dst are on the same
