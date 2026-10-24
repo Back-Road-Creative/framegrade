@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..atomic_io import write_text_atomic
+from ..pipeline._atomic_write import atomic_write_text
 
 SCHEMA = "health-incident/1"
 INCIDENTS_DIR_ENV = "GMS_HEALTH_INCIDENTS_DIR"
@@ -151,4 +151,4 @@ def load_all(incidents_dir: Path) -> Tuple[List[Dict[str, Any]], int]:
 def write_row(incidents_dir: Path, row: Dict[str, Any]) -> None:
     incidents_dir.mkdir(parents=True, exist_ok=True)
     path = incidents_dir / row["file"]
-    write_text_atomic(path, json.dumps(row, indent=2, sort_keys=True))
+    atomic_write_text(path, json.dumps(row, indent=2, sort_keys=True))

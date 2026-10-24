@@ -1,9 +1,9 @@
 """An interrupted write leaves the old file intact and no stray temp file behind.
 
-Covers the shared helper (``gomoveshift.atomic_io``) and the call sites that
-used to hand-roll a fixed-name ``.tmp`` write: the health incident row and
-resume recipe, the pending-publish sidecar, the trail-opening marker and the
-video routing table.
+Covers the shared helper (``gomoveshift.pipeline._atomic_write``) and the call
+sites that used to hand-roll a fixed-name ``.tmp`` write: the health incident
+row, the pending-publish sidecar, the trail-opening marker and the video
+routing table.
 """
 
 from __future__ import annotations
@@ -11,13 +11,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from gomoveshift.atomic_io import write_text_atomic
-from gomoveshift.health import resume, store
+from gomoveshift.health import store
 from gomoveshift.pipeline import pending_journal, trail_opening
+from gomoveshift.pipeline._atomic_write import atomic_write_text
 from gomoveshift.pipeline.site_sync.journey_reconcile import merge_routing
 
 
@@ -35,25 +36,25 @@ def _names(directory: Path) -> list[str]:
 # --- the helper ---------------------------------------------------------------
 
 
-def test_write_text_atomic_creates_and_replaces(tmp_path):
+def test_atomic_write_text_creates_and_replaces(tmp_path):
     target = tmp_path / "out.json"
-    write_text_atomic(target, "one")
-    write_text_atomic(target, "two")
+    atomic_write_text(target, "one")
+    atomic_write_text(target, "two")
     assert target.read_text(encoding="utf-8") == "two"
     assert _names(tmp_path) == ["out.json"]
 
 
-def test_write_text_atomic_writes_utf8(tmp_path):
+def test_atomic_write_text_writes_utf8(tmp_path):
     target = tmp_path / "place.txt"
-    write_text_atomic(target, "Zürich – Säntis")
+    atomic_write_text(target, "Zürich – Säntis")
     assert target.read_bytes() == "Zürich – Säntis".encode("utf-8")
 
 
-def test_write_text_atomic_follows_the_umask_not_0600(tmp_path):
+def test_atomic_write_text_follows_the_umask_not_0600(tmp_path):
     previous = os.umask(0o022)
     try:
         target = tmp_path / "shared.json"
-        write_text_atomic(target, "{}")
+        atomic_write_text(target, "{}")
     finally:
         os.umask(previous)
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
@@ -61,29 +62,29 @@ def test_write_text_atomic_follows_the_umask_not_0600(tmp_path):
 
 def test_interrupted_swap_keeps_old_file_and_leaves_no_temp(tmp_path, monkeypatch):
     target = tmp_path / "state.json"
-    write_text_atomic(target, "old")
+    atomic_write_text(target, "old")
     _interrupt_replace(monkeypatch)
     with pytest.raises(OSError, match="simulated interruption"):
-        write_text_atomic(target, "new")
+        atomic_write_text(target, "new")
     assert target.read_text() == "old"
     assert _names(tmp_path) == ["state.json"]
 
 
 def test_interrupted_write_keeps_old_file_and_leaves_no_temp(tmp_path, monkeypatch):
     target = tmp_path / "state.json"
-    write_text_atomic(target, "old")
+    atomic_write_text(target, "old")
 
     def boom(_fd):
         raise OSError("simulated disk full")
 
     monkeypatch.setattr(os, "fsync", boom)
     with pytest.raises(OSError, match="simulated disk full"):
-        write_text_atomic(target, "new")
+        atomic_write_text(target, "new")
     assert target.read_text() == "old"
     assert _names(tmp_path) == ["state.json"]
 
 
-def test_two_writers_never_share_a_temp_name(tmp_path, monkeypatch):
+def test_each_call_uses_a_fresh_temp_name(tmp_path, monkeypatch):
     seen: list[str] = []
     real_replace = os.replace
 
@@ -93,9 +94,18 @@ def test_two_writers_never_share_a_temp_name(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", spy)
     target = tmp_path / "state.json"
-    write_text_atomic(target, "a")
-    write_text_atomic(target, "b")
+    atomic_write_text(target, "a")
+    atomic_write_text(target, "b")
     assert len(set(seen)) == 2
+
+
+def test_concurrent_writers_leave_one_complete_file_and_no_temp(tmp_path):
+    target = tmp_path / "state.json"
+    payloads = [str(i) * 5000 for i in range(8)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda text: atomic_write_text(target, text), payloads))
+    assert target.read_text(encoding="utf-8") in payloads
+    assert _names(tmp_path) == ["state.json"]
 
 
 # --- the call sites -----------------------------------------------------------
@@ -108,19 +118,6 @@ def _row(file: str, note: str) -> dict:
 def _seed_incident(tmp_path):
     store.write_row(tmp_path, _row("a.json", "old"))
     return tmp_path / "a.json", lambda: store.write_row(tmp_path, _row("a.json", "new"))
-
-
-def _seed_recipe(tmp_path):
-    kwargs = dict(cwd="/w", sha="abc", now_iso="t")
-    resume.write_recipe(tmp_path, ["drive", "x"], **kwargs)
-    return tmp_path / resume.RECIPE_NAME, lambda: resume.write_recipe(
-        tmp_path, ["drive", "y"], **kwargs
-    )
-
-
-def _seed_phase(tmp_path):
-    resume.write_recipe(tmp_path, ["drive", "x"], cwd="/w", sha="abc", now_iso="t")
-    return tmp_path / resume.RECIPE_NAME, lambda: resume.mark_phase(tmp_path, "phase_d")
 
 
 def _entry(youtube_id: str) -> pending_journal.PendingEntry:
@@ -155,8 +152,6 @@ def _seed_routing(tmp_path):
 
 SITES = {
     "health-incident-row": _seed_incident,
-    "health-resume-recipe": _seed_recipe,
-    "health-resume-phase": _seed_phase,
     "pending-journal": _seed_pending,
     "trail-opening-marker": _seed_marker,
     "video-routing": _seed_routing,

@@ -21,6 +21,7 @@ import contextlib
 import json
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -59,23 +60,38 @@ def atomic_write_json(
         raise
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
     """Write ``text`` to ``path`` atomically — same contract as ``atomic_write_json``.
 
-    For files whose bytes are produced by a caller-owned serializer (site
-    journey markdown, ``videos.yaml``): this helper decides only *how* the
-    string reaches disk, never what it contains, so comment-preserving
-    round-trips are unaffected. A torn write on published site content is
-    worse than a skipped one — the merge is replayable, a truncated page is
-    a corrupt artifact that blocks the deploy. Encodes as utf-8 so a
-    non-utf-8 locale can't mangle place names.
+    The one shared text writer: site journey markdown, ``videos.yaml``, GPX
+    files, the video routing table and the JSON state files (health incident
+    rows, the pending-publish sidecar, the trail-opening marker). This helper
+    decides only *how* the string reaches disk, never what it contains, so
+    comment-preserving round-trips are unaffected. A torn write on published
+    site content is worse than a skipped one — the merge is replayable, a
+    truncated page is a corrupt artifact that blocks the deploy.
+
+    The text is staged in a uniquely named sibling file, flushed and fsynced,
+    then ``os.replace``d over ``path``: a reader sees the old file or the new
+    one, never a torn one, and any failure removes the staging file and leaves
+    the old file intact. The unique name keeps concurrent writers from
+    clobbering each other's staging file. The staging file takes the process
+    umask (like ``Path.write_text``), not the owner-only mode ``mkstemp``
+    forces, so a file other users read keeps the permissions it had. The
+    guarantee is atomicity of the swap; the parent directory is not fsynced,
+    so the rename itself can still be lost to a power cut. Encodes as utf-8 by
+    default so a non-utf-8 locale can't mangle place names. Parent
+    directories are created if missing.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)  # & ~umask
+        with os.fdopen(fd, "w", encoding=encoding) as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(FileNotFoundError, OSError):

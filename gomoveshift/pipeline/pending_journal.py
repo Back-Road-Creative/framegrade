@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from ..atomic_io import write_text_atomic
+from ._atomic_write import atomic_write_text
 from ._file_lock import make_blocking_file_lock
 
 PENDING_FILENAME = "pending_journal.json"
@@ -73,7 +73,7 @@ def save_pending(path: Path, entries: Iterable[PendingEntry]) -> None:
     # every still-pending video. Stage in a sibling file then swap it in (atomic
     # on the same filesystem) so a concurrent reader sees old-or-new, never
     # half. (Does not serialize concurrent read-modify-write; see merge_pending.)
-    write_text_atomic(path, json.dumps([asdict(e) for e in items], indent=2) + "\n")
+    atomic_write_text(path, json.dumps([asdict(e) for e in items], indent=2) + "\n")
 
 
 # The sidecar is keyed by ``pending_base`` (the drive output dir), not by

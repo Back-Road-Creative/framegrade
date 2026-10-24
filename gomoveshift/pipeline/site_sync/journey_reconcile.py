@@ -22,7 +22,6 @@ from types import SimpleNamespace
 import yaml
 from ruamel.yaml import YAMLError as RuamelYAMLError
 
-from ...atomic_io import write_text_atomic
 from .._atomic_write import atomic_write_text
 from ..journal_publisher import (
     MAX_TITLE_LEN,
@@ -167,7 +166,7 @@ def merge_routing(path: Path, entries: dict[str, dict]) -> None:
         routes[str(vid)] = {"journey": route["journey"], "date": route["date"]}
     doc["routes"] = routes
     p.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(
+    atomic_write_text(
         p, yaml.safe_dump(doc, sort_keys=True, default_flow_style=False, allow_unicode=True)
     )
 
