@@ -425,6 +425,38 @@ def run_ffmpeg_encode(
     )
 
 
+def run_ffmpeg_retry_enomem(
+    cmd: list[str],
+    output_path: Path,
+    timeout: int,
+    text: bool = True,
+) -> subprocess.CompletedProcess:
+    """Run ffmpeg once more when the first run fails with ENOMEM.
+
+    A large write onto a WSL drvfs mount (``/mnt/c``) can fail with
+    ``Cannot allocate memory`` (error code -12) from the filesystem while RAM
+    is free. That is transient, so the partial output is removed and the same
+    command runs again, at most twice in all. Any other failure, and a second
+    ENOMEM, return at once; the caller decides what a non-zero exit means.
+    """
+    result = subprocess.run(cmd, capture_output=True, text=text, timeout=timeout)
+    if result.returncode != 0 and _is_enomem(result.stderr):
+        logger.warning(
+            "ffmpeg hit ENOMEM (Cannot allocate memory) writing %s; "
+            "removing the partial output and retrying once",
+            output_path,
+        )
+        Path(output_path).unlink(missing_ok=True)
+        result = subprocess.run(cmd, capture_output=True, text=text, timeout=timeout)
+    return result
+
+
+def _is_enomem(stderr) -> bool:
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    return bool(stderr) and ("Cannot allocate memory" in stderr or "error code -12" in stderr)
+
+
 def run_ffmpeg_quick(
     cmd: list[str],
     output_path: Optional[Path] = None,

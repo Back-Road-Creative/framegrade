@@ -14,6 +14,7 @@ from keycut import probe_keyframes, snap_start_to_keyframe
 
 from ...analysis.shorts_models import GPX_MEDIA_S_TAG
 from .._atomic_write import atomic_write_text
+from ..ffmpeg_runner import run_ffmpeg_retry_enomem
 from .gopro_parser import Episode, _is_invalid_coord, get_clip_duration
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ def concat_episode(
 
     # 3600s timeout — GoPro 4K files can be several GB per chapter,
     # and WSL2 cross-mount I/O is slow even with stream copy
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    result = run_ffmpeg_retry_enomem(cmd, partial_path, timeout=3600)
     if result.returncode != 0:
         partial_path.unlink(missing_ok=True)
         # The cause is at the end of stderr; its head is the version banner.
