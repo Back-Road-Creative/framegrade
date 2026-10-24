@@ -203,7 +203,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # --durations=25 makes every run list its slowest tests.
-addopts = "-n auto --dist worksteal --durations=25 --cov --cov-report=term-missing --cov-fail-under=95"
+addopts = "-n auto --dist worksteal --durations=25 --cov --cov-report=term-missing --cov-fail-under=91"
 markers = [
     "integration: end-to-end tests requiring real FFmpeg/video files",
     "slow: tests that take more than 30 seconds",
@@ -218,11 +218,38 @@ filterwarnings = [
 python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = true
-exclude = ["tests/", "scripts/", "gomoveshift/"]
+# gomoveshift/ is skipped except the strict modules below (~780 errors remain in
+# ~170 other files). A module joins the ratchet when it is clean: add it to the
+# lookahead here (the (?=.) keeps the directory itself discoverable) and to the strict override, and tests/test_tooling_config.py.
+exclude = ["tests/", "scripts/", "gomoveshift/(?=.)(?!paths\\.py$|video_types\\.py$)"]
 
 [[tool.mypy.overrides]]
 module = ["gomoveshift.*"]
 ignore_errors = true
+
+# The ratchet: modules with no errors even under the strict flags. The more specific
+# pattern wins over gomoveshift.*, so errors are live here. ``strict = true`` is only
+# valid globally, so its per-module flags are spelled out.
+[[tool.mypy.overrides]]
+module = ["gomoveshift.paths", "gomoveshift.video_types"]
+ignore_errors = false
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+no_implicit_optional = true
+no_implicit_reexport = true
+warn_return_any = true
+warn_unused_ignores = true
+strict_equality = true
+
+# Measure the shipped package. With no source, pytest-cov's bare --cov counts every
+# file the run imports, including ~150k statements in tests/ that are almost all
+# "covered", which lifted the total from 91.5% to 96.6%.
+[tool.coverage.run]
+source = ["gomoveshift"]
 
 [tool.ruff]
 line-length = 100
