@@ -71,6 +71,16 @@ def test_second_enomem_fails(tmp_path):
     assert len(fake.calls) == 2
 
 
+def test_error_code_minus_12_alone_is_recognised(tmp_path):
+    # ffmpeg prints "error code: -12" with a colon; the errno text may be absent.
+    out = tmp_path / "x.mp4"
+    fake = _Ffmpeg([(1, "[out#0/mp4 @ 0x2] Task finished with error code: -12\n"), (0, "")])
+    with patch.object(subprocess, "run", fake):
+        result = run_ffmpeg_retry_enomem(["ffmpeg", str(out)], out, timeout=5)
+    assert result.returncode == 0
+    assert len(fake.calls) == 2
+
+
 def test_bytes_stderr_is_recognised(tmp_path):
     out = tmp_path / "x.mp4"
     fake = _Ffmpeg([(1, _ENOMEM), (0, "")], text=False)

@@ -434,7 +434,7 @@ def run_ffmpeg_retry_enomem(
     """Run ffmpeg once more when the first run fails with ENOMEM.
 
     A large write onto a WSL drvfs mount (``/mnt/c``) can fail with
-    ``Cannot allocate memory`` (error code -12) from the filesystem while RAM
+    ``Cannot allocate memory`` (``error code: -12``) from the filesystem while RAM
     is free. That is transient, so the partial output is removed and the same
     command runs again, at most twice in all. Any other failure, and a second
     ENOMEM, return at once; the caller decides what a non-zero exit means.
@@ -454,7 +454,7 @@ def run_ffmpeg_retry_enomem(
 def _is_enomem(stderr) -> bool:
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
-    return bool(stderr) and ("Cannot allocate memory" in stderr or "error code -12" in stderr)
+    return bool(stderr) and ("Cannot allocate memory" in stderr or "error code: -12" in stderr)
 
 
 def run_ffmpeg_quick(
