@@ -111,6 +111,8 @@ def _skip_reason(row, store_status, known, staged, stages_root) -> Optional[str]
     missing = [s for s in row.sources if not Path(s).is_file()]
     if missing:
         return f"missing source {missing[0]}"
+    if row.day_gpx and not Path(row.day_gpx).is_file():
+        return f"missing day_gpx {row.day_gpx}"
     for marker in sorted(Path(stages_root).glob(f"{row.project}/**/_stages/{HOLD_NAME}")):
         return f"operator hold: {marker}"
     mine = {os.path.realpath(s) for s in row.sources}
@@ -260,6 +262,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         "--lf-mode", row.lf_mode, "--output-dir", str(out_dir), "--skip-upload",
         "--no-youtube-upload", "--ost-system-review", "--no-review", "--force", "--no-tmux",
     ]  # fmt: skip
+    if row.day_gpx:
+        drive_argv += [
+            "--day-gpx", row.day_gpx, "--camera-utc-offset-hours", str(row.camera_utc_offset_hours),
+        ]  # fmt: skip
     argv = [
         "python3", str(job_runner(code_root)),
         "--name", f"gms-backlog-{row.project}", "--heavy", "--detach", "--stall", _STALL_S,

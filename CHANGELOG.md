@@ -5,6 +5,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `health backlog` launches a row that names a whole-day GPX with `--day-gpx` and `--camera-utc-offset-hours` from the row, so footage with no GPS of its own (Insta360) launches from the backlog; a row whose track is missing is skipped with that reason. Needs Waypost with the backlog `day_gpx` fields (Back-Road-Creative/waypost#46).
+
 ## [0.3.7] - 2026-10-24
 
 ### Added
