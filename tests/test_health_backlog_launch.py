@@ -282,6 +282,42 @@ def test_a_missing_source_skips_the_row(tmp_path):
     assert "missing" in res["skipped"][0]["reason"]
 
 
+def _gpx_row(rig, gpx):
+    row = rig.rows[0]
+    return BacklogRow(
+        row.project, row.region, row.sources, "generic", row.lf_mode,
+        day_gpx=str(gpx), camera_utc_offset_hours=-4.0,
+    )  # fmt: skip
+
+
+def test_a_day_gpx_row_launches_with_the_track_and_camera_offset(tmp_path):
+    rig = Rig(tmp_path)
+    gpx = tmp_path / "day12.gpx"
+    gpx.write_text("<gpx/>")
+    rig.rows[0] = _gpx_row(rig, gpx)
+    res = rig.run()
+    assert res["action"] == "launched", res
+    drive_args = rig.launches[0][0][rig.launches[0][0].index("--") + 1 :]
+    assert drive_args[drive_args.index("--day-gpx") + 1] == str(gpx)
+    assert drive_args[drive_args.index("--camera-utc-offset-hours") + 1] == "-4.0"
+    assert drive_args[drive_args.index("--ingest-mode") + 1] == "generic"
+
+
+def test_a_row_without_a_day_gpx_passes_neither_flag(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    drive_args = rig.launches[0][0]
+    assert "--day-gpx" not in drive_args and "--camera-utc-offset-hours" not in drive_args
+
+
+def test_a_missing_day_gpx_skips_the_row(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows[0] = _gpx_row(rig, tmp_path / "gone.gpx")
+    res = rig.run()
+    assert res["project"] == "day-b"
+    assert res["skipped"][0]["reason"] == f"missing day_gpx {tmp_path / 'gone.gpx'}"
+
+
 def test_backlog_exhausted_is_a_noop_naming_every_skip(tmp_path):
     rig = Rig(tmp_path)
     rig.ledger = {"day-a", "day-b"}

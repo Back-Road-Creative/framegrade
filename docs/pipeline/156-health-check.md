@@ -122,7 +122,7 @@ code: the failed audit still holds its slot, so the operator relaunches it (the 
 from its stages) or clears the row; a relaunched job that is running is a `noop` again.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
-a missing source file, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
+a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
 or a held earlier stage whose sources overlap the row's), or every source already staged by an
 earlier run's `resume.json`.
 
@@ -143,5 +143,7 @@ the job runner (`--name gms-backlog-<project> --heavy --detach --stall 86400 --e
 python> -m gomoveshift drive <subset> --region R --publish D --lf-day D --ingest-mode --lf-mode
 … --output-dir O/<project> --skip-upload --no-youtube-upload --ost-system-review --no-review
 --force --no-tmux`) with `GMS_INTERMEDIATE_DIR=S/<project>`, and registers the drive `auditing`
-in the store. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
+in the store. A row with a `day_gpx` (footage with no GPS of its own) adds `--day-gpx <track>
+--camera-utc-offset-hours <N>` from the row; Waypost refuses a row that sets one without the
+other. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
 `--dry-run` takes no lease, writes nothing and prints the exact argv, env and storage table.

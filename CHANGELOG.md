@@ -7,6 +7,7 @@ All notable changes to this project are recorded here. The format follows
 
 ### Added
 
+- `health backlog` launches a row that names a whole-day GPX with `--day-gpx` and `--camera-utc-offset-hours` from the row, so footage with no GPS of its own (Insta360) launches from the backlog; a row whose track is missing is skipped with that reason. Needs Waypost with the backlog `day_gpx` fields (Back-Road-Creative/waypost#46).
 - Preflight prints a non-blocking note beside the plan's ETA when the machine has fewer than 4 logical CPU cores or less than 8 GB total RAM (a machine sold as 8 GB is not flagged). The run is never refused for it.
 - `gomoveshift --help` ends with the commands grouped by what they do, and its usage line no longer lists every command.
 
