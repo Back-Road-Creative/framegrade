@@ -59,3 +59,15 @@ def test_minimum_machine_section_matches_preflight_defaults() -> None:
         assert re.search(rf"\b{re.escape(shown)} GB\b", section), (
             f"section does not state {shown} GB for {name}"
         )
+
+
+def test_minimum_machine_names_only_the_command_that_runs_preflight() -> None:
+    match = re.search(r"^## Minimum machine\n(.*?)(?=^## )", DOC, flags=re.MULTILINE | re.DOTALL)
+    assert match
+    section = match.group(1)
+    assert "gomoveshift drive" in section
+    assert "gomoveshift pipeline" not in section, (
+        "`pipeline` never calls run_preflight; the section must not claim it does"
+    )
+    assert "naming the one that failed" not in section, "run_preflight lists every failure"
+    assert "GPU below" not in section, "the NVENC section is above, not below"

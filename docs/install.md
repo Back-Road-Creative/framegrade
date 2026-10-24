@@ -35,11 +35,14 @@ when the three repositories sit side by side and you want your own checkouts.
 
 **GPU host.** The default dependency set already pins `onnxruntime-gpu[cuda,cudnn]`
 (the CUDA 12 runtime wheels), so install the siblings and then this project
-into a fresh virtual environment instead of using the CPU script:
+into a fresh virtual environment instead of using the CPU script. The first
+install uses the same reviewed sibling revisions as the CPU script; to use your
+own side-by-side checkouts, run `.venv/bin/pip install -e ../waypost -e ../gps-journey`
+in its place:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ../waypost -e ../gps-journey
+.venv/bin/pip install -r ci/siblings.txt
 .venv/bin/pip install -e '.[dev]'
 ```
 
@@ -257,9 +260,10 @@ equivalent). The tests and commands that need such a machine are listed in
 
 ## Minimum machine
 
-The checks below are what `gomoveshift drive` and `gomoveshift pipeline` enforce
-before an encode (`run_preflight` in `gomoveshift/pipeline/preflight.py`); a run
-on a smaller machine stops with a message naming the one that failed.
+Most of the checks below are what `gomoveshift drive` enforces before an encode
+(`run_preflight` in `gomoveshift/pipeline/preflight.py`); a run on a smaller
+machine stops before any encode and lists every check that failed. The NVENC row
+is checked separately by `detect_nvenc`.
 
 | resource | minimum |
 | --- | --- |
@@ -267,7 +271,7 @@ on a smaller machine stops with a message naming the one that failed.
 | Free disk at the staging directory | 30 GB |
 | Available RAM | 2 GB |
 | `ffmpeg` and `ffprobe` on `PATH` | present (8.1 or newer, per the local install above) |
-| NVENC-capable ffmpeg and GPU | required for the drive pipeline (see GPU below) |
+| NVENC-capable ffmpeg and GPU | required for the drive pipeline (see GPU (NVENC) above) |
 | CUDA execution provider for `onnxruntime` | required for a run with blur on |
 
 On WSL the Windows volume behind the Linux disk must also keep 25 GB free, even
