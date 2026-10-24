@@ -119,7 +119,7 @@ dependencies = [
     # redactcam ≥0.2 ships onnxruntime only through its ``[cpu]``/``[gpu]``
     # extras, so the ``[gpu]`` extra keeps this project and redactcam asking for
     # the same onnxruntime wheel.
-    "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam@9ada9f45407265a88c0a23b0b0898fb56567d871",
+    "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam@0ddd0c16d35db3d6837e69e1083da581f9b08006",
 ]
 
 [project.optional-dependencies]
