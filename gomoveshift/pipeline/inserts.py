@@ -551,21 +551,12 @@ def _photo_county(photo: Path, county_of) -> tuple[str, Optional[tuple[str, str]
     return (f"{county}, {st}" if st else county), (county, state or "")
 
 
-def describe_drive_inserts(drive, *, county_of=None) -> list[str]:
-    """One preflight line per requested insert; raises on media that is not there.
-
-    With ``county_of`` (a ``(lat, lon) -> (county, state)`` lookup) each photo line also
-    names the county it was captured in. Without it nothing leaves the machine.
-    """
+def describe_drive_inserts(drive) -> list[str]:
+    """One preflight line per requested insert; raises on media that is not there."""
     di = DriveInserts.from_drive(drive)
     if di is None:
         return []
-    lines = []
-    for p in di.photos:
-        line = f"photo  {p.name}  (placed by capture clock against the day's GPX)"
-        if county_of is not None:
-            line += f"  captured in: {_photo_county(p, county_of)[0]}"
-        lines.append(line)
+    lines = [f"photo  {p.name}  (placed by capture clock against the day's GPX)" for p in di.photos]
     for path, at in di.clips:
         lines.append(
             f"clip   {path.name}  at {int(at) // 60:02d}:{int(at) % 60:02d} of the first long-form"
@@ -576,8 +567,9 @@ def describe_drive_inserts(drive, *, county_of=None) -> list[str]:
 def describe_insert_label_match(drive, lf_labels: dict, county_of) -> list[str]:
     """One line per insert photo: its capture county and the LFs whose label accepts it.
 
-    ``lf_labels`` is ``{lf_index: label}``. Empty when no photos were requested. The same
-    county test the insert gate runs, shown before any encode.
+    ``lf_labels`` is ``{lf_index: label}``. Empty when no photos were requested. The county
+    test is the insert gate's (``county_in_label``), run against the labels passed in, which
+    may differ from the ``per_lf_locations`` the gate sees (overrides, multi-county labels).
     """
     di = DriveInserts.from_drive(drive)
     if di is None or not di.photos:

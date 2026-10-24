@@ -182,7 +182,12 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
 
 
 def _print_insert_counties(config: Any, lf_labels: dict, geocoder: Any) -> None:
-    """Insert photos vs the LF labels above, so a county refusal shows before any encode."""
+    """Insert photos vs the dry-run labels above, so a county refusal shows before any encode.
+
+    The verdict uses the labels this dry run printed (dominant-county fix), not
+    ``--per-lf-location`` overrides, so it can differ from the insert gate for an LF
+    the operator relabelled.
+    """
     from ..inserts import InsertError, describe_insert_label_match, geocoder_county_of
 
     try:
@@ -194,7 +199,10 @@ def _print_insert_counties(config: Any, lf_labels: dict, geocoder: Any) -> None:
         return
     if not lines:
         return
-    print("  Insert photos vs LF labels (capture county, EXIF GPS)")
+    print(
+        "  Insert photos vs the dry-run labels above (capture county, EXIF GPS;\n"
+        "  --per-lf-location overrides are not applied here)"
+    )
     for line in lines:
         print(f"    {line}")
     print("=" * 64)

@@ -35,26 +35,17 @@ def _photos(tmp_path, monkeypatch):
     return SimpleNamespace(insert_photos=str(d), insert_clips=[])
 
 
-def test_describe_names_the_capture_county_of_each_photo(tmp_path, monkeypatch):
-    drive = _photos(tmp_path, monkeypatch)
-    lines = describe_drive_inserts(drive, county_of=_county_of)
-    by_name = {ln.split()[1]: ln for ln in lines}
-    assert "Colleton County, SC" in by_name["a_colleton.jpg"]
-    assert "Beaufort County, SC" in by_name["b_beaufort.jpg"]
-    assert "no EXIF GPS" in by_name["c_nogps.jpg"]
-    assert "county unresolved" in by_name["d_ocean.jpg"]
-
-
-def test_describe_without_geocoder_stays_offline(tmp_path, monkeypatch):
+def test_describe_drive_inserts_does_no_exif_or_geocode_work(tmp_path, monkeypatch):
     drive = _photos(tmp_path, monkeypatch)
 
-    def boom(lat, lon):
-        raise AssertionError("no geocoder call without county_of")
+    def boom(*a, **k):
+        raise AssertionError("describe_drive_inserts must stay offline")
 
+    monkeypatch.setattr(ins_mod, "_photo_gps", boom)
     monkeypatch.setattr(ins_mod, "_geocoder_county_of", boom)
     lines = describe_drive_inserts(drive)
     assert len(lines) == 4
-    assert not any("County" in ln for ln in lines)
+    assert not any("County" in ln or "captured in" in ln for ln in lines)
 
 
 def test_label_match_lists_the_lfs_that_accept_each_photo(tmp_path, monkeypatch):
@@ -101,6 +92,7 @@ def test_label_dry_run_prints_insert_counties(tmp_path, monkeypatch, capsys):
     lf_listing.print_label_dry_run(config=config, state=SimpleNamespace(gps_per_episode=[]))
     out = capsys.readouterr().out
 
-    section = out.split("Insert photos vs LF labels", 1)[1]
+    section = out.split("Insert photos vs the dry-run labels above", 1)[1]
     assert "a_colleton.jpg" in section and "Colleton County, SC" in section
     assert "b_beaufort.jpg" in section and "outside every LF label" in section
+    assert "--per-lf-location" in section
