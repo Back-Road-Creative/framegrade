@@ -5,8 +5,7 @@ Resolves what kind of trip a route story is -- hiking, cycling, or driving
 instead of each independently re-guessing from speed. It is wired into ``route_story/film.py``'s display speed filter and
 ``route_story/metadata.py``'s derived title/tags. ``hud_speed_cap_mps`` and
 ``grade_cap_percent`` set the HUD's speed/grade display caps for the whole
-render (``route_story/hud.py``'s ``set_active_display_caps``);
-``default_units`` is carried, not yet consumed.
+render (``route_story/hud.py``'s ``set_active_display_caps``).
 
 An explicit ``--activity``/profile-yaml value always wins. Absent one
 (``None`` or ``"auto"``), the profile falls back to the same speed-band
@@ -36,7 +35,7 @@ RIDING_MAX_SPEED_MPS = 9.0
 
 #: Bump whenever ACTIVITY_PROFILES, IMPERIAL_REGIONS, or the units rule
 #: changes, so a receipt can distinguish a re-render under a different table.
-MAPPING_VERSION = "2026-09-25.1"
+MAPPING_VERSION = "2026-10-23.1"
 
 #: (name, lat_min, lat_max, lon_min, lon_max) bounding boxes for regions
 #: whose everyday road/trail units are imperial. Everything else (Ireland
@@ -61,7 +60,6 @@ class ActivityProfile:
     max_speed_mps: float
     hud_speed_cap_mps: float
     grade_cap_percent: float
-    default_units: str
 
 
 ACTIVITY_PROFILES: dict[str, ActivityProfile] = {
@@ -70,21 +68,18 @@ ACTIVITY_PROFILES: dict[str, ActivityProfile] = {
         max_speed_mps=HIKING_MAX_SPEED_MPS,
         hud_speed_cap_mps=4.0,
         grade_cap_percent=35.0,
-        default_units="imperial",
     ),
     "cycling": ActivityProfile(
         name="cycling",
         max_speed_mps=20.0,
         hud_speed_cap_mps=25.0,
         grade_cap_percent=20.0,
-        default_units="imperial",
     ),
     "driving": ActivityProfile(
         name="driving",
         max_speed_mps=50.0,
         hud_speed_cap_mps=60.0,
         grade_cap_percent=12.0,
-        default_units="imperial",
     ),
 }
 

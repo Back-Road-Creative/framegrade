@@ -124,12 +124,11 @@ def _collect_metrics_best_effort(
 
     Registers each uploaded LF's YouTube id into the tracking record, then
     pulls metrics via :class:`MetricsCollector`. BEST-EFFORT: uploads are
-    already done, so metrics are additive. ANY failure (not-implemented
-    collector — e.g. ``TikTokCollector`` raises ``NotImplementedError`` —
-    missing credential, store IO error) is logged ``METRICS-COLLECT:`` and
-    swallowed; it NEVER raises. ``collect_all`` / ``collect_for_short``
-    also swallow per-collector errors, so one unimplemented platform can't
-    abort the others.
+    already done, so metrics are additive. ANY failure (unavailable
+    collector, missing or revoked credential, platform API error, store IO
+    error) is logged ``METRICS-COLLECT:`` and swallowed; it NEVER raises.
+    ``collect_all`` / ``collect_for_short`` also swallow per-collector
+    errors, so one unavailable platform can't abort the others.
     """
     try:
         # ``output_base`` is the PROJECT dir (<output root>/<project>); the

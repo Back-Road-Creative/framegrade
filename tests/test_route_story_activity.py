@@ -1,5 +1,7 @@
 """The explicit Route Story activity contract."""
 
+import dataclasses
+
 import pytest
 
 from gomoveshift.pipeline.route_story.activity import (
@@ -44,17 +46,25 @@ def test_unknown_explicit_activity_raises():
         resolve_activity("unicycling", observed_max_speed_mps=5.0)
 
 
-def test_profile_carries_hud_cap_grade_cap_and_units():
+def test_profile_carries_hud_cap_and_grade_cap_but_no_units_default():
     profile = ACTIVITY_PROFILES["cycling"]
     assert isinstance(profile, ActivityProfile)
     assert profile.hud_speed_cap_mps > profile.max_speed_mps
     assert profile.grade_cap_percent > 0
-    assert profile.default_units
+    # Units come from resolve_units (explicit value or region), never the profile.
+    assert "default_units" not in {f.name for f in dataclasses.fields(ActivityProfile)}
+    assert not hasattr(profile, "default_units")
 
 
 def test_mapping_version_is_a_non_empty_string():
     assert isinstance(MAPPING_VERSION, str)
     assert MAPPING_VERSION
+
+
+def test_mapping_version_bumped_after_profile_field_removal():
+    # ACTIVITY_PROFILES changed shape (default_units dropped), so the receipt
+    # version must differ from the one that produced the old table.
+    assert MAPPING_VERSION != "2026-09-25.1"
 
 
 def test_region_units_dublin_is_metric():

@@ -1,9 +1,9 @@
 [project]
 name = "gomoveshift-video"
 version = "0.3.5"
-description = "Automated driving video processing: sign detection, OCR, dead spot removal, and intelligent segmentation"
+description = "A media engine that grades video and photos, checks each finished file and builds route films from GPS tracks"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Apache-2.0"}
 dependencies = [
     # Headless build: this pipeline never opens a window (no imshow/namedWindow/
@@ -23,7 +23,6 @@ dependencies = [
     # solve. Already resolved transitively (scikit-image), declared
     # directly since this module imports it itself.
     "scipy>=1.11.0",
-    "ffmpeg-python>=0.2.0",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
     "jinja2>=3.1.0",
@@ -31,7 +30,6 @@ dependencies = [
     # (multipart DoS / resource-exhaustion). 0.0.30 fixes 53538/53539, 0.0.31
     # fixes 53540 — pin the floor that clears all three.
     "python-multipart>=0.0.31",
-    "watchdog>=3.0.0",
     "pillow>=10.0.0",
     # Photo ingest decode front-end: Pillow cannot open camera RAW (DNG/CR2/NEF/ARW)
     # or HEIC. rawpy floor 0.24.0 = lowest release verified to import against the
@@ -44,7 +42,6 @@ dependencies = [
     # embed an ICC profile; tifffile does both, deterministically. Already locked
     # via scikit-image — declared because the export path imports it directly.
     "tifffile>=2023.7.10",
-    "aiofiles>=23.0.0",
     "pydantic>=2.0.0",
     # Floor raised to 2.14.2: 2.14.1 carries GHSA-4xgf-cpjx-pc3j (fixed in
     # 2.14.2).
@@ -105,8 +102,8 @@ dependencies = [
     # revision, which is why requirements.lock carries no entry for them — a
     # `git+https://…` line there is an *unnamed* requirement and CI feeds that
     # file to `uv pip install --constraint`, which rejects it outright.
-    # These four require Python >=3.11; this project's >=3.10 floor is already
-    # fictional (CI dropped its 3.10 leg because the lock pins 3.12-only wheels).
+    # These four require Python >=3.11; the project floor is 3.12 because the lock
+    # pins 3.12-only wheels (CI and the console image run 3.12).
     # pycube-lut's `[hald]` extra is deliberately not requested — it only adds
     # Pillow, already a direct dependency above; redactcam's `[centerface]` extra
     # likewise only adds `deface`, declared directly above.
