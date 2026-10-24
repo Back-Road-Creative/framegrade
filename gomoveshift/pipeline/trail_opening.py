@@ -37,6 +37,7 @@ from keycut import probe_keyframes
 
 from ..console.settings import current_brand
 from ..publishing.brand_policy import load_media_profile
+from ._atomic_write import atomic_write_text
 from .inserts import STILL_SUFFIXES, InsertError, MediaInfo, probe_media
 from .montage_builder import (
     concat_copy_argv,
@@ -77,9 +78,7 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, sort_keys=True))
-    os.replace(tmp, path)
+    atomic_write_text(path, json.dumps(data, sort_keys=True))
 
 
 def record_lead(
