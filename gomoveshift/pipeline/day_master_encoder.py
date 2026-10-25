@@ -237,6 +237,28 @@ def _source_fingerprints(concat_paths: list) -> list[str]:
     return fps
 
 
+def _concat_provenance_fingerprint(concat_paths: list, raw_concat: Path) -> Optional[str]:
+    """Key for a raw concat by what it was built from: each episode's
+    ``size:mtime_ns`` in order, plus the raw's own size.
+
+    A stream-copy concat of unchanged episodes is the same packets, so a raw
+    rebuilt after a failed run keeps the blur mask its predecessor paid for
+    (the raw's own ``size:mtime_ns`` flips on every rebuild). Any episode
+    change, a reorder, or a raw of another size changes the key. ``None`` when
+    an episode or the raw can't be stat'ed: callers fall back to the raw's own
+    fingerprint.
+    """
+    fps = _source_fingerprints(concat_paths)
+    if not fps or "missing" in fps:
+        return None
+    try:
+        raw_size = Path(raw_concat).stat().st_size
+    except OSError:
+        return None
+    digest = hashlib.sha256(json.dumps([fps, raw_size]).encode()).hexdigest()
+    return f"concat/v1:{digest}"
+
+
 def master_fingerprint(master_path: Path) -> str:
     """``"size:mtime_ns"`` fingerprint for a (potentially 60 GB) master.
 
@@ -1001,6 +1023,7 @@ def _build_day_blur_mask(
     mask_path: Path,
     regions_sidecar: Path,
     date: str,
+    source_fingerprint: Optional[str] = None,
 ) -> Path:
     """Detect faces ∪ plates ∪ vehicle-cabins ∪ persons on the day's raw concat and
     materialize the frame-accurate privacy mask the single-pass encode composites — so
@@ -1013,6 +1036,11 @@ def _build_day_blur_mask(
     detector models actually produced it, so a source-fingerprint match alone never
     authorizes reuse when this run's requirements (e.g. person blur newly resolvable)
     differ from what was recorded.
+
+    ``source_fingerprint`` (``_concat_provenance_fingerprint``) replaces that key when
+    the caller knows what the raw was built from, so a raw rebuilt from unchanged
+    episodes keeps its mask; a mask keyed on the raw's own fingerprint by an older
+    run still matches while that raw is untouched.
 
     Raises ``BlurGateError`` on ANY detection failure, or when the occupant cabin blur
     is on but its vehicle model can't resolve — never a silent fall-through to an
@@ -1035,9 +1063,11 @@ def _build_day_blur_mask(
 
     drive = config.drive
     try:
-        fingerprint = file_fingerprint(raw_concat)
+        file_fp = file_fingerprint(raw_concat)
     except OSError:
-        fingerprint = ""
+        file_fp = ""
+    fingerprint = source_fingerprint or file_fp
+    accepted_keys = {k for k in (fingerprint, file_fp) if k}
 
     # Occupant cabin blur is a signed-off privacy feature: enabled-but-unresolvable
     # means drivers would ship UNBLURRED — hard-fail rather than silently disable.
@@ -1080,8 +1110,7 @@ def _build_day_blur_mask(
     existing_evidence = load_cached_json(_blur_evidence_path(regions_sidecar))
     if (
         existing is not None
-        and fingerprint
-        and existing.source_hash == fingerprint
+        and existing.source_hash in accepted_keys
         and existing_evidence == current_evidence
         and mask_path.exists()
         and mask_path.stat().st_size > 0
@@ -1587,6 +1616,13 @@ def encode_day_master(
             output_dir / f"day_{date}_blur_mask.mkv",
             regions_sidecar,
             date,
+            # Picture steps write a new file from the raw: only the raw itself is
+            # keyed by its episodes.
+            source_fingerprint=(
+                None
+                if picture_changed
+                else _concat_provenance_fingerprint(concat_paths, raw_concat)
+            ),
         )
         # Occupant-coverage gate (drive path): a corroborated car whose cabin
         # the mask misses would ship its driver exposed — verify against the mask
