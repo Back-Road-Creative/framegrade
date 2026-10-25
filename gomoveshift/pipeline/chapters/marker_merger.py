@@ -274,15 +274,32 @@ class MarkerMerger:
         Two adjacent waypoints geocoding to the same town (or a marker
         repeating a GPS town name) produced consecutive identical titles. The
         earlier timestamp is kept; the duplicate is dropped.
+
+        An "Entering X" right after "Start - X, State" re-announces the place
+        the drive started in ("Start - Beaufort County, South Carolina" then
+        "Entering Beaufort County"), so it is dropped too.
         """
         collapsed: list[dict] = []
         for ch in chapters:
-            if collapsed and _strip_chapter_decorations(
-                str(collapsed[-1].get("title") or "")
-            ) == _strip_chapter_decorations(str(ch.get("title") or "")):
-                continue
+            title = str(ch.get("title") or "")
+            if collapsed:
+                prev = str(collapsed[-1].get("title") or "")
+                if _strip_chapter_decorations(prev) == _strip_chapter_decorations(title):
+                    continue
+                if len(collapsed) == 1 and _re_enters_start(prev, title):
+                    continue
             collapsed.append(ch)
         return collapsed
+
+
+def _re_enters_start(start_title: str, title: str) -> bool:
+    """True when ``title`` is an "Entering X" naming the place of the
+    "Start - X[, State]" chapter (its leading comma-parts)."""
+    if not start_title.startswith("Start - ") or not title.startswith("Entering "):
+        return False
+    start_parts = [p.strip().casefold() for p in start_title[len("Start - ") :].split(",")]
+    parts = [p.strip().casefold() for p in _strip_chapter_decorations(title).split(",")]
+    return bool(parts[0]) and start_parts[: len(parts)] == parts
 
 
 def _strip_chapter_decorations(title: str) -> str:

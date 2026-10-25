@@ -153,6 +153,48 @@ class TestConsecutiveDuplicateCollapse:
         assert sum(1 for t in titles if "Maple" in t) == 1, titles
 
 
+class TestEnteringTheStartPlace:
+    """An "Entering X" that only re-announces the Start chapter's place is dropped.
+
+    Beaufort (2026-02-20) shipped "0:00 Start - Beaufort County, South
+    Carolina" then "1:00 Entering Beaufort County": the drive never left the
+    county, so the second chapter announced nothing.
+    """
+
+    class _Loc:
+        def __init__(self, city):
+            self.city = city
+            self.name = city
+
+    def _titles(self, start_location, towns):
+        wpts = [(t, self._Loc(name)) for t, name in towns]
+        chapters = MarkerMerger().merge_markers_with_chapters(
+            wpts, None, video_duration=4000.0, start_location=start_location, end_location="B"
+        )
+        return [c["title"] for c in chapters]
+
+    def test_start_county_not_re_entered(self):
+        titles = self._titles(
+            "Beaufort County, South Carolina",
+            [(60.0, "Beaufort County"), (2554.0, "Sea Island Parkway, Beaufort County")],
+        )
+        assert "Entering Beaufort County" not in titles, titles
+        assert "Entering Sea Island Parkway, Beaufort County" in titles
+
+    def test_a_different_place_after_start_is_kept(self):
+        titles = self._titles(
+            "Beaufort County, South Carolina", [(60.0, "Colleton County"), (2554.0, "Walterboro")]
+        )
+        assert "Entering Colleton County" in titles, titles
+
+    def test_only_the_chapter_right_after_start_is_dropped(self):
+        titles = self._titles(
+            "Beaufort County, South Carolina",
+            [(600.0, "Colleton County"), (2554.0, "Beaufort County")],
+        )
+        assert "Entering Beaufort County" in titles, titles
+
+
 # ── dead-zone no longer drops a legitimate early/late chapter ─────────
 
 
