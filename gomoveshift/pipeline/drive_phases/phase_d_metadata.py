@@ -109,6 +109,33 @@ def _rescope_roads_to_lf(profile: dict, own_profiles: list[RouteProfile], lf_idx
     ).roads_traversed
 
 
+def _publish_time_bearing(state) -> dict[int, str]:
+    """Per-LF ``🧭 Heading:`` re-derived from every episode each LF spans.
+
+    Phase B+C used to store the heading of the LF's representative GPX alone,
+    so an out-and-back whose return leg was the representative shipped the
+    return leg's heading (Beaufort 2026-02-20: "Northeastbound"). Recompute
+    from the persisted span map for each LF whose GPX files are all still on
+    disk; any other LF keeps its stored heading.
+    """
+    stored = {int(k): v for k, v in (state.per_lf_bearing or {}).items()}
+    episode_map = {int(k): v for k, v in (state.per_lf_gpx_episode_paths or {}).items()}
+    readable = {
+        idx for idx, paths in episode_map.items() if paths and all(Path(p).is_file() for p in paths)
+    }
+    if not readable:
+        return stored
+    from ..post_encoding_invariants import _compute_per_lf_bearing
+
+    fresh = _compute_per_lf_bearing(
+        {int(k): v for k, v in (state.per_lf_gpx_path or {}).items() if int(k) in readable},
+        per_lf_gpx_episode_paths=episode_map,
+    )
+    out = {idx: v for idx, v in stored.items() if idx not in readable}
+    out.update(fresh)
+    return out
+
+
 def _build_route_profiles_per_lf(state, drive_plan) -> dict[int, dict]:
     """Aggregate the persisted per-EPISODE route profiles into per-LF profiles.
 
@@ -298,7 +325,7 @@ def _build_metadata_per_lf(
     per_lf_elevation_gain_m = state.per_lf_elevation_gain_m or {}
     per_lf_elevation_profile = state.per_lf_elevation_profile or {}
     per_lf_speed = state.per_lf_speed or {}
-    per_lf_bearing = state.per_lf_bearing or {}
+    per_lf_bearing = _publish_time_bearing(state)
     per_lf_regions = state.per_lf_regions or {}
     per_lf_gpx_path_map = state.per_lf_gpx_path or {}
 
