@@ -9,6 +9,11 @@ All notable changes to this project are recorded here. The format follows
 
 - `health backlog` launches a row that names a whole-day GPX with `--day-gpx` and `--camera-utc-offset-hours` from the row, so footage with no GPS of its own (Insta360) launches from the backlog; a row whose track is missing is skipped with that reason. Needs Waypost with the backlog `day_gpx` fields (Back-Road-Creative/waypost#46).
 
+### Fixed
+
+- A long-form's "Heading" line is worked out from the first fix of its first episode to the last fix of its last episode, not from one episode alone. An out-and-back drive that ends where it started now gets no heading instead of the direction of its return leg (Beaufort, 2026-02-20, said "Northeastbound"). The publish pass recomputes it from the episode tracks, so a drive encoded on an earlier version is corrected when it is published.
+- The chapter list no longer opens with "Start - Beaufort County, South Carolina" followed by "Entering Beaufort County": an "Entering" chapter that names the start place is dropped. The chapter minimum still holds, because padding runs after the merge.
+
 ## [0.3.7] - 2026-10-24
 
 ### Added

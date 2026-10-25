@@ -61,6 +61,51 @@ class TestComputePerLfBearing:
         assert next(iter(_compute_one([(40.0, -75.0), (40.5, -75.0)], key="0"))) == 0
 
 
+def _compute_multi(episodes, key=0):
+    """episodes: ordered {gpx_path: points} an LF spans (episode map, no ranges)."""
+    journeys = {path: _journey(points) for path, points in episodes.items()}
+    return _compute_per_lf_bearing(
+        {key: list(episodes)[-1]},
+        parse_fn=lambda path: journeys[path],
+        per_lf_gpx_episode_paths={key: {path: None for path in episodes}},
+    )
+
+
+class TestMultiEpisodeBearing:
+    """The heading spans EVERY episode the LF covers, not its representative.
+
+    Beaufort (2026-02-20): the LF drove out south-west in episode 01 and back
+    north-east in episode 02, ending 1.5 km from its start. The representative
+    GPX was episode 02 alone, so the description shipped "Heading:
+    Northeastbound" for an out-and-back drive.
+    """
+
+    def test_out_and_back_across_episodes_suppressed(self):
+        out = [(32.4231, -80.4675), (32.3048, -80.6413)]
+        back = [(32.3049, -80.6412), (32.4137, -80.4794)]
+        assert _compute_multi({"/ep01.gpx": out, "/ep02.gpx": back}) == {}
+
+    def test_first_fix_of_first_episode_to_last_of_last(self):
+        north = [(40.0, -75.0), (40.5, -75.0)]
+        east = [(40.5, -75.0), (40.5, -74.4)]
+        assert _compute_multi({"/ep01.gpx": north, "/ep02.gpx": east}) == {0: "NE"}
+
+    def test_parse_failure_in_any_episode_omits(self):
+        def parse(path):
+            if path == "/ep02.gpx":
+                raise OSError("x")
+            return _journey([(40.0, -75.0), (40.5, -75.0)])
+
+        assert (
+            _compute_per_lf_bearing(
+                {0: "/ep02.gpx"},
+                parse_fn=parse,
+                per_lf_gpx_episode_paths={0: {"/ep01.gpx": None, "/ep02.gpx": None}},
+            )
+            == {}
+        )
+
+
 class TestFormatBearingLine:
     def test_cardinal_to_word(self):
         assert _format_bearing_line("N", "X") == "🧭 Heading: Northbound\n"

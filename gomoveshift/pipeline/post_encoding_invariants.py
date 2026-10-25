@@ -745,7 +745,9 @@ def _assert_post_encoding_invariants(
     # invariant — a loop drive (tiny net displacement) or GPS-less LF yields no
     # entry (line omitted).
     per_lf_bearing = _compute_per_lf_bearing(
-        _per_lf_gpx_path, per_lf_included_segments=_per_lf_included_segments
+        _per_lf_gpx_path,
+        per_lf_included_segments=_per_lf_included_segments,
+        per_lf_gpx_episode_paths=_per_lf_gpx_episode_paths,
     )
     state.per_lf_bearing = dict(per_lf_bearing)
 
@@ -1029,15 +1031,22 @@ _BEARING_MIN_NET_KM = 2.0
 
 
 def _compute_per_lf_bearing(
-    per_lf_gpx_path: dict, parse_fn=None, per_lf_included_segments: dict | None = None
+    per_lf_gpx_path: dict,
+    parse_fn=None,
+    per_lf_included_segments: dict | None = None,
+    per_lf_gpx_episode_paths: dict | None = None,
 ) -> dict[int, str]:
     """Compute ``{lf.index: cardinal}`` net travel bearing per LF.
 
     WIRES the existing ``_drive_helpers._compass_from_waypoints`` (8-point
     compass, no new haversine-bearing code) on each LF's first→last waypoint.
-    LFs whose net straight-line displacement is below ``_BEARING_MIN_NET_KM``
-    (loop / round-trip — no meaningful heading), have < 2 waypoints, or fail to
-    parse are omitted — NO completeness invariant (the ``🧭 Heading:`` line is
+    The first and last waypoints span EVERY episode the LF covers
+    (``per_lf_gpx_episode_paths``, the same pairs distance sums over): an
+    out-and-back LF whose return leg is its representative GPX otherwise
+    reported the return leg's heading. LFs whose net straight-line
+    displacement is below ``_BEARING_MIN_NET_KM`` (loop / round-trip — no
+    meaningful heading), have < 2 waypoints, or fail to parse in any episode
+    are omitted — NO completeness invariant (the ``🧭 Heading:`` line is
     then just omitted). ``parse_fn`` defaults to ``GPXParser().parse``; str keys
     (resume) coerce to int.
     """
@@ -1058,22 +1067,16 @@ def _compute_per_lf_bearing(
             lf_idx = int(lf_idx_raw)
         except (TypeError, ValueError):
             continue
-        if not gpx_path:
-            continue
-        try:
-            journey = parse_fn(gpx_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "  per_lf_bearing: GPX parse failed for LF %d at %s: %s",
-                lf_idx,
-                gpx_path,
-                exc,
-            )
-            continue
-        journey = _window_journey_to_included_segments(
-            journey, (per_lf_included_segments or {}).get(lf_idx)
+        pairs = _lf_episode_pairs(
+            lf_idx, gpx_path, per_lf_included_segments, per_lf_gpx_episode_paths
         )
-        waypoints = _cleaned_waypoints(journey)
+        if not any(pair[0] for pair in pairs):
+            continue
+        traces, parse_failed = _cleaned_traces_for_pairs(pairs, parse_fn)
+        if parse_failed:
+            logger.warning("  per_lf_bearing: GPX parse failed for LF %d", lf_idx)
+            continue
+        waypoints = [wp for trace in traces for wp in trace]
         if len(waypoints) < 2:
             continue
         first, last = waypoints[0], waypoints[-1]
