@@ -21,12 +21,32 @@ Including it can reject the entire request. New observations therefore leave
 quantities and must not be substituted into that field. Existing stored
 measurements are not rewritten.
 
-Meta's Video insight reference documents a three-second threshold for
-`total_video_views`. Reel play metrics have different playback/replay
-semantics. The collector does not substitute those into historical views or
-invent video IDs from Page post IDs. A refused or unqueryable ID remains an
-unanswered observation; confirm its object type and supported metrics before
-repairing its registration.
+A successful Video response with no recognized numeric metrics triggers one
+Reel-metric query on the same public ID and endpoint, also for lifetime
+values. A refused Video request does not trigger this fallback. Existing
+pagination is bounded to ten pages per query. Numeric metric names in the
+response determine `post_format` (`video` or `reel`); two empty responses keep
+the format unknown and the observation unanswered. IDs are never guessed or
+rewritten.
+
+Reel observations keep their play counts in explicit optional fields:
+
+| Field | Meta metric | Meaning |
+| --- | --- | --- |
+| `reel_initial_plays` | `blue_reels_play_count` | Initial plays, excluding replays |
+| `reel_replays` | `fb_reels_replay_count` | Replays within the same session |
+| `reel_total_plays` | `fb_reels_total_plays` | Initial plays plus replays |
+
+These metrics count playback from one millisecond; they are not the
+three-second `total_video_views` counter. Reel `views` and `impressions` stay
+unknown, and existing view-based comparisons/rankings do not substitute play
+counts. Reel watch-time metrics (`post_video_view_time` and
+`post_video_avg_time_watched`) include replays and are converted from
+milliseconds to seconds. A play-only zero is still a measured observation;
+absent play fields remain `null`, including in old records loaded from disk.
+The fields survive tracking-record and observation serialization. Collection
+health reports measurement availability, not a claim that every metric or
+monetization field is present.
 
 The credential's Graph version is preserved. Meta retired v20 on September
 24, 2026: review a credential pinned to that version separately, including its

@@ -209,3 +209,140 @@ def test_missing_observation_is_counted_as_unanswered(caplog, monkeypatch):
     with caplog.at_level("INFO"):
         assert mc.collect_all(record) == 0
     assert "metrics health platform=facebook measured=0 attempted=1 unanswered=1" in caplog.text
+
+
+REEL_METRICS = (
+    "blue_reels_play_count,fb_reels_replay_count,fb_reels_total_plays,"
+    "post_video_view_time,post_video_avg_time_watched"
+)
+
+
+@pytest.mark.parametrize("graph_version", ["v21.0", "v26.0"])
+def test_reel_metrics_are_recovered_without_relabeling_plays_as_views(graph_version):
+    from gomoveshift.tracking.observation import ObservationStatus, compare_views
+
+    session = _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(
+            200, _insights_body(dict(zip(REEL_METRICS.split(","), (100, 25, 125, 45000, 5000))))
+        ),
+    )
+    obs = FacebookCollector(credentials=_creds(graph_version), session=session).collect_observation(
+        "video_1"
+    )
+    assert obs.status == ObservationStatus.MEASURED
+    assert obs.post_format == "reel"
+    metrics = obs.cumulative
+    assert (metrics.reel_initial_plays, metrics.reel_replays, metrics.reel_total_plays) == (
+        100,
+        25,
+        125,
+    )
+    assert (metrics.views, metrics.impressions) == (None, None)
+    assert (metrics.watch_time_seconds, metrics.avg_view_duration_seconds) == (45.0, 5.0)
+    assert compare_views([obs]).blended_views is None
+    assert len(session.calls) == 2
+    assert all(url.endswith("/video_1/video_insights") for url, _ in session.calls)
+    assert [params["metric"] for _, params in session.calls] == [VIDEO_METRICS, REEL_METRICS]
+    assert all(params["period"] == "lifetime" for _, params in session.calls)
+
+
+def test_reel_only_zero_is_measured_and_survives_record_round_trip():
+    from gomoveshift.tracking.observation import MetricObservation, ObservationStatus
+    from gomoveshift.tracking.schema import ShortRecord, TrackingRecord
+    from gomoveshift.tracking.store import append_observation
+
+    session = _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(200, _insights_body({"fb_reels_total_plays": 0})),
+    )
+    obs = FacebookCollector(credentials=_creds(), session=session).collect_observation("video_1")
+    assert obs.status == ObservationStatus.MEASURED
+    assert obs.cumulative.reel_total_plays == 0
+    assert obs.cumulative.reel_initial_plays is None
+    assert obs.cumulative.reel_replays is None
+    assert obs.cumulative.views is None
+    record = TrackingRecord(project="fixture", shorts=[ShortRecord(index=1)])
+    append_observation(record, 1, obs)
+    restored = TrackingRecord.from_dict(record.to_dict())
+    round_trip = MetricObservation.from_dict(restored.shorts[0].observation_log["facebook"][0])
+    assert round_trip.post_format == "reel"
+    assert round_trip.cumulative.reel_total_plays == 0
+    assert round_trip.cumulative.reel_initial_plays is None
+    assert round_trip.cumulative.views is None
+
+
+def test_generic_video_measurement_does_not_probe_reel_metrics():
+    session = _FakeSession(_FakeResponse(200, _insights_body({"total_video_views": 0})))
+    obs = FacebookCollector(credentials=_creds(), session=session).collect_observation("video_1")
+    assert obs.post_format == "video"
+    assert obs.cumulative.views == 0
+    assert obs.cumulative.reel_total_plays is None
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("http_status,code", [(400, 100), (403, 200), (429, 4), (500, 1)])
+def test_failed_video_request_never_fans_out_to_reel_request(http_status, code):
+    session = _FakeSession(
+        _FakeResponse(http_status, {"error": {"code": code, "message": "provider refused"}})
+    )
+    obs = FacebookCollector(credentials=_creds(), session=session).collect_observation("video_1")
+    assert not obs.is_measurement
+    assert len(session.calls) == 1
+
+
+def test_empty_video_and_reel_responses_are_unknown_and_bounded():
+    from gomoveshift.tracking.observation import ObservationStatus
+
+    session = _FakeSession(_FakeResponse(200, {"data": []}))
+    obs = FacebookCollector(credentials=_creds(), session=session).collect_observation("video_1")
+    assert obs.status == ObservationStatus.NOT_RETURNED
+    assert obs.post_format == ""
+    assert obs.cumulative.reel_total_plays is None
+    assert len(session.calls) == 2
+
+
+def test_failed_reel_lookup_records_failure_and_next_video_resets_format():
+    from gomoveshift.tracking.observation import ObservationStatus
+
+    session = _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(403, {"error": {"code": 200, "message": "permission denied"}}),
+        _FakeResponse(200, _insights_body({"total_video_views": 5})),
+    )
+    collector = FacebookCollector(credentials=_creds(), session=session)
+    first = collector.collect_observation("video_1")
+    second = collector.collect_observation("video_2")
+    assert first.status == ObservationStatus.PERMISSION_DENIED
+    assert second.status == ObservationStatus.MEASURED
+    assert second.post_format == "video"
+    assert second.cumulative.views == 5
+    assert len(session.calls) == 3
+
+
+def test_collect_all_persists_play_only_measurement(tmp_path, monkeypatch):
+    from gomoveshift.tracking.schema import PlatformMetrics, ShortRecord, TrackingRecord
+    from gomoveshift.tracking.store import TrackingStore
+
+    session = _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(200, _insights_body({"fb_reels_total_plays": 0})),
+    )
+    mc = MetricsCollector()
+    mc._collectors["facebook"] = FacebookCollector(credentials=_creds(), session=session)
+    monkeypatch.setattr(mc, "_collect_settled_series", lambda *args: None)
+    record = TrackingRecord(
+        project="fixture", shorts=[ShortRecord(index=1, platform_ids={"facebook": "video_1"})]
+    )
+    assert mc.collect_all(record) == 1
+    store = TrackingStore(root=tmp_path)
+    store.save(record)
+    restored = store.load("fixture")
+    assert restored.shorts[0].metrics["facebook"].reel_total_plays == 0
+    assert restored.shorts[0].metrics["facebook"].views is None
+    assert restored.shorts[0].observation_log["facebook"][0]["post_format"] == "reel"
+    legacy = PlatformMetrics.from_dict({"views": 10})
+    assert legacy.views == 10
+    assert legacy.reel_initial_plays is None
+    assert legacy.reel_replays is None
+    assert legacy.reel_total_plays is None

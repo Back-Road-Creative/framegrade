@@ -113,6 +113,11 @@ class PlatformMetrics:
     #: Lifetime Analytics ``averageViewPercentage`` (0-100). None = not reported.
     avg_view_percentage: Optional[float] = None
     daily: List[DailyMetricPoint] = field(default_factory=list)
+    #: Facebook Reel starts/replays count 1 ms playback, not three-second
+    #: video views. Keep them distinct so existing view trends cannot blend.
+    reel_initial_plays: Optional[int] = None
+    reel_replays: Optional[int] = None
+    reel_total_plays: Optional[int] = None
 
     @property
     def engagement_rate(self) -> Optional[float]:

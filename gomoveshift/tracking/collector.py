@@ -1137,6 +1137,15 @@ _FB_VIDEO_METRICS: Dict[str, str] = {
     "avg_view_duration_seconds": "total_video_avg_time_watched",
 }
 
+#: Reel play definitions differ from the Video edge's three-second views.
+_FB_REEL_METRICS: Dict[str, str] = {
+    "reel_initial_plays": "blue_reels_play_count",
+    "reel_replays": "fb_reels_replay_count",
+    "reel_total_plays": "fb_reels_total_plays",
+    "watch_time_seconds": "post_video_view_time",
+    "avg_view_duration_seconds": "post_video_avg_time_watched",
+}
+
 #: Scope gating both insight edges; a token may lack it,
 #: so every read degrades instead of raising. Page cap guards a bad cursor chain.
 _FB_INSIGHTS_SCOPE = "read_insights"
@@ -1162,6 +1171,7 @@ class FacebookCollector:
         self._brand = brand
         self._scope_warned = False
         self._last_failure: Optional[tuple[str, str]] = None
+        self._last_post_format = ""
 
     def _creds(self) -> Dict[str, Any]:
         if not self._credentials_loaded:
@@ -1230,21 +1240,39 @@ class FacebookCollector:
     def collect_short_metrics(
         self, video_id: str, published_at: Optional[str] = None
     ) -> PlatformMetrics:
-        """views/impressions/watch-time for one video/Reel; empty, never
-        raises, on missing creds, a missing scope, or any Graph failure."""
+        """Video views or distinct Reel plays/watch-time for one public ID.
+
+        A successful empty Video answer gets one Reel-metric lookup. Refused
+        requests never fan out; an empty response never becomes a zero.
+        """
+        self._last_failure = None
+        self._last_post_format = ""
         if not self.is_available() or not self._has_insights_scope():
             return PlatformMetrics()
+
+        def read_metrics(names: Dict[str, str]) -> Dict[str, float]:
+            params = {
+                "metric": ",".join(names.values()),
+                "period": "lifetime",
+                "access_token": self._creds().get("page_access_token"),
+            }
+            entries = self._get_data(f"{video_id}/video_insights", params)
+            return {
+                e["name"]: float(e["values"][0]["value"])
+                for e in entries
+                if e.get("name") in names.values()
+                and isinstance((e.get("values") or [{}])[0].get("value"), (int, float))
+            }
+
         names = _FB_VIDEO_METRICS
-        params = {
-            "metric": ",".join(names.values()),
-            "access_token": self._creds().get("page_access_token"),
-        }
-        entries = self._get_data(f"{video_id}/video_insights", params)
-        values = {
-            e["name"]: float(e["values"][0]["value"])
-            for e in entries
-            if e.get("name") and isinstance((e.get("values") or [{}])[0].get("value"), (int, float))
-        }
+        values = read_metrics(names)
+        if values:
+            self._last_post_format = "video"
+        elif self._last_failure is None:
+            names = _FB_REEL_METRICS
+            values = read_metrics(names)
+            if values:
+                self._last_post_format = "reel"
 
         # A metric Graph did not report is unknown, not zero. `values` is built
         # only from entries Graph actually returned, so an absent name means it
@@ -1258,9 +1286,12 @@ class FacebookCollector:
             return None if raw is None else raw / 1000.0
 
         return PlatformMetrics(
-            views=_reported_metric(values.get(names["views"])),
+            views=_reported_metric(values.get(names.get("views", ""))),
             watch_time_seconds=_ms_to_seconds(names["watch_time_seconds"]),
             avg_view_duration_seconds=_ms_to_seconds(names["avg_view_duration_seconds"]),
+            reel_initial_plays=_reported_metric(values.get("blue_reels_play_count")),
+            reel_replays=_reported_metric(values.get("fb_reels_replay_count")),
+            reel_total_plays=_reported_metric(values.get("fb_reels_total_plays")),
         )
 
     def collect_observation(
@@ -1273,7 +1304,7 @@ class FacebookCollector:
             "platform": "facebook",
             "post_id": video_id,
             "account_id": self._creds().get("page_id"),
-            "post_format": "video",
+            "post_format": "",
             "event_at": published_at,
             "fetched_at": datetime.now().astimezone().isoformat(),
         }
@@ -1291,6 +1322,7 @@ class FacebookCollector:
             )
         self._last_failure = None
         metrics = self.collect_short_metrics(video_id, published_at=published_at)
+        base["post_format"] = self._last_post_format
         return _answered_observation(base, metrics, self._last_failure)
 
     def fetch_audience_online(self) -> Dict[int, int]:
