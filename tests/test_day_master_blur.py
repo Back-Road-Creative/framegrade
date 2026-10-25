@@ -77,7 +77,7 @@ class TestFreshEncodeBlursMaster:
         monkeypatch.setattr(
             dme,
             "_build_day_blur_mask",
-            lambda raw, cfg, mask, sidecar, date: built.setdefault("mask", mask) or sentinel,
+            lambda raw, cfg, mask, sidecar, date, **_k: built.setdefault("mask", mask) or sentinel,
         )
         # Cabin-coverage gate is exercised on its own in
         # TestCabinCoverageGateWiredIntoDriveMasterPath — no-op it here so this
@@ -114,7 +114,7 @@ class TestCabinCoverageGateWiredIntoDriveMasterPath:
         cap = _mock_encode(monkeypatch)
         mask_path = tmp_path / "day_2026-02-24_blur_mask.mkv"
         monkeypatch.setattr(
-            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date: mask_path
+            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date, **_k: mask_path
         )
         seen = {}
 
@@ -135,7 +135,7 @@ class TestCabinCoverageGateWiredIntoDriveMasterPath:
         cap = _mock_encode(monkeypatch)
         mask_path = tmp_path / "day_2026-02-24_blur_mask.mkv"
         monkeypatch.setattr(
-            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date: mask_path
+            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date, **_k: mask_path
         )
         monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda c, v, m: None)
         out = dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
@@ -451,7 +451,7 @@ class TestCabinGateRepairsItsOwnLeaks:
         cap = _mock_encode(monkeypatch)
         mask_path = tmp_path / "day_2026-02-24_blur_mask.mkv"
         monkeypatch.setattr(
-            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date: mask_path
+            dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date, **_k: mask_path
         )
         calls = {"check": 0, "repair": []}
 

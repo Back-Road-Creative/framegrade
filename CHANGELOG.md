@@ -9,6 +9,10 @@ All notable changes to this project are recorded here. The format follows
 
 - `health backlog` launches a row that names a whole-day GPX with `--day-gpx` and `--camera-utc-offset-hours` from the row, so footage with no GPS of its own (Insta360) launches from the backlog; a row whose track is missing is skipped with that reason. Needs Waypost with the backlog `day_gpx` fields (Back-Road-Creative/waypost#46).
 
+### Fixed
+
+- A day's blur mask survives a rebuilt raw concat: when the episodes it was built from are unchanged and the raw is the same size, the finished detection is reused instead of re-run (a rebuilt 132 GB raw restarted a ~16 h pass). Masks made by earlier versions still match while their raw is untouched.
+
 ## [0.3.7] - 2026-10-24
 
 ### Added
