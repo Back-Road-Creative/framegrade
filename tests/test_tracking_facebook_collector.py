@@ -1,6 +1,6 @@
 """Facebook video metrics collector. Mirrors the Instagram collector:
-missing creds never raise, a Graph error is caught+logged, metric names follow
-the credential's own ``graph_version``, and the live token's missing
+missing creds never raise, a Graph error is caught+logged, video metric names stay on the video edge across
+Graph versions, and the live token's missing
 ``read_insights`` logs the scope NAME once, requests nothing, returns empty.
 No network call ever leaves this test — the HTTP layer is a fake session."""
 
@@ -12,12 +12,10 @@ from gomoveshift.tracking.collector import FacebookCollector, MetricsCollector
 
 TOKEN = "page-token-secret"  # noqa: S105 — fixture value, asserted never logged
 SCOPES = ["pages_read_engagement", "read_insights"]
-#: Canonical metric order: views, impressions, total watch time, avg watch time.
-METRICS_BY_VERSION = {
-    "v20.0": "total_video_views,total_video_impressions,"
-    "total_video_view_total_time,total_video_avg_time_watched",
-    "v21.0": "post_video_views,post_impressions,post_video_view_time,post_video_avg_time_watched",
-}
+#: Video and Post insight names are not API-version aliases. Retired
+#: impressions must not poison the whole lookup (Meta's June 2026 removal).
+VIDEO_METRICS = "total_video_views,total_video_view_total_time,total_video_avg_time_watched"
+METRICS_BY_VERSION = dict.fromkeys(("v20.0", "v21.0", "v25.0", "v26.0"), VIDEO_METRICS)
 
 
 class _FakeResponse:
@@ -68,16 +66,14 @@ def test_missing_credentials_degrades_gracefully(monkeypatch):
 
 
 @pytest.mark.parametrize("graph_version", list(METRICS_BY_VERSION))
-def test_collect_short_metrics_uses_version_correct_metric_names(graph_version):
+def test_collect_short_metrics_uses_video_edge_contract_across_versions(graph_version):
     names = METRICS_BY_VERSION[graph_version].split(",")
-    session = _FakeSession(
-        _FakeResponse(200, _insights_body(dict(zip(names, (900, 1200, 45000, 5000)))))
-    )
+    session = _FakeSession(_FakeResponse(200, _insights_body(dict(zip(names, (900, 45000, 5000))))))
     collector = FacebookCollector(credentials=_creds(graph_version), session=session)
 
     result = collector.collect_short_metrics("video_1")
 
-    assert (result.views, result.impressions) == (900, 1200)
+    assert (result.views, result.impressions) == (900, None)
     # Graph reports video watch times in milliseconds.
     assert (result.watch_time_seconds, result.avg_view_duration_seconds) == (45.0, 5.0)
     url, params = session.calls[0]
@@ -133,7 +129,7 @@ def test_absent_metric_key_is_none_not_zero():
 
 def test_reported_zero_metric_stays_zero():
     names = METRICS_BY_VERSION["v20.0"].split(",")
-    session = _FakeSession(_FakeResponse(200, _insights_body(dict(zip(names, (0, 0, 0, 0))))))
+    session = _FakeSession(_FakeResponse(200, _insights_body(dict(zip(names, (0, 0, 0))))))
     collector = FacebookCollector(credentials=_creds(), session=session)
 
     result = collector.collect_short_metrics("video_1")
@@ -143,7 +139,7 @@ def test_reported_zero_metric_stays_zero():
         result.impressions,
         result.watch_time_seconds,
         result.avg_view_duration_seconds,
-    ) == (0, 0, 0.0, 0.0)
+    ) == (0, None, 0.0, 0.0)
 
 
 def test_fetch_audience_online_follows_paging_and_sums_hours():
@@ -165,3 +161,51 @@ def test_facebook_registered_in_metrics_collector():
     mc = MetricsCollector()
     assert "facebook" in mc._collectors
     assert isinstance(mc.facebook, FacebookCollector)
+
+
+def test_mixed_platform_run_reports_facebook_failure_separately(caplog, monkeypatch):
+    """A successful sibling must not make a failed Facebook read look healthy."""
+    from gomoveshift.tracking.observation import MetricObservation, ObservationStatus
+    from gomoveshift.tracking.schema import PlatformMetrics, ShortRecord, TrackingRecord
+
+    short = ShortRecord(index=1, platform_ids={"youtube": "yt_1", "facebook": "video_1"})
+    mc = MetricsCollector()
+    monkeypatch.setattr(mc, "_collect_settled_series", lambda *args: None)
+    monkeypatch.setattr(
+        mc,
+        "collect_observations_for_short",
+        lambda short: {
+            "youtube": MetricObservation(
+                platform="youtube",
+                post_id="yt_1",
+                status=ObservationStatus.MEASURED,
+                cumulative=PlatformMetrics(views=0),
+            ),
+            "facebook": MetricObservation(
+                platform="facebook",
+                post_id="video_1",
+                status=ObservationStatus.PROVIDER_ERROR,
+                detail="invalid insights metric",
+            ),
+        },
+    )
+    with caplog.at_level("INFO"):
+        count = mc.collect_all(TrackingRecord(project="fixture", shorts=[short]))
+    assert count == 1  # A real zero is a measurement, but only on YouTube.
+    assert "metrics health platform=facebook measured=0 attempted=1 unanswered=1" in caplog.text
+    assert "metrics health platform=youtube measured=1 attempted=1 unanswered=0" in caplog.text
+    assert "facebook" not in short.metrics
+
+
+def test_missing_observation_is_counted_as_unanswered(caplog, monkeypatch):
+    from gomoveshift.tracking.schema import ShortRecord, TrackingRecord
+
+    mc = MetricsCollector()
+    monkeypatch.setattr(mc, "_collect_settled_series", lambda *args: None)
+    monkeypatch.setattr(mc, "collect_observations_for_short", lambda short: {})
+    record = TrackingRecord(
+        project="fixture", shorts=[ShortRecord(index=1, platform_ids={"facebook": "video_1"})]
+    )
+    with caplog.at_level("INFO"):
+        assert mc.collect_all(record) == 0
+    assert "metrics health platform=facebook measured=0 attempted=1 unanswered=1" in caplog.text

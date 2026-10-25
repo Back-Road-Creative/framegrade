@@ -1126,21 +1126,15 @@ class InstagramCollector:
         return {int(h): int(n) for h, n in histogram.items()} if histogram else {}
 
 
-#: Facebook video-insight metric names keyed by the lowest Graph major version
-#: using them (v21.0 deprecated ``total_video_*``; the live credential says v20.0).
-_FB_VIDEO_METRICS: Dict[float, Dict[str, str]] = {
-    21.0: {
-        "views": "post_video_views",
-        "impressions": "post_impressions",
-        "watch_time_seconds": "post_video_view_time",
-        "avg_view_duration_seconds": "post_video_avg_time_watched",
-    },
-    0.0: {
-        "views": "total_video_views",
-        "impressions": "total_video_impressions",
-        "watch_time_seconds": "total_video_view_total_time",
-        "avg_view_duration_seconds": "total_video_avg_time_watched",
-    },
+#: Video-edge metrics are not Post insights aliases. Meta retired video
+#: impressions for every Graph version in June 2026; requesting one retired
+#: metric rejects the entire bundled lookup. Keep impressions unknown rather
+#: than replacing them with a differently defined media-view count.
+#: Contract and current-version notes: docs/facebook-metrics.md.
+_FB_VIDEO_METRICS: Dict[str, str] = {
+    "views": "total_video_views",
+    "watch_time_seconds": "total_video_view_total_time",
+    "avg_view_duration_seconds": "total_video_avg_time_watched",
 }
 
 #: Scope gating both insight edges; a token may lack it,
@@ -1184,13 +1178,6 @@ class FacebookCollector:
 
     def _graph_version(self) -> str:
         return self._creds().get("graph_version") or DEFAULT_GRAPH_VERSION
-
-    def _metric_names(self) -> Dict[str, str]:
-        try:
-            major = float(str(self._graph_version()).lstrip("v"))
-        except ValueError:
-            major = 0.0
-        return _FB_VIDEO_METRICS[max((v for v in _FB_VIDEO_METRICS if v <= major), default=0.0)]
 
     def _has_insights_scope(self) -> bool:
         """True when the token carries ``read_insights``; else logs the scope
@@ -1247,7 +1234,7 @@ class FacebookCollector:
         raises, on missing creds, a missing scope, or any Graph failure."""
         if not self.is_available() or not self._has_insights_scope():
             return PlatformMetrics()
-        names = self._metric_names()
+        names = _FB_VIDEO_METRICS
         params = {
             "metric": ",".join(names.values()),
             "access_token": self._creds().get("page_access_token"),
@@ -1272,7 +1259,6 @@ class FacebookCollector:
 
         return PlatformMetrics(
             views=_reported_metric(values.get(names["views"])),
-            impressions=_reported_metric(values.get(names["impressions"])),
             watch_time_seconds=_ms_to_seconds(names["watch_time_seconds"]),
             avg_view_duration_seconds=_ms_to_seconds(names["avg_view_duration_seconds"]),
         )
@@ -1481,6 +1467,7 @@ class MetricsCollector:
             refusals are recorded in ``observation_log`` instead.
         """
         updated = 0
+        health: Dict[str, List[int]] = {}  # attempted, measured this run
         now = datetime.now().astimezone().isoformat()
 
         for short in record.shorts:
@@ -1488,12 +1475,15 @@ class MetricsCollector:
                 logger.debug("Short #%d has no platform IDs, skipping", short.index)
                 continue
 
+            for platform in short.platform_ids:
+                health.setdefault(platform, [0, 0])[0] += 1
             observations = self.collect_observations_for_short(short)
             if not observations:
                 continue
 
             measured_any = False
             for platform, obs in observations.items():
+                counts = health[platform]
                 try:
                     append_observation(record, short.index, obs)
                 except ValueError as exc:
@@ -1507,6 +1497,7 @@ class MetricsCollector:
                     )
                     continue
                 if obs.is_measurement:
+                    counts[1] += 1
                     prior = short.metrics.get(platform)
                     short.metrics[platform] = obs.cumulative
                     # A cumulative read carries no daily series; keep the one
@@ -1529,6 +1520,16 @@ class MetricsCollector:
                 updated += 1
 
         self._collect_settled_series(record, today or date.today())
+
+        for platform, (attempted, measured) in sorted(health.items()):
+            log = logger.warning if measured < attempted else logger.info
+            log(
+                "metrics health platform=%s measured=%d attempted=%d unanswered=%d",
+                platform,
+                measured,
+                attempted,
+                attempted - measured,
+            )
 
         logger.info(
             "Updated metrics for %d/%d shorts in project %s",
