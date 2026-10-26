@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-10-25
+
 ### Changed
 
 - redactcam pinned to `2150869` (redactcam #17): when the blur-mask ffmpeg dies mid-write, the error carries ffmpeg's exit code, its stderr and how many frames were sent, instead of a bare `[Errno 32] Broken pipe` (the Ace Basin cabin repair, 2026-10-25). Masks and verdicts are unchanged.
@@ -178,7 +180,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.9...HEAD
+[0.3.9]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.5...v0.3.6
