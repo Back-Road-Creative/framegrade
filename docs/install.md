@@ -58,11 +58,14 @@ Check the result with `gomoveshift doctor` (below).
 
 **Windows.** Native Windows is not supported yet; run the console in Docker
 (below). `.github/workflows/windows.yml` runs `ci/install-cpu.sh` on a hosted
-Windows runner and then `ci/import_smoke.py`, which imports every module and
-fails on any that breaks outside `ci/windows-import-failures.txt`. That list
-names what still blocks a native run (today, modules that use the Linux-only
-`fcntl` file lock); a change that fixes a module deletes its line, and the job
-fails until it does. The job becomes a required check once the list is empty.
+Windows runner, then `ci/import_smoke.py`, which imports every module and
+fails on any that breaks outside `ci/windows-import-failures.txt`, then
+`tests/test_file_lock_portable.py`. File locks go through
+`gomoveshift/pipeline/_file_lock.py` (`fcntl.flock` on Linux and macOS,
+`msvcrt.locking` on Windows), so no module imports `fcntl` directly. That list
+names what still blocks a native run; a change that fixes a module deletes its
+line, and the job fails until it does. The job becomes a required check once
+the list is empty and the process-group and path changes land.
 
 ### Where files go
 

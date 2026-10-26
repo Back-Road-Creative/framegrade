@@ -1,51 +1,8 @@
 # Modules of gomoveshift that fail to import on Windows today, one per line.
 # ci/import_smoke.py fails the Windows job when a module outside this list
 # fails, and when a listed module imports cleanly: delete its line in the same
-# change that fixes it. Seeded 2026-10-26: every entry imports fcntl, directly
-# or through gomoveshift.pipeline (the portable file lock removes them).
-gomoveshift.analysis.unified_scorer
-gomoveshift.assembly
-gomoveshift.catalog
-gomoveshift.cli
-gomoveshift.console.app
-gomoveshift.console.insights
-gomoveshift.console.jobs
-gomoveshift.console.journeys
-gomoveshift.console.library
-gomoveshift.console.night
-gomoveshift.console.night_supervision
-gomoveshift.console.night_workers
-gomoveshift.console.notify
-gomoveshift.console.overview
-gomoveshift.console.pubqueue
-gomoveshift.console.pubqueue_calendar
-gomoveshift.console.reconcile
-gomoveshift.console.route_story
-gomoveshift.console.schedule
-gomoveshift.console.schedule_model
-gomoveshift.console.seo
-gomoveshift.health
-gomoveshift.hostworker
-gomoveshift.pipeline
-gomoveshift.publishing.asset_plan
-gomoveshift.publishing.dispatch
-gomoveshift.publishing.enqueue_from_plan
-gomoveshift.publishing.facebook_adapter
-gomoveshift.publishing.handlers
-gomoveshift.publishing.ig_media_scan
-gomoveshift.publishing.instagram_adapter
-gomoveshift.publishing.meta_comments
-gomoveshift.publishing.next_week
-gomoveshift.publishing.photo_adapter
-gomoveshift.publishing.photo_graph_client
-gomoveshift.publishing.photo_run_hooks
-gomoveshift.publishing.plan_title_sync
-gomoveshift.publishing.queue
-gomoveshift.publishing.tiktok_auth
-gomoveshift.publishing.tiktok_pack
-gomoveshift.publishing.title_kit
-gomoveshift.publishing.token_expiry
-gomoveshift.publishing.youtube_adapter
-gomoveshift.publishing.youtube_comments
-gomoveshift.tracking
-gomoveshift.web
+# change that fixes it. Seeded 2026-10-26 with the fcntl importers (directly or
+# through gomoveshift.pipeline); the portable file lock removed those. With
+# gomoveshift.pipeline importing, the walk now reaches astro_benchmark, whose
+# top-level `import resource` is POSIX-only (the Linux-paths change fixes it).
+gomoveshift.pipeline.photos.astro_benchmark

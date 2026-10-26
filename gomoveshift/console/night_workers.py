@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -11,6 +10,8 @@ import sys
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 from ..pipeline.photos.night_project import build_identity, runtime_identity, worker_alive
 from . import jobs, settings
@@ -177,7 +178,7 @@ def launch(store, project, *, automatic=False, now=None):
     fd = os.open(store.root / "supervision.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "a") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(lock, blocking=False)
         except BlockingIOError:
             return False
         row = project_metadata(store.root, brand, project)

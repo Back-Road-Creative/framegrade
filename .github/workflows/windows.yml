@@ -1,8 +1,8 @@
 # Windows: the CPU install resolves and installs on Windows, and every
 # gomoveshift module imports there except the ones ci/windows-import-failures.txt
 # lists. A standard hosted runner with no secrets, like ci.yml. Not a required
-# check while that list is non-empty; the portable lock, process-group and path
-# changes empty it, and the job becomes required then (docs/install.md).
+# check while that list is non-empty; the portable lock (done), process-group
+# and path changes empty it, and the job becomes required then (docs/install.md).
 name: windows
 
 on:
@@ -58,3 +58,10 @@ jobs:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
         run: .venv/Scripts/python.exe ci/import_smoke.py --expected ci/windows-import-failures.txt
+
+      # The lock layer on a real Windows host: msvcrt.locking, not a fake.
+      - name: File lock tests
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: .venv/Scripts/python.exe -m pytest -p no:cacheprovider -o addopts= tests/test_file_lock_portable.py
