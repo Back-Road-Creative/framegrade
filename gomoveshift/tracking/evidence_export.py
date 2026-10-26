@@ -1,10 +1,22 @@
-"""EvidenceBundle v1 export: settled day-7 facts, no thresholds, no recommendation.
+"""EvidenceBundle v2 export: settled day-7 facts, no thresholds, no recommendation.
 
 Every YouTube short with a settled Analytics series is a row with
 ``source=analytics_daily``; one without falls back to the measured snapshot
 nearest age 7 days (within 12h) in ``observation_log`` with ``source=snapshot``;
-one with neither is listed under ``health.excluded`` and counted. A consumer
-decides what the numbers mean -- nothing here ranks, filters or recommends.
+one with neither is listed under ``health.excluded`` and counted.
+
+Every Facebook short is a row from the MEASURED Facebook observation nearest
+age 7 days (same 12h tolerance; an observation reporting no counter at all is
+not a measurement) with ``source=snapshot``, or is listed under
+``health.excluded`` with ``platform: facebook``. A row's ``day7`` maps counter
+name to its day-7 value, null when the platform did not report it: Facebook
+Reel plays go in ``reel_total_plays`` / ``reel_initial_plays`` and are never
+written into ``views``. ``post_format`` is ``short`` for YouTube, the measured
+observation's ``reel`` / ``video`` for Facebook, null when unknown.
+
+A consumer decides what the numbers mean (which counter is reach) -- nothing
+here ranks, filters or recommends. ``n_registered`` counts every short with an
+id on either platform; ``n_with_series`` is the number of short rows.
 """
 
 from __future__ import annotations
@@ -16,8 +28,15 @@ from zoneinfo import ZoneInfo
 from .day7 import posted_date, settled_day7_views
 from .observation import ObservationStatus
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PLATFORM = "youtube"
+FACEBOOK = "facebook"
+_FACEBOOK_COUNTERS = (
+    "views",
+    "reel_total_plays",
+    "reel_initial_plays",
+    "watch_time_seconds",
+)
 SNAPSHOT_TARGET = timedelta(days=7)
 SNAPSHOT_TOLERANCE = timedelta(hours=12)
 _LOCAL_TZ = ZoneInfo("America/New_York")  # the plan builder's display timezone
@@ -52,6 +71,24 @@ def snapshot_day7_views(short) -> Optional[Any]:
     return best[1] if best else None
 
 
+def snapshot_day7_facebook(short) -> Optional[Dict[str, Any]]:
+    """``{"post_format", "day7"}`` of the MEASURED facebook observation nearest
+    age 7d, or None when none within 12h of it reports a counter."""
+    best = None
+    for entry in short.observation_log.get(FACEBOOK) or []:
+        if entry.get("status") != ObservationStatus.MEASURED:
+            continue
+        cumulative = entry.get("cumulative") or {}
+        day7 = {name: cumulative.get(name) for name in _FACEBOOK_COUNTERS}
+        event, fetched = _utc(entry.get("event_at")), _utc(entry.get("fetched_at"))
+        if all(v is None for v in day7.values()) or event is None or fetched is None:
+            continue
+        miss = abs(fetched - event - SNAPSHOT_TARGET)
+        if miss <= SNAPSHOT_TOLERANCE and (best is None or miss < best[0]):
+            best = (miss, {"post_format": entry.get("post_format") or None, "day7": day7})
+    return best[1] if best else None
+
+
 def _slot(posted_at: str, slot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """region / weekday / hour_local: the plan sidecar's slot when known, else
     the posting time in the display timezone with no region."""
@@ -67,13 +104,28 @@ def _slot(posted_at: str, slot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _row(vid, record, short, platform, post_format, day7, source, slot) -> Dict[str, Any]:
+    return {
+        "video_id": vid,
+        "project": record.project,
+        "region": slot["region"],
+        "platform": platform,
+        "post_format": post_format,
+        "posted_at": short.posted_at,
+        "weekday": slot["weekday"],
+        "hour_local": slot["hour_local"],
+        "day7": day7,
+        "source": source,
+    }
+
+
 def build_evidence_bundle(
     records,
     status,
     now: datetime,
     slot_for: Optional[SlotFor] = None,
 ) -> Dict[str, Any]:
-    """The EvidenceBundle v1 dict. ``now`` supplies ``as_of`` and today."""
+    """The EvidenceBundle v2 dict. ``now`` supplies ``as_of`` and today."""
     today = now.date()
     lookup = slot_for or (lambda project, item: None)
     shorts: List[Dict[str, Any]] = []
@@ -82,29 +134,42 @@ def build_evidence_bundle(
     registered = 0
     for record in records:
         for short in record.shorts:
+            slot = _slot(short.posted_at, lookup(record.project, short))
             vid = short.platform_ids.get(PLATFORM)
-            if not vid:
-                continue
-            registered += 1
-            metrics = short.metrics.get(PLATFORM)
-            views = settled_day7_views(short.posted_at, metrics.daily if metrics else [], today)
-            source = "analytics_daily"
-            if views is None:
-                views, source = snapshot_day7_views(short), "snapshot"
-            if views is None:
-                excluded.append({"video_id": vid, "reason": "no_series"})
-                continue
-            shorts.append(
-                {
-                    "video_id": vid,
-                    "project": record.project,
-                    "platform": PLATFORM,
-                    "posted_at": short.posted_at,
-                    **_slot(short.posted_at, lookup(record.project, short)),
-                    "day7_views": views,
-                    "source": source,
-                }
-            )
+            if vid:
+                registered += 1
+                metrics = short.metrics.get(PLATFORM)
+                views = settled_day7_views(short.posted_at, metrics.daily if metrics else [], today)
+                source = "analytics_daily"
+                if views is None:
+                    views, source = snapshot_day7_views(short), "snapshot"
+                if views is None:
+                    excluded.append({"video_id": vid, "reason": "no_series"})
+                else:
+                    shorts.append(
+                        _row(vid, record, short, PLATFORM, "short", {"views": views}, source, slot)
+                    )
+            fb_id = short.platform_ids.get(FACEBOOK)
+            if fb_id:
+                registered += 1
+                fb = snapshot_day7_facebook(short)
+                if fb is None:
+                    excluded.append(
+                        {"video_id": fb_id, "reason": "no_series", "platform": FACEBOOK}
+                    )
+                else:
+                    shorts.append(
+                        _row(
+                            fb_id,
+                            record,
+                            short,
+                            FACEBOOK,
+                            fb["post_format"],
+                            fb["day7"],
+                            "snapshot",
+                            slot,
+                        )
+                    )
         for lf in record.long_forms:
             m = lf.metrics.get(PLATFORM)
             posted = lf.published_date

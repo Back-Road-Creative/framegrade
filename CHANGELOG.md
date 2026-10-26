@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `metrics export-evidence` emits EvidenceBundle schema 2 and carries Facebook shorts: each row has `platform`, `post_format` and a `day7` counter map (`views`, `reel_total_plays`, `reel_initial_plays`, `watch_time_seconds`, null when unreported) taken from the measured Facebook observation nearest age 7 days within 12h. Reel plays are never written into `views`. A Facebook short with no such observation is listed under `health.excluded` with `platform: facebook`. YouTube rows move `day7_views` to `day7: {views}`. Needs Waypost that accepts bundle schema 2.
+
+### Changed
+
+- Waypost pinned to v0.3.0 (`58168f5`, Back-Road-Creative/waypost#57, #58, #59): reads EvidenceBundle schema 2, keeps Facebook plays out of the YouTube cadence decisions and prints them as a per-platform reach line, and reports a metric nobody measured as unknown instead of 0.
+
 ## [0.3.9] - 2026-10-25
 
 ### Changed
