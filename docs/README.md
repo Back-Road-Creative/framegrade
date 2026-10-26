@@ -62,3 +62,4 @@ to read them.
 - [social-metrics-best-times.md](social-metrics-best-times.md): the best-time table.
 - [social-metrics-decline.md](social-metrics-decline.md): platform decline detection.
 - [social-metrics-anomaly.md](social-metrics-anomaly.md): post-level anomaly detection.
+- [facebook-metrics.md](facebook-metrics.md): Facebook Reel plays and watch time, kept apart from video views.
