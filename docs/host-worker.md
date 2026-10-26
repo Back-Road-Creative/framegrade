@@ -25,5 +25,5 @@ Behaviour:
 - Applies the request's `env` (the brand's setting overrides) on top of its own environment: registry names with string values only; `GMS_HOST_SPOOL_DIR` and `GMS_GPU_LOCK_PATH` are never overridable; a malformed `env` is ignored.
 - For `drive`, passes the configured shared GPU lock path to the child; the drive orchestrator takes the whole-run lock after its run locks. For other commands, the worker takes the lock before spawning and fails with `GPU lock unavailable` if it stays busy past `GMS_GPU_LOCK_WAIT_S`. There is no CPU fallback.
 - Progress: a child log line `GMS_PROGRESS <0-1> <phase>` updates `progress`/`phase` in the status file.
-- Cancel: SIGTERM to the child's own process group, a grace period, then SIGKILL. Only the worker's own child is signalled.
+- Cancel: SIGTERM to the child's own process group, a grace period, then SIGKILL. Only the worker's own child is signalled. On Windows the child starts in a new process group and is stopped with CTRL_BREAK, then `taskkill /T /F` (`gomoveshift/_process_group.py`).
 - The worker's source check prevents unusable host paths from entering the pipeline; media and publication gates stay in the code the child runs.
