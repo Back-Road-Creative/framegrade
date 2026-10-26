@@ -20,6 +20,19 @@ def _steps():
             yield job_name, step
 
 
+def test_ci_tests_use_every_logical_cpu():
+    # pytest-xdist's "-n auto" counts PHYSICAL cores when psutil is installed
+    # (it is, for preflight), so the 4-vCPU hosted runner got 2 workers and
+    # the suite took ~20 min. CI passes "-n logical"; pyproject keeps "auto"
+    # so a local run on this shared box does not take every thread.
+    runs = [s["run"] for _, s in _steps() if s.get("name") == "Tests"]
+    assert runs == [".venv/bin/pytest -n logical"], runs
+    addopts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"][
+        "addopts"
+    ]
+    assert "-n auto" in addopts, addopts
+
+
 def test_dependabot_covers_pip_and_actions():
     path = ROOT / ".github" / "dependabot.yml"
     assert path.is_file(), ".github/dependabot.yml is missing"
