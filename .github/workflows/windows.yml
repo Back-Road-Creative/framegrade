@@ -1,0 +1,60 @@
+# Windows: the CPU install resolves and installs on Windows, and every
+# gomoveshift module imports there except the ones ci/windows-import-failures.txt
+# lists. A standard hosted runner with no secrets, like ci.yml. Not a required
+# check while that list is non-empty; the portable lock, process-group and path
+# changes empty it, and the job becomes required then (docs/install.md).
+name: windows
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  import-smoke:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache downloaded packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/AppData/Local/uv/cache
+          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'requirements.lock', 'ci/siblings.txt') }}
+
+      # The same install script as ci.yml, so a dependency with no Windows
+      # build fails here rather than on a user's machine.
+      - name: Set up the project
+        env:
+          PYTHON: python
+        run: |
+          python -m pip install --quiet uv==0.11.17
+          bash ci/install-cpu.sh
+
+      - name: Import smoke self-test
+        run: python -I ci/tests/test_import_smoke.py
+
+      - name: Import every module
+        env:
+          UV_OFFLINE: "1"
+          PIP_NO_INDEX: "1"
+        run: .venv/Scripts/python.exe ci/import_smoke.py --expected ci/windows-import-failures.txt

@@ -56,6 +56,14 @@ see "`--ingest-mode gopro`" in the README for the extra `--no-deps` install).
 
 Check the result with `gomoveshift doctor` (below).
 
+**Windows.** Native Windows is not supported yet; run the console in Docker
+(below). `.github/workflows/windows.yml` runs `ci/install-cpu.sh` on a hosted
+Windows runner and then `ci/import_smoke.py`, which imports every module and
+fails on any that breaks outside `ci/windows-import-failures.txt`. That list
+names what still blocks a native run (today, modules that use the Linux-only
+`fcntl` file lock); a change that fixes a module deletes its line, and the job
+fails until it does. The job becomes a required check once the list is empty.
+
 ### Where files go
 
 Defaults are per user and resolve under three roots, the first that is set

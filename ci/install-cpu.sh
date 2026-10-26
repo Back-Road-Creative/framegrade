@@ -20,16 +20,19 @@ fi
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
-python3 ci/cpu_pins.py --overrides "$scratch/overrides.txt" --constraints "$scratch/constraints.txt"
+"${PYTHON:-python3}" ci/cpu_pins.py --overrides "$scratch/overrides.txt" --constraints "$scratch/constraints.txt"
 grep -v '^-e ' requirements.lock >> "$scratch/constraints.txt"
 
 uv venv .venv --python "${PYTHON:-python3}" -q
-uv pip install --python .venv/bin/python -q \
+# Windows (Git Bash on the windows-latest job) puts the interpreter in Scripts/.
+venv_python=.venv/bin/python
+[ -e .venv/Scripts/python.exe ] && venv_python=.venv/Scripts/python.exe
+uv pip install --python "$venv_python" -q \
   --override "$scratch/overrides.txt" \
   --constraint "$scratch/constraints.txt" \
   -r "$siblings" -e '.[dev]'
 
-.venv/bin/python - <<'PY'
+"$venv_python" - <<'PY'
 import onnxruntime as ort
 
 providers = ort.get_available_providers()
