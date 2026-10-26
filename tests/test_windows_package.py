@@ -220,6 +220,98 @@ class TestLauncher:
         assert self.text.isascii()
 
 
+class TestRouteStoryBrowser:
+    """Route Story's 3-D film drives Playwright's Chromium: the bundle carries it."""
+
+    def test_bundle_installs_the_playwright_extra(self):
+        reqs, _ = br.release_requirements(ROOT)
+        assert any(r.lower().startswith("playwright") for r in reqs)
+
+    def test_playwright_pin_comes_from_the_lock(self):
+        _, constraints = br.release_requirements(ROOT)
+        pin = br.playwright_pin(constraints)
+        assert re.fullmatch(r"\d+\.\d+\.\d+", pin)
+        assert f"playwright=={pin}" in constraints
+
+    def test_missing_pin_is_refused(self):
+        with pytest.raises(SystemExit, match="playwright"):
+            br.playwright_pin(["numpy==2.0.0"])
+
+    def test_windows_host_runs_the_bundled_python(self, tmp_path):
+        stage = tmp_path / "stage"
+        cmd, env = br.browser_install_plan(stage, "1.63.0", windows_host=True)
+        assert cmd == [
+            str(stage / "python" / "python.exe"),
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+        ]
+        assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(stage / "app" / "browsers")
+        assert "PLAYWRIGHT_HOST_PLATFORM_OVERRIDE" not in env
+
+    def test_other_hosts_fetch_the_windows_build_with_the_pinned_playwright(self, tmp_path):
+        stage = tmp_path / "stage"
+        cmd, env = br.browser_install_plan(stage, "1.63.0", windows_host=False)
+        assert cmd[:2] == ["uv", "run"]
+        assert "playwright==1.63.0" in cmd
+        assert cmd[-4:] == ["-m", "playwright", "install", "chromium"]
+        assert env["PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"] == "win64"
+        assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(stage / "app" / "browsers")
+
+    def test_stage_browser_runs_the_plan_then_checks_for_windows_executables(self, tmp_path):
+        stage = tmp_path / "stage"
+        calls = []
+
+        def fake_run(cmd, env, **kw):
+            calls.append((cmd, env))
+            root = Path(env["PLAYWRIGHT_BROWSERS_PATH"])
+            (root / "chromium-1243" / "chrome-win64").mkdir(parents=True)
+            (root / "chromium-1243" / "chrome-win64" / "chrome.exe").write_bytes(b"MZ")
+            shell = root / "chromium_headless_shell-1243" / "chrome-headless-shell-win64"
+            shell.mkdir(parents=True)
+            (shell / "chrome-headless-shell.exe").write_bytes(b"MZ")
+
+        assert br.stage_browser(stage, "1.63.0", windows_host=False, run=fake_run) is True
+        assert len(calls) == 1
+
+    def test_stage_browser_refuses_a_download_with_no_windows_executable(self, tmp_path):
+        def fake_run(cmd, env, **kw):
+            (Path(env["PLAYWRIGHT_BROWSERS_PATH"]) / "chromium-1243").mkdir(parents=True)
+
+        with pytest.raises(SystemExit, match="chrome.exe"):
+            br.stage_browser(tmp_path / "stage", "1.63.0", windows_host=True, run=fake_run)
+
+    def test_skip_browser_downloads_nothing_and_says_so(self, tmp_path, capsys):
+        def boom(*a, **kw):
+            raise AssertionError("must not download")
+
+        assert (
+            br.stage_browser(tmp_path, "1.63.0", windows_host=False, run=boom, skip=True) is False
+        )
+        assert "browser" in capsys.readouterr().out.lower()
+
+    def test_audit_accepts_the_browser_tree_but_still_refuses_linux_binaries(self, tmp_path):
+        stage = tmp_path / "stage"
+        good = stage / "app" / "browsers" / "chromium-1243" / "chrome-win64"
+        good.mkdir(parents=True)
+        (good / "chrome.exe").write_bytes(b"MZ")
+        (good / "Cookies.db").write_bytes(b"x")
+        (good / "chrome_100_percent.pak").write_bytes(b"x")
+        br.audit(stage)
+        (good / "libx.so").write_bytes(b"\x7fELF")
+        with pytest.raises(SystemExit, match="Linux binary"):
+            br.audit(stage)
+
+    def test_launcher_points_playwright_at_the_bundled_browsers(self):
+        text = (WIN / "framegrade.cmd").read_text(encoding="ascii")
+        assert 'set "PLAYWRIGHT_BROWSERS_PATH=%HERE%app\\browsers"' in text
+
+    def test_launcher_sets_it_before_starting_anything(self):
+        text = (WIN / "framegrade.cmd").read_text(encoding="ascii")
+        assert text.index("PLAYWRIGHT_BROWSERS_PATH") < text.index("start ")
+
+
 class TestInstallerScript:
     text = (WIN / "framegrade.iss").read_text(encoding="ascii")
 
