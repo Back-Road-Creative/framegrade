@@ -217,8 +217,9 @@ def test_wsl_mount_checks_inert_for_windows_path():
     wsl_mount.assert_wsl_mount(win)  # no raise, no subprocess
 
 
-def test_paths_mnt_check_inert_for_windows_path():
-    from gomoveshift import paths
-
-    assert not str(Path("D:\\out")).startswith("/mnt/")
-    assert paths is not None
+def test_seo_ownership_check_is_posix_only(monkeypatch, tmp_path):
+    """Windows has no uid/gid ownership (NTFS uses ACLs) and no ``os.geteuid``."""
+    (tmp_path / ".content_ledger.json").write_text("{}")
+    for name in ("geteuid", "getegid", "getgroups"):
+        monkeypatch.delattr(preflight.os, name, raising=False)
+    preflight.check_seo_ownership(tmp_path, "gomoveshift")

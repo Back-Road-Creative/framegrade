@@ -753,6 +753,9 @@ def check_seo_ownership(
             command. Default to ``GMS_SEO_OWNER_USER`` / ``GMS_SEO_OWNER_GROUP``;
             when either is still unset the command shows placeholders.
     """
+    if not hasattr(os, "geteuid"):
+        # Windows: no uid/gid ownership to drift (NTFS uses ACLs).
+        return
     target_user = target_user or os.environ.get(SEO_OWNER_USER_ENV, "").strip() or None
     target_group = target_group or os.environ.get(SEO_OWNER_GROUP_ENV, "").strip() or None
     seo_storage_path = Path(seo_storage_path).resolve()
