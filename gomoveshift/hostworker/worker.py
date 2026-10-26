@@ -22,7 +22,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -30,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from gomoveshift._process_group import kill_group, popen_kwargs, terminate_group
 from gomoveshift.console.jobs import ALLOWED_SUBCOMMANDS
 from gomoveshift.console.settings import load_registry
 from gomoveshift.pipeline.orchestrator_lock import (
@@ -250,7 +250,7 @@ class HostWorker:
                     stdin=subprocess.DEVNULL,
                     stdout=logf,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                    **popen_kwargs(),
                     env={**os.environ, **env, "GMS_GPU_LOCK_PATH": str(self.lock_path)},
                 )
         except OSError as exc:
@@ -330,16 +330,16 @@ class HostWorker:
 
     def _stop(self, proc: subprocess.Popen) -> None:
         """SIGTERM, grace, SIGKILL: our own child's process group only."""
-        self._signal(proc, signal.SIGTERM)
+        self._signal(terminate_group, proc)
         try:
             proc.wait(timeout=self.grace_s)
         except subprocess.TimeoutExpired:
-            self._signal(proc, signal.SIGKILL)
+            self._signal(kill_group, proc)
 
     @staticmethod
-    def _signal(proc: subprocess.Popen, sig: int) -> None:
+    def _signal(action: Callable[[subprocess.Popen], None], proc: subprocess.Popen) -> None:
         try:
-            os.killpg(proc.pid, sig)  # child is its own session leader
+            action(proc)  # child is its own group leader
         except (ProcessLookupError, PermissionError):
             pass
 
