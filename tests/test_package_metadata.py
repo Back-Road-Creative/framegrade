@@ -78,3 +78,13 @@ def test_lock_carries_no_pin_for_removed_dependencies() -> None:
         if line and not line.startswith(("#", "-e ")) and "==" in line
     }
     assert not (REMOVED_LOCK_PINS & pins)
+
+
+def test_tzdata_is_declared_for_windows() -> None:
+    """Windows ships no IANA time-zone database, so ``zoneinfo.ZoneInfo`` raises
+    ``ZoneInfoNotFoundError`` there unless ``tzdata`` is installed. Several modules
+    build ``ZoneInfo("America/New_York")`` at import time, so without it they fail
+    to import on Windows (the import-smoke job showed seven).
+    """
+    specs = [r.replace(" ", "") for r in PROJECT["dependencies"]]
+    assert any(s.startswith("tzdata") and 'sys_platform=="win32"' in s for s in specs), specs
