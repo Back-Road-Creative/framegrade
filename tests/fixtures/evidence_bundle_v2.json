@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "as_of": "2026-10-09T06:00:00",
+  "health": {
+    "analytics_status": "ok",
+    "n_registered": 6,
+    "n_with_series": 4,
+    "excluded": [
+      {
+        "video_id": "vid-c",
+        "reason": "no_series"
+      },
+      {
+        "video_id": "fb-lost",
+        "reason": "no_series",
+        "platform": "facebook"
+      }
+    ],
+    "detail": null
+  },
+  "shorts": [
+    {
+      "video_id": "vid-a",
+      "project": "gomoveshift",
+      "region": "us",
+      "platform": "youtube",
+      "posted_at": "2026-09-20T14:00:00",
+      "weekday": 6,
+      "hour_local": 10,
+      "source": "analytics_daily",
+      "post_format": "short",
+      "day7": {
+        "views": 412
+      }
+    },
+    {
+      "video_id": "vid-b",
+      "project": "gomoveshift",
+      "region": null,
+      "platform": "youtube",
+      "posted_at": "2026-09-21T18:30:00",
+      "weekday": 0,
+      "hour_local": 14,
+      "source": "snapshot",
+      "post_format": "short",
+      "day7": {
+        "views": 87.5
+      }
+    },
+    {
+      "video_id": "fb-reel",
+      "project": "gomoveshift",
+      "region": null,
+      "platform": "facebook",
+      "post_format": "reel",
+      "posted_at": "2026-09-22T15:00:00",
+      "weekday": 1,
+      "hour_local": 11,
+      "day7": {
+        "views": null,
+        "reel_total_plays": 1300,
+        "reel_initial_plays": 1000,
+        "watch_time_seconds": 9100
+      },
+      "source": "snapshot"
+    },
+    {
+      "video_id": "fb-video",
+      "project": "gomoveshift",
+      "region": null,
+      "platform": "facebook",
+      "post_format": "video",
+      "posted_at": "2026-09-23T15:00:00",
+      "weekday": 2,
+      "hour_local": 11,
+      "day7": {
+        "views": 640,
+        "reel_total_plays": null,
+        "reel_initial_plays": null,
+        "watch_time_seconds": null
+      },
+      "source": "snapshot"
+    }
+  ],
+  "longforms": [
+    {
+      "video_id": "vid-lf",
+      "project": "gomoveshift",
+      "region": "us",
+      "posted_at": "2026-09-19T15:00:00",
+      "duration_sec": 912,
+      "day7_views": 5310,
+      "avg_view_percentage": 41.2
+    }
+  ]
+}

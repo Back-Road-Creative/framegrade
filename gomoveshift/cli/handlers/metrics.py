@@ -108,7 +108,7 @@ def _cmd_metrics_enrol_channel() -> int:
 
 
 def _cmd_metrics_export_evidence(config) -> int:
-    """Print the EvidenceBundle v1 JSON (settled day-7 facts, no thresholds).
+    """Print the EvidenceBundle v2 JSON (settled day-7 facts, no thresholds).
 
     Shorts with neither a settled series nor a usable snapshot are excluded
     and counted on stderr as ``EVIDENCE_EXCLUDED n=<k> reason=no_settled_series``.
