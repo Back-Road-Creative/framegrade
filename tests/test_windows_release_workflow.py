@@ -132,7 +132,6 @@ def test_proof_script_proves_the_installer_per_user_and_headless():
     assert "unins000" in ps1
 
 
-
 def test_proof_never_waits_unbounded_on_the_standard_user():
     """The first dry run (run 40398196610) sat in step 1 for the job's full 90
     minutes and printed nothing: Start-Process -Wait waits on every descendant,
@@ -141,9 +140,14 @@ def test_proof_never_waits_unbounded_on_the_standard_user():
     assert not re.search(r"\[string\]\$Args\b", ps1), "$Args is an automatic variable"
     assert not re.search(r"Start-Process[^\n]*`\n[^\n]*-Wait\b|Start-Process[^\n]*-Wait\b", ps1)
     assert "WaitForExit(" in ps1
+    # Run 40414319309: Start-Process -Credential gives the installer no desktop on
+    # a hosted runner and it exits 1 before writing its log.
+    assert "-Credential" not in ps1.replace("Start-Process -Credential gets", "")
+    assert "Register-ScheduledTask" in ps1 and "SeBatchLogonRight" in ps1
     assert "Wait-Job $scan -Timeout" in ps1
     install = next(ln for ln in ps1.splitlines() if "install.out" in ln and "Trace" in ln)
     assert "-Minutes 20" in install
+
 
 def test_no_unannotated_checksum_literal():
     for path in (WORKFLOW, WIN / "release_gate.py", WIN / "windows_proof.ps1"):

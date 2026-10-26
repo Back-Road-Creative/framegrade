@@ -41,13 +41,28 @@ function New-ProofPassword {
 
 Write-Host '== 0. a standard user, and a folder it may use'
 $user = 'framegradeproof'
-$sec = ConvertTo-SecureString (New-ProofPassword) -AsPlainText -Force
+$plain = New-ProofPassword
+$sec = ConvertTo-SecureString $plain -AsPlainText -Force
 New-LocalUser -Name $user -Password $sec -PasswordNeverExpires | Out-Null
 Add-LocalGroupMember -Group 'Users' -Member $user
 if (Get-LocalGroupMember -Group 'Administrators' | Where-Object { $_.Name -like "*\$user" }) {
   throw "$user is an administrator"
 }
-$cred = New-Object System.Management.Automation.PSCredential($user, $sec)
+# The user's programs run as scheduled tasks (see Invoke-AsUser), which need
+# the "log on as a batch job" right; a plain member of Users lacks it.
+$sid = (Get-LocalUser -Name $user).SID.Value
+$inf = Join-Path $env:TEMP 'proof-rights.inf'
+secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
+$rights = [System.Collections.Generic.List[string]](Get-Content -LiteralPath $inf)
+$at = $rights.FindIndex([Predicate[string]]{ param($l) $l -like 'SeBatchLogonRight*' })
+if ($at -ge 0) { $rights[$at] = "$($rights[$at]),*$sid" }
+else { $rights.Insert($rights.IndexOf('[Privilege Rights]') + 1, "SeBatchLogonRight = *$sid") }
+Set-Content -LiteralPath $inf -Value $rights -Encoding Unicode
+secedit /configure /db (Join-Path $env:TEMP 'proof-rights.sdb') /cfg $inf /areas USER_RIGHTS | Out-Null
+secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
+if (-not (Select-String -LiteralPath $inf -Pattern "SeBatchLogonRight.*\*$sid" -Quiet)) {
+  throw "could not grant $user the batch logon right"
+}
 $base = 'C:\pröof dir'
 $inst = Join-Path $base 'Framegrade ✓'
 New-Item -ItemType Directory -Force -Path $base | Out-Null
@@ -75,27 +90,58 @@ function Stop-UserProcesses {
   }
 }
 
-# Runs a program as the standard user and returns its exit code. Output goes to
-# $Log so it can be shown; a program that must outlive the call is started
-# without this function by the caller. The wait is bounded: Start-Process's own wait
-# also waits on every descendant, so one stuck child would hang the job until
-# its timeout and print nothing. ($ArgLine, never $Args: that is PowerShell's
-# automatic variable.)
+# Runs a program as the standard user and returns its exit code. It runs as a
+# scheduled task with the user's password: a process started with
+# Start-Process -Credential gets no usable desktop on a hosted runner, and the
+# installer then exits 1 ("Setup failed to initialize") without writing its
+# log (run 40414319309). The task runs a small pwsh script, passed as an
+# encoded command so the non-ASCII paths survive, that starts the program,
+# waits and writes its exit code to "$Log.code". The wait here is bounded; a
+# step that runs out shows what is still running. -Detach returns once the
+# task has started, for a program that must keep running (the console).
+# ($ArgLine, never $Args: that is PowerShell's automatic variable.)
+$pwsh = (Get-Process -Id $PID).Path
+$taskCount = 0
 function Invoke-AsUser([string]$File, [string]$ArgLine, [string]$Log, [string]$Dir = $base,
-                       [int]$Minutes = 5, [string]$Trace = '') {
+                       [int]$Minutes = 5, [string]$Trace = '', [switch]$Detach) {
   Write-Host "  run as ${user}: $File $ArgLine"
-  $p = Start-Process -FilePath $File -ArgumentList $ArgLine -Credential $cred -LoadUserProfile `
-    -WorkingDirectory $Dir -PassThru -WindowStyle Hidden `
-    -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
-  $null = $p.Handle   # without it ExitCode reads back empty once the process ends
-  $done = $p.WaitForExit($Minutes * 60 * 1000)
+  function Q([string]$v) { "'" + ($v -replace "'", "''") + "'" }
+  $codeFile = "$Log.code"
+  Remove-Item -LiteralPath $codeFile -ErrorAction SilentlyContinue
+  $argPart = if ($ArgLine) { " -ArgumentList $(Q $ArgLine)" } else { '' }
+  $inner = "`$p = Start-Process -FilePath $(Q $File)$argPart -WorkingDirectory $(Q $Dir) -PassThru -NoNewWindow " +
+    "-RedirectStandardOutput $(Q $Log) -RedirectStandardError $(Q "$Log.err"); `$null = `$p.Handle; " +
+    "`$p.WaitForExit(); Set-Content -LiteralPath $(Q $codeFile) -Value `$p.ExitCode"
+  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+  $script:taskCount++
+  $name = "framegrade-proof-$script:taskCount"
+  $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoProfile -NonInteractive -EncodedCommand $enc" `
+    -WorkingDirectory $Dir
+  Register-ScheduledTask -TaskName $name -Action $action -User $user -Password $plain -RunLevel Limited -Force | Out-Null
+  Start-ScheduledTask -TaskName $name
+  if ($Detach) { return 0 }
+  $until = (Get-Date).AddMinutes($Minutes)
+  while (-not (Test-Path -LiteralPath $codeFile) -and (Get-Date) -lt $until) {
+    # A task that has run and is idle again, with no code file 10 s later,
+    # never ran its script (a logon or launch failure): say so now.
+    $info = Get-ScheduledTaskInfo -TaskName $name
+    if ($info.LastRunTime -gt [datetime]'2000-01-01' -and (Get-ScheduledTask -TaskName $name).State -eq 'Ready') {
+      Start-Sleep -Seconds 10
+      if (-not (Test-Path -LiteralPath $codeFile) -and (Get-ScheduledTask -TaskName $name).State -eq 'Ready') {
+        $info = Get-ScheduledTaskInfo -TaskName $name
+        throw "the task for $(Split-Path $File -Leaf) ended without an exit code (task result $($info.LastTaskResult))"
+      }
+    }
+    Start-Sleep -Seconds 2
+  }
   Get-Content -LiteralPath $Log, "$Log.err" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  | $_" }
-  if (-not $done) {
+  if (-not (Test-Path -LiteralPath $codeFile)) {
     Show-Stuck $Trace
     Stop-UserProcesses
     throw "$(Split-Path $File -Leaf) did not finish within $Minutes minutes"
   }
-  return $p.ExitCode
+  Unregister-ScheduledTask -TaskName $name -Confirm:$false
+  return [int](Get-Content -LiteralPath $codeFile -Raw).Trim()
 }
 
 Write-Host "== 1. silent per-user install into '$inst'"
@@ -130,8 +176,7 @@ Write-Host '  scanned the installed folder: nothing flagged'
 Write-Host '== 3. the console starts and answers /healthz'
 # Through the real launcher, as the Start-menu shortcut runs it. It also starts
 # the GPU host worker, which cannot run here and is not part of this proof.
-Start-Process -FilePath (Join-Path $inst 'framegrade.cmd') -Credential $cred -LoadUserProfile `
-  -WorkingDirectory $inst -WindowStyle Hidden | Out-Null
+$null = Invoke-AsUser (Join-Path $inst 'framegrade.cmd') '' "$base\console.out" $inst -Detach
 $until = (Get-Date).AddMinutes(3)
 $health = $null
 while (-not $health) {
@@ -185,6 +230,7 @@ while ((Test-Path -LiteralPath $py) -and (Get-Date) -lt $until) { Start-Sleep -S
 if (Test-Path -LiteralPath $py) { throw 'the uninstaller left python.exe behind' }
 if (-not (Test-Path -LiteralPath $marker)) { throw 'the uninstaller deleted the data folder' }
 
+Get-ScheduledTask -TaskName 'framegrade-proof-*' | Unregister-ScheduledTask -Confirm:$false
 Remove-LocalUser -Name $user
 Write-Host 'PROOF PASSED'
 exit 0

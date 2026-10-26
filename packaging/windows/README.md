@@ -32,7 +32,8 @@ GitHub-hosted `windows-2025` runners. It needs no secrets and no GPU.
    folder must survive). Nothing in it needs a GPU, ffmpeg or a network. Every
    wait is bounded (install 20 min, Defender scan 20, the rest 5-10); a step that
    runs out prints what is still running as the proof user and the installer log's
-   tail.
+   tail. The standard user's programs run as scheduled tasks (the script grants it
+   the batch logon right); `Start-Process -Credential` leaves the installer no desktop.
 5. `release` (tag runs only, the only job with `contents: write`) creates a
    **draft** release holding the installer and `SHA256SUMS`. Review it and publish
    it by hand. A release that already exists for the tag makes the job fail rather
