@@ -2,7 +2,6 @@
 # ci/import_smoke.py fails the Windows job when a module outside this list
 # fails, and when a listed module imports cleanly: delete its line in the same
 # change that fixes it. Seeded 2026-10-26 with the fcntl importers (directly or
-# through gomoveshift.pipeline); the portable file lock removed those. With
-# gomoveshift.pipeline importing, the walk now reaches astro_benchmark, whose
-# top-level `import resource` is POSIX-only (the Linux-paths change fixes it).
-gomoveshift.pipeline.photos.astro_benchmark
+# through gomoveshift.pipeline); the portable file lock removed those, and the
+# Linux-paths change moved astro_benchmark's `import resource` into the
+# Linux-only path. Empty: every module imports on Windows.
