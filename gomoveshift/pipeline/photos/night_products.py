@@ -31,6 +31,8 @@ from .night_project import (
     NightStore,
     StorageWaitError,
     _mark_cancelled,
+    available_memory_bytes,
+    boot_id,
     build_identity,
     digest,
     generated_bytes,
@@ -579,8 +581,7 @@ def product_resource_preflight(row: dict, task: dict) -> None:
     if product in {NightProduct.TIMELAPSE, NightProduct.STAR_TRAILS}:
         return
     pixels = max(_linear_pixels(row))
-    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    available = int(memory["MemAvailable"].split()[0]) * 1024
+    available = available_memory_bytes()
     required = pixels * (300 if product is NightProduct.DEEP_STILL else 200) + 2 * 1024**3
     if available < required:
         raise ProductWaitError(
@@ -679,7 +680,7 @@ def process_product_project(
         row["worker"] = {
             "pid": os.getpid(),
             "started_at": process_start(os.getpid()),
-            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "boot_id": boot_id(),
         }
         row["status"] = "running"
         row["last_progress_at"] = time.time()
