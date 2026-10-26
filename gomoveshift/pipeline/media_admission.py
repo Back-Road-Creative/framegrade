@@ -7,6 +7,7 @@ workload's memory/disk preflight. Never unlink a live lock file.
 
 from __future__ import annotations
 
+import getpass
 import os
 import stat
 import tempfile
@@ -20,6 +21,11 @@ class MediaAdmissionError(OSError):
     """The admission fence could not be opened or checked safely."""
 
 
+def _user_key() -> str:
+    """The uid on POSIX (the original lock name); the user name on Windows."""
+    return str(os.getuid()) if hasattr(os, "getuid") else getpass.getuser()
+
+
 @contextmanager
 def media_admission():
     """Yield whether admission was acquired; release on return or exception.
@@ -30,11 +36,13 @@ def media_admission():
     path = Path(
         os.environ.get(
             "GMS_NIGHT_ADMISSION_LOCK",
-            str(Path(tempfile.gettempdir()) / f"gomoveshift-night-{os.getuid()}.lock"),
+            str(Path(tempfile.gettempdir()) / f"gomoveshift-night-{_user_key()}.lock"),
         )
     )
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        # Windows has no O_NOFOLLOW; its per-user temp dir is not shared.
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
     except OSError as exc:
         raise MediaAdmissionError(f"Cannot open media admission lock: {exc}") from exc
     try:

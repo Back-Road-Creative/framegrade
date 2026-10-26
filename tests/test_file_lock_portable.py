@@ -198,3 +198,25 @@ def test_only_file_lock_imports_fcntl():
             elif isinstance(node, ast.ImportFrom) and node.module == "fcntl":
                 offenders.append(str(path.relative_to(ROOT)))
     assert offenders == []
+
+
+def test_media_admission_runs_without_posix_only_os_names(monkeypatch, tmp_path):
+    """Windows Python has no ``os.getuid`` or ``os.O_NOFOLLOW``."""
+    from gomoveshift.pipeline import media_admission
+
+    monkeypatch.delattr(os, "getuid", raising=False)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delenv("GMS_NIGHT_ADMISSION_LOCK", raising=False)
+    monkeypatch.setattr(media_admission.tempfile, "gettempdir", lambda: str(tmp_path))
+    with media_admission.media_admission() as admitted:
+        assert admitted is True
+    assert len(list(tmp_path.glob("gomoveshift-night-*.lock"))) == 1
+
+
+def test_queue_schema_lock_runs_without_fchmod(monkeypatch, tmp_path):
+    """``os.fchmod`` exists on Windows only from Python 3.13; the bundle is 3.12."""
+    from gomoveshift.publishing import queue
+
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    with queue._schema_lock(tmp_path / "q.db"):
+        pass

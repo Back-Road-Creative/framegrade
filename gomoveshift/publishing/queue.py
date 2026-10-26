@@ -247,8 +247,8 @@ def _chmod_group_writable(path: Path) -> None:
 
 @contextlib.contextmanager
 def _schema_lock(db_path: Path):
-    """Blocking flock guarding one-time schema creation (pattern from
-    ``pipeline._file_lock``, not imported to avoid a cross-package edge)."""
+    """Blocking file lock guarding one-time schema creation (the lock call
+    is ``pipeline._file_lock``'s portable one)."""
     lock_path = db_path.parent / (db_path.name + ".schema.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o664)
@@ -257,8 +257,10 @@ def _schema_lock(db_path: Path):
     # lock for writing and the flock fails. Set it outright;
     # fchmod on a file we do not own raises, and that is the one case where
     # the file already belongs to the other user, so ignore it.
-    with contextlib.suppress(OSError):
-        os.fchmod(fd, 0o664)
+    # Windows Python before 3.13 has no fchmod, and has no group bits to set.
+    if hasattr(os, "fchmod"):
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o664)
     try:
         lock_exclusive(fd)
         yield
