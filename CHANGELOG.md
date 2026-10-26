@@ -8,6 +8,7 @@ All notable changes to this project are recorded here. The format follows
 ### Added
 
 - Windows bundle builder (`packaging/windows/build_release.py`), launcher and per-user Inno Setup script: the embeddable Python 3.12 with the win_amd64 GPU wheels, a privacy audit and a 2 GiB per-asset size gate. Steps in `docs/install.md`.
+- Windows release workflow (`.github/workflows/windows-release.yml`): a `vX.Y.Z` tag push gates the tag (on `main`, matches `pyproject.toml`, `ci` passed that commit), builds the installer on a hosted `windows-2025` runner, proves the installed app (silent per-user install as a standard user, Defender scan, `/healthz`, `gomoveshift scan` on a synthetic clip, uninstall) and creates a draft release with the installer and `SHA256SUMS`. A manual run is a dry run that creates no release. Steps in `packaging/windows/README.md`.
 - The Windows bundle carries the `route-story-3d` extra (Playwright) and its pinned Chromium under `app\browsers`, and `framegrade.cmd` points `PLAYWRIGHT_BROWSERS_PATH` there, so Route Story 3-D runs offline. `build_release.py --skip-browser` leaves it out.
 
 ### Changed

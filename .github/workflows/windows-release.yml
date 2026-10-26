@@ -1,0 +1,182 @@
+# Windows installer release. A vX.Y.Z tag push gates the tag, builds the Inno
+# Setup installer on a GitHub-hosted Windows runner, proves the built installer
+# (not the repo) on a clean machine, and creates a DRAFT GitHub release holding
+# the installer and SHA256SUMS. The maintainer reviews and publishes the draft.
+#
+# workflow_dispatch is the dry run: the same gate-less build and the same proof,
+# ending in a workflow artifact. It never creates a release. Every Windows-only
+# step (the embeddable-Python bundle, ISCC, the install) can only run on this
+# runner, so the dry run is how a change to any of it is tried before a tag.
+#
+# Standard hosted runners only, no secrets beyond the job token, no self-hosted
+# runner. Hosted Windows runners have no NVIDIA GPU, so the proof uses nothing
+# that needs one. How to cut a release: packaging/windows/README.md.
+name: windows-release
+
+on:
+  push:
+    tags: ["v[0-9]*.[0-9]*.[0-9]*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A release is never cancelled half way; a second run for the same ref waits.
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Tag runs only: the tag commit is on main, the tag names pyproject.toml's
+  # version, and main's CI passed that exact commit. A dry run has no tag to
+  # check and publishes nothing.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Gate the tag
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I packaging/windows/release_gate.py gate
+
+      - name: Dry run, nothing to gate
+        if: github.ref_type != 'tag'
+        run: echo "dry run on ${GITHUB_REF} - no release will be created"
+
+  build:
+    needs: gate
+    runs-on: windows-2025
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Version from pyproject.toml
+        id: version
+        run: |
+          v=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # The windows-2025 image ships Inno Setup 6.7.1 (runner-images
+      # Windows2025-Readme). Checked rather than assumed: if an image update
+      # drops it, install the same version from Chocolatey.
+      - name: Find or install Inno Setup
+        run: |
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$iscc" ]; then
+            choco install innosetup -y --no-progress --version=6.7.1
+          fi
+          test -f "$iscc" || { echo "ISCC.exe not found: Inno Setup's install layout changed"; exit 1; }
+          echo 'C:\Program Files (x86)\Inno Setup 6' >> "$GITHUB_PATH"
+
+      - name: Build the installer
+        run: |
+          python -m pip install --quiet uv==0.11.17
+          python packaging/windows/build_release.py
+
+      - name: Size-gate and checksum the assets
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python packaging/windows/release_gate.py sums "dist/framegrade-setup-${VERSION}.exe"
+
+      # Kept on tag runs too: the proof and the release job both read it.
+      - name: Keep the installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: framegrade-windows-${{ steps.version.outputs.version }}
+          path: |
+            dist/framegrade-setup-${{ steps.version.outputs.version }}.exe
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  # Proves the built installer on a clean machine: silent per-user install as a
+  # standard user into a path with a space and non-ASCII characters, a Defender
+  # scan, the console answering /healthz, one CPU-only command, uninstall.
+  proof:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: framegrade-windows-${{ needs.build.outputs.version }}
+          path: dist-in
+
+      - name: Prove the installer
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: ./packaging/windows/windows_proof.ps1 -Installer "$PWD/dist-in/framegrade-setup-$env:VERSION.exe"
+
+  # Tag runs only. The one job that can write: it creates a DRAFT release.
+  release:
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    needs: [gate, build, proof]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: framegrade-windows-${{ needs.build.outputs.version }}
+          path: assets
+
+      - name: Check the checksums
+        working-directory: assets
+        run: sha256sum -c SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "a release for $TAG already exists: edit it by hand or delete it, then re-run"
+            exit 1
+          fi
+          {
+            echo "Windows installer for Framegrade ${VERSION}. Unsigned: Windows SmartScreen may ask for confirmation."
+            echo
+            echo "Needs an NVIDIA GPU with a current driver. ffmpeg is not included; the installer's last page says how to install it."
+            echo
+            echo "## Verify the download"
+            echo
+            echo '```'
+            cat assets/SHA256SUMS
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" --draft --verify-tag --title "Framegrade ${VERSION} for Windows" \
+            --notes-file notes.md "assets/framegrade-setup-${VERSION}.exe" assets/SHA256SUMS
