@@ -8,11 +8,15 @@ which happens in CI environments where the full dependency chain
 import atexit
 import functools
 import os
-import pwd
 import shutil
 import socket
 import tempfile
 import zlib
+
+try:
+    import pwd
+except ImportError:  # Windows has no pwd module
+    pwd = None
 
 # This suite does not use Hypothesis, but its pytest plugin loads whenever the
 # library is installed and would create ``.hypothesis/`` in the tree root.
@@ -68,7 +72,9 @@ for _name, _filename in (
 # product defaults into the real user's directories, so they are dropped here.
 def _make_test_home() -> str:
     # passwd home, not ``$HOME``: an xdist worker inherits the controller's fake HOME.
-    parent = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".cache", "gms-test-homes")
+    # Windows has no passwd database; there the user profile directory stands in.
+    real_home = pwd.getpwuid(os.getuid()).pw_dir if pwd else os.path.expanduser("~")
+    parent = os.path.join(real_home, ".cache", "gms-test-homes")
     try:
         os.makedirs(parent, exist_ok=True)
         home = tempfile.mkdtemp(prefix="gms-test-home-", dir=parent)
@@ -80,6 +86,8 @@ def _make_test_home() -> str:
 
 _TEST_HOME = _make_test_home()
 os.environ["HOME"] = _TEST_HOME
+# Windows reads the home directory from USERPROFILE, not HOME.
+os.environ["USERPROFILE"] = _TEST_HOME
 for _home_var in (
     "GMS_DATA_HOME",
     "GMS_CACHE_HOME",
@@ -1314,7 +1322,9 @@ def _bytes_on_disk(root: Path) -> int:
                 st = os.lstat(os.path.join(dirpath, name))
             except OSError:
                 continue
-            total += st.st_blocks * 512  # allocated blocks: a sparse file counts ~0
+            blocks = getattr(st, "st_blocks", None)  # Windows stat has no block count
+            # allocated blocks: a sparse file counts ~0; without them, the file size
+            total += st.st_size if blocks is None else blocks * 512
     return total
 
 
