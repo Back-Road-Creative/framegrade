@@ -44,7 +44,7 @@ PYTHON_VERSION = "3.12.10"
 PYTHON_EMBED_URL = (
     f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 )
-PYTHON_EMBED_SHA256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+PYTHON_EMBED_SHA256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"  # pragma: allowlist secret (public python.org checksum, not a credential)
 
 #: GitHub Releases' per-file upload limit.
 MAX_ASSET_BYTES = 2 * 1024**3
