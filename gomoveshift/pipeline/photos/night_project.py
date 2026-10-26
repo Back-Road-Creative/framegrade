@@ -88,8 +88,33 @@ def build_identity() -> dict:
 
 
 def process_start(pid: int) -> str:
+    """Start time of ``pid``: the ``/proc`` tick count on Linux, psutil's
+    create time on Windows. Paired with :func:`boot_id` so a reused pid never matches."""
+    if sys.platform == "win32":
+        import psutil
+
+        return str(psutil.Process(pid).create_time())
     stat = Path(f"/proc/{pid}/stat").read_text()
     return stat.rsplit(")", 1)[1].split()[19]
+
+
+def boot_id() -> str:
+    """This boot's identity: the kernel boot id on Linux, psutil's boot time on Windows."""
+    if sys.platform == "win32":
+        import psutil
+
+        return str(psutil.boot_time())
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def available_memory_bytes() -> int:
+    """``MemAvailable`` on Linux, psutil's available memory on Windows."""
+    if sys.platform == "win32":
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    return int(memory["MemAvailable"].split()[0]) * 1024
 
 
 def worker_alive(worker: dict | None) -> bool:
@@ -97,8 +122,7 @@ def worker_alive(worker: dict | None) -> bool:
         return False
     try:
         return (
-            worker["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            and process_start(worker["pid"]) == worker["started_at"]
+            worker["boot_id"] == boot_id() and process_start(worker["pid"]) == worker["started_at"]
         )
     except (KeyError, OSError, IndexError):
         return False
@@ -668,9 +692,7 @@ def admission(source: Path) -> bool:
     manifest = json.loads((source / "manifest.json").read_text())
     shape = manifest["payloads"]["sky_sum.npy"]["shape"]
     pixels = int(shape[0]) * int(shape[1])
-    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    available = int(memory["MemAvailable"].split()[0]) * 1024
-    return available >= pixels * 200 + 2 * 1024**3
+    return available_memory_bytes() >= pixels * 200 + 2 * 1024**3
 
 
 class StorageWaitError(RuntimeError):
@@ -811,7 +833,7 @@ def process_project(
         row["worker"] = {
             "pid": os.getpid(),
             "started_at": process_start(os.getpid()),
-            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            "boot_id": boot_id(),
         }
         row["status"] = "running"
         row.pop("reason", None)
