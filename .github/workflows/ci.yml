@@ -97,11 +97,13 @@ jobs:
           PIP_NO_INDEX: "1"
         run: .venv/bin/python -m mypy . --config-file pyproject.toml
 
+      # "-n auto" (pyproject addopts) counts physical cores, which gave the
+      # 4-vCPU runner 2 workers; "-n logical" uses all 4.
       - name: Tests
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
-        run: .venv/bin/pytest
+        run: .venv/bin/pytest -n logical
 
       # Runs after a failed build too: a build or test that writes into the
       # tree, or leaves anything behind that is not a known cache, fails here.
