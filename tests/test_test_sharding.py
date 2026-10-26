@@ -4,6 +4,8 @@ Every test must land in exactly one shard, or a test silently stops running in
 CI; a malformed spec must stop the run, not run everything or nothing.
 """
 
+import os
+
 import pytest
 
 from conftest import parse_test_shard, shard_of  # type: ignore[import-not-found]
@@ -41,3 +43,8 @@ def test_spec_is_index_over_total():
 def test_malformed_spec_stops_the_run(spec):
     with pytest.raises(pytest.UsageError, match="FRAMEGRADE_TEST_SHARD"):
         parse_test_shard(spec)
+
+
+def test_spec_is_consumed_at_collection():
+    # A pytest this suite starts in a subprocess must run all of its own tests.
+    assert "FRAMEGRADE_TEST_SHARD" not in os.environ

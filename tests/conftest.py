@@ -993,7 +993,9 @@ def shard_of(nodeid, total):
 
 def pytest_collection_modifyitems(config, items):
     """CI runs the suite as N hosted-runner shards; each test is in exactly one."""
-    shard = parse_test_shard(os.environ.get("FRAMEGRADE_TEST_SHARD"))
+    # Popped, not read: a test that runs pytest in a subprocess (test_network_guard)
+    # would inherit the spec and deselect its own one test (exit 5).
+    shard = parse_test_shard(os.environ.pop("FRAMEGRADE_TEST_SHARD", None))
     if shard is None:
         return
     index, total = shard
@@ -1404,6 +1406,15 @@ def legacy_test_cadence(request):
             m.LONG_FORM_TIME = _SEED_MIRRORS[(m.__name__, "LONG_FORM_TIME")]
         else:
             m.LONG_FORM_DAYS, m.LONG_FORM_TIME = days, lf_time
+    if seed_run:
+        # The re-exporters too: a pin leaked into them broke the seed tests'
+        # ``importer.LONG_FORM_DAYS is schedule_constants.LONG_FORM_DAYS`` whenever
+        # such a test ran after it in the same worker (it surfaced once CI sharded).
+        from gomoveshift.pipeline import content_ledger as _ledger
+        from gomoveshift.pipeline import longform_metadata as _lfm
+
+        for m in (_ledger, _lfm):
+            m.LONG_FORM_DAYS, m.LONG_FORM_TIME = _sc.LONG_FORM_DAYS, _sc.LONG_FORM_TIME
     yield
     for m in mods:
         m.LONG_FORM_DAYS = _SEED_MIRRORS[(m.__name__, "LONG_FORM_DAYS")]
