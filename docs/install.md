@@ -111,12 +111,25 @@ and `gomoveshift console` in two minimised windows, then opens
 `http://127.0.0.1:8787`. Close those two windows to stop it. Uninstalling never
 deletes the data folder.
 
+**Route Story 3-D works offline.** The installer carries the pinned Playwright
+(the `route-story-3d` extra) and its Chromium for Windows under
+`app\browsers`; `framegrade.cmd` sets `PLAYWRIGHT_BROWSERS_PATH` to that folder,
+so the 3-D terrain film never downloads a browser at run time. Chromium adds
+roughly 0.3 GB to the download, which puts the portable `--zip` over GitHub's
+2 GiB per-file limit; the installer (LZMA2) is the release asset, and the size
+gate refuses an oversized zip.
+
 **Build the bundle locally.** On any OS with `uv` and git (Inno Setup is only
 needed for the last step, and only runs on Windows):
 
 ```bash
 python packaging/windows/build_release.py --skip-installer --zip
 ```
+
+Add `--skip-browser` to leave Chromium out. Otherwise the build fetches the
+Windows Chromium that matches the pinned Playwright version: on Windows with the
+bundled `python -m playwright install chromium`, elsewhere with a throwaway
+`uv run --with playwright==<pin>` that sets `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=win64`.
 
 This stages the python.org embeddable Python 3.12 (sha256-checked), installs the
 `win_amd64` wheels pinned by `pyproject.toml` and `requirements.lock` (the GPU
