@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import signal
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -19,6 +18,7 @@ from typing import List, Optional
 
 import yaml
 
+from ..._process_group import kill_group, popen_kwargs
 from .._atomic_write import atomic_write_yaml
 from ..content_validator import ContentValidator
 from .generation_provenance import GenerationProvenance
@@ -1208,8 +1208,8 @@ Return ONLY valid JSON with the field(s) {fields_list}:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    start_new_session=True,
                     env=env,
+                    **popen_kwargs(),
                 )
                 try:
                     stdout, stderr = proc.communicate(input=prompt, timeout=600)
@@ -1217,7 +1217,7 @@ Return ONLY valid JSON with the field(s) {fields_list}:
                     # Orphaned descendants would otherwise outlive the timeout
                     # and stack with the retry below. Reap is best-effort.
                     with contextlib.suppress(Exception):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        kill_group(proc)
                         proc.wait(timeout=5)
                     raise
 
