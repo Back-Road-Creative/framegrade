@@ -55,19 +55,52 @@ icacls $base /grant "${user}:(OI)(CI)M" /T | Out-Null
 $exe = Join-Path $base (Split-Path $Installer -Leaf)
 Copy-Item -LiteralPath $Installer -Destination $exe
 
+# Shows what is left running as the proof user, and the tail of $Trace (a log
+# the program writes), so a hung step says what it was waiting on.
+function Show-Stuck([string]$Trace) {
+  Get-CimInstance Win32_Process | ForEach-Object {
+    $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue
+    if ($o -and $o.User -eq $user) { Write-Host "  still running: pid $($_.ProcessId) $($_.CommandLine)" }
+  }
+  if (-not $Trace) { return }
+  if (Test-Path -LiteralPath $Trace) {
+    Get-Content -LiteralPath $Trace -Tail 40 | ForEach-Object { Write-Host "  log| $_" }
+  } else { Write-Host "  no log at $Trace" }
+}
+
+function Stop-UserProcesses {
+  Get-CimInstance Win32_Process | ForEach-Object {
+    $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue
+    if ($o -and $o.User -eq $user) { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  }
+}
+
 # Runs a program as the standard user and returns its exit code. Output goes to
 # $Log so it can be shown; a program that must outlive the call is started
-# without -Wait by the caller.
-function Invoke-AsUser([string]$File, [string]$Args, [string]$Log, [string]$Dir = $base) {
-  $p = Start-Process -FilePath $File -ArgumentList $Args -Credential $cred -LoadUserProfile `
-    -WorkingDirectory $Dir -Wait -PassThru -WindowStyle Hidden `
+# without this function by the caller. The wait is bounded: Start-Process's own wait
+# also waits on every descendant, so one stuck child would hang the job until
+# its timeout and print nothing. ($ArgLine, never $Args: that is PowerShell's
+# automatic variable.)
+function Invoke-AsUser([string]$File, [string]$ArgLine, [string]$Log, [string]$Dir = $base,
+                       [int]$Minutes = 5, [string]$Trace = '') {
+  Write-Host "  run as ${user}: $File $ArgLine"
+  $p = Start-Process -FilePath $File -ArgumentList $ArgLine -Credential $cred -LoadUserProfile `
+    -WorkingDirectory $Dir -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput $Log -RedirectStandardError "$Log.err"
+  $null = $p.Handle   # without it ExitCode reads back empty once the process ends
+  $done = $p.WaitForExit($Minutes * 60 * 1000)
   Get-Content -LiteralPath $Log, "$Log.err" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  | $_" }
+  if (-not $done) {
+    Show-Stuck $Trace
+    Stop-UserProcesses
+    throw "$(Split-Path $File -Leaf) did not finish within $Minutes minutes"
+  }
   return $p.ExitCode
 }
 
 Write-Host "== 1. silent per-user install into '$inst'"
-$code = Invoke-AsUser $exe "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$inst`" /LOG=`"$base\install.log`"" "$base\install.out"
+$code = Invoke-AsUser $exe "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CURRENTUSER /DIR=`"$inst`" /LOG=`"$base\install.log`"" `
+  "$base\install.out" -Minutes 20 -Trace "$base\install.log"
 if ($code -ne 0) { Get-Content "$base\install.log" -ErrorAction SilentlyContinue | Select-Object -Last 40; throw "installer exited $code" }
 $py = Join-Path $inst 'python\python.exe'
 foreach ($need in $py, (Join-Path $inst 'framegrade.cmd'), (Join-Path $inst 'app\config.yaml'),
@@ -81,7 +114,15 @@ if (-not (Test-Path -LiteralPath $dataHome)) { throw 'the data folder was not cr
 Write-Host '== 2. Defender scan of the installed folder'
 $pref = Invoke-Defender { Get-MpPreference }
 foreach ($x in @($pref.ExclusionPath)) { if ($x) { Remove-MpPreference -ExclusionPath $x } }
-Invoke-Defender { Start-MpScan -ScanType CustomScan -ScanPath $inst }
+# Bounded like every other step: a scan that never returns fails with a reason
+# instead of being retried.
+$scanHung = $false
+Invoke-Defender {
+  $scan = Start-Job -ScriptBlock { param($Path) Start-MpScan -ScanType CustomScan -ScanPath $Path } -ArgumentList $inst
+  if (-not (Wait-Job $scan -Timeout 1200)) { Stop-Job $scan; $script:scanHung = $true; return }
+  Receive-Job $scan -ErrorAction Stop
+}
+if ($scanHung) { throw 'the Defender scan did not finish within 20 minutes' }
 $found = @(Get-MpThreatDetection | Where-Object { $_.InitialDetectionTime -ge $started })
 if ($found) { throw "Defender flagged the install: $($found.Resources -join ', ')" }
 Write-Host '  scanned the installed folder: nothing flagged'
@@ -136,7 +177,7 @@ foreach ($want in 'Resolution: 64x48', 'Total frames: 10') {
 Write-Host '== 5. uninstall leaves the data folder alone'
 $marker = Join-Path $dataHome 'proof-marker.txt'
 Set-Content -LiteralPath $marker -Value 'mine'
-$code = Invoke-AsUser (Join-Path $inst 'unins000.exe') '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' "$base\uninstall.out"
+$code = Invoke-AsUser (Join-Path $inst 'unins000.exe') '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' "$base\uninstall.out" -Minutes 10
 if ($code -ne 0) { throw "uninstaller exited $code" }
 # The uninstaller re-launches itself from a temp copy, so the call can return first.
 $until = (Get-Date).AddSeconds(90)
