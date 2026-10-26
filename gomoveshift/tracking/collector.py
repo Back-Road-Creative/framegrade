@@ -1126,21 +1126,24 @@ class InstagramCollector:
         return {int(h): int(n) for h, n in histogram.items()} if histogram else {}
 
 
-#: Facebook video-insight metric names keyed by the lowest Graph major version
-#: using them (v21.0 deprecated ``total_video_*``; the live credential says v20.0).
-_FB_VIDEO_METRICS: Dict[float, Dict[str, str]] = {
-    21.0: {
-        "views": "post_video_views",
-        "impressions": "post_impressions",
-        "watch_time_seconds": "post_video_view_time",
-        "avg_view_duration_seconds": "post_video_avg_time_watched",
-    },
-    0.0: {
-        "views": "total_video_views",
-        "impressions": "total_video_impressions",
-        "watch_time_seconds": "total_video_view_total_time",
-        "avg_view_duration_seconds": "total_video_avg_time_watched",
-    },
+#: Video-edge metrics are not Post insights aliases. Meta retired video
+#: impressions for every Graph version in June 2026; requesting one retired
+#: metric rejects the entire bundled lookup. Keep impressions unknown rather
+#: than replacing them with a differently defined media-view count.
+#: Contract and current-version notes: docs/facebook-metrics.md.
+_FB_VIDEO_METRICS: Dict[str, str] = {
+    "views": "total_video_views",
+    "watch_time_seconds": "total_video_view_total_time",
+    "avg_view_duration_seconds": "total_video_avg_time_watched",
+}
+
+#: Reel play definitions differ from the Video edge's three-second views.
+_FB_REEL_METRICS: Dict[str, str] = {
+    "reel_initial_plays": "blue_reels_play_count",
+    "reel_replays": "fb_reels_replay_count",
+    "reel_total_plays": "fb_reels_total_plays",
+    "watch_time_seconds": "post_video_view_time",
+    "avg_view_duration_seconds": "post_video_avg_time_watched",
 }
 
 #: Scope gating both insight edges; a token may lack it,
@@ -1168,6 +1171,7 @@ class FacebookCollector:
         self._brand = brand
         self._scope_warned = False
         self._last_failure: Optional[tuple[str, str]] = None
+        self._last_post_format = ""
 
     def _creds(self) -> Dict[str, Any]:
         if not self._credentials_loaded:
@@ -1184,13 +1188,6 @@ class FacebookCollector:
 
     def _graph_version(self) -> str:
         return self._creds().get("graph_version") or DEFAULT_GRAPH_VERSION
-
-    def _metric_names(self) -> Dict[str, str]:
-        try:
-            major = float(str(self._graph_version()).lstrip("v"))
-        except ValueError:
-            major = 0.0
-        return _FB_VIDEO_METRICS[max((v for v in _FB_VIDEO_METRICS if v <= major), default=0.0)]
 
     def _has_insights_scope(self) -> bool:
         """True when the token carries ``read_insights``; else logs the scope
@@ -1243,21 +1240,39 @@ class FacebookCollector:
     def collect_short_metrics(
         self, video_id: str, published_at: Optional[str] = None
     ) -> PlatformMetrics:
-        """views/impressions/watch-time for one video/Reel; empty, never
-        raises, on missing creds, a missing scope, or any Graph failure."""
+        """Video views or distinct Reel plays/watch-time for one public ID.
+
+        A successful empty Video answer gets one Reel-metric lookup. Refused
+        requests never fan out; an empty response never becomes a zero.
+        """
+        self._last_failure = None
+        self._last_post_format = ""
         if not self.is_available() or not self._has_insights_scope():
             return PlatformMetrics()
-        names = self._metric_names()
-        params = {
-            "metric": ",".join(names.values()),
-            "access_token": self._creds().get("page_access_token"),
-        }
-        entries = self._get_data(f"{video_id}/video_insights", params)
-        values = {
-            e["name"]: float(e["values"][0]["value"])
-            for e in entries
-            if e.get("name") and isinstance((e.get("values") or [{}])[0].get("value"), (int, float))
-        }
+
+        def read_metrics(names: Dict[str, str]) -> Dict[str, float]:
+            params = {
+                "metric": ",".join(names.values()),
+                "period": "lifetime",
+                "access_token": self._creds().get("page_access_token"),
+            }
+            entries = self._get_data(f"{video_id}/video_insights", params)
+            return {
+                e["name"]: float(e["values"][0]["value"])
+                for e in entries
+                if e.get("name") in names.values()
+                and isinstance((e.get("values") or [{}])[0].get("value"), (int, float))
+            }
+
+        names = _FB_VIDEO_METRICS
+        values = read_metrics(names)
+        if values:
+            self._last_post_format = "video"
+        elif self._last_failure is None:
+            names = _FB_REEL_METRICS
+            values = read_metrics(names)
+            if values:
+                self._last_post_format = "reel"
 
         # A metric Graph did not report is unknown, not zero. `values` is built
         # only from entries Graph actually returned, so an absent name means it
@@ -1271,10 +1286,12 @@ class FacebookCollector:
             return None if raw is None else raw / 1000.0
 
         return PlatformMetrics(
-            views=_reported_metric(values.get(names["views"])),
-            impressions=_reported_metric(values.get(names["impressions"])),
+            views=_reported_metric(values.get(names.get("views", ""))),
             watch_time_seconds=_ms_to_seconds(names["watch_time_seconds"]),
             avg_view_duration_seconds=_ms_to_seconds(names["avg_view_duration_seconds"]),
+            reel_initial_plays=_reported_metric(values.get("blue_reels_play_count")),
+            reel_replays=_reported_metric(values.get("fb_reels_replay_count")),
+            reel_total_plays=_reported_metric(values.get("fb_reels_total_plays")),
         )
 
     def collect_observation(
@@ -1287,7 +1304,7 @@ class FacebookCollector:
             "platform": "facebook",
             "post_id": video_id,
             "account_id": self._creds().get("page_id"),
-            "post_format": "video",
+            "post_format": "",
             "event_at": published_at,
             "fetched_at": datetime.now().astimezone().isoformat(),
         }
@@ -1305,6 +1322,7 @@ class FacebookCollector:
             )
         self._last_failure = None
         metrics = self.collect_short_metrics(video_id, published_at=published_at)
+        base["post_format"] = self._last_post_format
         return _answered_observation(base, metrics, self._last_failure)
 
     def fetch_audience_online(self) -> Dict[int, int]:
@@ -1481,6 +1499,7 @@ class MetricsCollector:
             refusals are recorded in ``observation_log`` instead.
         """
         updated = 0
+        health: Dict[str, List[int]] = {}  # attempted, measured this run
         now = datetime.now().astimezone().isoformat()
 
         for short in record.shorts:
@@ -1488,12 +1507,15 @@ class MetricsCollector:
                 logger.debug("Short #%d has no platform IDs, skipping", short.index)
                 continue
 
+            for platform in short.platform_ids:
+                health.setdefault(platform, [0, 0])[0] += 1
             observations = self.collect_observations_for_short(short)
             if not observations:
                 continue
 
             measured_any = False
             for platform, obs in observations.items():
+                counts = health[platform]
                 try:
                     append_observation(record, short.index, obs)
                 except ValueError as exc:
@@ -1507,6 +1529,7 @@ class MetricsCollector:
                     )
                     continue
                 if obs.is_measurement:
+                    counts[1] += 1
                     prior = short.metrics.get(platform)
                     short.metrics[platform] = obs.cumulative
                     # A cumulative read carries no daily series; keep the one
@@ -1529,6 +1552,16 @@ class MetricsCollector:
                 updated += 1
 
         self._collect_settled_series(record, today or date.today())
+
+        for platform, (attempted, measured) in sorted(health.items()):
+            log = logger.warning if measured < attempted else logger.info
+            log(
+                "metrics health platform=%s measured=%d attempted=%d unanswered=%d",
+                platform,
+                measured,
+                attempted,
+                attempted - measured,
+            )
 
         logger.info(
             "Updated metrics for %d/%d shorts in project %s",

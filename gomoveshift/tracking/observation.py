@@ -99,6 +99,9 @@ def has_numbers(metrics: PlatformMetrics) -> bool:
             metrics.avg_view_duration_seconds,
             metrics.impressions,
             metrics.click_through_rate,
+            metrics.reel_initial_plays,
+            metrics.reel_replays,
+            metrics.reel_total_plays,
         )
     )
 
