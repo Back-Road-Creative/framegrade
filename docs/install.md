@@ -81,6 +81,50 @@ location and report "not configured" until you set them. For example,
 `photos.site_root` in `config.yaml` (the Hugo site checkout the journey photos
 live in) must be set before the photo pipeline can read that site.
 
+## Windows install (NVIDIA GPU)
+
+A per-user installer that runs the console and the GPU host worker natively on
+Windows: no WSL, Docker or terminal. It is unsigned.
+
+**Needs:** Windows 10 or 11 (64-bit), an NVIDIA GPU with a current driver (the
+blur, grade and render passes run on the GPU; this install has no CPU
+fallback), and ffmpeg, which is not bundled:
+
+```
+winget install -e --id Gyan.FFmpeg
+```
+
+**SmartScreen.** Because the installer is unsigned, Windows shows "Windows
+protected your PC". Choose "More info", then "Run anyway".
+
+**What the installer does.** Installs under `%LOCALAPPDATA%\Programs\Framegrade`
+without administrator rights, adds a Start-menu entry and an Add/Remove Programs
+entry, and asks once for a data folder (default `%USERPROFILE%\Framegrade`). The
+choice is written to `data-folder.txt` beside `framegrade.cmd`. Starting
+Framegrade from the Start menu runs `framegrade.cmd`, which sets `GMS_DATA_HOME`
+to that folder (and the cache, config, `SEO_MANAGER_DATA_HOME` and
+`GMS_HOST_SPOOL_DIR` folders beneath it), starts `python -m gomoveshift.hostworker`
+and `gomoveshift console` in two minimised windows, then opens
+`http://127.0.0.1:8787`. Close those two windows to stop it. Uninstalling never
+deletes the data folder.
+
+**Build the bundle locally.** On any OS with `uv` and git (Inno Setup is only
+needed for the last step, and only runs on Windows):
+
+```bash
+python packaging/windows/build_release.py --skip-installer --zip
+```
+
+This stages the python.org embeddable Python 3.12 (sha256-checked), installs the
+`win_amd64` wheels pinned by `pyproject.toml` and `requirements.lock` (the GPU
+`onnxruntime-gpu` with its CUDA and cuDNN runtime wheels) and copies only
+git-tracked app files into `dist/stage/`. A privacy audit refuses a data folder,
+database, credential or token file or `.enc` file, and a size gate refuses any
+output over 2 GiB (the GitHub Releases per-file limit) before anything is
+uploaded. Without `--skip-installer` the script then runs `ISCC` on
+`packaging/windows/framegrade.iss` to write `dist/framegrade-setup-<version>.exe`.
+See `packaging/windows/README.md`.
+
 ## Console in Docker
 
 ### 1. Install Docker
