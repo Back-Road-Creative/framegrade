@@ -8,6 +8,7 @@ All notable changes to this project are recorded here. The format follows
 ### Changed
 
 - CI runs the test suite on every logical CPU of the hosted runner (`-n logical`, 4 workers) instead of `-n auto`, which counted physical cores and ran 2 workers (the suite took ~20 min). Local runs keep `-n auto`.
+- CI splits the test suite across four hosted runners (`FRAMEGRADE_TEST_SHARD=i/4`; each test lands in exactly one shard by a CRC32 of its node id). The required `test` check now waits for every shard, combines their coverage and holds it to the same 91% floor. Shard 1 also runs the secret scan, lint and type check.
 
 ## [0.3.10] - 2026-10-25
 

@@ -1,5 +1,6 @@
-# One job on a standard hosted runner. No secrets, no self-hosted runner, no
-# matrix: a pull request from a fork runs exactly what a maintainer's does.
+# Standard hosted runners only, no secrets, no self-hosted runner: a pull
+# request from a fork runs exactly what a maintainer's does. The suite runs as
+# four shards; the "test" job combines their coverage and is the required check.
 # GPU checks are not run here; see docs/gpu-checks.md.
 # Only the "Set up" step downloads anything. Every check after it runs with the
 # package index switched off, so a check cannot pass or fail on what it fetched.
@@ -22,9 +23,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  # Each shard runs the tests whose node id hashes to it (tests/conftest.py).
+  # Shard 1 also runs the one-off checks: secret scan, lint, type check.
+  test-shard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,6 +80,7 @@ jobs:
           uv pip install --python .venv/bin/python -q mypy==2.3.0
 
       - name: Secret scan
+        if: matrix.shard == 1
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
@@ -82,6 +90,7 @@ jobs:
           python3 ci/secret_scan.py
 
       - name: Lint and format
+        if: matrix.shard == 1
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
@@ -92,24 +101,78 @@ jobs:
       # pyproject.toml excludes gomoveshift/, tests/ and scripts/ from mypy, so
       # this step covers only the scripts and CI helpers.
       - name: Type check (tools, ci and bin only)
+        if: matrix.shard == 1
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
         run: .venv/bin/python -m mypy . --config-file pyproject.toml
 
       # "-n auto" (pyproject addopts) counts physical cores, which gave the
-      # 4-vCPU runner 2 workers; "-n logical" uses all 4.
+      # 4-vCPU runner 2 workers; "-n logical" uses all 4. One shard covers a
+      # quarter of the package, so the coverage floor is checked in "test".
       - name: Tests
         env:
           UV_OFFLINE: "1"
           PIP_NO_INDEX: "1"
-        run: .venv/bin/pytest -n logical
+          FRAMEGRADE_TEST_SHARD: "${{ matrix.shard }}/4"
+        run: .venv/bin/pytest -n logical --cov-fail-under=0
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-${{ matrix.shard }}
+          path: .coverage
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 
       # Runs after a failed build too: a build or test that writes into the
       # tree, or leaves anything behind that is not a known cache, fails here.
       - name: Tree cleanliness (after build and tests)
         if: always()
         run: python3 -I tools/check_public_tree.py --check-clean
+
+  # The required check. It fails unless every shard passed, then holds the
+  # combined coverage to the pyproject floor (--cov-fail-under in addopts).
+  test:
+    needs: test-shard
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Every shard passed
+        env:
+          SHARDS: ${{ needs.test-shard.result }}
+        run: test "$SHARDS" = success
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install coverage
+        run: python3 -m pip install --quiet "$(grep -E '^coverage==' requirements.lock)"
+
+      - name: Download coverage data
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          path: ${{ runner.temp }}/coverage
+
+      - name: Combined coverage
+        env:
+          COVERAGE_DIR: ${{ runner.temp }}/coverage
+        run: |
+          for d in "$COVERAGE_DIR"/coverage-*; do
+            mv "$d/.coverage" "$COVERAGE_DIR/.coverage.${d##*-}"
+          done
+          python3 -m coverage combine "$COVERAGE_DIR"
+          python3 -m coverage report --show-missing --fail-under=91
 
   # The one job that needs the network after setup: it asks the vulnerability
   # databases about the versions pinned in requirements.lock. Coverage is those

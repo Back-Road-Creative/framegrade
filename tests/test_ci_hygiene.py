@@ -26,11 +26,46 @@ def test_ci_tests_use_every_logical_cpu():
     # the suite took ~20 min. CI passes "-n logical"; pyproject keeps "auto"
     # so a local run on this shared box does not take every thread.
     runs = [s["run"] for _, s in _steps() if s.get("name") == "Tests"]
-    assert runs == [".venv/bin/pytest -n logical"], runs
+    assert len(runs) == 1 and runs[0].startswith(".venv/bin/pytest -n logical"), runs
     addopts = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"][
         "addopts"
     ]
     assert "-n auto" in addopts, addopts
+
+
+def _addopts():
+    return tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"][
+        "addopts"
+    ]
+
+
+def test_every_shard_runs_and_the_required_check_waits_for_all():
+    # ruleset 24929613 requires a check named "test"; the shards are
+    # "test-shard (n)". A matrix smaller than N in i/N silently drops tests.
+    shard_job = CI["jobs"]["test-shard"]
+    shards = shard_job["strategy"]["matrix"]["shard"]
+    (tests,) = [s for s in shard_job["steps"] if s.get("name") == "Tests"]
+    spec = tests["env"]["FRAMEGRADE_TEST_SHARD"]
+    assert spec == "${{ matrix.shard }}/" + str(len(shards)), spec
+    assert shards == list(range(1, len(shards) + 1)), shards
+    assert shard_job["strategy"]["fail-fast"] is False
+    gate = CI["jobs"]["test"]
+    assert gate["needs"] == "test-shard"
+    assert gate["if"] == "always()"
+    assert "needs.test-shard.result" in str(gate["steps"][0]["env"])
+
+
+def test_combined_coverage_floor_matches_pyproject():
+    # Each shard turns the floor off (--cov-fail-under=0); the "test" job
+    # combines the shards and must hold the same floor a local run does.
+    (floor,) = re.findall(r"--cov-fail-under=(\d+)", _addopts())
+    runs = "\n".join(s.get("run", "") for s in CI["jobs"]["test"]["steps"])
+    assert f"coverage report --show-missing --fail-under={floor}" in runs, runs
+    assert "coverage combine" in runs
+    shard_steps = CI["jobs"]["test-shard"]["steps"]
+    (upload,) = [s for s in shard_steps if s.get("uses", "").startswith("actions/upload-artifact@")]
+    assert upload["with"]["path"] == ".coverage"
+    assert upload["with"]["include-hidden-files"] is True
 
 
 def test_dependabot_covers_pip_and_actions():

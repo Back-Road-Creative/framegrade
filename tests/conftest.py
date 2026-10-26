@@ -12,6 +12,7 @@ import pwd
 import shutil
 import socket
 import tempfile
+import zlib
 
 # This suite does not use Hypothesis, but its pytest plugin loads whenever the
 # library is installed and would create ``.hypothesis/`` in the tree root.
@@ -970,6 +971,37 @@ def disable_blur(monkeypatch):
         return cfg
 
     monkeypatch.setattr(Config, "load", classmethod(_load))
+
+
+def parse_test_shard(spec):
+    """``FRAMEGRADE_TEST_SHARD`` is ``i/N`` (1 <= i <= N); unset runs everything."""
+    if not spec:
+        return None
+    parts = spec.split("/")
+    if len(parts) == 2 and all(p.isdigit() for p in parts):
+        index, total = int(parts[0]), int(parts[1])
+        if 1 <= index <= total:
+            return index, total
+    raise pytest.UsageError(f"FRAMEGRADE_TEST_SHARD={spec!r}: expected i/N with 1 <= i <= N")
+
+
+def shard_of(nodeid, total):
+    # crc32, not hash(): str hashes differ per process, and every xdist worker
+    # and every CI runner must put a test in the same shard.
+    return zlib.crc32(nodeid.encode()) % total + 1
+
+
+def pytest_collection_modifyitems(config, items):
+    """CI runs the suite as N hosted-runner shards; each test is in exactly one."""
+    shard = parse_test_shard(os.environ.get("FRAMEGRADE_TEST_SHARD"))
+    if shard is None:
+        return
+    index, total = shard
+    keep = [item for item in items if shard_of(item.nodeid, total) == index]
+    dropped = [item for item in items if shard_of(item.nodeid, total) != index]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = keep
 
 
 def pytest_ignore_collect(collection_path, config):
