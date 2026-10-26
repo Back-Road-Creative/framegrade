@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import subprocess
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -838,7 +839,7 @@ class PhotoOrchestrator:
         # Standard WSL location of the Windows PowerShell executable; when absent
         # (not WSL) the plain copy fallback below is used.
         powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
-        if not powershell.exists():
+        if sys.platform == "win32" or not powershell.exists():
             # Fallback to shutil if not on WSL
             try:
                 dest = export_dir / csv_path.name

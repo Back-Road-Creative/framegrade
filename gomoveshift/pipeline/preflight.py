@@ -31,6 +31,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -68,7 +69,7 @@ def _virtual_memory():
         pass
 
     meminfo = Path("/proc/meminfo")
-    if meminfo.exists():
+    if sys.platform != "win32" and meminfo.exists():
         available_kb = 0
         for line in meminfo.read_text().splitlines():
             if line.startswith("MemAvailable:"):
@@ -328,6 +329,8 @@ _WSL_HOST_MIN_FREE_GB = 25.0  # absolute floor for the host volume even on resum
 
 def _is_wsl() -> bool:
     """True when running under WSL (ext4 root lives in a host-backed VHDX)."""
+    if sys.platform == "win32":
+        return False
     try:
         return "microsoft" in Path("/proc/version").read_text().lower()
     except OSError:
@@ -847,6 +850,8 @@ def _read_probe(path: str | os.PathLike) -> None:
 
 def _read_mounts() -> list[tuple[str, str]]:
     """(mount point, fstype) rows from /proc/self/mounts; empty off Linux."""
+    if sys.platform == "win32":
+        return []
     try:
         with open("/proc/self/mounts", encoding="utf-8") as fh:
             rows = [line.split() for line in fh]

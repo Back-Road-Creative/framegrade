@@ -208,12 +208,15 @@ HE_DNG_CONVERT_TIMEOUT = 300.0
 _DNG_CONVERTER_FLAGS = ("-c", "-p1", "-cr11.2")
 
 # Standard Adobe DNG Converter install locations (the vendor's default Windows
-# install, reached through the WSL ``/mnt/c`` mount), probed in order when
+# install: through the WSL ``/mnt/c`` mount, or natively on Windows), probed in order when
 # ``photos.he_dng_converter_exe`` is unset — an explicit config value always
 # wins and skips the probe. First existing file wins; no hit keeps the hook
 # disabled (embedded-preview fallback), exactly as before the probe existed.
 HE_DNG_CONVERTER_DEFAULT_PATHS = (
     "/mnt/c/Program Files/Adobe/Adobe DNG Converter/Adobe DNG Converter.exe",
+    # Native Windows install: a plain Windows path, passed to the converter as is
+    # (the ``/mnt/`` WSL-to-Windows argv translation applies only to the entry above).
+    "C:\\Program Files\\Adobe\\Adobe DNG Converter\\Adobe DNG Converter.exe",
 )
 
 

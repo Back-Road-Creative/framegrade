@@ -49,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +67,11 @@ METADATA_NAME_RE = re.compile(r"_lf(\d+)_(?:youtube\.json)$")
 
 # check_lf_durations' superlong-part ceiling fallback; orchestrator overrides.
 DEFAULT_SUPERLONG_MAX_DURATION_SEC = 15552.0
+
+
+def _default_state_dir(project: str) -> str:
+    """``<system temp dir>/gomoveshift/<project>/_stages`` (``/tmp`` on Linux)."""
+    return str(Path(tempfile.gettempdir()) / "gomoveshift" / project / "_stages")
 
 
 class Mode(enum.Enum):
@@ -1271,7 +1277,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--state-dir",
         default=None,
-        help="Pipeline state dir (default: /tmp/gomoveshift/<project>/_stages)",
+        help="Pipeline state dir (default: <temp dir>/gomoveshift/<project>/_stages)",
     )
     parser.add_argument(
         "--snapshot-dir",
@@ -1392,7 +1398,7 @@ def run_checks(args: argparse.Namespace) -> list[CheckResult]:
     attribute default to the POST_UPLOAD audit.
     """
     state_dir = Path(
-        args.state_dir if args.state_dir is not None else f"/tmp/gomoveshift/{args.project}/_stages"  # noqa: S108 — pipeline default, not user input
+        args.state_dir if args.state_dir is not None else _default_state_dir(args.project)
     )
     mode_str = getattr(args, "mode", Mode.POST_UPLOAD.value)
     mode = Mode(mode_str)
@@ -1456,7 +1462,7 @@ def run_validation(
         snapshot_dir: Pre-run snapshot dir holding ``youtube_uploads.json``.
             Also used as fallback anchor for ``run_start`` if not provided.
         state_dir: Pipeline state dir. Defaults to
-            ``/tmp/gomoveshift/<project>/_stages`` when ``None``.
+            ``<temp dir>/gomoveshift/<project>/_stages`` when ``None``.
             In ``SKIP_UPLOAD_AUDIT`` mode this is ALSO where the cache-side
             ``day_*/regular_lfs/`` layout lives.
         run_start: ISO-8601 string or ``datetime``. If ``None`` the snapshot
@@ -1488,7 +1494,7 @@ def run_validation(
     else:
         project_dir = output_base / project
     if state_dir is None:
-        state_dir = Path(f"/tmp/gomoveshift/{project}/_stages")  # noqa: S108
+        state_dir = Path(_default_state_dir(project))
     else:
         state_dir = Path(state_dir)
 
@@ -1676,7 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     state_dir = Path(
-        args.state_dir if args.state_dir is not None else f"/tmp/gomoveshift/{args.project}/_stages"  # noqa: S108 — pipeline default, not user input
+        args.state_dir if args.state_dir is not None else _default_state_dir(args.project)
     )
     mode = Mode(args.mode)
     # AUTO: read the state file off disk so the CLI can reproduce the

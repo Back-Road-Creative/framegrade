@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 
@@ -146,7 +147,10 @@ def _load_encoding_constants():
 class PathsConfig(BaseModel):
     input_folder: str = ""
     output_folder: str = ""
-    temp_folder: str = "/tmp/gomoveshift"
+    # ``<system temp dir>/gomoveshift``: /tmp (or $TMPDIR) on Linux, %TEMP% on Windows.
+    temp_folder: str = Field(
+        default_factory=lambda: os.path.join(tempfile.gettempdir(), "gomoveshift")
+    )
     intermediate_folder: str = ""  # ext4 override for drvfs intermediates (empty = use temp_folder)
 
 

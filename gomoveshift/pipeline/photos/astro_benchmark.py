@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
-import resource
+import sys
 import time
 from pathlib import Path
 
@@ -43,6 +43,10 @@ UNAVAILABLE_PANELS = {  # panels the pipeline can't produce yet -- honest, never
 }
 
 
+class LinuxOnlyBenchmarkError(RuntimeError):
+    """Refused: the astro benchmark needs Linux (``/proc`` RSS high-water mark, fork)."""
+
+
 class SourceDirectoryWriteError(ValueError):
     """Refused: output_dir is inside a light/dark source directory."""
 
@@ -53,6 +57,8 @@ def ru_maxrss_to_bytes(ru_maxrss_kib) -> int:
 
 def _reset_peak_rss() -> bool:
     """Reset this process's RSS high-water mark to its current RSS; False if the kernel refuses."""
+    if sys.platform == "win32":
+        return False
     try:
         with open(_CLEAR_REFS, "w") as fh:
             fh.write("5")
@@ -78,6 +84,8 @@ def _measure_peak_rss_kib(reset_ok: bool) -> tuple[int, str]:
     vmhwm = _read_vmhwm_kib() if reset_ok else None
     if vmhwm is not None:
         return vmhwm, "vmhwm"
+    import resource  # POSIX-only; reached only on the Linux-only benchmark path
+
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, "ru_maxrss"
 
 
@@ -172,6 +180,11 @@ def _child_worker(light_paths, dark_paths, out_path, horizon_frac, meteors, queu
 def run_benchmark(
     light_paths, output_dir, *, dark_paths=(), horizon_frac=None, meteors=None, mp_context=None
 ) -> dict:
+    if sys.platform == "win32":
+        raise LinuxOnlyBenchmarkError(
+            "the astro benchmark is Linux-only (it measures peak RSS through /proc and "
+            "forks a child process); run it on Linux or WSL"
+        )
     light_paths = [Path(p) for p in light_paths]
     dark_paths = [Path(p) for p in dark_paths]
     output_dir = Path(output_dir)

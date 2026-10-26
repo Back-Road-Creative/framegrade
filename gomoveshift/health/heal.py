@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -173,7 +174,17 @@ def _job_records(jobs_dir: Path) -> List[Dict[str, Any]]:
 
 def _proc_alive(ident: Any) -> bool:
     """The job runner's identity rule: the boot id and the
-    ``/proc/<pid>/stat`` start-time field both match, so a reused pid never counts."""
+    ``/proc/<pid>/stat`` start-time field both match, so a reused pid never counts.
+    On Windows psutil's boot time and process create time (as strings) play those roles."""
+    if sys.platform == "win32":
+        try:
+            import psutil
+
+            boot = str(psutil.boot_time())
+            ticks = str(psutil.Process(int(ident["pid"])).create_time())
+            return ident["boot_id"] == boot and ticks == str(ident["start_ticks"])
+        except Exception:  # noqa: BLE001 - gone/denied/malformed identity: not alive
+            return False
     try:
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         stat = Path(f"/proc/{int(ident['pid'])}/stat").read_text()
