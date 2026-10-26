@@ -40,6 +40,8 @@ def _machine_spec() -> tuple[Optional[int], Optional[float]]:
         total_gb = psutil.virtual_memory().total / 1024**3
     except Exception:  # noqa: BLE001 - psutil missing or unreadable: try /proc/meminfo
         try:
+            if sys.platform == "win32":
+                raise OSError("no /proc/meminfo on Windows")
             for line in Path("/proc/meminfo").read_text().splitlines():
                 if line.startswith("MemTotal:"):
                     total_gb = int(line.split()[1]) * 1024 / 1024**3

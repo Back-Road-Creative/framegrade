@@ -4,7 +4,7 @@
 paths:
   input_folder: ""  # Set via CLI or environment
   output_folder: ""
-  temp_folder: "/tmp/gomoveshift"
+  # temp_folder defaults to <system temp dir>/gomoveshift (/tmp on Linux, %TEMP% on Windows)
 
 # Frame extraction settings
 extraction:

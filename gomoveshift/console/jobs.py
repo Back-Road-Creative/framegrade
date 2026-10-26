@@ -364,7 +364,15 @@ def _launch_host(
 def _read_proc_starttime(pid: int) -> str | None:
     """Field 22 (``starttime``) of ``/proc/<pid>/stat`` -- fingerprints
     "this pid, this process" (not just this pid, since pids get reused).
-    ``None`` off Linux or if the pid is already gone."""
+    ``None`` if the pid is already gone. On Windows (no ``/proc``) the psutil
+    process create time stands in, as a string."""
+    if sys.platform == "win32":
+        try:
+            import psutil
+
+            return str(psutil.Process(pid).create_time())
+        except Exception:  # noqa: BLE001 - gone/denied/psutil missing: no fingerprint
+            return None
     try:
         content = Path(f"/proc/{pid}/stat").read_text()
     except OSError:

@@ -285,6 +285,13 @@ is checked separately by `detect_nvenc`.
 | NVENC-capable ffmpeg and GPU | required for the drive pipeline (see GPU (NVENC) above) |
 | CUDA execution provider for `onnxruntime` | required for a run with blur on |
 
+Native Windows: the scratch folder defaults to `%TEMP%\gomoveshift` (on Linux
+`/tmp/gomoveshift`, or `$TMPDIR/gomoveshift`); process identity, RAM and boot time
+come from `psutil` instead of `/proc`, and the Adobe DNG Converter is found at
+`C:\Program Files\Adobe\Adobe DNG Converter\Adobe DNG Converter.exe`. The astro
+benchmark (`run_benchmark`) is Linux-only and refuses to run on Windows with a
+named error.
+
 On WSL the Windows volume behind the Linux disk must also keep 25 GB free, even
 when resuming. These are floors, not recommendations: a long day of footage needs
 more staging space than 30 GB, and preflight raises that number from the footage

@@ -36,7 +36,7 @@ exists). `sweep_orphaned_jobs()` runs once at startup (before the ticker starts)
 DB row still `running` from a prior process, since `_PROCESSES` (keyed by store file + job id: every
 store numbers its jobs from 1, so another store's job 1 is never this one's) is in-memory only and
 doesn't survive a restart -- but an empty `_PROCESSES` is not evidence the child died. `launch()`
-records the child's pid plus a fingerprint (`/proc/<pid>/stat` field 22, `starttime`, so a *reused*
+records the child's pid plus a fingerprint (`/proc/<pid>/stat` field 22, `starttime`; on Windows the psutil process create time, so a *reused*
 pid isn't mistaken for the original child) on the same `store.update` that sets `status="running"`
 (`pid`/`started_fingerprint` columns, ALTERed onto a pre-existing table the same way as `brand`).
 The sweep has exactly three outcomes for a `running` row it doesn't hold a `Popen` for: pid alive
