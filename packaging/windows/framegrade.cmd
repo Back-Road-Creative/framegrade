@@ -20,6 +20,10 @@ set "GMS_CONFIG_HOME=%GMS_DATA_HOME%\config"
 set "SEO_MANAGER_DATA_HOME=%GMS_DATA_HOME%\waypost"
 set "GMS_HOST_SPOOL_DIR=%GMS_DATA_HOME%\host-spool"
 set "PYTHONUTF8=1"
+
+rem Route Story's 3-D film drives Chromium through Playwright: use the copy
+rem bundled under app\browsers, never a run-time download.
+set "PLAYWRIGHT_BROWSERS_PATH=%HERE%app\browsers"
 for %%D in ("%GMS_DATA_HOME%" "%GMS_CACHE_HOME%" "%GMS_CONFIG_HOME%" "%SEO_MANAGER_DATA_HOME%" "%GMS_HOST_SPOOL_DIR%") do if not exist "%%~D" mkdir "%%~D"
 
 rem The CUDA and cuDNN runtime DLLs ship as pip wheels under site-packages\nvidia.

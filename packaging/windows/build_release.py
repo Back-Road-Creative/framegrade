@@ -7,6 +7,7 @@ layout follows the embeddable-Python pattern (no freeze step)::
         framegrade.cmd      launcher (packaging/windows/framegrade.cmd)
         python/             python.org embeddable 3.12 + Lib/site-packages
         app/                git-tracked source: gomoveshift/, config.yaml, ...
+        app/browsers/       Playwright's Chromium for Windows (Route Story 3-D)
 
 then ``ISCC`` compiles ``framegrade.iss`` over the stage into
 ``dist/framegrade-setup-<version>.exe``.
@@ -19,13 +20,16 @@ over GitHub Releases' 2 GiB per-file limit before anything is uploaded.
     python packaging/windows/build_release.py [--skip-installer] [--zip]
 
 Downloads come from python.org (the embeddable zip, sha256-checked) and PyPI
-and the pinned git repositories in pyproject.toml (the wheels).
+and the pinned git repositories in pyproject.toml (the wheels), plus Playwright's
+own browser CDN for Chromium. ``--skip-browser`` leaves Chromium out (Route Story
+3-D then needs a browser provisioned separately).
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -53,6 +57,13 @@ MAX_ASSET_BYTES = 2 * 1024**3
 #: the wheel force-includes, plus the licence and readme.
 SHIP = ("gomoveshift", "config.yaml", "metricool_reference_header.csv", "LICENSE", "README.md")
 
+#: Where the bundled Chromium lives under ``app/``; framegrade.cmd points
+#: ``PLAYWRIGHT_BROWSERS_PATH`` here so the app never downloads a browser.
+BROWSERS_DIR = "browsers"
+
+#: The optional extra that carries Playwright (Route Story's 3-D terrain film).
+PLAYWRIGHT_EXTRA = "route-story-3d"
+
 #: Search-path entries added to the embeddable's ``._pth``.
 SITE_PACKAGES = "Lib\\site-packages"
 APP_PATH = "..\\app"
@@ -76,18 +87,78 @@ def release_requirements(root: Path) -> tuple[list[str], list[str]]:
     """(requirements, constraints) for the bundle's site-packages.
 
     Requirements are pyproject's own dependency list, so the bundle can never
-    drift from what ``pip install .`` asks for: the GPU onnxruntime with its
+    drift from what ``pip install '.[route-story-3d]'`` asks for: the GPU onnxruntime with its
     ``cuda``/``cudnn`` extras and the git-pinned siblings. Constraints are
     requirements.lock's transitive pins, with editable lines dropped.
     """
     with (root / "pyproject.toml").open("rb") as fh:
-        reqs = [d.strip() for d in tomllib.load(fh)["project"]["dependencies"]]
+        project = tomllib.load(fh)["project"]
+    reqs = [d.strip() for d in project["dependencies"]]
+    reqs += [d.strip() for d in project["optional-dependencies"][PLAYWRIGHT_EXTRA]]
     constraints = [
         line.strip()
         for line in (root / "requirements.lock").read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith(("#", "-"))
     ]
     return reqs, constraints
+
+
+def playwright_pin(constraints: list[str]) -> str:
+    """The Playwright version requirements.lock pins; its Chromium revision follows."""
+    for line in constraints:
+        m = re.fullmatch(r"playwright==(\d+\.\d+\.\d+)\s*(?:;.*)?", line)
+        if m:
+            return m.group(1)
+    raise SystemExit("requirements.lock does not pin playwright; cannot pick its Chromium")
+
+
+def browser_install_plan(
+    stage: Path, pin: str, *, windows_host: bool
+) -> tuple[list[str], dict[str, str]]:
+    """(argv, env) that puts Playwright's Windows Chromium under ``app/browsers``.
+
+    On Windows the bundled Python runs its own ``playwright install``, which
+    fetches the build for the host OS (Windows). Anywhere else that would fetch
+    the wrong build, and the bundled ``node.exe`` cannot run, so a throwaway
+    host-side Playwright of the same pinned version runs the same installer with
+    ``PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=win64``: Playwright's own switch for
+    choosing the platform whose browser to download.
+    """
+    env = {"PLAYWRIGHT_BROWSERS_PATH": str(stage / "app" / BROWSERS_DIR)}
+    install = ["-m", "playwright", "install", "chromium"]
+    if windows_host:
+        return [str(stage / "python" / "python.exe"), *install], env
+    env["PLAYWRIGHT_HOST_PLATFORM_OVERRIDE"] = "win64"
+    return ["uv", "run", "--no-project", "--with", f"playwright=={pin}", "python", *install], env
+
+
+def stage_browser(
+    stage: Path,
+    pin: str,
+    *,
+    windows_host: bool | None = None,
+    run=None,
+    skip: bool = False,
+) -> bool:
+    """Download the pinned Chromium into the stage; False when ``skip`` is set."""
+    if skip:
+        print("skipping Chromium (--skip-browser): Route Story 3-D needs a browser provisioned")
+        return False
+    if windows_host is None:
+        windows_host = sys.platform == "win32"
+    cmd, extra = browser_install_plan(stage, pin, windows_host=windows_host)
+    env = {**os.environ, **extra}
+    print("+", " ".join(cmd))
+    (run or _run_install)(cmd, env)
+    root = stage / "app" / BROWSERS_DIR
+    for exe in ("chrome.exe", "chrome-headless-shell.exe"):
+        if not any(root.rglob(exe)):
+            raise SystemExit(f"playwright install left no Windows {exe} under {root}")
+    return True
+
+
+def _run_install(cmd: list[str], env: dict[str, str]) -> None:
+    subprocess.run(cmd, check=True, env=env)  # noqa: S603
 
 
 def fetch_embed(cache: Path) -> Path:
@@ -182,7 +253,9 @@ def _problem(rel: str) -> str | None:
     """Why a staged path may not ship, or None. ``rel`` is POSIX, stage-relative."""
     parts = rel.split("/")
     name = parts[-1]
-    third_party = parts[0] == "python"
+    # The bundled interpreter and Chromium are third-party trees: they hold
+    # certificate stores, profile databases and the like.
+    third_party = parts[0] == "python" or parts[:2] == ["app", BROWSERS_DIR]
     if name.lower().endswith(".enc"):
         return "encrypted private file"
     if third_party:
@@ -245,6 +318,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--skip-installer", action="store_true", help="stop before compiling with Inno Setup"
     )
+    ap.add_argument(
+        "--skip-browser",
+        action="store_true",
+        help="do not bundle Chromium (Route Story 3-D then needs one provisioned separately)",
+    )
     ap.add_argument("--zip", action="store_true", help="also write a portable zip of the stage")
     args = ap.parse_args(argv)
 
@@ -258,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     py = stage_python(fetch_embed(dist / "cache"), stage)
     install_site_packages(ROOT, py, dist / "work")
     stage_app(ROOT, stage)
+    _, constraints = release_requirements(ROOT)
+    stage_browser(stage, playwright_pin(constraints), skip=args.skip_browser)
     stage_launcher(stage)
     audit(stage)
 
