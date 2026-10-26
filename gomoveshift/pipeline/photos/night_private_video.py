@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
@@ -12,6 +11,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Callable
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 from ..day_master_encoder import PRIVACY_VERIFIED, REQUIRED_PRIVACY_CLASSES
 from .face_filter import attestable_privacy_classes
@@ -387,7 +388,7 @@ def prepare_private_video(
         workspace / f".{row['id']}.export.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
     )
     with os.fdopen(descriptor, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_exclusive(lock)
         if target.exists():
             existing = _existing(project_root, target, identity)
             if existing is None:

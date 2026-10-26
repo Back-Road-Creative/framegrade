@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +12,8 @@ from typing import Callable
 
 import numpy as np
 from PIL import Image
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 from ..day_master_encoder import PRIVACY_VERIFIED, REQUIRED_PRIVACY_CLASSES
 from .develop import export_jpeg
@@ -206,7 +207,7 @@ def prepare_private_export(
         0o600,
     )
     with os.fdopen(lock_descriptor, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_exclusive(lock)
         if target.exists():
             existing = _existing(project_root, target, identity)
             if existing is None:

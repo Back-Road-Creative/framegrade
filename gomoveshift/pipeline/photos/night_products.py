@@ -7,7 +7,6 @@ timelapse, trail, or deep-combine algorithm.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import logging
@@ -23,6 +22,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 from ..media_admission import media_admission
 from .night_collection import NightProduct
@@ -656,7 +657,7 @@ def process_product_project(
         try:
             if not host_admitted:
                 raise BlockingIOError("Another media worker holds admission")
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(lock, blocking=False)
         except BlockingIOError:
             current = store.get(brand, project)
             if current["status"] not in {"running", "complete", "paused"}:
