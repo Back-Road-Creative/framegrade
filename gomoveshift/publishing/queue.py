@@ -18,7 +18,6 @@ seam, so callers make platform HTTP calls *between* calls into this module.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -26,6 +25,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Tuple, Union
+
+from gomoveshift.pipeline._file_lock import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
 
@@ -259,11 +260,11 @@ def _schema_lock(db_path: Path):
     with contextlib.suppress(OSError):
         os.fchmod(fd, 0o664)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_exclusive(fd)
         yield
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock(fd)
         os.close(fd)
 
 

@@ -16,7 +16,6 @@ Usage:
 """
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -37,6 +36,7 @@ from typing import Dict, List, Optional
 
 from gomoveshift.paths import gms_secret_path
 from gomoveshift.pipeline._atomic_write import atomic_write_json
+from gomoveshift.pipeline._file_lock import lock_exclusive, unlock
 from gomoveshift.pipeline._yt_creds import _sanitize_sops_stderr, sops_age_recipients
 
 logger = logging.getLogger(__name__)
@@ -373,7 +373,7 @@ def _sops_write_lock(enc_path: Path):
     ``_refresh_lock`` only serializes threads within a single process; a photo
     run and a drive run refreshing the same shared OAuth sidecar are separate
     processes, so it protects nothing between them. Blocking
-    ``fcntl.flock(LOCK_EX)`` on a sidecar — advisory, released on fd close or
+    a blocking exclusive file lock on a sidecar — advisory, released on fd close or
     process death, so a crashed run can't wedge the next one.
     """
     lock_path = _sops_lock_path(enc_path)
@@ -384,11 +384,11 @@ def _sops_write_lock(enc_path: Path):
     with contextlib.suppress(OSError):
         os.chmod(lock_path, 0o664)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_exclusive(fd)
         yield
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock(fd)
         os.close(fd)
 
 

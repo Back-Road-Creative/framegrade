@@ -1,7 +1,6 @@
 """Run-lock helpers extracted from ``drive_orchestrator``."""
 
 import errno
-import fcntl
 import json
 import logging
 import os
@@ -11,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Optional
+
+from gomoveshift.pipeline._file_lock import lock_exclusive, unlock
 
 from ..paths import gms_cache_home
 
@@ -24,8 +25,9 @@ logger = logging.getLogger("gomoveshift.pipeline.drive_orchestrator")
 # output dir would otherwise race on ``pipeline_state.json`` writes and
 # overwrite each other's day-master encodes. The lock lives at
 # ``stages_base / pipeline_state.lock`` (sibling of the state file, on
-# ext4 always — never NTFS where ``fcntl.flock`` semantics are
-# unreliable). Held against the open file descriptor, so a tmux detach
+# ext4 always — never NTFS where POSIX ``flock`` semantics are
+# unreliable; on native Windows the lock is ``msvcrt.locking`` via
+# ``_file_lock`` and the same-volume NTFS location is the supported one). Held against the open file descriptor, so a tmux detach
 # or reattach is invisible to the lock — only process death releases.
 #
 # Stale recovery: on EWOULDBLOCK we read the holder PID from the lock
@@ -90,7 +92,7 @@ def _acquire_run_lock(
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(fd, blocking=False)
             return _write_lock_metadata(fd, lock_path, output_base)
         except BlockingIOError as exc:
             # EWOULDBLOCK / EAGAIN: someone holds it. Probe.
@@ -109,7 +111,7 @@ def _acquire_run_lock(
             )
             # One retry. If THIS fails, surface whatever the new holder is.
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_exclusive(fd, blocking=False)
             except BlockingIOError:
                 holder = _read_lock_metadata(lock_path)
                 _raise_concurrent_run_error(holder, lock_path, output_base)
@@ -224,7 +226,7 @@ def _release_run_lock(fd: Optional[int], lock_path: Optional[Path]) -> None:
     if fd is None:
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock(fd)
     except OSError:
         pass
     try:
@@ -255,7 +257,7 @@ def _release_run_lock(fd: Optional[int], lock_path: Optional[Path]) -> None:
 # no cross-package Python dependency exists or should. The contract is small
 # and is asserted by ``tests/test_gpu_lock.py``:
 #
-#   * ``fcntl.flock(LOCK_EX)`` on the file is the actual mutex;
+#   * an exclusive ``_file_lock.lock_exclusive`` lock on the file is the actual mutex;
 #   * the JSON body is diagnostics, and carries at least ``owner`` and ``pid``;
 #   * **release never unlinks.** A lock file that is deleted and re-created is
 #     two different inodes, so a releasing holder can delete a path a waiting
@@ -339,7 +341,7 @@ def acquire_gpu_lock(
     try:
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_exclusive(fd, blocking=False)
             except BlockingIOError as exc:
                 if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
                     raise
@@ -382,7 +384,7 @@ def release_gpu_lock(fd: Optional[int], lock_path: Optional[Path]) -> None:
     except OSError:
         pass
     try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        unlock(fd)
     except OSError:
         pass
     try:

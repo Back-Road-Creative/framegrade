@@ -7,12 +7,13 @@ workload's memory/disk preflight. Never unlink a live lock file.
 
 from __future__ import annotations
 
-import fcntl
 import os
 import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 
 class MediaAdmissionError(OSError):
@@ -40,7 +41,7 @@ def media_admission():
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise MediaAdmissionError("Media admission lock must be a regular file")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(fd, blocking=False)
         except BlockingIOError:
             acquired = False
         except OSError as exc:

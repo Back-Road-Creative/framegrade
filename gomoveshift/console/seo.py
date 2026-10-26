@@ -16,7 +16,7 @@ replaces the file atomically.
 
 Atomic replacement makes a torn file impossible; it does nothing about a lost
 one. The whole read-check-mutate-replace runs under the same blocking
-`fcntl.flock` sidecar `content_ledger` and `pending_journal` use, because the
+file-lock sidecar `content_ledger` and `pending_journal` use, because the
 optimistic revision check cannot close the window it is itself inside: two
 editors can both read one snapshot, both pass the check against it, and the
 second replace drops the first rule with no error anywhere.

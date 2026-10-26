@@ -7,7 +7,6 @@ local-host admission, not a reservation against unrelated media/CI processes.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import importlib.metadata
 import json
@@ -21,6 +20,8 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from gomoveshift.pipeline._file_lock import lock_exclusive
 
 from ..media_admission import media_admission
 from .night_collection import NightCollection, NightProduct, ProductRequest
@@ -782,7 +783,7 @@ def process_project(
         try:
             if not host_admitted:
                 raise BlockingIOError("Another media worker holds admission")
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(lock, blocking=False)
         except BlockingIOError:
             current = store.get(brand, project)
             if current["status"] not in {"running", "complete", "paused"}:

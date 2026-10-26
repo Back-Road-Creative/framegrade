@@ -83,7 +83,7 @@ def save_pending(path: Path, entries: Iterable[PendingEntry]) -> None:
 # ``journey_path`` and wouldn't exclude a second writer touching the same
 # sidecar file for a different journey. This uses the same mechanism as
 # ``content_ledger._ledger_lock`` (see ``._file_lock.make_blocking_file_lock``)
-# — a blocking ``fcntl.flock(LOCK_EX)`` on a ``.lock`` sidecar beside the
+# — a blocking exclusive file lock on a ``.lock`` sidecar beside the
 # resource itself, reentrant per-thread so a caller that already holds it
 # (none today, but future-proofed the same way the ledger lock is) doesn't
 # self-deadlock.
