@@ -2817,6 +2817,13 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
         "held, shutter stepping one way, close in time) and their members are CONSUMED: "
         "they export once as <first-stem>_hdr_<variant>, never also one by one.",
     )
+    dev.add_argument(
+        "--no-bracket-align",
+        action="store_true",
+        help="With --hdr, merge the bracket frames as decoded instead of first shifting each onto "
+        "the middle exposure (default: photos.develop_hdr_align; on). Alignment is translation "
+        "only: a tripod bracket is unchanged either way.",
+    )
 
     # photos reel — stills -> one vertical Ken Burns MP4. Its own command, not a
     # develop flag: it renders video, so no existing rendered pixel can change.

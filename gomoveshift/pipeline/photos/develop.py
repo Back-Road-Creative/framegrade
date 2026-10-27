@@ -114,6 +114,23 @@ class DecodedPhoto:
     height: int
     bit_depth: int
     is_raw: bool
+    #: One record per frame of a fused bracket, in input order (see ``fuse_bracket``); empty for
+    #: a single decode and for a bracket fused with ``align=False``.
+    bracket_shifts: tuple["BracketShift", ...] = ()
+
+
+@dataclass(frozen=True)
+class BracketShift:
+    """What the pre-fusion alignment did to one bracket frame.
+
+    ``dx``/``dy`` is the translation (pixels, +x right, +y down) that brings the frame onto the
+    reference; ``applied`` is False for the reference itself, a zero shift, and a shift the
+    guard refused (``BRACKET_ALIGN_MAX_FRACTION``), which leaves the frame exactly as decoded."""
+
+    path: Path
+    dx: int
+    dy: int
+    applied: bool
 
 
 _Decoded = tuple[np.ndarray, int, int, int, str, bool]
@@ -547,7 +564,61 @@ def decode(path) -> DecodedPhoto:
 HDR_STEM_SUFFIX = "_hdr"
 
 
-def fuse_bracket(paths) -> DecodedPhoto:
+#: A frame whose measured shift exceeds this fraction of the SHORTER side is left unaligned and
+#: recorded. A handheld bracket drifts by a few tenths of a percent of the frame; 3% (120 px on a
+#: 24 MP frame) is already far more than a hand does between shots, so a larger "shift" is far
+#: likelier a mismatch (a moved scene, a mis-grouped frame) than camera motion, and warping a
+#: frame that far would smear the replicated border across the picture.
+BRACKET_ALIGN_MAX_FRACTION = 0.03
+
+
+def _align_bracket(decoded):
+    """Translate every frame onto the middle exposure; returns (frames, shifts).
+
+    The median-threshold bitmap method compares each frame's above/below-median mask, which an
+    exposure change leaves in place, so it needs no brightness matching. The shift is measured on
+    an 8-bit grey view and applied to the frame at its ORIGINAL precision (a 16-bit decode stays
+    16-bit), with the border replicated so the shape never changes. Integer shifts only; rotation
+    and moving subjects (deghosting) are not handled."""
+    ref = len(decoded) // 2
+    grey = [
+        cv2.cvtColor(
+            (d.rgb >> 8).astype(np.uint8) if d.rgb.dtype == np.uint16 else d.rgb,
+            cv2.COLOR_RGB2GRAY,
+        )
+        for d in decoded
+    ]
+    bound = BRACKET_ALIGN_MAX_FRACTION * min(grey[ref].shape)
+    # MTB halves the image max_bits times and searches +-1 px per level; OpenCV's default of 6
+    # underflows on a frame whose coarsest level would be < ~8 px, so cap it to the frame.
+    mtb = cv2.createAlignMTB(
+        max_bits=int(np.clip(math.log2(max(min(grey[ref].shape), 16) / 8), 1, 6))
+    )
+    frames, shifts = [], []
+    for i, d in enumerate(decoded):
+        dx, dy = (0, 0) if i == ref else (int(v) for v in mtb.calculateShift(grey[ref], grey[i]))
+        apply = i != ref and (dx, dy) != (0, 0) and max(abs(dx), abs(dy)) <= bound
+        rgb = d.rgb
+        if apply:
+            h, w = rgb.shape[:2]
+            rgb = cv2.warpAffine(
+                rgb,
+                np.float32([[1, 0, dx], [0, 1, dy]]),
+                (w, h),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+        frames.append(rgb)
+        shifts.append(BracketShift(d.path, dx, dy, apply))
+        if i != ref and (dx, dy) != (0, 0):
+            logger.info(
+                "Bracket align %s: shift (%d, %d) px %s", d.path.name, dx, dy,
+                "applied" if apply else f"skipped (over the {bound:.0f} px bound)",
+            )  # fmt: skip
+    return frames, tuple(shifts)
+
+
+def fuse_bracket(paths, align: bool = True) -> DecodedPhoto:
     """Fuse one exposure bracket into the single frame the normal chain develops.
 
     Mertens exposure fusion, not tone-mapped HDR: a per-pixel weighted blend, so the result
@@ -559,7 +630,12 @@ def fuse_bracket(paths) -> DecodedPhoto:
     on a bright region (1.48 on the test scene), and clamping would flatten the very highlights
     the darkest frame was shot to hold, so an out-of-range merge is mapped IN affinely — in
     range that map is the identity. It keeps the first path, so the profile still reads real
-    EXIF, and tags ``<decoder>+mertens<N>``."""
+    EXIF, and tags ``<decoder>+mertens<N>``.
+
+    ``align`` (default on) first translates each frame onto the middle exposure
+    (``_align_bracket``) — equal size does not mean registered, and a handheld bracket ghosts
+    otherwise. A tripod bracket measures zero everywhere and is bit-identical to ``align=False``,
+    which is exactly the pre-alignment path. The per-frame result is on ``bracket_shifts``."""
     decoded = [decode(p) for p in paths]
     if len(decoded) < 2:
         raise ValueError(f"fuse_bracket needs a bracket, got {len(decoded)} frame(s)")
@@ -571,10 +647,11 @@ def fuse_bracket(paths) -> DecodedPhoto:
             f"{decoded[0].path}: bracket frames decoded to different sizes ({shapes}) — "
             "fix the decode (the DNG hook) rather than resampling one rendering onto another"
         )
+    frames, shifts = _align_bracket(decoded) if align else ([d.rgb for d in decoded], ())
     # Mertens weighs contrast/saturation/well-exposedness on DISPLAY-referred frames and reads
     # OpenCV's BGR luma, so a 16-bit decode steps down here (>> 8 maps 65535 to 255 exactly)
     # and re-quantizes at its own depth below — a blend of N keeps sub-8-bit precision.
-    ldr = [(d.rgb >> 8).astype(np.uint8) if d.rgb.dtype == np.uint16 else d.rgb for d in decoded]
+    ldr = [(f >> 8).astype(np.uint8) if f.dtype == np.uint16 else f for f in frames]
     pool = cv2.getNumThreads()
     try:
         cv2.setNumThreads(1)
@@ -592,6 +669,7 @@ def fuse_bracket(paths) -> DecodedPhoto:
         rgb=np.rint(scaled).astype(np.uint16 if wide else np.uint8),
         decoder=f"{first.decoder}+mertens{len(decoded)}",
         bit_depth=max(d.bit_depth for d in decoded),
+        bracket_shifts=shifts,
     )
 
 

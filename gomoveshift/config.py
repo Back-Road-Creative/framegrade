@@ -1001,6 +1001,10 @@ class PhotosConfig(BaseModel):
     # here; the semantic gate (too few photos for a bracket to exist) sits at the CLI door,
     # where importing MIN_BRACKET_FRAMES is legal and this file's import is not. Per-run: --hdr.
     develop_hdr: bool = False
+    # Translation alignment of each bracket frame onto the middle exposure before the merge
+    # (``fuse_bracket``); a tripod bracket measures zero and is unchanged. False skips it and
+    # restores the unaligned merge. Per-run: --no-bracket-align.
+    develop_hdr_align: bool = True
     # Social target aspect for the RESIZED upload copy: "" (the default) ships the
     # source's own aspect, byte-identical to before; "square"/"4:5"/"9:16" trim the
     # largest CENTRED rectangle of that ratio — after EXIF orientation, before the
