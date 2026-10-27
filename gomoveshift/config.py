@@ -2040,6 +2040,13 @@ class DriveConfig(BaseModel):
     # screen, and the min gap enforced so a dense town run doesn't strobe.
     superlong_lower_third_duration_sec: float = 8.0
     superlong_lower_third_min_gap_sec: float = 45.0
+    # Opt-in GPS event captions on REGULAR long-form videos (``--gps-captions``):
+    # "off" burns none (today's path), "events" burns one "Entering <town>" card
+    # per supported town event of the LF's own chapters. Own timing knobs, so the
+    # superlong values above never move.
+    gps_captions: str = "off"
+    regular_lf_lower_third_duration_sec: float = 8.0
+    regular_lf_lower_third_min_gap_sec: float = 45.0
     # Superlong per-part publish DAY. Saturday is a placeholder default chosen because it
     # falls outside every currently-designed LF/shorts cadence (Ireland Sun,
     # USA Tue/Fri). Settable per run via ``--superlong-day`` (flag_registry.py,
@@ -2287,6 +2294,12 @@ class DriveConfig(BaseModel):
             raise ValueError(
                 f"superlong_split_grace must be in [0, 0.5], got {self.superlong_split_grace}"
             )
+        if self.gps_captions not in ("off", "events"):
+            raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
+        if self.regular_lf_lower_third_duration_sec <= 0:
+            raise ValueError("regular_lf_lower_third_duration_sec must be > 0")
+        if self.regular_lf_lower_third_min_gap_sec < 0:
+            raise ValueError("regular_lf_lower_third_min_gap_sec must be >= 0")
         _weekdays = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
         if self.superlong_publish_day.lower() not in _weekdays:
             raise ValueError(

@@ -622,6 +622,8 @@ def _cmd_drive_impl(args, config):
     config.drive.no_sharpen = bool(getattr(args, "no_sharpen", False))
     config.drive.no_denoise = bool(getattr(args, "no_denoise", False))
     config.drive.trail = getattr(args, "trail", None)
+    if getattr(args, "gps_captions", None) is not None:
+        config.drive.gps_captions = args.gps_captions
     config.drive.trail_profile = getattr(args, "trail_profile", "") or ""
     apply_picture_flags(config, args)
     # Refuse upstream of any work when this ffmpeg cannot do what was asked.

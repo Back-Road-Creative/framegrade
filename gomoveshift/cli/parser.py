@@ -529,6 +529,17 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "(overrides config.drive.superlong_publish_day / "
         "superlong_publish_day_by_region). Same vocabulary as --lf-day.",
     )
+    # Per-invocation (not persisted): a resume that omits it renders "off".
+    p.add_argument(
+        "--gps-captions",
+        dest="gps_captions",
+        choices=["off", "events"],
+        default=None,
+        help="Regular long-form videos only: 'events' burns an 'Entering <town>' "
+        "card per GPS-supported town event of each LF's own chapters "
+        "(config.drive.gps_captions, default off). Refuses before encoding when "
+        "an LF has no retained-route evidence.",
+    )
     p.add_argument("--fresh", action="store_true", help="Force restart from scratch")
     p.add_argument("--no-tmux", action="store_true", help="Skip tmux launcher")
     # The four upload flags use the

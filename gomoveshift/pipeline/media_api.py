@@ -33,6 +33,7 @@ class RunSpec:
     short_regions_fn: Optional[Callable] = None
     short_route_fn: Optional[Callable] = None
     superlong_route_fn: Optional[Callable] = None
+    lf_chapters_fn: Optional[Callable] = None
     state: Any = None
     inserts_by_lf: Optional[dict] = None
     # The publish-side title / chapter / brand inputs (``TitleKit``); the engine
@@ -122,6 +123,7 @@ def render_day(spec: RunSpec) -> Optional[Deliverables]:
         short_regions_fn=spec.short_regions_fn,
         short_route_fn=spec.short_route_fn,
         superlong_route_fn=spec.superlong_route_fn,
+        lf_chapters_fn=spec.lf_chapters_fn,
         state=spec.state,
         inserts_by_lf=spec.inserts_by_lf,
         kit=spec.kit,

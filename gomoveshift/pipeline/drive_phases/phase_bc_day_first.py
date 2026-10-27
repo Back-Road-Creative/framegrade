@@ -642,6 +642,13 @@ class PhaseBCDayFirst:
             # The same check per superlong part, over that part's own ranges.
             superlong_route_fn = make_superlong_route_fn(geocoder)
 
+            def lf_chapters_fn(lf, lf_location):
+                """Opt-in ``--gps-captions events``: this LF's own GPS chapters."""
+                from .phase_d_metadata import _lf_chapters
+
+                computed = _lf_chapters(self.config, lf, state, lf_location, stages_dir)
+                return computed[0] if computed else []
+
             fresh_artifacts = run_all_days(
                 day_batches=remaining_batches,
                 drive_scores=state.drive_scores,
@@ -670,6 +677,7 @@ class PhaseBCDayFirst:
                 short_regions_fn=short_regions_fn,
                 short_route_fn=short_route_fn,
                 superlong_route_fn=superlong_route_fn,
+                lf_chapters_fn=lf_chapters_fn,
                 state=state,
                 kit=kit,
                 on_day_complete=_on_day_complete,

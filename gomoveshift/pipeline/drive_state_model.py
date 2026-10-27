@@ -582,6 +582,10 @@ class PipelineState:
     # parameter is gone from ``_produce_superlong_parts`` and the
     # chapter-derived path is the only production shape.)
     superlong_parts: Optional[dict] = None
+    # Opt-in ``--gps-captions events``: ``{date: {str(lf_index): {"lower_thirds":
+    # [{"label", "time_sec"}], "lower_thirds_suppressed": [{"label", "time_sec",
+    # "reason"}]}}}`` -- the reviewable cards burned onto each regular LF.
+    regular_lf_captions: Optional[dict] = None
 
     # ── Resume-time backstop observability ────
     # ``{field_name: [lf_index, ...]}`` populated by
