@@ -975,6 +975,7 @@ def _cmd_drive_impl(args, config):
             # as --no-audio above.
             superlong_enabled=getattr(args, "superlong_enabled", None),
             superlong_publish_day=getattr(args, "superlong_publish_day", None),
+            gps_captions=getattr(args, "gps_captions", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The

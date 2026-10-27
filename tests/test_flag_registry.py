@@ -93,6 +93,7 @@ _VALUE_SAMPLES = {  # non-bool sentinel rows: (cli_value, saved_value)
     "shorts_per_day": (3, 4),
     "superlong_publish_day": ("sun", "wed"),
     "lf_mode": ("full_drive", "best_moments"),
+    "gps_captions": ("events", "off"),
 }
 _VALUE_RULES = [r for r in _MERGED_RULES if r.state_field in _VALUE_SAMPLES]
 assert len(_BOOL_RULES) + len(_VALUE_RULES) == len(_MERGED_RULES)
