@@ -21,14 +21,16 @@ def map_from_edited_time(
     """
     if not keep_segments:
         return edited_time
-    elapsed = 0.0
-    last = len(keep_segments) - 1
-    for i, (seg_start, seg_end) in enumerate(keep_segments):
-        seg_duration = seg_end - seg_start
-        extent = seg_duration if i == last else seg_duration - crossfade
-        if edited_time < elapsed + extent:
-            return seg_start + (edited_time - elapsed)
-        elapsed += extent
+    if edited_time < 0:
+        return keep_segments[0][0] + edited_time
+    # Imported here: gomoveshift.pipeline's package init imports gomoveshift.analysis.
+    from gomoveshift.pipeline.edit_timeline import planned_timeline
+
+    # Inside a seam overlap the edited clock already belongs to the incoming
+    # segment (the last position), which is what this mapper has always returned.
+    positions = planned_timeline(keep_segments, crossfade).output_to_source(edited_time)
+    if positions:
+        return positions[-1].time
     return keep_segments[-1][1]  # Past all segments (or exactly at end)
 
 

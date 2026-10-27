@@ -7,6 +7,7 @@ from typing import Optional
 from ..config import Config
 from ..models import DetectedLocation, LocationType, VideoAnalysis
 from ..pipeline.chapters._shared import is_valid_chapter_placename
+from ..pipeline.edit_timeline import planned_timeline
 from .encoder import Chapter, VideoEncoder
 
 
@@ -288,32 +289,12 @@ class VideoAssembler:
         if not segments_to_keep:
             return chapters
 
+        timeline = planned_timeline(segments_to_keep)
         adjusted = []
-        _cumulative_offset = 0.0
-        _segment_idx = 0
-
         for chapter in chapters:
-            original_time = chapter.start_time
-
-            # Calculate how much time has been trimmed before this point
-            trimmed_time = 0.0
-            prev_end = 0.0
-
-            for seg_start, seg_end in segments_to_keep:
-                if seg_start > original_time:
-                    break
-                # Accumulate every removed gap before this chapter; overwriting
-                # (=) kept only the last gap, mis-placing chapters after >=2 trims.
-                trimmed_time += seg_start - prev_end
-                prev_end = seg_end
-
-            # Also add time from any segments that were completely before this chapter
-            new_time = original_time - trimmed_time
-
-            # Only keep chapters that fall within kept segments
-            for seg_start, seg_end in segments_to_keep:
-                if seg_start <= original_time < seg_end:
-                    adjusted.append(Chapter(new_time, chapter.title))
-                    break
+            # A chapter on a trimmed second has no place in the output; drop it.
+            new_time = timeline.source_to_output(chapter.start_time)
+            if new_time is not None:
+                adjusted.append(Chapter(new_time, chapter.title))
 
         return adjusted

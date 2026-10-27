@@ -15,8 +15,9 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
 SCHEMA_ID = "keycut-assembly-receipt/1"
 PROVENANCES = ("keycut", "planned")
@@ -259,3 +260,278 @@ def load_receipt(source: Union[str, Path, Mapping[str, Any]]) -> AssemblyReceipt
     except json.JSONDecodeError as exc:
         raise _fail("receipt", f"not valid JSON ({exc.msg})") from exc
     return _parse(data)
+
+
+# --------------------------------------------------------------------------
+# Edit timeline: output <-> source mapping
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Crossfade:
+    """An overlap of ``duration`` seconds between span ``after_span`` and the next.
+
+    The incoming span starts ``duration`` before the outgoing span ends, so the
+    output shrinks by ``duration`` per seam (sum of durations minus the overlaps).
+    """
+
+    after_span: int
+    duration: float
+
+
+@dataclass(frozen=True)
+class Insert:
+    """An output-time hold with no source (for example a still).
+
+    ``at`` is measured on the timeline before any insert (receipt spans with
+    crossfades applied). Everything at or after ``at`` moves later by ``duration``.
+    """
+
+    at: float
+    duration: float
+
+
+@dataclass(frozen=True)
+class SourcePosition:
+    """A source second that contributes to an output instant, with its weight."""
+
+    time: float
+    weight: float
+    span_index: int
+
+
+@dataclass(frozen=True)
+class _Piece:
+    out_start: float
+    out_end: float
+    src_start: Optional[float]  # None for an insert hold
+    src_end: Optional[float]
+    span_index: int
+
+    def to_source(self, t: float) -> float:
+        if self.src_start is None or self.src_end is None:
+            raise ValueError("an insert hold has no source")
+        out_dur = self.out_end - self.out_start
+        src_dur = self.src_end - self.src_start
+        if out_dur == src_dur or out_dur <= 0:
+            return self.src_start + (t - self.out_start)
+        return self.src_start + (t - self.out_start) * (src_dur / out_dur)
+
+    def to_output(self, t: float) -> float:
+        if self.src_start is None or self.src_end is None:
+            raise ValueError("an insert hold has no source")
+        out_dur = self.out_end - self.out_start
+        src_dur = self.src_end - self.src_start
+        if out_dur == src_dur or src_dur <= 0:
+            return self.out_start + (t - self.src_start)
+        return self.out_start + (t - self.src_start) * (out_dur / src_dur)
+
+
+def _positive(value: float, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field}: must be a number")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{field}: must be finite and > 0, got {value!r}")
+    return float(value)
+
+
+class EditTimeline:
+    """Maps edited (output) time to source time and back from what was assembled.
+
+    Built from an :class:`AssemblyReceipt` plus optional :class:`Crossfade` and
+    :class:`Insert` extras. Intervals are half-open. A cut is never interpolated
+    across: ``source_to_output`` returns ``None`` for a source second that was
+    cut, and ``output_to_source`` returns no position inside an insert hold or
+    outside the timeline.
+    """
+
+    def __init__(self, pieces: Sequence[_Piece]):
+        self._pieces: tuple[_Piece, ...] = tuple(pieces)
+        self._src = tuple(p for p in self._pieces if p.src_start is not None)
+        for i in range(len(self._src) - 2):
+            if self._src[i + 2].out_start < self._src[i].out_end:
+                raise ValueError("crossfade: a span cannot overlap both neighbours past its length")
+
+    # -- construction -----------------------------------------------------
+
+    @classmethod
+    def from_receipt(
+        cls,
+        receipt: AssemblyReceipt,
+        crossfades: Iterable[Crossfade] = (),
+        inserts: Iterable[Insert] = (),
+    ) -> "EditTimeline":
+        items = [
+            (s.source_start, s.source_end, s.output_end - s.output_start, s.index)
+            for s in receipt.spans
+        ]
+        starts = [s.output_start for s in receipt.spans]
+        return cls._build(items, crossfades, inserts, starts)
+
+    @classmethod
+    def from_segments(
+        cls, segments: Sequence[tuple[float, float]], crossfade: float = 0.0
+    ) -> "EditTimeline":
+        """Planned timeline from kept ``(start, end)`` source segments in output order.
+
+        ``crossfade`` is the seam overlap applied between every pair of adjacent
+        non-empty segments. A seam is clamped to half of the shorter neighbour so
+        a short segment never overlaps both sides past its length. Zero-length
+        segments contribute nothing.
+        """
+        kept = [(s, e) for s, e in segments if e - s > 0]
+        items = [(s, e, e - s, i) for i, (s, e) in enumerate(kept)]
+        fades: list[Crossfade] = []
+        if crossfade > 0:
+            for i in range(len(kept) - 1):
+                shorter = min(items[i][2], items[i + 1][2])
+                fades.append(Crossfade(i, min(float(crossfade), shorter / 2)))
+        return cls._build(items, fades, (), None)
+
+    @classmethod
+    def _build(
+        cls,
+        items: Sequence[tuple[float, float, float, int]],
+        crossfades: Iterable[Crossfade],
+        inserts: Iterable[Insert],
+        starts: Optional[Sequence[float]],
+    ) -> "EditTimeline":
+        n = len(items)
+        fade_after: dict[int, float] = {}
+        for cf in crossfades:
+            d = _positive(cf.duration, f"crossfade[{cf.after_span}].duration")
+            if not 0 <= cf.after_span < n - 1:
+                raise ValueError(f"crossfade.after_span: {cf.after_span} has no following span")
+            if cf.after_span in fade_after:
+                raise ValueError(f"crossfade.after_span: {cf.after_span} given twice")
+            if d > min(items[cf.after_span][2], items[cf.after_span + 1][2]):
+                raise ValueError(
+                    f"crossfade[{cf.after_span}].duration: longer than an adjacent span"
+                )
+            fade_after[cf.after_span] = d
+        for i in range(1, n - 1):
+            if fade_after.get(i - 1, 0.0) + fade_after.get(i, 0.0) > items[i][2]:
+                raise ValueError(f"crossfade: overlaps at span {i} exceed its length")
+
+        pieces: list[_Piece] = []
+        running = 0.0
+        shift = 0.0  # receipt starts are used verbatim; crossfades pull later spans back
+        for i, (ss, se, dur, idx) in enumerate(items):
+            if starts is None:
+                os_ = running
+                running += dur - fade_after.get(i, 0.0)
+            else:
+                os_ = starts[i] - shift
+                shift += fade_after.get(i, 0.0)
+            pieces.append(_Piece(os_, os_ + dur, ss, se, idx))
+
+        total = max((p.out_end for p in pieces), default=0.0)
+        ins = sorted(((i.at, _positive(i.duration, "insert.duration")) for i in inserts))
+        for at, _ in ins:
+            if not math.isfinite(at) or not 0 <= at <= total:
+                raise ValueError(f"insert.at: {at!r} outside the timeline 0..{total}")
+            for k in range(1, len(pieces)):
+                a, b = pieces[k - 1], pieces[k]
+                if b.out_start <= at < a.out_end:
+                    raise ValueError(f"insert.at: {at!r} falls inside a crossfade")
+        if ins:
+            pieces = cls._apply_inserts(pieces, ins)
+        return cls(pieces)
+
+    @staticmethod
+    def _apply_inserts(pieces: list[_Piece], ins: list[tuple[float, float]]) -> list[_Piece]:
+        cuts = sorted({at for at, _ in ins})
+        split: list[_Piece] = []
+        for p in pieces:
+            cur = p
+            for at in cuts:
+                if cur.out_start < at < cur.out_end:
+                    mid = cur.to_source(at)
+                    split.append(_Piece(cur.out_start, at, cur.src_start, mid, cur.span_index))
+                    cur = _Piece(at, cur.out_end, mid, cur.src_end, cur.span_index)
+            split.append(cur)
+
+        def moved(t: float, inclusive: bool) -> float:
+            return t + sum(d for at, d in ins if (at <= t if inclusive else at < t))
+
+        out: list[_Piece] = []
+        for p in split:
+            # A hold at ``at`` sits before a piece starting at ``at`` and after one ending there.
+            out.append(
+                _Piece(
+                    moved(p.out_start, True),
+                    moved(p.out_end, False),
+                    p.src_start,
+                    p.src_end,
+                    p.span_index,
+                )
+            )
+        for k, (at, d) in enumerate(ins):
+            # Holds at the same instant stack: each starts where the previous ended.
+            start = moved(at, False) + sum(dd for aa, dd in ins[:k] if aa == at)
+            out.append(_Piece(start, start + d, None, None, -1))
+        out.sort(key=lambda p: (p.out_start, p.src_start is None))
+        return out
+
+    # -- queries ----------------------------------------------------------
+
+    def output_to_source(self, t: float) -> tuple[SourcePosition, ...]:
+        """Source positions behind output second ``t``.
+
+        Empty inside an insert hold or outside ``[0, duration)``; two positions
+        (outgoing first, weights summing to 1) inside a crossfade; else one.
+        """
+        hits = [p for p in self._src if p.out_start <= t < p.out_end]
+        if not hits:
+            return ()
+        if len(hits) == 1:
+            p = hits[0]
+            return (SourcePosition(p.to_source(t), 1.0, p.span_index),)
+        a, b = hits[0], hits[1]
+        x = (t - b.out_start) / (a.out_end - b.out_start)
+        return (
+            SourcePosition(a.to_source(t), 1.0 - x, a.span_index),
+            SourcePosition(b.to_source(t), x, b.span_index),
+        )
+
+    def source_to_output(self, t: float) -> Optional[float]:
+        """Output second of source second ``t``; ``None`` if that second was cut.
+
+        A source second used twice answers with its first use in output order.
+        """
+        for p in self._src:
+            if p.src_start <= t < p.src_end:  # type: ignore[operator]
+                return p.to_output(t)
+        return None
+
+    def source_to_output_snapped(self, t: float) -> float:
+        """Like :meth:`source_to_output` but a cut second snaps to the end of the
+        footage before it (``0`` before the first span, the total after the last).
+
+        The ends are inclusive here (a marker on a span's last frame stays on it),
+        which is what the chapter placement has always done.
+        """
+        prev_end = 0.0
+        for k, p in enumerate(self._src):
+            if t <= p.src_start:  # type: ignore[operator]
+                return p.out_start if k == 0 or t == p.src_start else prev_end
+            if t <= p.src_end:  # type: ignore[operator]
+                return p.to_output(t)
+            prev_end = p.out_end
+        return prev_end
+
+    @property
+    def duration(self) -> float:
+        return max((p.out_end for p in self._pieces), default=0.0)
+
+
+@lru_cache(maxsize=64)
+def _planned_timeline(segments: tuple[tuple[float, float], ...], crossfade: float) -> EditTimeline:
+    return EditTimeline.from_segments(segments, crossfade)
+
+
+def planned_timeline(
+    segments: Sequence[tuple[float, float]], crossfade: float = 0.0
+) -> EditTimeline:
+    """Cached :meth:`EditTimeline.from_segments` for the per-marker mappers."""
+    return _planned_timeline(tuple((float(s), float(e)) for s, e in segments), float(crossfade))
