@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import gomoveshift
 
-CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from tools import release  # noqa: E402
+
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 REPO_URL = "https://github.com/Back-Road-Creative/framegrade"
 
 
@@ -55,3 +61,10 @@ def test_headings_are_newest_first() -> None:
     released = [h for h in _headings(_text()) if h != "Unreleased"]
     keys = [tuple(int(p) for p in h.split(".")) for h in released]
     assert keys == sorted(keys, reverse=True)
+
+
+def test_every_changelog_fragment_is_releasable() -> None:
+    """``tools/release.py`` folds each ``changelog.d/*.md`` into the next release,
+    so a fragment it would refuse fails here, in the PR that adds it."""
+    for path in release.fragment_paths(REPO_ROOT):
+        release.read_fragment(path)
