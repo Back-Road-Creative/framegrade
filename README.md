@@ -14,7 +14,7 @@ To cut one, run `python3 -I tools/release.py X.Y.Z` on a branch off `main`
 ## Install
 
 ```bash
-pip install "gomoveshift-video @ git+https://github.com/Back-Road-Creative/framegrade@v0.3.4"
+pip install "gomoveshift-video @ git+https://github.com/Back-Road-Creative/framegrade@v0.3.11"
 ```
 
 This installs the tagged release together with its two sibling projects
