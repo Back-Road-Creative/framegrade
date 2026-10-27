@@ -385,6 +385,24 @@ def _timestamp_seconds(stamp: str) -> int:
     return seconds
 
 
+def shift_chapters(chapters: list[dict], lead_s: float) -> list[dict]:
+    """``chapters`` moved ``lead_s`` later, except the one at 0:00.
+
+    GPS chapters are timed against the LF body; the published file carries a montage
+    in front of it, so each later chapter sits ``lead_s`` further in. Gaps between
+    chapters are unchanged, and the first stays at 0:00 (YouTube needs it). A lead
+    of 0 or less returns the chapters as they are. ``chapters`` is not mutated.
+    """
+    out = [dict(c) for c in chapters]
+    if lead_s <= 0:
+        return out
+    for c in out:
+        sec = _timestamp_seconds(c["timestamp"])
+        if sec > 0:
+            c["timestamp"] = MarkerMerger.format_timestamp(sec + lead_s)
+    return out
+
+
 def add_insert_markers(chapters: list[dict], insert_times_s: list[float]) -> list[dict]:
     """``chapters`` plus a marker at each insert, in time order.
 
