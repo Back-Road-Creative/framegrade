@@ -132,8 +132,9 @@ from .social_generator import assert_day_title_stamps
 from .stop_mask import (
     build_county_change_mask,
     build_gps_gap_mask,
-    build_stop_mask,
+    classify_motion_states,
     mask_summary,
+    states_to_stop_mask,
     stop_mask_kwargs,
 )
 from .title_kit import TitleKit, require_title_kit
@@ -1898,7 +1899,10 @@ def run_day_pipeline(
         # reader (this used to look on ``config.drive`` and always fell back to
         # the hard-coded defaults). Same reader as the day-first drive plan's
         # full_drive mask, so the two masks agree.
-        stop_mask = build_stop_mask(day_scores, day_gps_points, **stop_mask_kwargs(config))
+        motion_states = classify_motion_states(
+            day_scores, day_gps_points, **stop_mask_kwargs(config)
+        )
+        stop_mask = states_to_stop_mask(motion_states)
         _summary = mask_summary(stop_mask)
         logger.info(
             "Day %s: stop mask — %d/%d s masked (%.1f%%)",
@@ -1920,7 +1924,12 @@ def run_day_pipeline(
             else:
                 _mask_base = output_dir / "_stages"
             _mask_base.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(_mask_base / f"stop_mask_{date}.npz", mask=stop_mask)
+            # ``mask`` keeps its meaning (True == a stopped second); ``states``
+            # is the int8 MotionState series beside it (CREEPING is never True
+            # in ``mask``).
+            np.savez_compressed(
+                _mask_base / f"stop_mask_{date}.npz", mask=stop_mask, states=motion_states
+            )
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Day %s: stop mask persist failed: %s", date, exc)
 
