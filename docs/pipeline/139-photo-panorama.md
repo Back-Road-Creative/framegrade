@@ -19,8 +19,24 @@ leaves a partial file at `out_path`.
   fraction is below `MIN_VALID_AREA_FRACTION` (0.5), or the output width is
   narrower than the widest input — both signs of a degenerate warp that
   `Stitcher_OK` alone does not catch.
+- Seam measurement (`measure_seam`): each adjacent pair is registered with an
+  ORB feature-match similarity fit, the next frame is warped onto the previous,
+  and the overlap is compared on blurred luma. Two numbers per seam: the
+  exposure step (absolute mean-luma difference) and the ghost fraction (share
+  of overlap pixels still differing by more than `GHOST_PIXEL_DIFF` = 40
+  levels once the step is removed). A seam over `MAX_SEAM_GHOST_FRACTION`
+  (2%) or `MAX_SEAM_LUMA_STEP` (12 levels) is flagged: by default the
+  panorama is still written, the reasons are logged at WARNING and returned in
+  `PanoramaResult.message` (and the console's `seam_message`). The raw overlap
+  is measured, not the blended output, and the Stitcher's seam finder and
+  exposure compensator often hide what it shows, so a flag is not proof of a
+  visible defect. `stitch_panorama(..., strict_seams=True)` refuses a flagged
+  seam with `PanoramaError` before the write instead. A pair with too few
+  matches to register is skipped, not failed. Thresholds are tuned on
+  synthetic scenes only.
 - `PanoramaResult` (returned only on success) carries `out_path`, `width`,
-  `height`, `valid_area_fraction`.
+  `height`, `valid_area_fraction`, and per-seam `seam_ghost_fractions` and
+  `seam_luma_steps`.
 
 **Console (`gomoveshift/console/photos.py`).** `validate_panorama_paths`
 mirrors `validate_develop_paths` — plus a minimum-of-2-photos check — and
