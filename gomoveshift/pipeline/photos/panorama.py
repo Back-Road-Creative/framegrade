@@ -21,6 +21,29 @@ import numpy as np
 #: of the canvas black (barely-overlapping frames, a near-degenerate warp).
 MIN_VALID_AREA_FRACTION = 0.5
 
+#: Seam measurement. Each adjacent source pair is registered with an ORB
+#: feature-match homography (the Stitcher does not expose its per-pair
+#: registration), the next frame is warped onto the previous one, and the
+#: overlap is compared on blurred luma.
+#:
+#: A pixel is "ghosted" when it still differs by more than this many luma
+#: levels (of 255) after the seam's mean-luma step is removed, so an exposure
+#: change alone never reads as a ghost.
+GHOST_PIXEL_DIFF = 40
+#: A seam is refused when more than this fraction of its overlap is ghosted.
+#: A moving person or car covers well over 2% of a frame's overlap, while the
+#: sub-pixel registration error on a clean seam leaves a few tenths of a percent.
+#: Chosen on synthetic scenes; not yet tuned on real handheld pans.
+MAX_SEAM_GHOST_FRACTION = 0.02
+#: A seam is refused when the mean luma of the overlap differs by more than
+#: this many levels (of 255) between the two frames -- about 1/6 stop at
+#: mid-grey, a step the blender cannot hide. Auto-exposure drift between
+#: handheld frames is usually below this; a step of 45 (the test) is far above.
+MAX_SEAM_LUMA_STEP = 12.0
+_MIN_SEAM_INLIERS = 12
+#: Largest vertical feature shift (fraction of frame height) a seam match may show.
+_MAX_VERTICAL_SHIFT = 0.15
+
 _STATUS_NAMES = {
     cv2.Stitcher_ERR_NEED_MORE_IMGS: "need more overlapping images",
     cv2.Stitcher_ERR_HOMOGRAPHY_EST_FAIL: (
@@ -46,6 +69,13 @@ class PanoramaResult:
     valid_area_fraction: float
     status: str
     message: str
+    #: One entry per measured adjacent pair: fraction of the overlap that
+    #: still differs after registration (ghosting), and the absolute
+    #: mean-luma difference across the overlap (exposure step). A pair with
+    #: too few feature matches to register is skipped, so these can be
+    #: shorter than ``len(paths) - 1``.
+    seam_ghost_fractions: tuple[float, ...] = ()
+    seam_luma_steps: tuple[float, ...] = ()
 
 
 def _valid_area_fraction(frame: np.ndarray) -> float:
@@ -53,6 +83,58 @@ def _valid_area_fraction(frame: np.ndarray) -> float:
     warped canvas with black where no source image reaches."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     return float(np.count_nonzero(gray > 0)) / float(gray.size)
+
+
+def measure_seam(prev: np.ndarray, nxt: np.ndarray) -> tuple[float, float] | None:
+    """Register ``nxt`` onto ``prev`` and measure their overlap.
+
+    Returns ``(ghost_fraction, luma_step)``, or ``None`` when too few feature
+    matches survive RANSAC to register the pair (nothing to measure)."""
+    gray_prev = cv2.cvtColor(prev, cv2.COLOR_BGR2GRAY)
+    gray_next = cv2.cvtColor(nxt, cv2.COLOR_BGR2GRAY)
+    orb = cv2.ORB_create(4000)
+    kp_p, des_p = orb.detectAndCompute(gray_prev, None)
+    kp_n, des_n = orb.detectAndCompute(gray_next, None)
+    if des_p is None or des_n is None:
+        return None
+    # Lowe ratio test: a repeating texture (tiles, windows) otherwise matches
+    # a feature to a neighbour one period over and registers the pair wrongly.
+    matches = []
+    for pair in cv2.BFMatcher(cv2.NORM_HAMMING).knnMatch(des_n, des_p, k=2):
+        if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance:
+            matches.append(pair[0])
+    if len(matches) < _MIN_SEAM_INLIERS:
+        return None
+    src = np.float32([kp_n[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst = np.float32([kp_p[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    # SCANS inputs pan horizontally, so a match that moves a feature far
+    # vertically is a false one (a symmetric scene also fits a 180-degree
+    # rotation, which no real pan is).
+    keep = np.abs(dst[:, 0, 1] - src[:, 0, 1]) < _MAX_VERTICAL_SHIFT * gray_prev.shape[0]
+    src, dst = src[keep], dst[keep]
+    if len(src) < _MIN_SEAM_INLIERS:
+        return None
+    # A similarity (shift, rotation, uniform scale) is all a hand-held pan
+    # between two frames needs, and it is far harder to fool than a full
+    # homography.
+    affine, inliers = cv2.estimateAffinePartial2D(
+        src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0
+    )
+    if affine is None or int(inliers.sum()) < _MIN_SEAM_INLIERS:
+        return None
+    homography = np.vstack([affine, [0.0, 0.0, 1.0]])
+    h, w = gray_prev.shape
+    warped = cv2.warpPerspective(gray_next, homography, (w, h))
+    mask = cv2.warpPerspective(np.full(gray_next.shape, 255, np.uint8), homography, (w, h))
+    # Erode so warp-edge interpolation never counts as overlap content.
+    mask = cv2.erode(mask, np.ones((9, 9), np.uint8)) > 0
+    if not mask.any():
+        return None
+    a = cv2.GaussianBlur(gray_prev, (5, 5), 0).astype(np.float32)[mask]
+    b = cv2.GaussianBlur(warped, (5, 5), 0).astype(np.float32)[mask]
+    step = float(a.mean() - b.mean())
+    ghost = float(np.mean(np.abs(a - (b + step)) > GHOST_PIXEL_DIFF))
+    return ghost, abs(step)
 
 
 def stitch_panorama(paths, out_path) -> PanoramaResult:
@@ -101,6 +183,26 @@ def stitch_panorama(paths, out_path) -> PanoramaResult:
             f"({max_input_width}px)"
         )
 
+    ghosts: list[float] = []
+    steps: list[float] = []
+    for index, (prev, nxt) in enumerate(zip(images, images[1:]), start=1):
+        measured = measure_seam(prev, nxt)
+        if measured is None:
+            continue
+        ghost, step = measured
+        ghosts.append(ghost)
+        steps.append(step)
+        if ghost > MAX_SEAM_GHOST_FRACTION:
+            raise PanoramaError(
+                f"panorama stitch rejected by seam QA: ghosting at seam {index} "
+                f"({ghost:.1%} of the overlap differs, max {MAX_SEAM_GHOST_FRACTION:.1%})"
+            )
+        if step > MAX_SEAM_LUMA_STEP:
+            raise PanoramaError(
+                f"panorama stitch rejected by seam QA: exposure step at seam {index} "
+                f"({step:.1f} luma levels, max {MAX_SEAM_LUMA_STEP:.0f})"
+            )
+
     out_path = Path(out_path)
     if not cv2.imwrite(str(out_path), stitched):
         raise PanoramaError(f"{out_path}: failed to write stitched panorama")
@@ -112,4 +214,6 @@ def stitch_panorama(paths, out_path) -> PanoramaResult:
         valid_area_fraction=valid_fraction,
         status="ok",
         message="",
+        seam_ghost_fractions=tuple(ghosts),
+        seam_luma_steps=tuple(steps),
     )

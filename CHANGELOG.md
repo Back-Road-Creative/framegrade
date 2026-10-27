@@ -5,6 +5,10 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Panorama stitching measures each seam's ghosting and exposure step (`measure_seam`) and refuses a result past `MAX_SEAM_GHOST_FRACTION` or `MAX_SEAM_LUMA_STEP` before writing; the measurements are on `PanoramaResult` and in the console's `run_panorama` dict.
+
 ## [0.3.11] - 2026-10-27
 
 ### Added
