@@ -5,10 +5,6 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- Opt-in GPS event captions on regular long-form videos: `--gps-captions {off,events}` (`config.drive.gps_captions`, default `off`, saved in drive state: a resume without the flag keeps the choice, a differing flag wins and is saved). `events` burns one "Entering <town>" card per town event of that LF's own chapters. A card naming a place no retained fix of the LF resolves to is suppressed and recorded (`state.regular_lf_captions`), the rest are spaced by `regular_lf_lower_third_min_gap_sec` (45 s) and shown for `regular_lf_lower_third_duration_sec` (8 s), separate from the superlong knobs. With captions requested and no retained-route evidence for an LF, the run refuses before any encode. `off` renders exactly as before. Cards are placed at chapter time plus the lead the file actually carries (probed `prepended` minus `concatenated`), since chapter times are LF-body-relative.
-
 ## [0.3.11] - 2026-10-27
 
 ### Added
