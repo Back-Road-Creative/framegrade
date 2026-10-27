@@ -1,6 +1,6 @@
 [project]
 name = "gomoveshift-video"
-version = "0.3.11"
+version = "0.3.12"
 description = "A media engine that grades video and photos, checks each finished file and builds route films from GPS tracks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -109,7 +109,7 @@ dependencies = [
     # likewise only adds `deface`, declared directly above.
     "sun-track @ git+https://github.com/Back-Road-Creative/sun-track@v0.1.0",
     "pycube-lut @ git+https://github.com/Back-Road-Creative/pycube-lut@v0.1.0",
-    "keycut @ git+https://github.com/Back-Road-Creative/keycut@v0.1.0",
+    "keycut @ git+https://github.com/Back-Road-Creative/keycut@v0.1.2",
     # redactcam is pinned to a COMMIT, not a tag, unlike its three siblings:
     # redactcam's release.yml is tag-triggered, so cutting a `v*` tag to move this
     # pin would also publish a Windows installer as a side effect. ``[gpu]``:
