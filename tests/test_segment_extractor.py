@@ -21,6 +21,7 @@ unattended.
      over a plain ``Mapping[key, Sequence[Segment]]``.
 """
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -28,6 +29,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from gomoveshift.pipeline import day_pipeline, montage_builder
+
+
+class _FixtureReceipt:
+    """Stands in for keycut's receipt: ``to_dict`` yields the frozen valid fixture."""
+
+    def to_dict(self):
+        path = Path(__file__).parent / "fixtures" / "assembly_receipt_v1.json"
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _seg(ep_idx, start, end):
@@ -79,8 +88,8 @@ class TestMergeThresholdPinned:
         master = tmp_path / "master.mp4"
         master.write_bytes(b"fake")
 
-        with patch.object(day_pipeline, "extract_and_concat_ranges") as ranges_fn:
-            ranges_fn.return_value = tmp_path / "out.mp4"
+        with patch.object(day_pipeline, "extract_and_concat_ranges_with_receipt") as ranges_fn:
+            ranges_fn.return_value = (tmp_path / "out.mp4", _FixtureReceipt())
             day_pipeline.extract_and_concat_segments(
                 master_path=master,
                 segments=[_seg(0, 10.0, 20.0)],
@@ -142,8 +151,8 @@ class TestReencodeArgsPinned:
         master = tmp_path / "master.mp4"
         master.write_bytes(b"fake")
 
-        with patch.object(day_pipeline, "extract_and_concat_ranges") as ranges_fn:
-            ranges_fn.return_value = tmp_path / "out.mp4"
+        with patch.object(day_pipeline, "extract_and_concat_ranges_with_receipt") as ranges_fn:
+            ranges_fn.return_value = (tmp_path / "out.mp4", _FixtureReceipt())
             day_pipeline.extract_and_concat_segments(
                 master_path=master,
                 segments=[_seg(0, 10.0, 20.0)],
@@ -183,8 +192,8 @@ class TestStopMaskRenamedToExcludeMask:
         master.write_bytes(b"fake")
         mask = [False] * 30 + [True] * 5
 
-        with patch.object(day_pipeline, "extract_and_concat_ranges") as ranges_fn:
-            ranges_fn.return_value = tmp_path / "out.mp4"
+        with patch.object(day_pipeline, "extract_and_concat_ranges_with_receipt") as ranges_fn:
+            ranges_fn.return_value = (tmp_path / "out.mp4", _FixtureReceipt())
             day_pipeline.extract_and_concat_segments(
                 master_path=master,
                 segments=[_seg(0, 10.0, 20.0)],
@@ -340,8 +349,8 @@ class TestFaststartDisabledOnIntermediates:
         master = tmp_path / "master.mp4"
         master.write_bytes(b"fake")
 
-        with patch.object(day_pipeline, "extract_and_concat_ranges") as ranges_fn:
-            ranges_fn.return_value = tmp_path / "out.mp4"
+        with patch.object(day_pipeline, "extract_and_concat_ranges_with_receipt") as ranges_fn:
+            ranges_fn.return_value = (tmp_path / "out.mp4", _FixtureReceipt())
             day_pipeline.extract_and_concat_segments(
                 master_path=master,
                 segments=[_seg(0, 10.0, 20.0)],

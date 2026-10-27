@@ -108,7 +108,7 @@ def test_trail_opening_replaces_montage_when_film_exists(tmp_path):
     seam = next(
         a for a in rig.argvs if "-ss" in a and str(rig.lf) in a and "libx265" in " ".join(a)
     )
-    assert seam[seam.index("-ss") + 1] == "15.0" and seam[seam.index("-to") + 1] == "16.0"
+    assert seam[seam.index("-ss") + 1] == "15.0" and seam[seam.index("-t") + 1] == "1.0"
     assert rig.d.trail_openings == [
         {"lf_index": 1, "opening_s": 10.0, "lead_s": 15.0, "insert_delta_s": -5.0}
     ]
@@ -323,7 +323,7 @@ def test_a_re_rendered_film_swaps_in_place_with_no_re_run(tmp_path):
     rig.expected, rig.argvs = 12.0 + (TOTAL - 10.0), []
     assert rig.attach() is True and rig.d.trail_skips == []
     assert rig.burns[1]["montage_duration"] == 12.0
-    seam = next(a for a in rig.argvs if "-ss" in a and "libx265" in " ".join(a) and "-to" in a)
+    seam = next(a for a in rig.argvs if "-ss" in a and "libx265" in " ".join(a) and "-t" in a)
     assert seam[seam.index("-ss") + 1] == "10.0"  # the earlier opening ends at 10 s
     assert (rig.lf_dir / "lf_01.ost.sha256").read_text() == to.fold("base", key)
     assert rig.d.trail_openings == [

@@ -168,9 +168,12 @@ class TestCleanStateProducesOutput:
         assert result == out
         assert out.exists()
         assert out.stat().st_size > 0
-        # One keyframe probe + one stream-copy per (non-contiguous)
-        # segment + one concat invocation
-        assert len(commands) == len(segments) + 2
+        # keycut 0.2.0 records an assembly receipt, which costs extra ffprobes:
+        # 1 keyframe probe + 1 stream-copy per (non-contiguous) segment
+        # + 1 duration probe per piece (receipt span lengths) + 1 concat
+        # + 1 duration probe of the output (receipt output.duration).
+        assert len(commands) == 1 + len(segments) + len(segments) + 1 + 1
+        assert [c[0] for c in commands].count("ffprobe") == 1 + len(segments) + 1
         assert commands[0][0] == "ffprobe"
         # Scratch per-segment files were cleaned up (keycut names them
         # ``keycut_NNN.mp4``; the old in-tree extractor used ``seg_NN.mp4``)

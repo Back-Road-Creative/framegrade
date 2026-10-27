@@ -63,7 +63,7 @@ import numpy as np
 from keycut import (
     assign_clips_by_source_window,
     boundaries_from_durations,
-    extract_and_concat_ranges,
+    extract_and_concat_ranges_with_receipt,
     segments_to_master_ranges,
 )
 
@@ -73,6 +73,7 @@ from .blur_gate import BlurGateError
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
+from .edit_timeline import ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
 from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
 from .inserts import (
@@ -312,8 +313,14 @@ def extract_and_concat_segments(
     ``file_boundaries`` directly. Callers holding drive-global indices must
     remap first (``phase_bc_day_first._partition_lf_plans_by_date``).
 
-    Returns the concatenated file, or None on any ffmpeg failure or missing
-    input.
+    The cut goes through keycut's ``extract_and_concat_ranges_with_receipt``.
+    The receipt it returns (what was actually cut, where each piece landed in
+    the output) is checked with ``edit_timeline.load_receipt``; a receipt that
+    does not validate means any later output-to-source time mapping would be
+    wrong, so it is logged as an error and None is returned.
+
+    Returns the concatenated file, or None on any ffmpeg failure, missing
+    input, or a receipt that fails validation.
     """
     master_path = Path(master_path)
     output_path = Path(output_path)
@@ -349,7 +356,7 @@ def extract_and_concat_segments(
         )
         return None
 
-    result = extract_and_concat_ranges(
+    result, receipt = extract_and_concat_ranges_with_receipt(
         master_path,
         ranges,
         output_path,
@@ -367,10 +374,24 @@ def extract_and_concat_segments(
         # it. keycut's default would rewrite the moov atom over the whole
         # concat for nothing — on a superlong part that is the entire ~118 GB
         # day, and it exceeded keycut's 1800s stream-copy timeout, which this
-        # caller cannot raise (extract_and_concat_ranges takes no timeout).
+        # caller cannot raise (the keycut call takes no timeout).
         # Not doing the work beats waiting longer for it.
         faststart=False,
     )
+    if result is not None:
+        try:
+            load_receipt(receipt.to_dict())
+        except ReceiptError as exc:
+            logger.error(
+                "segment extract: keycut receipt failed validation (%s); "
+                "returning None (output=%s) because the output-to-source time "
+                "mapping built from it would be wrong",
+                exc,
+                output_path,
+            )
+            # A resume must not pick up a concat its receipt cannot describe.
+            Path(result).unlink(missing_ok=True)
+            return None
     if result is None:
         logger.warning(
             "⚠ segment extract: stream-copy/concat failed (master=%s, "

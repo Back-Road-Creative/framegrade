@@ -124,11 +124,19 @@ def copy_range_argv(src, start: float, end: float, out, *, ffmpeg_bin: str = "ff
 def reencode_range_argv(
     src, start: float, end: float, out, *, ffmpeg_bin: str = "ffmpeg"
 ) -> list[str]:
-    """argv of keycut's ``reencode_range`` with the pinned join-repair args."""
-    return [ffmpeg_bin, "-y", "-i", str(src), "-ss", f"{float(start)}", "-to", f"{float(end)}"] + [
+    """argv of keycut's ``reencode_range`` with the pinned join-repair args.
+
+    keycut >= 0.1.2 seeks on the input side (``-ss S -i src``), restarts the
+    output clock with ``-ss 0`` and bounds the length with ``-t D``: the same
+    frame-accurate cut as the old ``-i src -ss S -to E``, without decoding
+    everything from the start of the file.
+    """
+    return [
+        ffmpeg_bin, "-y", "-ss", f"{float(start)}", "-i", str(src),
+        "-ss", "0", "-t", f"{float(end) - float(start)}",
         *lf_reencode_args(),
         str(out),
-    ]
+    ]  # fmt: skip
 
 
 def concat_copy_argv(list_file, out, *, ffmpeg_bin: str = "ffmpeg") -> list[str]:
