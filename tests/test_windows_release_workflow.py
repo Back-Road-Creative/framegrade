@@ -149,6 +149,16 @@ def test_proof_never_waits_unbounded_on_the_standard_user():
     assert "-Minutes 20" in install
 
 
+def test_proof_grants_the_batch_right_through_lsa_not_secedit_text():
+    """Run 40427689294 stopped in step 0: the secedit export never listed the
+    proof user as `*<sid>`, so the grant could not be confirmed from its text.
+    The right is granted and read back by SID through the LSA API instead."""
+    ps1 = (WIN / "windows_proof.ps1").read_text(encoding="utf-8")
+    assert "secedit" not in ps1
+    assert "LsaAddAccountRights" in ps1 and "LsaEnumerateAccountRights" in ps1
+    assert "LsaRemoveAccountRights" in ps1, "the proof user's right is revoked at the end"
+
+
 def test_no_unannotated_checksum_literal():
     for path in (WORKFLOW, WIN / "release_gate.py", WIN / "windows_proof.ps1"):
         for n, ln in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
