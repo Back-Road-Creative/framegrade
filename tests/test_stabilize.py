@@ -212,3 +212,136 @@ def test_deflicker_reduces_measured_jitter_on_real_ffmpeg(tmp_path):
     assert gate.passed, gate.reason
     assert gate.output_jitter < gate.input_jitter
     assert output_path.exists()
+
+
+# ── explicit intermediate encoding ──────────────────────────────────────────
+
+
+def _tenbit():
+    return stabilize.StreamSpec(
+        pix_fmt="yuv420p10le",
+        color_range="tv",
+        color_space="bt709",
+        color_primaries="bt709",
+        color_transfer="bt709",
+    )
+
+
+def _flag(argv, name):
+    return argv[argv.index(name) + 1]
+
+
+def test_deflicker_argv_is_explicit_about_codec_depth_and_tags():
+    from gomoveshift.pipeline import encoding_constants as ec
+
+    argv = stabilize.build_deflicker_argv("in.mp4", "out.mp4", stream=_tenbit())
+    assert _flag(argv, "-c:v") == "libx265"
+    assert _flag(argv, "-preset") == ec.LONGFORM_PRESET
+    assert _flag(argv, "-crf") == str(ec.LONGFORM_CRF)
+    assert _flag(argv, "-pix_fmt") == "yuv420p10le"
+    assert _flag(argv, "-profile:v") == ec.LONGFORM_PROFILE
+    assert _flag(argv, "-color_range") == "tv"
+    assert _flag(argv, "-colorspace") == "bt709"
+    assert _flag(argv, "-color_primaries") == "bt709"
+    assert _flag(argv, "-color_trc") == "bt709"
+    # libx265 writes primaries / transfer only through x265-params
+    assert _flag(argv, "-x265-params") == "colorprim=bt709:transfer=bt709:colormatrix=bt709"
+    assert argv[-1] == "out.mp4"
+    assert argv.index("-c:v") < argv.index("-c:a") < len(argv) - 1
+
+
+def test_vidstabtransform_argv_is_explicit_too():
+    caps = stabilize.FfmpegFilterCapabilities(frozenset({"vidstabdetect", "vidstabtransform"}))
+    argv = stabilize.build_vidstabtransform_argv(
+        "in.mp4", "t.trf", "out.mp4", caps, stream=_tenbit()
+    )
+    assert _flag(argv, "-c:v") == "libx265"
+    assert _flag(argv, "-pix_fmt") == "yuv420p10le"
+    assert _flag(argv, "-color_trc") == "bt709"
+
+
+def test_eight_bit_input_stays_eight_bit_and_unset_tags_are_not_invented():
+    spec = stabilize.StreamSpec(pix_fmt="yuv420p", color_range="tv", color_space="unknown")
+    args = stabilize.intermediate_video_args(spec)
+    assert _flag(args, "-pix_fmt") == "yuv420p"
+    assert "-profile:v" not in args
+    assert "-colorspace" not in args and "-color_trc" not in args
+    assert "-x265-params" not in args
+    assert _flag(args, "-color_range") == "tv"
+
+
+def test_unprobed_or_unsupported_pix_fmt_falls_back_to_ten_bit():
+    for spec in (stabilize.StreamSpec(), stabilize.StreamSpec(pix_fmt="cuda")):
+        assert _flag(stabilize.intermediate_video_args(spec), "-pix_fmt") == "yuv420p10le"
+
+
+def test_probe_stream_spec_parses_ffprobe_and_survives_failure():
+    out = '{"streams":[{"pix_fmt":"yuv420p10le","color_range":"tv","color_space":"bt709"}]}'
+    spec = stabilize.probe_stream_spec("c.mp4", run=lambda *a, **k: _FakeCompleted(stdout=out))
+    assert spec.pix_fmt == "yuv420p10le" and spec.color_space == "bt709"
+    assert spec.color_transfer == ""
+    bad = stabilize.probe_stream_spec("c.mp4", run=lambda *a, **k: _FakeCompleted(returncode=1))
+    assert bad == stabilize.StreamSpec()
+
+
+def _probe_out(path):
+    res = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries"]
+        + ["stream=codec_name,pix_fmt,color_range,color_space,color_primaries,color_transfer"]
+        + ["-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    import json
+
+    return json.loads(res.stdout)["streams"][0]
+
+
+def _tenbit_flicker_clip(path):
+    src = (
+        "color=c=gray:s=128x128:r=24:d=2,format=yuv420p10le,"
+        "geq=lum='if(mod(N,2),300,800)':cb=512:cr=512"
+    )
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", src, "-c:v", "libx265"]
+        + ["-pix_fmt", "yuv420p10le", "-crf", "10", "-color_range", "tv"]
+        + ["-x265-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709", str(path)],
+        capture_output=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")[-400:]
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")
+def test_deflicker_keeps_ten_bit_and_colour_tags_on_real_ffmpeg(tmp_path):
+    src = tmp_path / "in10.mp4"
+    _tenbit_flicker_clip(src)
+    tagged = _probe_out(src)
+    assert tagged["pix_fmt"] == "yuv420p10le" and tagged["color_transfer"] == "bt709"
+    out = tmp_path / "out10.mp4"
+    gate = stabilize.run_deflicker(src, out)
+    assert gate.passed, gate.reason
+    got = _probe_out(out)
+    # ffmpeg's own default for .mp4 is h264 at crf 23; the codec must be chosen, not defaulted
+    assert got["codec_name"] == "hevc"
+    assert got["pix_fmt"] == "yuv420p10le"
+    assert (got["color_range"], got["color_space"]) == ("tv", "bt709")
+    assert (got["color_primaries"], got["color_transfer"]) == ("bt709", "bt709")
+
+
+@pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not installed")
+def test_vidstab_keeps_ten_bit_and_colour_tags_on_real_ffmpeg(tmp_path):
+    caps = stabilize.probe_ffmpeg_filters()
+    if not caps.has_vidstab:
+        pytest.skip(stabilize.VIDSTAB_MISSING_REASON)
+    src = tmp_path / "in10.mp4"
+    _tenbit_flicker_clip(src)
+    trf, out = tmp_path / "t.trf", tmp_path / "o.mp4"
+    detect = stabilize.build_vidstabdetect_argv(src, trf, caps)
+    assert subprocess.run(detect, capture_output=True, timeout=120).returncode == 0
+    spec = stabilize.probe_stream_spec(src)
+    argv = stabilize.build_vidstabtransform_argv(src, trf, out, caps, stream=spec)
+    assert subprocess.run(argv, capture_output=True, timeout=120).returncode == 0
+    got = _probe_out(out)
+    assert got["pix_fmt"] == "yuv420p10le" and got["color_transfer"] == "bt709"

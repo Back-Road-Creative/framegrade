@@ -22,6 +22,8 @@ silently hands back an argv that would just fail later at ffmpeg's own filter-gr
 path that silently skips stabilisation and calls it done. A caller that wants "stabilise if
 possible, else fall back to deflicker-only" must catch `StabilizeUnavailableError` explicitly.
 
+**Intermediate encoding.** Neither output-writing pass (`build_deflicker_argv`, `build_vidstabtransform_argv`) leaves the intermediate to ffmpeg's defaults any more (an `.mp4` defaulted to h264 at crf 23, whatever the input was). `intermediate_video_args` writes `-c:v libx265 -preset <LONGFORM_PRESET> -crf <LONGFORM_CRF>` from `encoding_constants`, a `-pix_fmt` that keeps the input's own depth (10-bit stays 10-bit; an input libx265 cannot take falls back to `LONGFORM_PIX_FMT`, never lower than 10-bit), and the colour range, matrix, primaries and transfer copied from an ffprobe of the input (`probe_stream_spec`). A tag the input does not carry is left unwritten, not invented; an unprobeable input logs a warning and gets the 10-bit default with no tags. This build of libx265 writes only matrix and range from `-colorspace` / `-color_range`, so primaries and transfer also go in `-x265-params` (`colorprim` / `transfer` / `colormatrix`). `vidstabdetect` writes no video (`-f null`), so it is unchanged. x265 `slow` is CPU-heavy on a long 4K day master; that is the same cost the long-form CPU path already pays.
+
 **Quality gate.** `measure_luma_jitter` runs `ffmpeg -vf signalstats,metadata=print -f null -` and
 parses the `lavfi.signalstats.YAVG=<value>` lines ffmpeg emits to stderr, one per frame, then
 returns the population std of the frame-to-frame deltas -- a flickering clip has large deltas and

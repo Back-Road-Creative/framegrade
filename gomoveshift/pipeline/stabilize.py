@@ -24,6 +24,7 @@ pass-through of a filter that made things worse.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import statistics
@@ -35,6 +36,40 @@ from typing import Callable, Union
 logger = logging.getLogger(__name__)
 
 StrPath = Union[str, Path]
+
+# Pixel formats libx265 takes as-is. An input outside this set (hardware
+# surface formats, full-range ``yuvj``) is written as the long-form 10-bit
+# format instead: a depth never lower than the master's own.
+_X265_PIX_FMTS = frozenset(
+    {
+        "yuv420p",
+        "yuv422p",
+        "yuv444p",
+        "yuv420p10le",
+        "yuv422p10le",
+        "yuv444p10le",
+        "yuv420p12le",
+        "yuv422p12le",
+        "yuv444p12le",
+    }
+)
+# libx265 in this ffmpeg writes only the matrix and range from ``-colorspace`` /
+# ``-color_range``; primaries and transfer reach the bitstream only through
+# ``-x265-params``. Values both ffmpeg and x265 spell the same way:
+_X265_PRIMARIES = frozenset(
+    {"bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film", "bt2020", "smpte428"}
+    | {"smpte431", "smpte432"}
+)
+_X265_TRANSFERS = frozenset(
+    {"bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "linear", "log100", "log316"}
+    | {"iec61966-2-4", "bt1361e", "iec61966-2-1", "bt2020-10", "bt2020-12", "smpte2084"}
+    | {"smpte428", "arib-std-b67"}
+)
+_X265_MATRICES = frozenset(
+    {"gbr", "bt709", "fcc", "bt470bg", "smpte170m", "smpte240m", "ycgco", "bt2020nc"}
+    | {"bt2020c", "smpte2085", "chroma-derived-nc", "chroma-derived-c", "ictcp"}
+)
+_UNSET_TAGS = frozenset({"", "unknown", "unspecified", "reserved"})
 
 DEFLICKER_FILTER = "deflicker"
 VIDSTABDETECT_FILTER = "vidstabdetect"
@@ -110,6 +145,113 @@ def require_vidstab(capabilities: FfmpegFilterCapabilities) -> None:
         raise StabilizeUnavailableError(VIDSTAB_MISSING_REASON)
 
 
+@dataclass(frozen=True)
+class StreamSpec:
+    """Pixel format and colour tags of an input's first video stream."""
+
+    pix_fmt: str = ""
+    color_range: str = ""
+    color_space: str = ""
+    color_primaries: str = ""
+    color_transfer: str = ""
+
+
+def probe_stream_spec(
+    path: StrPath,
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ffprobe_bin: str = "ffprobe",
+) -> StreamSpec:
+    """ffprobe ``path`` for the pixel format and colour tags the intermediate must keep.
+
+    A failed or unparseable probe returns an empty spec (logged): the argv then
+    falls back to the 10-bit long-form format and writes no tags, rather than
+    guessing the input's.
+    """
+    argv = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=pix_fmt,color_range,color_space,color_primaries,color_transfer",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        res = run(argv, capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT_S * 3)
+        if res.returncode != 0:
+            raise ValueError(f"ffprobe rc={res.returncode}")
+        stream = json.loads(res.stdout)["streams"][0]
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+    ) as exc:
+        logger.warning("could not probe %s for pixel format / colour tags: %s", path, exc)
+        return StreamSpec()
+    return StreamSpec(
+        pix_fmt=str(stream.get("pix_fmt", "")),
+        color_range=str(stream.get("color_range", "")),
+        color_space=str(stream.get("color_space", "")),
+        color_primaries=str(stream.get("color_primaries", "")),
+        color_transfer=str(stream.get("color_transfer", "")),
+    )
+
+
+def intermediate_video_args(spec: StreamSpec | None = None) -> list:
+    """Explicit ``-c:v`` / quality / ``-pix_fmt`` / colour-tag args for an intermediate.
+
+    Codec and quality are the long-form x265 constants (``encoding_constants``),
+    so the intermediate is never left to ffmpeg's defaults (which wrote an
+    8-bit file). The pixel format is the input's own when libx265 takes it
+    (10-bit stays 10-bit), else the long-form 10-bit format; the colour
+    range / matrix / primaries / transfer are copied from the probe, and a tag
+    the input does not carry is left unwritten rather than invented.
+    """
+    from . import encoding_constants as ec
+
+    spec = spec or StreamSpec()
+    pix_fmt = spec.pix_fmt if spec.pix_fmt in _X265_PIX_FMTS else ec.LONGFORM_PIX_FMT
+    args = [
+        "-c:v",
+        "libx265",
+        "-preset",
+        ec.LONGFORM_PRESET,
+        "-crf",
+        str(ec.LONGFORM_CRF),
+        "-pix_fmt",
+        pix_fmt,
+    ]
+    if pix_fmt == ec.LONGFORM_PIX_FMT:
+        args += ["-profile:v", ec.LONGFORM_PROFILE]
+    for flag, value in (
+        ("-color_range", spec.color_range),
+        ("-colorspace", spec.color_space),
+        ("-color_primaries", spec.color_primaries),
+        ("-color_trc", spec.color_transfer),
+    ):
+        if value.strip().lower() not in _UNSET_TAGS:
+            args += [flag, value]
+    vui = [
+        f"{key}={value}"
+        for key, value, known in (
+            ("colorprim", spec.color_primaries, _X265_PRIMARIES),
+            ("transfer", spec.color_transfer, _X265_TRANSFERS),
+            ("colormatrix", spec.color_space, _X265_MATRICES),
+        )
+        if value in known
+    ]
+    if vui:
+        args += ["-x265-params", ":".join(vui)]
+    return args
+
+
 def build_deflicker_argv(
     input_path: StrPath,
     output_path: StrPath,
@@ -117,8 +259,9 @@ def build_deflicker_argv(
     mode: str = "pm",
     size: int = 5,
     ffmpeg_bin: str = "ffmpeg",
+    stream: StreamSpec | None = None,
 ) -> list:
-    """argv for a single-pass ``deflicker`` re-encode."""
+    """argv for a single-pass ``deflicker`` re-encode (explicit codec, depth, tags)."""
     filter_expr = f"deflicker=mode={mode}:size={size}"
     return [
         ffmpeg_bin,
@@ -127,6 +270,7 @@ def build_deflicker_argv(
         str(input_path),
         "-vf",
         filter_expr,
+        *intermediate_video_args(stream),
         "-c:a",
         "copy",
         str(output_path),
@@ -174,8 +318,9 @@ def build_vidstabtransform_argv(
     smoothing: int = 10,
     zoom: float = 0,
     ffmpeg_bin: str = "ffmpeg",
+    stream: StreamSpec | None = None,
 ) -> list:
-    """argv for vidstab pass 2 (applies the transforms from pass 1)."""
+    """argv for vidstab pass 2 (applies the transforms from pass 1; explicit codec, depth, tags)."""
     require_vidstab(capabilities)
     filter_expr = f"vidstabtransform=input={transforms_path}:smoothing={smoothing}:zoom={zoom}"
     return [
@@ -185,6 +330,7 @@ def build_vidstabtransform_argv(
         str(input_path),
         "-vf",
         filter_expr,
+        *intermediate_video_args(stream),
         "-c:a",
         "copy",
         str(output_path),
@@ -268,7 +414,12 @@ def run_deflicker(
     jitter-worsening encode for a kept result.
     """
     argv = build_deflicker_argv(
-        input_path, output_path, mode=mode, size=size, ffmpeg_bin=ffmpeg_bin
+        input_path,
+        output_path,
+        mode=mode,
+        size=size,
+        ffmpeg_bin=ffmpeg_bin,
+        stream=probe_stream_spec(input_path, run=run),
     )
     result = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)
     if result.returncode != 0:
@@ -345,7 +496,9 @@ def apply_picture_steps(
             caps = capabilities if capabilities is not None else probe_ffmpeg_filters()
             for argv in (
                 build_vidstabdetect_argv(current, trf, caps),
-                build_vidstabtransform_argv(current, trf, out, caps),
+                build_vidstabtransform_argv(
+                    current, trf, out, caps, stream=probe_stream_spec(current, run=run)
+                ),
             ):
                 res = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)
                 if res.returncode != 0:
