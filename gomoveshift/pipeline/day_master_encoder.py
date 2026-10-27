@@ -1556,7 +1556,7 @@ def encode_day_master(
     # discarded / failed step falls back to the raw concat; never raises.
     graded_src = raw_concat
     if cfg.drive.deflicker or cfg.drive.stabilize:
-        from .stabilize import apply_picture_steps
+        from .stabilize import apply_picture_steps, nvenc_available
 
         steps = apply_picture_steps(
             raw_concat,
@@ -1564,6 +1564,7 @@ def encode_day_master(
             f"day_{date}_raw",
             deflicker=bool(cfg.drive.deflicker),
             stabilize=bool(cfg.drive.stabilize),
+            has_nvenc=nvenc_available(),
         )
         graded_src = steps.path
         try:

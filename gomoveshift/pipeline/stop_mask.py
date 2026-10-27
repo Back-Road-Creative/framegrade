@@ -33,6 +33,7 @@ planner cannot pick a clip that would have to borrow a place.
 from __future__ import annotations
 
 import logging
+from enum import IntEnum
 
 import numpy as np
 
@@ -45,30 +46,58 @@ logger = logging.getLogger(__name__)
 COL_MOTION_ENERGY = 2
 
 
+class MotionState(IntEnum):
+    """Per-second motion class (the values persist in ``stop_mask_<date>.npz``)."""
+
+    MOVING = 0
+    STOPPED = 1
+    CREEPING = 2  # sustained slow GPS speed, kept on purpose (creep_policy="keep")
+    UNCERTAIN = 3  # no usable GPS speed AND no usable optical reading
+
+
+CREEP_POLICIES = ("remove", "keep")
+DEFAULT_CREEP_MIN_SPEED_KMH = 2.0
+
+
 def stop_mask_kwargs(config) -> dict:
-    """The three ``build_stop_mask`` knobs read from ``config.stop_detection``.
+    """The ``build_stop_mask`` knobs read from ``config.stop_detection``.
 
     ``stop_detection`` is a TOP-LEVEL ``Config`` block (``config.py``), not a
     ``DriveConfig`` field. One reader for every mask builder — the day
     pipeline's per-day mask and the day-first drive plan's drive-wide mask —
     so the two can never drift. Falls back to ``config.drive.stop_detection``
     (duck-typed test configs), then to the builder's own defaults.
+
+    The creep and hysteresis knobs are emitted only when they differ from the
+    builder's defaults, so a default config yields exactly the three base keys.
     """
     sd = getattr(config, "stop_detection", None) if config is not None else None
     if sd is None:
         drive = getattr(config, "drive", None) if config is not None else None
         sd = getattr(drive, "stop_detection", None) if drive is not None else None
     stop_speed_kmh, min_stop_dur, optical = 10.0, 5.0, 0.008
+    extra: dict = {}
     if sd is not None:
         min_stop_dur = float(getattr(sd, "min_stop_duration", min_stop_dur))
         optical = float(getattr(sd, "motion_threshold", optical))
         gsc = getattr(sd, "gps_speed_corroboration", None)
         if gsc is not None:
             stop_speed_kmh = float(getattr(gsc, "stop_speed_kmh", stop_speed_kmh))
+        policy = getattr(sd, "creep_policy", "remove")
+        if policy != "remove":
+            extra["creep_policy"] = policy
+        creep_min = float(getattr(sd, "creep_min_speed_kmh", DEFAULT_CREEP_MIN_SPEED_KMH))
+        if creep_min != DEFAULT_CREEP_MIN_SPEED_KMH:
+            extra["creep_min_speed_kmh"] = creep_min
+        hyst = getattr(sd, "hysteresis", None)
+        if hyst is not None and getattr(hyst, "enabled", False) is True:
+            extra["hysteresis_enabled"] = True
+            extra["hysteresis_exit_multiplier"] = float(getattr(hyst, "exit_multiplier", 1.0))
     return {
         "stop_speed_kmh": stop_speed_kmh,
         "min_stop_duration_s": min_stop_dur,
         "optical_motion_threshold": optical,
+        **extra,
     }
 
 
@@ -95,7 +124,7 @@ def _sustained_runs(candidate: np.ndarray, min_len_s: float) -> np.ndarray:
     return mask
 
 
-def build_stop_mask(
+def classify_motion_states(
     day_scores: np.ndarray,
     day_gps_points,
     *,
@@ -103,8 +132,12 @@ def build_stop_mask(
     min_stop_duration_s: float = 5.0,
     optical_motion_threshold: float = 0.008,
     speed_window_s: float = 5.0,
+    creep_policy: str = "remove",
+    creep_min_speed_kmh: float = DEFAULT_CREEP_MIN_SPEED_KMH,
+    hysteresis_enabled: bool = False,
+    hysteresis_exit_multiplier: float = 1.0,
 ) -> np.ndarray:
-    """Build a per-second STOP mask for one day's scored timeline.
+    """Classify every second of one day into a :class:`MotionState` (int8).
 
     Args:
         day_scores: (N, >=3) score array, one row per second, timestamps
@@ -114,26 +147,46 @@ def build_stop_mask(
             for a GPS-less day.
         stop_speed_kmh: ground speed below which a second is "stopped".
         min_stop_duration_s: the minimum length (seconds) of a contiguous
-            stopped run before it masks — shorter blips (a light) don't.
+            stopped run before it is STOPPED — shorter blips (a light) are not.
         optical_motion_threshold: motion-energy floor used when a second's GPS
             speed can't be measured.
         speed_window_s: width of the CENTERED window (seconds) over which a
             second's median GPS speed is measured.
+        creep_policy: ``"remove"`` (default) treats sub-``stop_speed_kmh``
+            driving as a stop. ``"keep"`` leaves seconds whose speed is in
+            ``[creep_min_speed_kmh, stop_speed_kmh)`` as CREEPING (not a stop);
+            only speed below ``creep_min_speed_kmh`` stays a stop.
+        creep_min_speed_kmh: the floor of the creep band (provisional).
+        hysteresis_enabled / hysteresis_exit_multiplier: once a second is a stop
+            candidate, the run continues until the signal clears its threshold
+            times the multiplier (same semantics as the legacy optical state
+            machine in ``analysis/motion.py``). Off by default.
 
     Returns:
-        A boolean ``np.ndarray`` of length ``len(day_scores)`` — ``True`` marks
-        a STOP second to EXCLUDE. Empty array when ``day_scores`` is empty.
+        ``int8`` array of length ``len(day_scores)``. STOPPED seconds are
+        exactly the seconds the pre-states mask called a stop. UNCERTAIN marks
+        a second with neither a GPS speed nor a finite optical reading; it is
+        not a stop (as before), only visible.
     """
+    if creep_policy not in CREEP_POLICIES:
+        raise ValueError(f"creep_policy must be one of {CREEP_POLICIES}, got {creep_policy!r}")
     n = int(len(day_scores)) if day_scores is not None else 0
     if n == 0:
-        return np.zeros(0, dtype=bool)
+        return np.zeros(0, dtype=np.int8)
 
+    keep_creep = creep_policy == "keep"
+    # Speed below this is a stop candidate; the creep band sits above it.
+    stop_floor_kmh = min(creep_min_speed_kmh, stop_speed_kmh) if keep_creep else stop_speed_kmh
+    stop_floor_mps = stop_floor_kmh / 3.6
     stop_speed_mps = stop_speed_kmh / 3.6
+    exit_mult = float(hysteresis_exit_multiplier)
     have_gps = day_gps_points is not None and len(day_gps_points) >= 2
     motion = np.asarray(day_scores[:, COL_MOTION_ENERGY], dtype=np.float64)
     half = speed_window_s / 2.0
 
     candidate = np.zeros(n, dtype=bool)
+    raw = np.full(n, int(MotionState.MOVING), dtype=np.int8)
+    in_stop = False
     for i in range(n):
         speed = None
         if have_gps:
@@ -143,12 +196,44 @@ def build_stop_mask(
         if speed is not None:
             # GPS authoritative + additive: a sub-threshold span is a stop even
             # when optical motion is high (parked with passing traffic).
-            candidate[i] = speed < stop_speed_mps
+            stopped = speed < stop_floor_mps
+            if not stopped and in_stop and hysteresis_enabled:
+                stopped = speed <= stop_floor_mps * exit_mult
+            if not stopped and keep_creep and speed < stop_speed_mps:
+                raw[i] = MotionState.CREEPING
         else:
-            # No measurable speed here — never auto-pass; fall back to optical.
-            candidate[i] = float(motion[i]) < optical_motion_threshold
+            m = float(motion[i])
+            if np.isnan(m):
+                # No GPS speed and no optical reading: never a stop (as before),
+                # but say so.
+                stopped = False
+                raw[i] = MotionState.UNCERTAIN
+            else:
+                # No measurable speed here — never auto-pass; fall back to optical.
+                stopped = m < optical_motion_threshold
+                if not stopped and in_stop and hysteresis_enabled:
+                    stopped = m <= optical_motion_threshold * exit_mult
+        candidate[i] = stopped
+        in_stop = stopped
 
-    return _sustained_runs(candidate, min_stop_duration_s)
+    sustained = _sustained_runs(candidate, min_stop_duration_s)
+    raw[sustained] = MotionState.STOPPED
+    return raw
+
+
+def build_stop_mask(day_scores: np.ndarray, day_gps_points, **kwargs) -> np.ndarray:
+    """Per-second STOP mask for one day: ``True`` marks a STOP second to EXCLUDE.
+
+    The boolean projection of :func:`classify_motion_states` (same keyword
+    arguments); CREEPING and UNCERTAIN seconds are never ``True``. Empty array
+    when ``day_scores`` is empty.
+    """
+    return states_to_stop_mask(classify_motion_states(day_scores, day_gps_points, **kwargs))
+
+
+def states_to_stop_mask(states: np.ndarray) -> np.ndarray:
+    """``True`` exactly where ``states`` is :attr:`MotionState.STOPPED`."""
+    return np.asarray(states) == int(MotionState.STOPPED)
 
 
 # A short may name only a place its own clip's GPS votes (quorum: two fixes). A

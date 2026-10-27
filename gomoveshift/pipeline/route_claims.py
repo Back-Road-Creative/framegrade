@@ -825,6 +825,70 @@ def lower_third_issues(lower_thirds, ev: RouteEvidence) -> list:
     ]
 
 
+def regular_lf_caption_cards(
+    chapters,
+    ev: RouteEvidence,
+    town_events,
+    *,
+    lead_s: float,
+    duration_sec: float,
+    min_gap_sec: float,
+):
+    """Opt-in GPS event captions for ONE regular LF: ``(cards, suppressed)``.
+
+    ``town_events(chapters)`` is the kit's ``[(label, t_sec)]`` helper over the
+    LF's own chapters; ``lead_s`` shifts those body times onto the burned video
+    (the montage lead). A card whose place no retained fix of ``ev`` resolves to
+    is suppressed (never broadened), then the survivors are spaced by
+    ``min_gap_sec``. ``cards`` is ``[(label, video_time_sec)]``, ``suppressed``
+    ``[{"label", "time_sec", "reason"}]``. The route evidence is aggregated
+    (no per-second bin times), so ``place_text_issues`` can only be asked of a
+    whole LF, not of one card's interval; support is place-on-route."""
+    from .ost_applier import _prepare_lower_thirds
+
+    kept, suppressed = [], []
+    for label, t in town_events(chapters):
+        why = lower_third_issues([(label, t)], ev)
+        if why:
+            suppressed.append(
+                {"label": label, "time_sec": float(t) + lead_s, "reason": "; ".join(why)}
+            )
+        else:
+            kept.append((label, float(t) + lead_s))
+    spaced = _prepare_lower_thirds(
+        kept,
+        video_duration=float("inf"),
+        opener_end_sec=lead_s,
+        cta_start_sec=None,
+        duration_sec=duration_sec,
+        min_gap_sec=min_gap_sec,
+    )
+    return [(lbl, start) for lbl, start, _end in spaced], suppressed
+
+
+def caption_route_evidence(state, lf_indices) -> dict:
+    """``{lf_index: RouteEvidence}`` for every LF in ``lf_indices``, from
+    ``state.per_lf_route_record``. Raises :class:`RouteClaimRefusedError` naming
+    each LF with no usable record: GPS captions were requested, so rendering
+    without them (or without proof for them) is never silent."""
+    records = (state.get("per_lf_route_record") if state is not None else None) or {}
+    out, missing = {}, []
+    for idx in lf_indices:
+        rec = (records.get(idx) or {}).get("record")
+        if not rec or "bins" not in rec:
+            missing.append(idx)
+        else:
+            out[idx] = RouteEvidence.from_record(rec)
+    if missing:
+        raise RouteClaimRefusedError(
+            "GPS captions requested (--gps-captions events) but LF "
+            + ", ".join(str(i) for i in missing)
+            + " has no retained-route evidence; nothing encoded. Render without "
+            "--gps-captions, or fix the LF's GPS first."
+        )
+    return out
+
+
 def route_claim_outcome(
     idx: int, requested: str, ev: Optional["RouteEvidence"], *, chosen: Optional[str], reason: str
 ) -> dict:

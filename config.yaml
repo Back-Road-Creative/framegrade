@@ -113,6 +113,15 @@ stop_detection:
     enabled: false
     exit_multiplier: 1.0
 
+  # Day/drive STOP mask (pipeline/stop_mask.py): what to do with slow driving.
+  #   remove - every second under stop_speed_kmh is a stop and is masked (default)
+  #   keep   - GPS speed in [creep_min_speed_kmh, stop_speed_kmh) is CREEPING and
+  #            NOT masked; only speed below creep_min_speed_kmh is a stop
+  creep_policy: remove
+  # Floor of the creep band, km/h. Provisional: pending tuning on labelled real
+  # drives. Used only when creep_policy is "keep".
+  creep_min_speed_kmh: 2.0
+
   # GPS-speed corroboration of optical stops.
   # When enabled and the LF has a GPS trace, an optical "stop" whose GPS speed
   # over the same source-time span is clearly above stop_speed_kmh is treated as

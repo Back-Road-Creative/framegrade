@@ -210,6 +210,9 @@ def run_panorama(paths: list[str], out: str) -> dict:
         "width": result.width,
         "height": result.height,
         "valid_area_fraction": result.valid_area_fraction,
+        "seam_ghost_fractions": list(result.seam_ghost_fractions),
+        "seam_luma_steps": list(result.seam_luma_steps),
+        "seam_message": result.message,
     }
 
 

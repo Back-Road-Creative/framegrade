@@ -546,6 +546,7 @@ def _cmd_photos_develop(args) -> int:
     grade_sidecar = args.grade_sidecar or photos.grade_sidecar
     # Same either-switch opt-in; off, no bracket is detected and nothing is fused.
     hdr = args.hdr or photos.develop_hdr
+    hdr_align = photos.develop_hdr_align and not args.no_bracket_align
     vibrance = args.vibrance if args.vibrance is not None else photos.vibrance
     if not 0.0 <= vibrance <= 2.0:
         print(f"--vibrance must be in [0, 2] (got {vibrance})", file=sys.stderr)
@@ -852,7 +853,7 @@ def _cmd_photos_develop(args) -> int:
         path = group[0] if group else item
         stem = f"{path.stem}{HDR_STEM_SUFFIX}" if group else path.stem
         try:
-            source = fuse_bracket(group) if group else path
+            source = fuse_bracket(group, align=hdr_align) if group else path
             # What the photo is OF, read off EXIF/grouping/the operator sidecar
             # for THIS path. Only the auto-select path (no explicit ``styles``)
             # consults it, same as ``select_styles`` itself.
