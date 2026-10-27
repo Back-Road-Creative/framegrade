@@ -20,3 +20,5 @@ grade reaching an encode is now a baked LUT:
 
 LUT↔string parity is pinned by the golden test (<2 LSB), so this changes the grade's numeric
 precision, not its look.
+
+The fallback is no longer silent. `SinglePassResult.grade_fallback` is `None` for a LUT grade and `"eq_filter_chain"` when the bake failed and the 8-bit chain was used; it is in `to_dict()` and in the `<final stem>.tonemap.json` sidecar (an SDR master gets that sidecar only when a fallback happened). `drive.strict_grade` (default `false`) refuses the fallback instead: the bake failure raises `ValueError("GRADE-FALLBACK-REFUSED: ...")` before any encode.

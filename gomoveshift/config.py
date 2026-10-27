@@ -1499,6 +1499,10 @@ class DriveConfig(BaseModel):
     # color-analysis cache (and a resume) carries the choice.
     no_sharpen: bool = False
     no_denoise: bool = False
+    # Refuse (ValueError, before any encode) when the global LUT bake fails and
+    # the grade would degrade to the 8-bit eq filter chain. Off = degrade and
+    # record `grade_fallback` on the result and the .tonemap.json sidecar.
+    strict_grade: bool = False
     # Opt-in picture steps on the day master (--stabilize / --deflicker); each is
     # gated on measured luma jitter (pipeline/stabilize.py).
     stabilize: bool = False
