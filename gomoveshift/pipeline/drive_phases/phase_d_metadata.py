@@ -52,6 +52,26 @@ def _lf_inserts(state) -> dict[int, list[dict]]:
     return out
 
 
+def _lf_leads(state) -> dict[int, float]:
+    """``{lf_index: seconds of montage in front of the LF body}`` the file really carries.
+
+    Read from the lead the burn recorded beside the LF (``lf_NN.lead.json``); a trail
+    opening that replaced the montage supplies its own length. An LF with no record
+    (rendered before the lead was kept, or no montage) has lead 0.
+    """
+    from ..media_api import deliverables_for_publish
+    from ..trail_opening import _lead_path, _read_json
+
+    out: dict[int, float] = {}
+    for d in deliverables_for_publish(state):
+        opened = {int(o["lf_index"]): float(o.get("opening_s") or 0.0) for o in d.trail_openings}
+        for idx, path in zip(d.regular_lf_indices, d.regular_lf_paths):
+            recipe = _read_json(_lead_path(Path(path).parent, idx))
+            lead = float(recipe.get("lead_s") or 0.0) if recipe else 0.0
+            out[idx] = max(0.0, opened.get(idx, lead))
+    return out
+
+
 def _rescope_arc_to_lf(profile: dict, resolved) -> None:
     """Window a day-aggregated route profile's journey arc + towns to ONE LF.
 
@@ -748,6 +768,7 @@ def _generate_chapters_all_lfs(
     gpx_files = state.gpx_files or []
     per_lf_gpx_path = state.per_lf_gpx_path or {}
     lf_inserts = _lf_inserts(state)
+    lf_leads = _lf_leads(state)
     if not (per_lf_gpx_path or gpx_files):
         logger.info("  D1.5: No GPX files — skipping chapter generation")
         return
@@ -772,6 +793,12 @@ def _generate_chapters_all_lfs(
             )
 
         meta = metadata_per_lf.get(lf.index, {})
+        if chapters and lf_leads.get(lf.index):
+            # chapters were timed against the body; the file opens with the montage
+            from ..chapters.marker_merger import shift_chapters
+
+            chapters = shift_chapters(chapters, lf_leads[lf.index])
+            chapter_text = "\n".join(f"{c['timestamp']} {c['title']}" for c in chapters)
         if chapters and lf_inserts.get(lf.index):
             from ..chapters.marker_merger import add_insert_markers
 

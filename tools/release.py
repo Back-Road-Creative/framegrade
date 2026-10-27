@@ -1,8 +1,10 @@
 """Prepare a release commit: ``python3 -I tools/release.py 0.3.5``.
 
-Bumps the version in ``pyproject.toml`` and ``gomoveshift/__init__.py``, gives
-the ``[Unreleased]`` entries a dated ``## [X.Y.Z]`` heading and moves the
-CHANGELOG link references on (the shape ``tests/test_changelog.py`` checks).
+Bumps the version in ``pyproject.toml`` and ``gomoveshift/__init__.py``, folds
+each ``changelog.d/*.md`` fragment into the ``[Unreleased]`` entries (by
+section, then deletes it), gives those entries a dated ``## [X.Y.Z]`` heading
+and moves the CHANGELOG link references on (the shape
+``tests/test_changelog.py`` checks).
 Each file keeps its own line endings. Nothing is written unless every edit
 applies. Committing, the PR and the tag stay with the caller (README, Releasing).
 """
@@ -17,6 +19,12 @@ from pathlib import Path
 
 REPO_URL = "https://github.com/Back-Road-Creative/framegrade"
 _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+#: Keep a Changelog sections, in the order a release lists them. A change adds
+#: ``changelog.d/<name>.md`` (one or more ``### <Section>`` blocks of bullets)
+#: instead of editing CHANGELOG.md, so parallel PRs never conflict on it.
+SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
+FRAGMENTS_DIR = "changelog.d"
+_SECTION = re.compile(r"^### (.+?)\s*$", flags=re.MULTILINE)
 
 
 class ReleaseError(Exception):
@@ -41,6 +49,50 @@ def _replace_once(name: str, text: str, old: str, new: str) -> str:
 
 def _key(version: str) -> tuple[int, ...]:
     return tuple(int(p) for p in version.split("."))
+
+
+def _sections(name: str, text: str) -> dict[str, list[str]]:
+    """``### <Section>`` blocks of ``text`` (``\\n`` line endings) -> their entries."""
+    found = list(_SECTION.finditer(text))
+    if text.strip() and (not found or text[: found[0].start()].strip()):
+        raise ReleaseError(f"{name}: must start with a '### <Section>' heading")
+    out: dict[str, list[str]] = {}
+    for match, nxt in zip(found, [*found[1:], None]):
+        body = text[match.end() : nxt.start() if nxt else len(text)].strip("\n")
+        if not body.strip():
+            raise ReleaseError(f"{name}: '### {match.group(1)}' has no entries")
+        out.setdefault(match.group(1), []).append(body)
+    return out
+
+
+def fragment_paths(root: Path) -> list[Path]:
+    """The ``changelog.d`` fragments the next release folds in, in name order."""
+    frags = root / FRAGMENTS_DIR
+    if not frags.is_dir():
+        return []
+    return sorted(p for p in frags.glob("*.md") if p.name != "README.md")
+
+
+def read_fragment(path: Path) -> dict[str, list[str]]:
+    """One fragment's entries by section; refuses a section outside ``SECTIONS``."""
+    name = f"{FRAGMENTS_DIR}/{path.name}"
+    sections = _sections(name, _read(path).replace("\r\n", "\n"))
+    if not sections:
+        raise ReleaseError(f"{name}: must start with a '### <Section>' heading")
+    unknown = [s for s in sections if s not in SECTIONS]
+    if unknown:
+        raise ReleaseError(f"{name}: unknown section {unknown[0]!r} (use one of {SECTIONS})")
+    return sections
+
+
+def _fold(body: str, fragments: list[dict[str, list[str]]]) -> str:
+    """``[Unreleased]`` ``body`` plus ``fragments``, one block per section, ``\\n`` endings."""
+    merged = _sections("CHANGELOG.md [Unreleased]", body)
+    for frag in fragments:
+        for section, blocks in frag.items():
+            merged.setdefault(section, []).extend(blocks)
+    order = [s for s in SECTIONS if s in merged] + [s for s in merged if s not in SECTIONS]
+    return "".join(f"### {s}\n\n" + "\n".join(merged[s]) + "\n\n" for s in order)
 
 
 def release(root: Path, version: str, date: str) -> str:
@@ -71,9 +123,16 @@ def release(root: Path, version: str, date: str) -> str:
     head = f"## [Unreleased]{nl}{nl}"
     if log_text.count(head) != 1:
         raise ReleaseError("CHANGELOG.md: expected exactly one [Unreleased] heading")
-    if log_text.split(head, 1)[1].startswith("## ["):
+    before, rest = log_text.split(head, 1)
+    cut = re.search(r"^## \[", rest, flags=re.MULTILINE)
+    if cut is None:
+        raise ReleaseError("CHANGELOG.md: no released version under [Unreleased]")
+    paths = fragment_paths(root)
+    entries = _fold(rest[: cut.start()].replace(nl, "\n"), [read_fragment(p) for p in paths])
+    if not entries:
         raise ReleaseError("CHANGELOG.md: [Unreleased] is empty, nothing to release")
-    log_text = log_text.replace(head, f"{head}## [{version}] - {date}{nl}{nl}")
+    entries = entries.replace("\n", nl)
+    log_text = f"{before}{head}## [{version}] - {date}{nl}{nl}{entries}{rest[cut.start() :]}"
     log_text = _replace_once(
         "CHANGELOG.md",
         log_text,
@@ -85,6 +144,8 @@ def release(root: Path, version: str, date: str) -> str:
     _write(pyproject, py_text)
     _write(init, init_text)
     _write(changelog, log_text)
+    for path in paths:
+        path.unlink()
     return current
 
 

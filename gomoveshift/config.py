@@ -274,6 +274,13 @@ class StopDetectionConfig(BaseModel):
     motion_threshold: float = 0.008  # Lower threshold for sensitivity
     crossfade_duration: float = 0.5  # Crossfade between segments (0 = hard cuts)
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
+    # Day/drive stop mask: "remove" masks all sub-stop_speed_kmh driving (today's
+    # policy); "keep" leaves GPS speed in [creep_min_speed_kmh, stop_speed_kmh)
+    # as CREEPING, not masked.
+    creep_policy: Literal["remove", "keep"] = "remove"
+    # Floor of the creep band, km/h. Provisional: pending tuning on labelled
+    # real drives.
+    creep_min_speed_kmh: float = Field(default=2.0, ge=0.0)
     gps_speed_corroboration: GPSSpeedCorroborationConfig = Field(
         default_factory=GPSSpeedCorroborationConfig
     )
@@ -1492,6 +1499,10 @@ class DriveConfig(BaseModel):
     # color-analysis cache (and a resume) carries the choice.
     no_sharpen: bool = False
     no_denoise: bool = False
+    # Refuse (ValueError, before any encode) when the global LUT bake fails and
+    # the grade would degrade to the 8-bit eq filter chain. Off = degrade and
+    # record `grade_fallback` on the result and the .tonemap.json sidecar.
+    strict_grade: bool = False
     # Opt-in picture steps on the day master (--stabilize / --deflicker); each is
     # gated on measured luma jitter (pipeline/stabilize.py).
     stabilize: bool = False
@@ -2044,6 +2055,13 @@ class DriveConfig(BaseModel):
     # screen, and the min gap enforced so a dense town run doesn't strobe.
     superlong_lower_third_duration_sec: float = 8.0
     superlong_lower_third_min_gap_sec: float = 45.0
+    # Opt-in GPS event captions on REGULAR long-form videos (``--gps-captions``):
+    # "off" burns none (today's path), "events" burns one "Entering <town>" card
+    # per supported town event of the LF's own chapters. Own timing knobs, so the
+    # superlong values above never move.
+    gps_captions: str = "off"
+    regular_lf_lower_third_duration_sec: float = 8.0
+    regular_lf_lower_third_min_gap_sec: float = 45.0
     # Superlong per-part publish DAY. Saturday is a placeholder default chosen because it
     # falls outside every currently-designed LF/shorts cadence (Ireland Sun,
     # USA Tue/Fri). Settable per run via ``--superlong-day`` (flag_registry.py,
@@ -2291,6 +2309,12 @@ class DriveConfig(BaseModel):
             raise ValueError(
                 f"superlong_split_grace must be in [0, 0.5], got {self.superlong_split_grace}"
             )
+        if self.gps_captions not in ("off", "events"):
+            raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
+        if self.regular_lf_lower_third_duration_sec <= 0:
+            raise ValueError("regular_lf_lower_third_duration_sec must be > 0")
+        if self.regular_lf_lower_third_min_gap_sec < 0:
+            raise ValueError("regular_lf_lower_third_min_gap_sec must be >= 0")
         _weekdays = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
         if self.superlong_publish_day.lower() not in _weekdays:
             raise ValueError(

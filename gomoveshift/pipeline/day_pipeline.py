@@ -132,8 +132,9 @@ from .social_generator import assert_day_title_stamps
 from .stop_mask import (
     build_county_change_mask,
     build_gps_gap_mask,
-    build_stop_mask,
+    classify_motion_states,
     mask_summary,
+    states_to_stop_mask,
     stop_mask_kwargs,
 )
 from .title_kit import TitleKit, require_title_kit
@@ -1763,6 +1764,7 @@ def run_day_pipeline(
     short_regions_fn: Optional[Callable] = None,
     short_route_fn: Optional[Callable] = None,
     superlong_route_fn: Optional[Callable] = None,
+    lf_chapters_fn: Optional[Callable] = None,
     state=None,
     inserts_by_lf: Optional[dict] = None,
     kit: Optional[TitleKit] = None,
@@ -1803,6 +1805,9 @@ def run_day_pipeline(
             wide ``location`` fallback for the short's OST burn-in.
             The trim output is consumed here; otherwise the
             drive-wide string would always be burned.
+        lf_chapters_fn: ``(lf_plan, location) -> chapters`` for
+            ``config.drive.gps_captions == "events"`` (regular-LF GPS event
+            captions); unused when captions are off.
         state: Optional pipeline state (``PipelineState`` or dict). When
             supplied, ``shorts_target`` / ``shorts_gap`` override the
             equivalents on ``config.drive`` for the plan_shorts call.
@@ -1842,6 +1847,20 @@ def run_day_pipeline(
 
     day_dir = output_dir / f"day_{date}"
     day_dir.mkdir(parents=True, exist_ok=True)
+
+    # Opt-in regular-LF GPS event captions: refuse BEFORE any encode when an LF
+    # has no retained-route evidence (never render silently without captions).
+    _caption_ev: dict = {}
+    if getattr(getattr(config, "drive", None), "gps_captions", "off") == "events":
+        from .route_claims import RouteClaimRefusedError, caption_route_evidence
+
+        if lf_chapters_fn is None:
+            raise RouteClaimRefusedError(
+                "GPS captions requested but no LF chapter source was wired; nothing encoded."
+            )
+        _caption_ev = caption_route_evidence(
+            state, [int(getattr(p, "index", i + 1)) for i, p in enumerate(lf_plans or [])]
+        )
 
     # ── Step 1: encode day master (color + audio + OST in one pass) ─
     # OST is burned during the single-pass encode using the day master
@@ -1898,7 +1917,10 @@ def run_day_pipeline(
         # reader (this used to look on ``config.drive`` and always fell back to
         # the hard-coded defaults). Same reader as the day-first drive plan's
         # full_drive mask, so the two masks agree.
-        stop_mask = build_stop_mask(day_scores, day_gps_points, **stop_mask_kwargs(config))
+        motion_states = classify_motion_states(
+            day_scores, day_gps_points, **stop_mask_kwargs(config)
+        )
+        stop_mask = states_to_stop_mask(motion_states)
         _summary = mask_summary(stop_mask)
         logger.info(
             "Day %s: stop mask — %d/%d s masked (%.1f%%)",
@@ -1920,7 +1942,12 @@ def run_day_pipeline(
             else:
                 _mask_base = output_dir / "_stages"
             _mask_base.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(_mask_base / f"stop_mask_{date}.npz", mask=stop_mask)
+            # ``mask`` keeps its meaning (True == a stopped second); ``states``
+            # is the int8 MotionState series beside it (CREEPING is never True
+            # in ``mask``).
+            np.savez_compressed(
+                _mask_base / f"stop_mask_{date}.npz", mask=stop_mask, states=motion_states
+            )
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Day %s: stop mask persist failed: %s", date, exc)
 
@@ -2338,6 +2365,20 @@ def run_day_pipeline(
             )
 
         final_lf = lf_dir / f"lf_{idx:02d}.mp4"
+        # Opt-in GPS event cards, derived from this LF's own chapters (None = off).
+        _lf_cards, _lf_suppressed = None, []
+        if _caption_ev:
+            from .route_claims import regular_lf_caption_cards
+
+            _drive_cfg = config.drive
+            _lf_cards, _lf_suppressed = regular_lf_caption_cards(
+                lf_chapters_fn(lf_plan, lf_location),
+                _caption_ev[idx],
+                kit.town_events,
+                lead_s=float(montage_duration),
+                duration_sec=float(_drive_cfg.regular_lf_lower_third_duration_sec),
+                min_gap_sec=float(_drive_cfg.regular_lf_lower_third_min_gap_sec),
+            )
         # Per-LF freshness: skip re-burning a final that already exists
         # and whose burned-OST fingerprint is unchanged. The shorts OST-gate
         # stops the run AFTER every LF is final; a plain gate→confirm→resume
@@ -2349,6 +2390,10 @@ def run_day_pipeline(
         if _lf_inserts:  # a changed insert list re-burns, so a stale final never ships
             ost_fingerprint = hashlib.sha256(
                 (ost_fingerprint + repr(insert_records({idx: _lf_inserts}))).encode()
+            ).hexdigest()
+        if _lf_cards is not None:  # toggling captions or their cards re-burns
+            ost_fingerprint = hashlib.sha256(
+                (ost_fingerprint + repr(_lf_cards) + repr(_lf_suppressed)).encode()
             ).hexdigest()
         fp_path = lf_dir / f"lf_{idx:02d}.ost.sha256"
         if (
@@ -2417,6 +2462,27 @@ def run_day_pipeline(
             )
             continue
 
+        if _lf_cards is not None:
+            # Chapter times are LF-body-relative, so a card sits at T + the lead the
+            # file ACTUALLY carries (the montage may be shorter than planned, or absent
+            # when there are no peaks); the planned lead only keys the fingerprint.
+            try:
+                _real_lead = float(probe_media(prepended).duration) - float(
+                    probe_media(concatenated).duration
+                )
+            except Exception as exc:  # noqa: BLE001 -- keep the planned lead
+                logger.warning("Day %s: LF %d caption lead not probed (%s)", date, idx, exc)
+                _real_lead = float(montage_duration)
+            if abs(_real_lead - float(montage_duration)) > 0.05:
+                _lf_cards, _lf_suppressed = regular_lf_caption_cards(
+                    lf_chapters_fn(lf_plan, lf_location),
+                    _caption_ev[idx],
+                    kit.town_events,
+                    lead_s=max(0.0, _real_lead),
+                    duration_sec=float(_drive_cfg.regular_lf_lower_third_duration_sec),
+                    min_gap_sec=float(_drive_cfg.regular_lf_lower_third_min_gap_sec),
+                )
+
         # prefer_nvenc=True: the day master just finished on NVENC, so the
         # LF OST re-encode should too. The helper retries the NVENC probe
         # once to ride out post-encode session release (otherwise a busy
@@ -2431,6 +2497,19 @@ def run_day_pipeline(
             montage_duration=montage_duration,
             crossfade_sec=ost_crossfade_sec,
             media_profile=media_profile,
+            **(
+                {}
+                if _lf_cards is None
+                else {
+                    "lower_thirds": _lf_cards,
+                    "lower_third_duration_sec": float(
+                        config.drive.regular_lf_lower_third_duration_sec
+                    ),
+                    "lower_third_min_gap_sec": float(
+                        config.drive.regular_lf_lower_third_min_gap_sec
+                    ),
+                }
+            ),
         )
         if ost_result is None:
             raise RuntimeError(
@@ -2470,6 +2549,11 @@ def run_day_pipeline(
         # Persist the burned-OST fingerprint so a later resume can detect this
         # final is fresh and skip the re-burn.
         fp_path.write_text(ost_fingerprint)
+        if _lf_cards is not None and state is not None:  # reviewable, like superlong
+            state.setdefault("regular_lf_captions", {}).setdefault(date, {})[str(idx)] = {
+                "lower_thirds": [{"label": lbl, "time_sec": t} for lbl, t in _lf_cards],
+                "lower_thirds_suppressed": _lf_suppressed,
+            }
         regular_lf_paths.append(ost_result)
         regular_lf_indices.append(idx)
         # Release this LF's work files now, not at day end: a multi-part day
@@ -2858,6 +2942,7 @@ def run_all_days(
     short_regions_fn: Optional[Callable] = None,
     short_route_fn: Optional[Callable] = None,
     superlong_route_fn: Optional[Callable] = None,
+    lf_chapters_fn: Optional[Callable] = None,
     state=None,
     on_day_complete: Optional[Callable] = None,
     state_save_fn: Optional[Callable] = None,
@@ -3073,6 +3158,7 @@ def run_all_days(
                     short_regions_fn=short_regions_fn,
                     short_route_fn=short_route_fn,
                     superlong_route_fn=superlong_route_fn,
+                    lf_chapters_fn=lf_chapters_fn,
                     state=state,
                     inserts_by_lf=_inserts_by_date.get(day_batch.date) or None,
                     kit=kit,
