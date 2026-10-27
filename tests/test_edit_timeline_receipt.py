@@ -25,7 +25,7 @@ def test_fixture_loads_from_path_and_dict():
     assert load_receipt(_raw()) == r
     assert len(r.spans) == 3
     assert r.spans[0].source_start > r.spans[0].merged_start  # snapped forward
-    assert r.spans[2].requested_indices == (1, 2)
+    assert r.spans[2].requested_indices == (2, 3)
 
 
 def test_round_trip_is_lossless():

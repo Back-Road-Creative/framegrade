@@ -5,7 +5,7 @@
   "master": {"path": "day_master.mp4", "size_bytes": 8589934592},
   "time_base": "seconds",
   "max_gap_sec": 2.0,
-  "requested": [[10.0, 40.0], [100.0, 130.0], [131.0, 160.0], [300.0, 330.0]],
+  "requested": [[10.0, 40.0], [300.0, 330.0], [100.0, 130.0], [131.0, 160.0]],
   "spans": [
     {
       "index": 0,
@@ -22,7 +22,7 @@
     },
     {
       "index": 1,
-      "requested_indices": [3],
+      "requested_indices": [1],
       "merged_start": 300.0,
       "merged_end": 330.0,
       "source_start": 300.0,
@@ -35,7 +35,7 @@
     },
     {
       "index": 2,
-      "requested_indices": [1, 2],
+      "requested_indices": [2, 3],
       "merged_start": 100.0,
       "merged_end": 160.0,
       "source_start": 100.0,
