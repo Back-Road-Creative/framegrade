@@ -161,6 +161,20 @@ def _stall_kill_reason(
     return None
 
 
+# ffmpeg prints nothing while +faststart shifts the whole file to put the moov
+# atom first, so the stall window for that phase must cover the file's size. A
+# 118 GB day master on /mnt/c rewrote at ~52 MB/s (~38 min) and was killed by a
+# flat 1800s window; 20 MB/s leaves room for a slower disk.
+MOOV_REWRITE_MIN_STALL_S = 1800
+MOOV_REWRITE_MIN_BYTES_PER_SEC = 20_000_000
+
+
+def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> int:
+    """Stall window for the silent moov rewrite of an *output_size_bytes* file."""
+    by_size = -(-output_size_bytes // MOOV_REWRITE_MIN_BYTES_PER_SEC)
+    return max(stall_timeout, MOOV_REWRITE_MIN_STALL_S, by_size)
+
+
 def run_ffmpeg_encode(
     cmd: list[str],
     output_path: Path,
@@ -296,15 +310,22 @@ def run_ffmpeg_encode(
                     if not in_moov_rewrite:
                         in_moov_rewrite = True
                         # Extend stall timeout during moov rewrite — no frame progress
-                        effective_stall_timeout = max(stall_timeout, 1800)
+                        try:
+                            output_size = output_path.stat().st_size
+                        except OSError:
+                            output_size = 0
+                        effective_stall_timeout = _moov_rewrite_stall_timeout(
+                            output_size, stall_timeout
+                        )
                         logger.warning(
                             "⚠ ffmpeg_runner: %s: moov atom rewrite phase detected "
                             "(trigger='Starting second pass' / 'moving the moov atom'); "
-                            "extending stall timeout from %ss to %ss — "
-                            "stall detection is suppressed during this window",
+                            "extending stall timeout from %ss to %ss for a %.1f GB "
+                            "output — stall detection is suppressed during this window",
                             description,
                             stall_timeout,
                             effective_stall_timeout,
+                            output_size / 1e9,
                         )
 
                 # Parse progress lines

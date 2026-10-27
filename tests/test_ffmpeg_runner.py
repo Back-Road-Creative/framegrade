@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from gomoveshift.pipeline.ffmpeg_runner import (
+    _moov_rewrite_stall_timeout,
     _parse_time_to_seconds,
     _stall_kill_reason,
     run_ffmpeg_encode,
@@ -520,6 +521,73 @@ class TestRunFfmpegEncode:
         # Never killed → the moov extension applied.
         assert fake.terminated is False
         assert fake.killed is False
+
+    def test_moov_rewrite_window_scales_with_output_size(self):
+        """The silent faststart rewrite gets time in proportion to the file size.
+
+        Ace Basin (2026-10-26): a 118 GB day master was ~38 min into a healthy
+        moov rewrite (~52 MB/s on /mnt/c) when the flat 1800s window killed it.
+        """
+        assert _moov_rewrite_stall_timeout(0, 600) == 1800
+        assert _moov_rewrite_stall_timeout(1_000_000_000, 600) == 1800
+        assert _moov_rewrite_stall_timeout(1_000_000_000, 7200) == 7200
+        # 118 GB at the 20 MB/s floor.
+        assert _moov_rewrite_stall_timeout(117_987_020_255, 600) == 5900
+
+    def test_moov_rewrite_of_large_output_outlives_1800s(self, tmp_path):
+        """A 118 GB output still rewriting after 1h is not killed as a stall."""
+        output = tmp_path / "out.mp4"
+        with open(output, "wb") as f:
+            f.truncate(117_987_020_255)  # sparse: no real disk used
+
+        stderr_lines = [
+            "frame=  100 fps= 30.0 size=   1024kB time=00:00:10.00 speed=1.0x\n",
+            "Starting second pass: moving the moov atom to the beginning of the file\n",
+        ]
+        fake = _FakeProc(stderr_lines=stderr_lines, poll_returns=[None, None, None, 0])
+        clock = _ScriptedClock([0.0, 0.0, 0.0, 0.0, 3600.0])
+
+        with patch("gomoveshift.pipeline.ffmpeg_runner.subprocess.Popen", return_value=fake):
+            result = run_ffmpeg_encode(
+                ["ffmpeg", "-i", "in.mp4", str(output)],
+                output,
+                expected_duration=10.0,
+                description="test moov large",
+                stall_timeout=600,
+                max_timeout=86400,
+                time_source=clock,
+            )
+
+        assert result.killed_reason is None
+        assert result.success
+        assert fake.terminated is False
+
+    def test_moov_rewrite_of_large_output_still_stalls_eventually(self, tmp_path):
+        """Past the size-scaled window a silent rewrite is still killed."""
+        output = tmp_path / "out.mp4"
+        with open(output, "wb") as f:
+            f.truncate(117_987_020_255)
+
+        stderr_lines = [
+            "frame=  100 fps= 30.0 size=   1024kB time=00:00:10.00 speed=1.0x\n",
+            "Starting second pass: moving the moov atom to the beginning of the file\n",
+        ]
+        fake = _FakeProc(stderr_lines=stderr_lines, poll_returns=[None])
+        clock = _ScriptedClock([0.0, 0.0, 0.0, 0.0, 6000.0])
+
+        with patch("gomoveshift.pipeline.ffmpeg_runner.subprocess.Popen", return_value=fake):
+            result = run_ffmpeg_encode(
+                ["ffmpeg", "-i", "in.mp4", str(output)],
+                output,
+                expected_duration=10.0,
+                description="test moov large stall",
+                stall_timeout=600,
+                max_timeout=86400,
+                time_source=clock,
+            )
+
+        assert result.killed_reason == "stall"
+        assert fake.terminated is True
 
 
 # ── run_ffmpeg_quick ──────────────────────────────────────────────────
