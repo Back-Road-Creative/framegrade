@@ -9,11 +9,14 @@ untouched -- callers never have to clean up a partial file.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 #: Below this fraction of non-black pixels, the stitch is treated as a failed
 #: seam rather than a usable panorama -- OpenCV's Stitcher can return
@@ -22,7 +25,7 @@ import numpy as np
 MIN_VALID_AREA_FRACTION = 0.5
 
 #: Seam measurement. Each adjacent source pair is registered with an ORB
-#: feature-match homography (the Stitcher does not expose its per-pair
+#: feature-match similarity fit (the Stitcher does not expose its per-pair
 #: registration), the next frame is warped onto the previous one, and the
 #: overlap is compared on blurred luma.
 #:
@@ -30,12 +33,12 @@ MIN_VALID_AREA_FRACTION = 0.5
 #: levels (of 255) after the seam's mean-luma step is removed, so an exposure
 #: change alone never reads as a ghost.
 GHOST_PIXEL_DIFF = 40
-#: A seam is refused when more than this fraction of its overlap is ghosted.
+#: A seam is flagged when more than this fraction of its overlap is ghosted.
 #: A moving person or car covers well over 2% of a frame's overlap, while the
 #: sub-pixel registration error on a clean seam leaves a few tenths of a percent.
 #: Chosen on synthetic scenes; not yet tuned on real handheld pans.
 MAX_SEAM_GHOST_FRACTION = 0.02
-#: A seam is refused when the mean luma of the overlap differs by more than
+#: A seam is flagged when the mean luma of the overlap differs by more than
 #: this many levels (of 255) between the two frames -- about 1/6 stop at
 #: mid-grey, a step the blender cannot hide. Auto-exposure drift between
 #: handheld frames is usually below this; a step of 45 (the test) is far above.
@@ -137,12 +140,19 @@ def measure_seam(prev: np.ndarray, nxt: np.ndarray) -> tuple[float, float] | Non
     return ghost, abs(step)
 
 
-def stitch_panorama(paths, out_path) -> PanoramaResult:
+def stitch_panorama(paths, out_path, *, strict_seams: bool = False) -> PanoramaResult:
     """Stitch ``paths`` (2+ ordered, overlapping images) into one panorama at
     ``out_path``. Raises ``PanoramaError`` -- never writes a partial output --
     when there are too few images, a file can't be decoded, the Stitcher
     itself fails, or the result fails seam QA (mostly-black canvas, or an
     output narrower than the widest input, both signs of a degenerate warp).
+
+    Seams over ``MAX_SEAM_GHOST_FRACTION`` / ``MAX_SEAM_LUMA_STEP`` are flagged:
+    by default the panorama is still written and the reasons are logged at
+    WARNING and returned in ``message`` (the thresholds are not yet tuned on
+    real handheld pans, and the Stitcher's seam finder and exposure
+    compensator often hide what the raw overlap shows). ``strict_seams=True``
+    refuses instead, before the write.
     """
     paths = [Path(p) for p in paths]
     if len(paths) < 2:
@@ -185,6 +195,7 @@ def stitch_panorama(paths, out_path) -> PanoramaResult:
 
     ghosts: list[float] = []
     steps: list[float] = []
+    flags: list[str] = []
     for index, (prev, nxt) in enumerate(zip(images, images[1:]), start=1):
         measured = measure_seam(prev, nxt)
         if measured is None:
@@ -193,15 +204,20 @@ def stitch_panorama(paths, out_path) -> PanoramaResult:
         ghosts.append(ghost)
         steps.append(step)
         if ghost > MAX_SEAM_GHOST_FRACTION:
-            raise PanoramaError(
-                f"panorama stitch rejected by seam QA: ghosting at seam {index} "
-                f"({ghost:.1%} of the overlap differs, max {MAX_SEAM_GHOST_FRACTION:.1%})"
+            flags.append(
+                f"ghosting at seam {index} ({ghost:.1%} of the overlap differs, "
+                f"max {MAX_SEAM_GHOST_FRACTION:.1%})"
             )
         if step > MAX_SEAM_LUMA_STEP:
-            raise PanoramaError(
-                f"panorama stitch rejected by seam QA: exposure step at seam {index} "
-                f"({step:.1f} luma levels, max {MAX_SEAM_LUMA_STEP:.0f})"
+            flags.append(
+                f"exposure step at seam {index} ({step:.1f} luma levels, "
+                f"max {MAX_SEAM_LUMA_STEP:.0f})"
             )
+    seam_message = "; ".join(flags)
+    if flags and strict_seams:
+        raise PanoramaError(f"panorama stitch rejected by seam QA: {seam_message}")
+    if flags:
+        logger.warning("panorama seam QA: %s", seam_message)
 
     out_path = Path(out_path)
     if not cv2.imwrite(str(out_path), stitched):
@@ -213,7 +229,7 @@ def stitch_panorama(paths, out_path) -> PanoramaResult:
         height=int(stitched.shape[0]),
         valid_area_fraction=valid_fraction,
         status="ok",
-        message="",
+        message=seam_message,
         seam_ghost_fractions=tuple(ghosts),
         seam_luma_steps=tuple(steps),
     )

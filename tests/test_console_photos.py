@@ -470,6 +470,7 @@ def test_run_panorama_calls_the_pipeline_stitch(tmp_path, monkeypatch):
         valid_area_fraction = 0.9
         seam_ghost_fractions = (0.0, 0.01)
         seam_luma_steps = (1.5, 2.5)
+        message = ""
 
     calls = []
 
@@ -486,6 +487,7 @@ def test_run_panorama_calls_the_pipeline_stitch(tmp_path, monkeypatch):
         "valid_area_fraction": 0.9,
         "seam_ghost_fractions": [0.0, 0.01],
         "seam_luma_steps": [1.5, 2.5],
+        "seam_message": "",
     }
     assert calls == [([str(a), str(b)], str(out))]
 

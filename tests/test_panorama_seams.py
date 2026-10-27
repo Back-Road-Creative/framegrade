@@ -1,6 +1,9 @@
-"""Panorama seam QA: ghosting and exposure steps are measured per seam and
-a result past the named thresholds is refused before anything is written.
+"""Panorama seam QA: ghosting and exposure steps are measured per seam. A seam
+past the named thresholds is flagged (logged, returned in ``message``) and the
+panorama is still written; ``strict_seams=True`` refuses it before the write.
 """
+
+import logging
 
 import cv2
 import pytest
@@ -45,17 +48,33 @@ def test_clean_set_passes_with_low_measurements(tmp_path):
     assert max(result.seam_luma_steps) < panorama.MAX_SEAM_LUMA_STEP
 
 
-def test_ghost_in_overlap_is_refused(tmp_path):
+def test_clean_set_has_no_seam_message(tmp_path):
+    result = panorama.stitch_panorama(_tiles(tmp_path), tmp_path / "out.png")
+    assert result.message == ""
+
+
+@pytest.mark.parametrize(("edit", "word"), [(_ghost, "ghost"), (_brighten, "exposure")])
+def test_bad_seam_is_flagged_and_still_written_by_default(tmp_path, caplog, edit, word):
+    out = tmp_path / "out.png"
+    with caplog.at_level(logging.WARNING, logger=panorama.__name__):
+        result = panorama.stitch_panorama(_tiles(tmp_path, edit), out)
+    assert out.exists()
+    assert result.status == "ok"
+    assert word in result.message
+    assert any(word in r.getMessage() for r in caplog.records)
+
+
+def test_ghost_in_overlap_is_refused_when_strict(tmp_path):
     out = tmp_path / "out.png"
     with pytest.raises(panorama.PanoramaError, match="ghost"):
-        panorama.stitch_panorama(_tiles(tmp_path, _ghost), out)
+        panorama.stitch_panorama(_tiles(tmp_path, _ghost), out, strict_seams=True)
     assert not out.exists()
 
 
-def test_exposure_step_is_refused(tmp_path):
+def test_exposure_step_is_refused_when_strict(tmp_path):
     out = tmp_path / "out.png"
     with pytest.raises(panorama.PanoramaError, match="exposure"):
-        panorama.stitch_panorama(_tiles(tmp_path, _brighten), out)
+        panorama.stitch_panorama(_tiles(tmp_path, _brighten), out, strict_seams=True)
     assert not out.exists()
 
 
