@@ -1,0 +1,51 @@
+{
+  "schema": "keycut-assembly-receipt/1",
+  "provenance": "keycut",
+  "keycut_version": "0.4.0",
+  "master": {"path": "day_master.mp4", "size_bytes": 8589934592},
+  "time_base": "seconds",
+  "max_gap_sec": 2.0,
+  "requested": [[10.0, 40.0], [100.0, 130.0], [131.0, 160.0], [300.0, 330.0]],
+  "spans": [
+    {
+      "index": 0,
+      "requested_indices": [0],
+      "merged_start": 10.0,
+      "merged_end": 40.0,
+      "source_start": 11.5,
+      "source_end": 40.0,
+      "method": "copy",
+      "reason": "stream_copy",
+      "output_start": 0.0,
+      "output_end": 28.5,
+      "duration_source": "probed"
+    },
+    {
+      "index": 1,
+      "requested_indices": [3],
+      "merged_start": 300.0,
+      "merged_end": 330.0,
+      "source_start": 300.0,
+      "source_end": 330.0,
+      "method": "reencode",
+      "reason": "keyframes_unknown",
+      "output_start": 28.5,
+      "output_end": 58.5,
+      "duration_source": "probed"
+    },
+    {
+      "index": 2,
+      "requested_indices": [1, 2],
+      "merged_start": 100.0,
+      "merged_end": 160.0,
+      "source_start": 100.0,
+      "source_end": 160.0,
+      "method": "reencode",
+      "reason": "snap_back_over_excluded",
+      "output_start": 58.5,
+      "output_end": 118.5,
+      "duration_source": "planned"
+    }
+  ],
+  "output": {"path": "edited.mp4", "duration": 118.5}
+}
