@@ -64,6 +64,7 @@ import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -1116,6 +1117,50 @@ def _validated_output(
     return final_path
 
 
+def _pix_fmt_of(enc_args: list) -> str:
+    """The encoder's output ``-pix_fmt`` (10-bit for every drive-path encoder)."""
+    return enc_args[enc_args.index("-pix_fmt") + 1]
+
+
+def _map_inset_graph(inset: "MapInsetOverlay", inset_index: int, pix_fmt: str) -> str:
+    """Filter-graph tail that composites the inset onto ``[vbase]``, ending in ``[vout]``.
+
+    Precision: ffmpeg's auto-inserted conversion for ``overlay`` picks an 8-bit
+    format, which would quietly cost a 10-bit master its gradients. So every
+    stage names its format. ``overlay``'s own ``format=yuv420p10`` (its option
+    for the blend format) is used with a ``yuv420p10le`` base and a
+    ``yuva420p10le`` inset: no chroma-subsampling round trip outside the inset
+    (a 4:4:4 blend would up- then down-sample the whole frame), 10-bit alpha
+    blending, and the base passes through bit-exact where the inset is absent.
+    The tail ``format=`` pins the encoder's own pix_fmt rather than leaving it
+    to an implicit conversion.
+
+    The inset keeps its own frame rate; ``overlay`` pairs each base frame with
+    the inset frame current at its timestamp, so the inset is resampled to the
+    output rate. ``eof_action=pass`` drops the inset once its clip ends and the
+    video carries on without it. ``setpts`` starts the clip at t=0.
+    """
+    return (
+        f"[{inset_index}:v]setpts=PTS-STARTPTS,format=yuva420p10le[inset];"
+        f"[vbase]format=yuv420p10le[base10];"
+        f"[base10][inset]overlay=x={inset.x}:y={inset.y}:eof_action=pass:format=yuv420p10,"
+        f"format={pix_fmt}[vout]"
+    )
+
+
+@dataclass(frozen=True)
+class MapInsetOverlay:
+    """An RGBA video clip (with alpha) composited onto the OST burn.
+
+    ``clip_path`` keeps its own size and frame rate and may be shorter than the
+    input; ``x``/``y`` are the top-left corner in OUTPUT pixels.
+    """
+
+    clip_path: Path
+    x: int
+    y: int
+
+
 def apply_ost(
     input_path: Path,
     output_path: Path,
@@ -1132,6 +1177,7 @@ def apply_ost(
     brand_kit: Optional[dict] = None,
     media_profile: Optional[object] = None,
     website_cta: bool = True,
+    map_inset: Optional[MapInsetOverlay] = None,
 ) -> Optional[Path]:
     """Burn an OST location overlay onto a video with layout-specific timing.
 
@@ -1175,6 +1221,12 @@ def apply_ost(
             the module default; its ``colors.text`` overrides every burned
             entry's ``fontcolor=``.
 
+        map_inset: Optional :class:`MapInsetOverlay`. Composited AFTER the
+            drawtext (and the logo, when one applies) inside the same ffmpeg
+            command, in 10-bit. A missing clip file is an error (``None``),
+            never an encode without the inset the caller asked for. ``None``
+            leaves the ffmpeg argv exactly as it was before the parameter existed.
+
     Returns:
         ``output_path`` on success, or ``None`` on any failure (missing
         input, ffprobe failure — input is unreadable / truncated —,
@@ -1196,6 +1248,15 @@ def apply_ost(
 
     if not input_path.exists():
         logger.error("OST apply: input file not found: %s", input_path)
+        return None
+
+    if map_inset is not None and not Path(map_inset.clip_path).is_file():
+        logger.error(
+            "OST apply: map inset clip not found: %s — refusing to encode %s "
+            "without the inset the caller asked for",
+            map_inset.clip_path,
+            input_path.name,
+        )
         return None
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1260,6 +1321,15 @@ def apply_ost(
             font,
             input_path.name,
         )
+        if map_inset is not None:
+            # A stream copy cannot composite; shipping it would silently drop
+            # the inset the caller asked for.
+            logger.error(
+                "OST apply: font missing and a map inset was requested — "
+                "refusing the stream-copy fallback for %s",
+                input_path.name,
+            )
+            return None
         if not _stream_copy(input_path, temp_output_path, output_path):
             _discard_partial_output(temp_output_path, "stream-copy failed")
             return None
@@ -1332,25 +1402,35 @@ def apply_ost(
                 brand_logo_path,
             )
 
-    if use_logo and logo_exists:
-        # Two-input filter_complex: source video + logo PNG.
-        # Chain: drawtext OST on source → overlay scaled logo → [vout].
-        # Audio is mapped from stream 0; -af applies loudnorm independently
-        # of the video filter_complex (valid ffmpeg: simple audio filtergraph
-        # on the mapped audio stream).
-        fc = (
-            f"[0:v]{vfilter}[v1];"
-            f"[1:v]scale=240:-1:flags=lanczos,format=rgba[logo];"
-            f"[v1][logo]overlay=x=W-w-40:y=H-h-40[vout]"
-        )
+    with_logo = use_logo and logo_exists
+    if with_logo or map_inset is not None:
+        # filter_complex: source video [+ logo PNG] [+ map inset clip].
+        # Chain: drawtext OST on source -> overlay scaled logo -> overlay inset
+        # -> [vout]. Audio is mapped from stream 0; -af applies loudnorm
+        # independently of the video filter_complex (valid ffmpeg: simple audio
+        # filtergraph on the mapped audio stream).
+        base_label = "[vbase]" if map_inset is not None else "[vout]"
+        if with_logo:
+            fc = (
+                f"[0:v]{vfilter}[v1];"
+                f"[1:v]scale=240:-1:flags=lanczos,format=rgba[logo];"
+                f"[v1][logo]overlay=x=W-w-40:y=H-h-40{base_label}"
+            )
+        else:
+            fc = f"[0:v]{vfilter}{base_label}"
+        extra_inputs = ["-i", str(brand_logo_path)] if with_logo else []
+        if map_inset is not None:
+            fc += ";" + _map_inset_graph(
+                map_inset, inset_index=2 if with_logo else 1, pix_fmt=_pix_fmt_of(enc_args)
+            )
+            extra_inputs += ["-i", str(map_inset.clip_path)]
         audio_args = ["-map", "0:a?", "-af", audio_filter] if has_audio else ["-an"]
         cmd = [
             "ffmpeg",
             "-y",
             "-i",
             str(input_path),
-            "-i",
-            str(brand_logo_path),
+            *extra_inputs,
             "-filter_complex",
             fc,
             "-map",
