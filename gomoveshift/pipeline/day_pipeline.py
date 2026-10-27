@@ -1946,7 +1946,6 @@ def run_day_pipeline(
             config.drive,
             (gps_points_by_date or {}).get(date),
             date=date,
-            has_inserts=any((inserts_by_lf or {}).values()),
         )
 
     # ── Step 1: encode day master (color + audio + OST in one pass) ─

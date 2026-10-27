@@ -8,6 +8,7 @@ reported refusal BEFORE any encode, never a silent fallback to off.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
@@ -143,6 +144,7 @@ class Run:
         self.clip_at_burn = None
         self.extract_kwargs: dict = {}
         self.error: BaseException | None = None
+        self.spliced = 0
 
 
 def _run(
@@ -223,7 +225,17 @@ def _run(
         patch.object(day_pipeline, "plan_shorts", return_value=[]),
         patch.object(day_pipeline, "compute_day_file_boundaries", return_value=[(0.0, 300.0)]),
         patch.object(day_pipeline, "probe_media", side_effect=_probe),
+        contextlib.ExitStack() as stack,
     ):
+        if inserts_by_lf:  # placeholder inserts: record the splice, keep no records
+            stack.enter_context(patch.object(day_pipeline, "insert_records", return_value={}))
+            stack.enter_context(
+                patch.object(
+                    day_pipeline,
+                    "splice_day_lf_inserts",
+                    side_effect=lambda *a, **k: setattr(run, "spliced", run.spliced + 1),
+                )
+            )
         try:
             day_pipeline.run_day_pipeline(
                 day_batch=day_batch,
@@ -374,10 +386,13 @@ def test_the_clip_exists_when_the_ost_burn_composites_it(tmp_path, bundle):
     assert run.render_calls[0]["output"].parent == run.apply_calls[0]["output_path"].parent
 
 
-def test_photo_inserts_with_a_map_inset_refuse_before_encode(tmp_path, bundle):
+def test_photo_inserts_keep_the_map_inset(tmp_path, bundle):
+    # Stills are spliced into the burned LF, so the map travels with its frames
+    # and the inserted stills simply carry none: inserts never block an inset.
     run = _run(tmp_path, _on(bundle), inserts_by_lf={1: [object()]})
-    assert isinstance(run.error, RouteClaimRefusedError) and run.encode_calls == 0
-    assert "inserts" in str(run.error)
+    assert run.error is None and len(run.render_calls) == 1
+    assert isinstance(run.apply_calls[0]["map_inset"], MapInsetOverlay)
+    assert run.spliced == 1  # the inserts still went in, after the burn
 
 
 def test_inset_refusal_stops_the_render_naming_the_lf(tmp_path, bundle):

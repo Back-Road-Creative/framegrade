@@ -125,9 +125,7 @@ def day_route_segments(day_points) -> list:
     return [s for s in segments if len(s) >= 2]
 
 
-def map_inset_inputs(
-    drive, day_points, *, date: str = "", has_inserts: bool = False
-) -> MapInsetInputs:
+def map_inset_inputs(drive, day_points, *, date: str = "") -> MapInsetInputs:
     """Validate ``--map-inset route`` inputs; one :class:`RouteClaimRefusedError`
     lists EVERY missing input and says nothing was encoded (never a silent
     fallback to no inset, never a partial overlay)."""
@@ -168,11 +166,6 @@ def map_inset_inputs(
     segments = day_route_segments(day_points)
     if not segments:
         reasons.append(f"no usable GPS trace for day {date or '(unknown)'}")
-    if has_inserts:
-        reasons.append(
-            "this day has photo/clip inserts, which are spliced after the burn and "
-            "would shift the map out of sync"
-        )
     if reasons:
         raise RouteClaimRefusedError(
             "map inset requested (--map-inset route) but cannot be drawn; nothing was "
