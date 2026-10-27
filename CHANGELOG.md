@@ -15,6 +15,7 @@ All notable changes to this project are recorded here. The format follows
 
 - An encode's moov atom rewrite (`+faststart`) now gets a stall window sized to the output, at a 20 MB/s floor (at least 1800s), instead of a flat 1800s. ffmpeg prints nothing while it shifts the whole file, and a 118 GB day master on `/mnt/c` was killed ~30 min into a healthy rewrite at ~52 MB/s, losing an 11-hour render. The window for that file is now 5900s.
 - The Windows installer proof bounds every wait: the install gets 20 minutes, the Defender scan 20, each other command 5-10. A step that runs out prints what is still running as the proof user (with its command line) and the tail of the installer's log, instead of hanging the job until its 90-minute limit with no output, as the first dry run did. The proof runs the installer, the console and each command as the standard user through a scheduled task: started with `Start-Process -Credential` on a hosted runner, the installer got no desktop and exited 1 without writing its log. The helper no longer names a parameter `$Args`, PowerShell's automatic variable.
+- The Windows installer proof grants its standard user the "log on as a batch job" right through the LSA API and reads it back by SID, then revokes it before removing the user. The second dry run stopped before installing because an exported security template names a local account rather than its SID, so the grant could not be confirmed from it.
 
 ### Changed
 
