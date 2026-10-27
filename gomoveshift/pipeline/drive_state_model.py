@@ -590,6 +590,9 @@ class PipelineState:
     # [{"label", "time_sec"}], "lower_thirds_suppressed": [{"label", "time_sec",
     # "reason"}]}}}`` -- the reviewable cards burned onto each regular LF.
     regular_lf_captions: Optional[dict] = None
+    # Opt-in ``--map-inset route``: ``{date: {str(lf_index): <inset receipt dict>}}``
+    # -- the reviewable receipt of the inset composited onto each regular LF.
+    regular_lf_map_inset: Optional[dict] = None
 
     # ── Resume-time backstop observability ────
     # ``{field_name: [lf_index, ...]}`` populated by

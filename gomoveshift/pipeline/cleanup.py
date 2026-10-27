@@ -541,7 +541,13 @@ def _purge_lf_work(lf_dir: Path, idx: str, summary: Dict[str, int]) -> None:
 
     ``idx`` is the 2-digit index; the caller has verified ``lf_{idx}.mp4``.
     """
-    for name in (f"lf_{idx}_segments.mp4", f"lf_{idx}_with_montage.mp4"):
+    for name in (
+        f"lf_{idx}_segments.mp4",
+        f"lf_{idx}_segments.mp4.receipt.json",
+        f"lf_{idx}_with_montage.mp4",
+        f"lf_{idx}_map_inset.mov",
+        f"lf_{idx}_map_inset.mov.receipt.json",
+    ):
         path = lf_dir / name
         try:
             size = path.stat().st_size if path.is_file() else 0
