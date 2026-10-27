@@ -49,20 +49,106 @@ if (Get-LocalGroupMember -Group 'Administrators' | Where-Object { $_.Name -like 
   throw "$user is an administrator"
 }
 # The user's programs run as scheduled tasks (see Invoke-AsUser), which need
-# the "log on as a batch job" right; a plain member of Users lacks it.
-$sid = (Get-LocalUser -Name $user).SID.Value
-$inf = Join-Path $env:TEMP 'proof-rights.inf'
-secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
-$rights = [System.Collections.Generic.List[string]](Get-Content -LiteralPath $inf)
-$at = $rights.FindIndex([Predicate[string]]{ param($l) $l -like 'SeBatchLogonRight*' })
-if ($at -ge 0) { $rights[$at] = "$($rights[$at]),*$sid" }
-else { $rights.Insert($rights.IndexOf('[Privilege Rights]') + 1, "SeBatchLogonRight = *$sid") }
-Set-Content -LiteralPath $inf -Value $rights -Encoding Unicode
-secedit /configure /db (Join-Path $env:TEMP 'proof-rights.sdb') /cfg $inf /areas USER_RIGHTS | Out-Null
-secedit /export /cfg $inf /areas USER_RIGHTS | Out-Null
-if (-not (Select-String -LiteralPath $inf -Pattern "SeBatchLogonRight.*\*$sid" -Quiet)) {
-  throw "could not grant $user the batch logon right"
+# the "log on as a batch job" right; a plain member of Users lacks it. The LSA
+# API grants it and reads it back by SID: an exported security template names
+# a local account rather than its SID, so its text could not confirm the grant
+# (run 40427689294).
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+public static class ProofRights {
+  [StructLayout(LayoutKind.Sequential)]
+  struct LsaString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct LsaAttributes {
+    public int Length; public IntPtr RootDirectory; public IntPtr ObjectName;
+    public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService;
+  }
+
+  [DllImport("advapi32.dll")] static extern uint LsaOpenPolicy(IntPtr system, ref LsaAttributes attrs, uint access, out IntPtr policy);
+  [DllImport("advapi32.dll")] static extern uint LsaAddAccountRights(IntPtr policy, byte[] sid, LsaString[] rights, uint count);
+  [DllImport("advapi32.dll")] static extern uint LsaRemoveAccountRights(IntPtr policy, byte[] sid, [MarshalAs(UnmanagedType.U1)] bool all, LsaString[] rights, uint count);
+  [DllImport("advapi32.dll")] static extern uint LsaEnumerateAccountRights(IntPtr policy, byte[] sid, out IntPtr rights, out uint count);
+  [DllImport("advapi32.dll")] static extern uint LsaFreeMemory(IntPtr buffer);
+  [DllImport("advapi32.dll")] static extern uint LsaClose(IntPtr policy);
+  [DllImport("advapi32.dll")] static extern int LsaNtStatusToWinError(uint status);
+
+  const uint PolicyAllAccess = 0x000F0FFF;
+  const uint StatusObjectNameNotFound = 0xC0000034;
+
+  static void Check(uint status, string what) {
+    if (status != 0) throw new Win32Exception(LsaNtStatusToWinError(status), what);
+  }
+
+  static byte[] SidBytes(string sid) {
+    var s = new SecurityIdentifier(sid);
+    var b = new byte[s.BinaryLength];
+    s.GetBinaryForm(b, 0);
+    return b;
+  }
+
+  static T WithPolicy<T>(Func<IntPtr, T> body) {
+    var attrs = new LsaAttributes();
+    attrs.Length = Marshal.SizeOf(typeof(LsaAttributes));
+    IntPtr policy;
+    Check(LsaOpenPolicy(IntPtr.Zero, ref attrs, PolicyAllAccess, out policy), "LsaOpenPolicy");
+    try { return body(policy); } finally { LsaClose(policy); }
+  }
+
+  static uint WithRight(string right, Func<LsaString[], uint> call) {
+    var buf = Marshal.StringToHGlobalUni(right);
+    try {
+      var s = new LsaString();
+      s.Length = (ushort)(right.Length * 2);
+      s.MaximumLength = (ushort)(right.Length * 2 + 2);
+      s.Buffer = buf;
+      return call(new[] { s });
+    } finally { Marshal.FreeHGlobal(buf); }
+  }
+
+  public static void Grant(string sid, string right) {
+    var b = SidBytes(sid);
+    WithPolicy(p => { Check(WithRight(right, r => LsaAddAccountRights(p, b, r, 1)), "LsaAddAccountRights"); return 0; });
+  }
+
+  public static void Revoke(string sid, string right) {
+    var b = SidBytes(sid);
+    WithPolicy(p => { Check(WithRight(right, r => LsaRemoveAccountRights(p, b, false, r, 1)), "LsaRemoveAccountRights"); return 0; });
+  }
+
+  public static string[] Rights(string sid) {
+    var b = SidBytes(sid);
+    return WithPolicy(p => {
+      IntPtr rights;
+      uint count;
+      var status = LsaEnumerateAccountRights(p, b, out rights, out count);
+      if (status == StatusObjectNameNotFound) return new string[0];
+      Check(status, "LsaEnumerateAccountRights");
+      try {
+        var names = new List<string>();
+        var size = Marshal.SizeOf(typeof(LsaString));
+        for (var i = 0; i < count; i++) {
+          var s = (LsaString)Marshal.PtrToStructure(new IntPtr(rights.ToInt64() + i * size), typeof(LsaString));
+          names.Add(Marshal.PtrToStringUni(s.Buffer, s.Length / 2));
+        }
+        return names.ToArray();
+      } finally { LsaFreeMemory(rights); }
+    });
+  }
 }
+'@
+$sid = (Get-LocalUser -Name $user).SID.Value
+[ProofRights]::Grant($sid, 'SeBatchLogonRight')
+$held = [ProofRights]::Rights($sid)
+if ($held -notcontains 'SeBatchLogonRight') {
+  throw "could not grant $user the batch logon right (holds: $($held -join ', '))"
+}
+Write-Host "  $user may log on as a batch job"
 $base = 'C:\pröof dir'
 $inst = Join-Path $base 'Framegrade ✓'
 New-Item -ItemType Directory -Force -Path $base | Out-Null
@@ -231,6 +317,7 @@ if (Test-Path -LiteralPath $py) { throw 'the uninstaller left python.exe behind'
 if (-not (Test-Path -LiteralPath $marker)) { throw 'the uninstaller deleted the data folder' }
 
 Get-ScheduledTask -TaskName 'framegrade-proof-*' | Unregister-ScheduledTask -Confirm:$false
+[ProofRights]::Revoke($sid, 'SeBatchLogonRight')
 Remove-LocalUser -Name $user
 Write-Host 'PROOF PASSED'
 exit 0
