@@ -124,8 +124,16 @@ def copy_range_argv(src, start: float, end: float, out, *, ffmpeg_bin: str = "ff
 def reencode_range_argv(
     src, start: float, end: float, out, *, ffmpeg_bin: str = "ffmpeg"
 ) -> list[str]:
-    """argv of keycut's ``reencode_range`` with the pinned join-repair args."""
-    return [ffmpeg_bin, "-y", "-i", str(src), "-ss", f"{float(start)}", "-to", f"{float(end)}"] + [
+    """argv of keycut's ``reencode_range`` with the pinned join-repair args.
+
+    An input-side seek with an output-side ``-ss 0`` and a ``-t`` length, as
+    keycut 0.1.2 runs it: it decodes one GOP before the cut, not the whole
+    source before it.
+    """
+    duration = float(end) - float(start)
+    return [ffmpeg_bin, "-y", "-ss", f"{float(start)}", "-i", str(src), "-ss", "0"] + [
+        "-t",
+        f"{duration}",
         *lf_reencode_args(),
         str(out),
     ]

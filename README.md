@@ -17,7 +17,7 @@ entries, deletes them and dates those entries), open a
 ## Install
 
 ```bash
-pip install "gomoveshift-video @ git+https://github.com/Back-Road-Creative/framegrade@v0.3.11"
+pip install "gomoveshift-video @ git+https://github.com/Back-Road-Creative/framegrade@v0.3.12"
 ```
 
 This installs the tagged release together with its two sibling projects
