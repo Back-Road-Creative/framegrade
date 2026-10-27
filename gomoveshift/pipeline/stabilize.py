@@ -154,6 +154,21 @@ class StreamSpec:
     color_space: str = ""
     color_primaries: str = ""
     color_transfer: str = ""
+    height: int = 0
+
+
+def nvenc_available() -> bool:
+    """True when the hardware HEVC encoder works, the same probe the day master uses.
+
+    ``color_filters.detect_nvenc`` raises on a missing GPU; the picture-step
+    intermediate may fall back to x265 instead, so that is read as ``False``.
+    """
+    from .color_filters import NVENCUnavailableError, detect_nvenc
+
+    try:
+        return bool(detect_nvenc())
+    except NVENCUnavailableError:
+        return False
 
 
 def probe_stream_spec(
@@ -175,7 +190,7 @@ def probe_stream_spec(
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=pix_fmt,color_range,color_space,color_primaries,color_transfer",
+        "stream=pix_fmt,height,color_range,color_space,color_primaries,color_transfer",
         "-of",
         "json",
         str(path),
@@ -201,22 +216,62 @@ def probe_stream_spec(
         color_space=str(stream.get("color_space", "")),
         color_primaries=str(stream.get("color_primaries", "")),
         color_transfer=str(stream.get("color_transfer", "")),
+        height=int(stream.get("height") or 0),
     )
 
 
-def intermediate_video_args(spec: StreamSpec | None = None) -> list:
+def _nvenc_video_args(spec: StreamSpec) -> list:
+    """hevc_nvenc args from the long-form NVENC constants (no ``-r``: keep input timing)."""
+    from . import encoding_constants as ec
+
+    eight_bit = spec.pix_fmt == "yuv420p"  # the one 8-bit layout NVENC takes as-is
+    if spec.height >= 2160:
+        target = ec.LONGFORM_MIN_BITRATE_4K
+    elif spec.height >= 1080:
+        target = ec.LONGFORM_MIN_BITRATE_1080P
+    else:
+        target = 5000
+    return [
+        "-c:v",
+        "hevc_nvenc",
+        "-preset",
+        ec.LONGFORM_NVENC_PRESET,
+        "-tune",
+        "hq",
+        "-rc",
+        "vbr",
+        "-cq",
+        str(ec.LONGFORM_NVENC_CQ),
+        "-profile:v",
+        "main" if eight_bit else ec.LONGFORM_PROFILE,
+        "-pix_fmt",
+        "yuv420p" if eight_bit else "p010le",
+        # CQ alone is capped by NVENC's default bitrate; same soft floors as the master encode
+        "-b:v",
+        f"{target}k",
+        "-maxrate",
+        f"{int(target * ec.LONGFORM_MAXRATE_RATIO)}k",
+        "-bufsize",
+        f"{int(target * ec.LONGFORM_BUFSIZE_RATIO)}k",
+    ]
+
+
+def intermediate_video_args(spec: StreamSpec | None = None, *, has_nvenc: bool = False) -> list:
     """Explicit ``-c:v`` / quality / ``-pix_fmt`` / colour-tag args for an intermediate.
 
-    Codec and quality are the long-form x265 constants (``encoding_constants``),
-    so the intermediate is never left to ffmpeg's defaults (which wrote an
-    8-bit file). The pixel format is the input's own when libx265 takes it
-    (10-bit stays 10-bit), else the long-form 10-bit format; the colour
-    range / matrix / primaries / transfer are copied from the probe, and a tag
-    the input does not carry is left unwritten rather than invented.
+    Encoder selection follows ``color_filters.get_encoding_args``: hevc_nvenc
+    (``LONGFORM_NVENC_*``, main10 ``p010le``) when ``has_nvenc``, else libx265
+    at the long-form CRF and preset. The pixel format keeps the input's depth
+    (10-bit stays 10-bit); the colour range / matrix / primaries / transfer
+    are copied from the probe, and a tag the input does not carry is left
+    unwritten rather than invented. No ``-r``: the input's timing is kept.
     """
     from . import encoding_constants as ec
 
     spec = spec or StreamSpec()
+    if has_nvenc:
+        args = _nvenc_video_args(spec)
+        return args + _color_flags(spec)
     pix_fmt = spec.pix_fmt if spec.pix_fmt in _X265_PIX_FMTS else ec.LONGFORM_PIX_FMT
     args = [
         "-c:v",
@@ -230,14 +285,7 @@ def intermediate_video_args(spec: StreamSpec | None = None) -> list:
     ]
     if pix_fmt == ec.LONGFORM_PIX_FMT:
         args += ["-profile:v", ec.LONGFORM_PROFILE]
-    for flag, value in (
-        ("-color_range", spec.color_range),
-        ("-colorspace", spec.color_space),
-        ("-color_primaries", spec.color_primaries),
-        ("-color_trc", spec.color_transfer),
-    ):
-        if value.strip().lower() not in _UNSET_TAGS:
-            args += [flag, value]
+    args += _color_flags(spec)
     vui = [
         f"{key}={value}"
         for key, value, known in (
@@ -252,6 +300,19 @@ def intermediate_video_args(spec: StreamSpec | None = None) -> list:
     return args
 
 
+def _color_flags(spec: StreamSpec) -> list:
+    args: list = []
+    for flag, value in (
+        ("-color_range", spec.color_range),
+        ("-colorspace", spec.color_space),
+        ("-color_primaries", spec.color_primaries),
+        ("-color_trc", spec.color_transfer),
+    ):
+        if value.strip().lower() not in _UNSET_TAGS:
+            args += [flag, value]
+    return args
+
+
 def build_deflicker_argv(
     input_path: StrPath,
     output_path: StrPath,
@@ -260,6 +321,7 @@ def build_deflicker_argv(
     size: int = 5,
     ffmpeg_bin: str = "ffmpeg",
     stream: StreamSpec | None = None,
+    has_nvenc: bool = False,
 ) -> list:
     """argv for a single-pass ``deflicker`` re-encode (explicit codec, depth, tags)."""
     filter_expr = f"deflicker=mode={mode}:size={size}"
@@ -270,7 +332,7 @@ def build_deflicker_argv(
         str(input_path),
         "-vf",
         filter_expr,
-        *intermediate_video_args(stream),
+        *intermediate_video_args(stream, has_nvenc=has_nvenc),
         "-c:a",
         "copy",
         str(output_path),
@@ -319,6 +381,7 @@ def build_vidstabtransform_argv(
     zoom: float = 0,
     ffmpeg_bin: str = "ffmpeg",
     stream: StreamSpec | None = None,
+    has_nvenc: bool = False,
 ) -> list:
     """argv for vidstab pass 2 (applies the transforms from pass 1; explicit codec, depth, tags)."""
     require_vidstab(capabilities)
@@ -330,7 +393,7 @@ def build_vidstabtransform_argv(
         str(input_path),
         "-vf",
         filter_expr,
-        *intermediate_video_args(stream),
+        *intermediate_video_args(stream, has_nvenc=has_nvenc),
         "-c:a",
         "copy",
         str(output_path),
@@ -406,6 +469,7 @@ def run_deflicker(
     ffmpeg_bin: str = "ffmpeg",
     mode: str = "pm",
     size: int = 5,
+    has_nvenc: bool = False,
 ) -> JitterGateResult:
     """Run the deflicker pass and gate the result on measured luma jitter.
 
@@ -420,6 +484,7 @@ def run_deflicker(
         size=size,
         ffmpeg_bin=ffmpeg_bin,
         stream=probe_stream_spec(input_path, run=run),
+        has_nvenc=has_nvenc,
     )
     result = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)
     if result.returncode != 0:
@@ -460,6 +525,7 @@ def apply_picture_steps(
     stabilize: bool,
     capabilities: FfmpegFilterCapabilities | None = None,
     run: Callable[..., subprocess.CompletedProcess] | None = None,
+    has_nvenc: bool = False,
 ) -> PictureStepsResult:
     """Deflicker then stabilise ``src`` into ``out_dir``; never raises.
 
@@ -478,7 +544,7 @@ def apply_picture_steps(
     if deflicker:
         out = out_dir / f"{stem}.deflicker.mp4"
         try:
-            gate = run_deflicker(current, out, run=run)
+            gate = run_deflicker(current, out, run=run, has_nvenc=has_nvenc)
         except Exception as exc:  # encode / measure failure: keep the input
             out.unlink(missing_ok=True)
             logger.warning("deflicker failed, continuing with input: %s", exc)
@@ -497,7 +563,12 @@ def apply_picture_steps(
             for argv in (
                 build_vidstabdetect_argv(current, trf, caps),
                 build_vidstabtransform_argv(
-                    current, trf, out, caps, stream=probe_stream_spec(current, run=run)
+                    current,
+                    trf,
+                    out,
+                    caps,
+                    stream=probe_stream_spec(current, run=run),
+                    has_nvenc=has_nvenc,
                 ),
             ):
                 res = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)

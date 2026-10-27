@@ -345,3 +345,94 @@ def test_vidstab_keeps_ten_bit_and_colour_tags_on_real_ffmpeg(tmp_path):
     assert subprocess.run(argv, capture_output=True, timeout=120).returncode == 0
     got = _probe_out(out)
     assert got["pix_fmt"] == "yuv420p10le" and got["color_transfer"] == "bt709"
+
+
+# --- encoder selection: NVENC first, x265 fallback (no GPU needed) -----------
+
+
+def _uhd(**kw):
+    base = dict(
+        pix_fmt="yuv420p10le",
+        color_range="tv",
+        color_space="bt709",
+        color_primaries="bt709",
+        color_transfer="bt709",
+        height=2160,
+    )
+    base.update(kw)
+    return stabilize.StreamSpec(**base)
+
+
+def test_nvenc_branch_uses_longform_nvenc_constants_and_keeps_timing():
+    from gomoveshift.pipeline import encoding_constants as ec
+
+    args = stabilize.intermediate_video_args(_uhd(), has_nvenc=True)
+    assert _flag(args, "-c:v") == "hevc_nvenc"
+    assert _flag(args, "-preset") == ec.LONGFORM_NVENC_PRESET
+    assert _flag(args, "-cq") == str(ec.LONGFORM_NVENC_CQ)
+    assert _flag(args, "-rc") == "vbr"
+    assert _flag(args, "-pix_fmt") == "p010le"
+    assert _flag(args, "-profile:v") == ec.LONGFORM_PROFILE
+    assert _flag(args, "-b:v") == f"{ec.LONGFORM_MIN_BITRATE_4K}k"
+    assert "-r" not in args and "-crf" not in args and "-x265-params" not in args
+    assert _flag(args, "-color_range") == "tv"
+    assert _flag(args, "-colorspace") == "bt709"
+    assert _flag(args, "-color_primaries") == "bt709"
+    assert _flag(args, "-color_trc") == "bt709"
+
+
+def test_nvenc_branch_eight_bit_stays_eight_bit_and_other_depths_go_p010():
+    eight = stabilize.intermediate_video_args(_uhd(pix_fmt="yuv420p", height=1080), has_nvenc=True)
+    assert _flag(eight, "-pix_fmt") == "yuv420p"
+    assert _flag(eight, "-profile:v") == "main"
+    assert _flag(eight, "-b:v") == "15000k"
+    for pf in ("", "yuv444p12le"):
+        args = stabilize.intermediate_video_args(_uhd(pix_fmt=pf), has_nvenc=True)
+        assert _flag(args, "-pix_fmt") == "p010le"
+
+
+def test_x265_branch_is_the_default_and_unchanged():
+    assert stabilize.intermediate_video_args(_uhd()) == stabilize.intermediate_video_args(
+        _uhd(), has_nvenc=False
+    )
+    assert _flag(stabilize.intermediate_video_args(_uhd()), "-c:v") == "libx265"
+
+
+def test_build_argv_threads_has_nvenc():
+    caps = stabilize.FfmpegFilterCapabilities(frozenset({"vidstabdetect", "vidstabtransform"}))
+    d = stabilize.build_deflicker_argv("i.mp4", "o.mp4", stream=_uhd(), has_nvenc=True)
+    v = stabilize.build_vidstabtransform_argv(
+        "i.mp4", "t.trf", "o.mp4", caps, stream=_uhd(), has_nvenc=True
+    )
+    assert _flag(d, "-c:v") == "hevc_nvenc" and _flag(v, "-c:v") == "hevc_nvenc"
+
+
+def test_run_deflicker_injects_has_nvenc_without_a_gpu():
+    seen = []
+    probe = '{"streams":[{"pix_fmt":"yuv420p10le","height":2160}]}'
+
+    def fake(argv, *a, **k):
+        seen.append(list(argv))
+        if "ffprobe" in str(argv[0]):
+            return _FakeCompleted(stdout=probe)
+        return _FakeCompleted(stderr="")
+
+    try:
+        stabilize.run_deflicker("i.mp4", "o.mp4", run=fake, has_nvenc=True)
+    except Exception:  # the jitter measurement of a fake run is not the point
+        pass
+    encode = [a for a in seen if "-c:v" in a]
+    assert encode and _flag(encode[0], "-c:v") == "hevc_nvenc"
+
+
+def test_nvenc_available_reads_unavailable_as_false(monkeypatch):
+    from gomoveshift.pipeline import color_filters
+
+    monkeypatch.setattr(color_filters, "detect_nvenc", lambda: True)
+    assert stabilize.nvenc_available() is True
+
+    def boom():
+        raise color_filters.NVENCUnavailableError("no gpu")
+
+    monkeypatch.setattr(color_filters, "detect_nvenc", boom)
+    assert stabilize.nvenc_available() is False
