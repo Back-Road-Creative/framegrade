@@ -6,6 +6,7 @@ Part of the ChapterGenerator split (see ``chapters/generator.py``).
 import logging
 from typing import Optional
 
+from ..edit_timeline import planned_timeline
 from .overpass_source import _haversine
 
 logger = logging.getLogger(__name__)
@@ -69,34 +70,24 @@ class MarkerMerger:
 
     @staticmethod
     def map_to_edited_time(
-        original_time: float, keep_segments: Optional[list[tuple[float, float]]] = None
+        original_time: float,
+        keep_segments: Optional[list[tuple[float, float]]] = None,
+        crossfade: float = 0.0,
     ) -> float:
         """
         Map original video time to edited (post-stop-removal) video time.
 
-        Uses the keep_segments list to compute the piecewise mapping.
-        Each keep_segment is a (start, end) in original video time.
-        In the edited video, these segments are concatenated without gaps.
+        Delegates to ``EditTimeline``. Each keep_segment is a (start, end) in
+        original video time; the edited video concatenates them, overlapping each
+        seam by ``crossfade`` seconds (0 = hard cuts, the only case the chapter
+        generator can pass today because it carries no crossfade information).
 
+        A time inside a removed stop snaps to the end of the previous segment.
         Falls back to identity (no adjustment) when keep_segments is None.
         """
         if not keep_segments:
             return original_time
-
-        elapsed = 0.0
-        for seg_start, seg_end in keep_segments:
-            if original_time <= seg_start:
-                # Point is in a removed stop -- snap to end of previous segment
-                return elapsed
-            elif original_time <= seg_end:
-                # Point is within this kept segment
-                return elapsed + (original_time - seg_start)
-            else:
-                # Point is after this segment -- accumulate its duration
-                elapsed += seg_end - seg_start
-
-        # Past all segments -- return total edited duration
-        return elapsed
+        return planned_timeline(keep_segments, crossfade).source_to_output_snapped(original_time)
 
     @staticmethod
     def format_timestamp(seconds: float) -> str:

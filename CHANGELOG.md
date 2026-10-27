@@ -8,6 +8,11 @@ All notable changes to this project are recorded here. The format follows
 ### Added
 
 - `gomoveshift.pipeline.edit_timeline`: frozen dataclasses and a strict loader (`load_receipt`, `ReceiptError`) for the `keycut-assembly-receipt/1` assembly receipt, with a frozen test fixture. Every violation names its field. Nothing reads a receipt yet. Described in `docs/pipeline/167-edit-timeline.md`.
+- `EditTimeline` in the same module: `output_to_source` (none in an insert hold, two weighted positions in a crossfade) and `source_to_output` (`None` for a cut second, never interpolated), built from a receipt plus optional `Crossfade` and `Insert` extras.
+
+### Changed
+
+- The shorts edited-to-source mapper, the chapter source-to-edited mapper and the assembler's chapter trim adjustment now share `EditTimeline`; their signatures and answers are unchanged. `MarkerMerger.map_to_edited_time` takes an optional `crossfade` (default 0, which is all the chapter generator can pass).
 
 ## [0.3.11] - 2026-10-27
 
