@@ -94,6 +94,11 @@ _VALUE_SAMPLES = {  # non-bool sentinel rows: (cli_value, saved_value)
     "superlong_publish_day": ("sun", "wed"),
     "lf_mode": ("full_drive", "best_moments"),
     "gps_captions": ("events", "off"),
+    "map_inset": ("route", "off"),
+    "map_inset_bundle": ("/data/a", "/data/b"),
+    "map_inset_trim_start_m": (100.0, 200.0),
+    "map_inset_trim_end_m": (100.0, 200.0),
+    "map_inset_privacy_zones": (["1,2,3"], ["4,5,6"]),
 }
 _VALUE_RULES = [r for r in _MERGED_RULES if r.state_field in _VALUE_SAMPLES]
 assert len(_BOOL_RULES) + len(_VALUE_RULES) == len(_MERGED_RULES)

@@ -2060,6 +2060,15 @@ class DriveConfig(BaseModel):
     # per supported town event of the LF's own chapters. Own timing knobs, so the
     # superlong values above never move.
     gps_captions: str = "off"
+    # Opt-in route-only map inset on REGULAR long-form videos (``--map-inset``):
+    # "off" is today's path; "route" composites an inset rendered from an offline
+    # bundle and refuses before any encode when the bundle, trim or GPS is missing.
+    # Zones are "LAT,LON,RADIUS_M" strings so the value stays JSON-safe in state.
+    map_inset: str = "off"
+    map_inset_bundle: Optional[str] = None
+    map_inset_trim_start_m: float = 0.0
+    map_inset_trim_end_m: float = 0.0
+    map_inset_privacy_zones: list[str] = Field(default_factory=list)
     regular_lf_lower_third_duration_sec: float = 8.0
     regular_lf_lower_third_min_gap_sec: float = 45.0
     # Superlong per-part publish DAY. Saturday is a placeholder default chosen because it
@@ -2311,6 +2320,17 @@ class DriveConfig(BaseModel):
             )
         if self.gps_captions not in ("off", "events"):
             raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
+        if self.map_inset not in ("off", "route"):
+            raise ValueError(f"map_inset must be 'off' or 'route', got {self.map_inset!r}")
+        if self.map_inset_trim_start_m < 0 or self.map_inset_trim_end_m < 0:
+            raise ValueError("map_inset trim distances must be >= 0")
+        for zone in self.map_inset_privacy_zones:
+            try:
+                from gomoveshift.pipeline.route_claims import parse_privacy_zone
+
+                parse_privacy_zone(zone)
+            except ValueError as exc:
+                raise ValueError(f"map_inset privacy zone {zone!r}: {exc}") from exc
         if self.regular_lf_lower_third_duration_sec <= 0:
             raise ValueError("regular_lf_lower_third_duration_sec must be > 0")
         if self.regular_lf_lower_third_min_gap_sec < 0:
