@@ -649,9 +649,15 @@ def fuse_bracket(paths, align: bool = True) -> DecodedPhoto:
         )
     frames, shifts = _align_bracket(decoded) if align else ([d.rgb for d in decoded], ())
     # Mertens weighs contrast/saturation/well-exposedness on DISPLAY-referred frames and reads
-    # OpenCV's BGR luma, so a 16-bit decode steps down here (>> 8 maps 65535 to 255 exactly)
-    # and re-quantizes at its own depth below — a blend of N keeps sub-8-bit precision.
-    ldr = [(f >> 8).astype(np.uint8) if f.dtype == np.uint16 else f for f in frames]
+    # OpenCV's BGR luma. A bracket with any 16-bit decode goes in as float32 on OpenCV's 0-255
+    # scale (it divides every input by 255, uint8 or float; 65535 / 257 = 255 exactly), so the
+    # blend keeps the full precision the decode gave it and is re-quantized at that depth below;
+    # an all-8-bit bracket takes the 8-bit path unchanged.
+    wide = any(d.rgb.dtype == np.uint16 for d in decoded)
+    ldr = [
+        f.astype(np.float32) / (257.0 if f.dtype == np.uint16 else 1.0) if wide else f
+        for f in frames
+    ]
     pool = cv2.getNumThreads()
     try:
         cv2.setNumThreads(1)
@@ -659,7 +665,6 @@ def fuse_bracket(paths, align: bool = True) -> DecodedPhoto:
     finally:
         cv2.setNumThreads(pool)
     low, high = min(0.0, float(fused.min())), max(1.0, float(fused.max()))
-    wide = any(d.rgb.dtype == np.uint16 for d in decoded)
     peak = 65535.0 if wide else 255.0
     scaled = np.clip((fused[:, :, ::-1] - low) / (high - low), 0.0, 1.0) * peak
     first = decoded[0]
