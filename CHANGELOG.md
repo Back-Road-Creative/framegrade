@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-10-27
+
 ### Added
 
 - Windows bundle builder (`packaging/windows/build_release.py`), launcher and per-user Inno Setup script: the embeddable Python 3.12 with the win_amd64 GPU wheels, a privacy audit and a 2 GiB per-asset size gate. Steps in `docs/install.md`.
@@ -207,7 +209,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.10...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.11...HEAD
+[0.3.11]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.7...v0.3.8
