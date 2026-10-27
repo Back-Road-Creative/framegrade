@@ -545,6 +545,10 @@ class PipelineState:
     # ``--superlong-day`` sentinel — mirrored onto
     # config.drive.superlong_publish_day by flag_registry.py.
     superlong_publish_day: Optional[str] = None
+    # ``--gps-captions`` sentinel ("off"/"events") — mirrored onto
+    # config.drive.gps_captions by flag_registry.py so a resume without the flag
+    # keeps the burned captions (and the LF fingerprint) of the first run.
+    gps_captions: Optional[str] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks
@@ -582,6 +586,10 @@ class PipelineState:
     # parameter is gone from ``_produce_superlong_parts`` and the
     # chapter-derived path is the only production shape.)
     superlong_parts: Optional[dict] = None
+    # Opt-in ``--gps-captions events``: ``{date: {str(lf_index): {"lower_thirds":
+    # [{"label", "time_sec"}], "lower_thirds_suppressed": [{"label", "time_sec",
+    # "reason"}]}}}`` -- the reviewable cards burned onto each regular LF.
+    regular_lf_captions: Optional[dict] = None
 
     # ── Resume-time backstop observability ────
     # ``{field_name: [lf_index, ...]}`` populated by

@@ -94,6 +94,7 @@ FLAG_REGISTRY: tuple[FlagRule, ...] = (
     FlagRule("sign_verify_strict", "sign_verify_strict", Semantic.SENTINEL_CLI_WINS, "escalates a corroborated sign-vs-GPS state/county conflict from a warning to a pre-encode hard fail; sentinel for the same resume reason as sign_verify; config.drive mirror is the pipeline read path", coerce=bool, config_mirror="sign_verify_strict"),
     FlagRule("superlong_enabled", "superlong_enabled", Semantic.SENTINEL_CLI_WINS, "opt-in per-day superlong part production (sl_NN.mp4); sentinel so a CLI-absent resume preserves a saved True across a multi-day run; config.drive mirror is the pipeline read path", coerce=bool, config_mirror="superlong_enabled"),
     FlagRule("superlong_publish_day", "superlong_publish_day", Semantic.SENTINEL_CLI_WINS, "per-run override for the superlong part publish weekday; sentinel so a CLI-absent resume preserves a saved value across a multi-day run; config.drive mirror is the pipeline read path (schedule_constants.resolve_superlong_publish_day)", config_mirror="superlong_publish_day"),
+    FlagRule("gps_captions", "gps_captions", Semantic.SENTINEL_CLI_WINS, "opt-in regular-LF GPS event cards ('off'/'events'); sentinel so a CLI-absent resume keeps the saved choice (a resume that dropped it would re-burn every LF without cards); a differing CLI value wins and is persisted; config.drive mirror is the pipeline read path", config_mirror="gps_captions"),
     FlagRule("ost_audit_confirmed", "ost_audit_confirmed", Semantic.SENTINEL_CLI_WINS, "OST audit gate bypass", coerce=bool),
     FlagRule("gate_cd_confirmed", "gate_cd_confirmed", Semantic.SENTINEL_CLI_WINS, "Gate C/D content-review bypass", coerce=bool),
     FlagRule("no_youtube_upload", "no_youtube_upload", Semantic.ALWAYS_CLI, "explicit YouTube opt-out (banner provenance); ALWAYS_CLI to mirror youtube_upload — cmd_drive folds it into resolve_youtube_upload, so both re-decide every invocation and a saved True is cleared by simply omitting the flag", Apply.ALWAYS, coerce=bool),
@@ -192,6 +193,14 @@ def merge_on_resume(state, saved: dict, config, log: Optional[logging.Logger] = 
                 saved_val,
                 rule.state_field,
             )
+    cli_caps, saved_caps = overrides.get("gps_captions"), saved.get("gps_captions")
+    if cli_caps is not None and saved_caps is not None and cli_caps != saved_caps:
+        log.info(
+            "  gps_captions: --gps-captions %s overrides the checkpoint's %s; "
+            "the new choice is persisted.",
+            cli_caps,
+            saved_caps,
+        )
     # ``PipelineState.from_dict`` applies the int-key/Path/tuple/dataclass
     # coercions; copy each populated field across (matching the historical
     # ``object.__setattr__`` restore loops).
@@ -208,6 +217,7 @@ def merge_on_resume(state, saved: dict, config, log: Optional[logging.Logger] = 
     for rule in FLAG_REGISTRY:
         if rule.config_mirror is None:
             continue
-        persisted = saved.get(rule.state_field)
-        if persisted is not None:
-            setattr(config.drive, rule.config_mirror, persisted)
+        # The merged state value: the checkpoint's, unless the CLI supplied one and won.
+        effective = getattr(state, rule.state_field, None)
+        if effective is not None:
+            setattr(config.drive, rule.config_mirror, effective)

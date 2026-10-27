@@ -154,15 +154,23 @@ _COUNTRY_SUFFIXES = (
 )
 
 
+GRADE_FALLBACK_EQ = "eq_filter_chain"
+
+
 def _bake_global_filter(
     corrections: list[CorrectionParams],
+    *,
+    strict: bool = False,
+    fallback: Optional[list] = None,
 ) -> tuple[str, str, Optional[Path]]:
     """Bake ONE uniform grade to a LUT so the chain never hits ``eq``.
 
     Returns (filter_str, method, lut_dir); the caller owns ``lut_dir``. It is
     None — and nothing is left in /tmp — for an identity grade (nothing worth
     a LUT pass) or a failed bake, which degrades to the legacy 8-bit string
-    chain rather than aborting a multi-hour master encode.
+    chain rather than aborting a multi-hour master encode. That fallback is
+    appended to ``fallback`` (when given) as ``GRADE_FALLBACK_EQ`` so the
+    caller can record it; with ``strict`` it raises ``ValueError`` instead.
     """
     avg = corrections[0] if len(corrections) == 1 else _average_params(corrections)
     lut_dir = Path(tempfile.mkdtemp(prefix="gms_span_luts_"))
@@ -170,13 +178,33 @@ def _bake_global_filter(
         lut = params_to_lut3d_cube(avg, output_path=lut_dir / "global.cube")
         filter_str = build_filter_chain([avg], lut_paths=[lut])
     except (ValueError, TypeError, OSError) as e:
-        logger.warning(f"  Color: global LUT bake failed ({e}) — using the 8-bit filter chain")
         shutil.rmtree(lut_dir, ignore_errors=True)
+        if strict:
+            raise ValueError(
+                f"GRADE-FALLBACK-REFUSED: the global LUT bake failed ({e}) and strict_grade "
+                "is on, so the 8-bit eq filter chain will not be used. Nothing was encoded."
+            ) from e
+        logger.warning(f"  Color: global LUT bake failed ({e}) — using the 8-bit filter chain")
+        if fallback is not None:
+            fallback.append(GRADE_FALLBACK_EQ)
         return (build_filter_chain([avg]), "auto_global", None)
     if "lut3d=" not in filter_str:
         shutil.rmtree(lut_dir, ignore_errors=True)
         return (filter_str, "auto_global", None)
     return (filter_str, "auto_global", lut_dir)
+
+
+def _bake_recording_fallback(
+    proc: "SinglePassProcessor", corrections: list[CorrectionParams]
+) -> tuple[str, str, Optional[Path]]:
+    """``_bake_global_filter`` that records a fallback on ``proc`` (and honours
+    ``config.drive.strict_grade``)."""
+    reasons: list[str] = []
+    strict = getattr(proc.config.drive, "strict_grade", False) is True
+    result = _bake_global_filter(corrections, strict=strict, fallback=reasons)
+    if reasons:
+        proc._grade_fallback = reasons[0]
+    return result
 
 
 def _clean_location(location: str) -> str:
@@ -194,24 +222,37 @@ def _clean_location(location: str) -> str:
     return location
 
 
+# Last format of every HDR / gamut conversion chain, shared by the encode
+# `-vf`, the blur `filter_complex` and the colour-analysis sampler (all take
+# the one resolved chain string, so they cannot diverge). It must keep at least
+# the 10 bits the master is encoded at: the chains used to end `yuv420p`, an
+# 8-bit hop (<=256 levels per channel, banding in skies) ahead of the 16-bit
+# grade. 10-bit 4:2:0 is the grade's own input depth class, so `format=` into
+# GRADE_WORKING_FORMAT is a lossless widening, and the chain stays YUV so the
+# bt709/tv tags probed by `_probe_converted_sample` still describe it. The
+# sampler converts to 8-bit RGB only at its own end, after this chain.
+TONEMAP_OUTPUT_FORMAT = "yuv420p10le"
+
 # HDR -> BT.709 tonemap chains, tried in order; the first whose filters all exist
 # in the installed ffmpeg wins (probed by filter NAME, never by ffmpeg version).
 # (label, operator, required filters, chain). Each chain ends limited-range
-# yuv420p BT.709 so the SDR gate's re-check of the tagged result is truthful.
+# BT.709 in TONEMAP_OUTPUT_FORMAT, so the SDR gate's re-check of the tagged result
+# is truthful.
 _HDR_TONEMAP_CHAINS = (
     (
         "zscale",
         "hable",
         frozenset({"zscale", "tonemap"}),
         "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
-        "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=limited,format=yuv420p",
+        "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=limited,"
+        f"format={TONEMAP_OUTPUT_FORMAT}",
     ),
     (
         "libplacebo",
         "bt.2390",
         frozenset({"libplacebo"}),
         "libplacebo=tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:"
-        "color_trc=bt709:range=tv:format=yuv420p",
+        f"color_trc=bt709:range=tv:format={TONEMAP_OUTPUT_FORMAT}",
     ),
 )
 
@@ -219,7 +260,7 @@ _HDR_TONEMAP_CHAINS = (
 # BT.709, so only the primaries move. No tonemap (that would darken it).
 _GAMUT_CHAIN = (
     "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
-    "zscale=t=bt709:m=bt709:r=limited,format=yuv420p"
+    f"zscale=t=bt709:m=bt709:r=limited,format={TONEMAP_OUTPUT_FORMAT}"
 )
 _GAMUT_OPERATOR = "zscale:gamut"
 
@@ -331,7 +372,9 @@ def _clear_tonemap_record(output_path: Path) -> None:
     _tonemap_sidecar(output_path).unlink(missing_ok=True)
 
 
-def _record_tonemap(output_path: Path, operator: str, source: dict) -> None:
+def _record_tonemap(
+    output_path: Path, operator: str, source: dict, grade_fallback: Optional[str] = None
+) -> None:
     """Persist the tonemap operator next to the master (``<final stem>.tonemap.json``).
 
     Callers encode to ``<stem>.tmp<ext>`` and rename, so the sidecar is keyed on
@@ -342,6 +385,7 @@ def _record_tonemap(output_path: Path, operator: str, source: dict) -> None:
         "tonemap": operator,
         "source_color_trc": str(source.get("color_trc", "")),
         "source_color_primaries": str(source.get("color_primaries", "")),
+        "grade_fallback": grade_fallback,
     }
     sidecar.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -359,6 +403,8 @@ class SinglePassResult:
     encoding_time: float = 0.0
     total_time: float = 0.0
     tonemap: str = ""  # "<filter>:<operator>" when an HDR source was tonemapped
+    # Why the grade degraded to the 8-bit eq chain (e.g. "eq_filter_chain"), else None.
+    grade_fallback: Optional[str] = None
     # Declared resampling upscale applied by this encode (quality.UpscalePlan), else None.
     upscale_plan: Optional[object] = None
 
@@ -373,6 +419,7 @@ class SinglePassResult:
             "encoding_time": round(self.encoding_time, 1),
             "total_time": round(self.total_time, 1),
             "tonemap": self.tonemap,
+            "grade_fallback": self.grade_fallback,
         }
 
 
@@ -402,6 +449,8 @@ class SinglePassProcessor:
 
     def __init__(self, config: Config, profile: Optional[object] = None):
         self.config = config
+        # Why the last grade fell back to the 8-bit eq chain (None = it did not).
+        self._grade_fallback: Optional[str] = None
         # Per-tenant MediaProfile (brand_policy.load_media_profile), set once;
         # None = engine defaults; the upscaler reads upscale/claim_native_resolution_only.
         self.profile = profile
@@ -798,7 +847,7 @@ class SinglePassProcessor:
         if not corrections:
             return ("null", "none", None)
         if len(corrections) < 2 or not span_durations or len(span_durations) != len(corrections):
-            return _bake_global_filter(corrections)
+            return _bake_recording_fallback(self, corrections)
 
         lut_dir = Path(tempfile.mkdtemp(prefix="gms_span_luts_"))
         try:
@@ -812,12 +861,12 @@ class SinglePassProcessor:
         except (ValueError, TypeError, OSError) as e:
             logger.warning(f"  Color: adaptive filtergraph failed ({e}) — using averaged")
             shutil.rmtree(lut_dir, ignore_errors=True)
-            return _bake_global_filter(corrections)
+            return _bake_recording_fallback(self, corrections)
         if "xfade=" in filter_str:
             return (filter_str, "auto_adaptive", lut_dir)
         # Identity collapse — a single averaged grade was emitted.
         shutil.rmtree(lut_dir, ignore_errors=True)
-        return _bake_global_filter(corrections)
+        return _bake_recording_fallback(self, corrections)
 
     def _analyze_color(
         self,
@@ -1402,6 +1451,7 @@ class SinglePassProcessor:
 
         Returns ("null", "none", None) when color is skipped.
         """
+        self._grade_fallback = None
         if skip_color:
             logger.info("  Step 1/3: Color — SKIPPED")
             return ("null", "none", None)
@@ -1853,8 +1903,9 @@ class SinglePassProcessor:
 
         result.color_method = color_method
         result.tonemap = tonemap_op
-        if tonemap_op:
-            _record_tonemap(output_path, tonemap_op, info_in)
+        result.grade_fallback = self._grade_fallback
+        if tonemap_op or self._grade_fallback:
+            _record_tonemap(output_path, tonemap_op, info_in, self._grade_fallback)
         else:
             _clear_tonemap_record(output_path)
         result.total_time = total_time
