@@ -274,6 +274,13 @@ class StopDetectionConfig(BaseModel):
     motion_threshold: float = 0.008  # Lower threshold for sensitivity
     crossfade_duration: float = 0.5  # Crossfade between segments (0 = hard cuts)
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
+    # Day/drive stop mask: "remove" masks all sub-stop_speed_kmh driving (today's
+    # policy); "keep" leaves GPS speed in [creep_min_speed_kmh, stop_speed_kmh)
+    # as CREEPING, not masked.
+    creep_policy: Literal["remove", "keep"] = "remove"
+    # Floor of the creep band, km/h. Provisional: pending tuning on labelled
+    # real drives.
+    creep_min_speed_kmh: float = Field(default=2.0, ge=0.0)
     gps_speed_corroboration: GPSSpeedCorroborationConfig = Field(
         default_factory=GPSSpeedCorroborationConfig
     )
