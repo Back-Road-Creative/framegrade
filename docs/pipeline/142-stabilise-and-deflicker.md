@@ -37,6 +37,8 @@ flow doesn't yet have an equivalent single-call wrapper -- callers currently com
 `gate_on_jitter` themselves; adding one is part of the wiring follow-up below, since the shape of
 that wrapper depends on where in the render path the two ffmpeg calls actually run.)
 
+**Stabilise gate (camera motion).** Luma jitter cannot judge stabilisation: a translating image keeps the same per-frame mean, so a clip that is still shaking, or only got brighter or darker, would pass. The stabilise step has its own judge, `judge_stabilisation`. `read_grey_frames` decodes the first `MOTION_MAX_FRAMES` consecutive frames through an ffmpeg rawvideo pipe at `MOTION_FRAME_W` x `MOTION_FRAME_H` grey. `shake_residual` takes the global translation of each consecutive pair (OpenCV phase correlation with a Hanning window), sums it into a camera trajectory, subtracts a `MOTION_SMOOTH_WINDOW`-frame moving average of that trajectory, and reports the RMS of what is left in pixels. The moving average is the intentional motion, so a steady pan or turn is not counted as shake; only the high-frequency part is. Rotation is not measured. `border_coverage` is the mean fraction of the outer `MOTION_BORDER_BAND` of each frame at or below `MOTION_BLACK_LEVEL`. `gate_on_motion` keeps the output only when the input actually shakes (residual at least `MOTION_MIN_INPUT_RESIDUAL`), the output residual is at most `MOTION_MAX_RESIDUAL_RATIO` of the input's, and the output's border coverage is at most `MOTION_MAX_BORDER_COVERAGE`; the `reason` names every failed check. Otherwise the input is used and the reason is logged at WARNING. Deflicker keeps the luma-jitter gate above. Not yet covered (needs real footage): denoise trails, lighting events, span caps and runtime measurement.
+
 Every function here takes its `run` collaborator (default `subprocess.run`) as a parameter, so
 `tests/test_stabilize.py` exercises the probe, the argv builders and the refusal against a fake
 `run` and never depends on a real ffmpeg build for those cases. One test
@@ -64,8 +66,9 @@ jitter; it's skipped, not xfailed, when ffmpeg is genuinely absent from the box.
   Intermediates sit next to the raw concat under the day's output dir and are removed afterwards.
   The colour cache is keyed on the raw concat, so it is neither seeded nor saved for a day whose
   picture steps were kept (the grade re-analyses the changed frames).
-* **The gate.** Each step is measured: `measure_luma_jitter` on input and output, kept only when
-  jitter dropped. A discarded or failed step deletes its output, logs both numbers at WARNING and
+* **The gate.** Each step is measured. Deflicker: `measure_luma_jitter` on input and output, kept only when
+  jitter dropped. Stabilise: `judge_stabilisation` (shake residual and black-border coverage, see above),
+  recorded as `input_residual` / `output_residual` / `border_coverage` / `kept`. A discarded or failed step deletes its output, logs both numbers at WARNING and
   the chain continues with its input; it never raises.
 * **Record.** `day_<date>_picture_steps.json` beside the master holds `deflicker_applied`,
   `stabilize_applied` (bool) and per-step `input_jitter` / `output_jitter` / `kept`.

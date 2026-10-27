@@ -11,11 +11,13 @@ build-time filters that not every ffmpeg build has:
     never silently pass the input through unstabilised, which would look
     identical to a successful no-op stabilise to anything downstream.
 
-Every pass here is gated by measured per-frame luminance jitter
-(``measure_luma_jitter`` / ``gate_on_jitter``): the output only replaces the
-input when its jitter measurably dropped. A pass that makes jitter worse (or
-doesn't improve it) is discarded and the caller is told why — never a silent
-pass-through of a filter that made things worse.
+Each pass is gated on a measurement and the output only replaces the input when
+it measurably improved. Deflicker is judged on per-frame luminance jitter
+(``measure_luma_jitter`` / ``gate_on_jitter``). Stabilise is judged on camera
+motion (``judge_stabilisation``): shake residual must drop and black borders
+stay small, because a translating image keeps its mean luma and luma jitter
+cannot see shake. A pass that fails its gate is discarded and the caller is told
+why — never a silent pass-through of a filter that made things worse.
 
 ``apply_picture_steps`` is the drive-path entry (``--stabilize`` /
 ``--deflicker`` via ``day_master_encoder.encode_day_master``); see
@@ -500,6 +502,159 @@ def run_deflicker(
     return gate
 
 
+# --- Stabilise judge: camera motion, not luma ---------------------------------
+# A translating image keeps the same per-frame mean, so luma jitter cannot see
+# camera shake. The stabilise step is judged on the shake residual instead: per
+# consecutive frame pair the global translation (phase correlation on small grey
+# frames), accumulated into a camera trajectory; the shake is that trajectory
+# minus its own smoothed version, so a deliberate pan or turn is not shake.
+MOTION_FRAME_W = 160  # decode size; shake is measured in pixels of this frame
+MOTION_FRAME_H = 90
+MOTION_MAX_FRAMES = 240  # consecutive frames from the start (8-10 s of footage)
+MOTION_MIN_FRAMES = 8
+# Moving-average window (frames) that defines "intentional" motion. ~0.5 s at
+# 30 fps: slower than a hand tremor, faster than a pan.
+MOTION_SMOOTH_WINDOW = 15
+# Keep only when output residual <= input residual * this (a 25% cut at least).
+MOTION_MAX_RESIDUAL_RATIO = 0.75
+# An input already steadier than this (px RMS at 160 px wide) has nothing to fix.
+MOTION_MIN_INPUT_RESIDUAL = 0.3
+# Black edge band: outer fraction of each side, and the luma at or below which a
+# pixel counts as black. Output coverage above the bound means the stabiliser
+# zoomed too little and exposed its fill.
+MOTION_BORDER_BAND = 0.10
+MOTION_BLACK_LEVEL = 16
+MOTION_MAX_BORDER_COVERAGE = 0.05
+
+
+def read_grey_frames(
+    path: StrPath,
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ffmpeg_bin: str = "ffmpeg",
+    max_frames: int = MOTION_MAX_FRAMES,
+):
+    """First ``max_frames`` consecutive frames as small grey uint8 arrays (ffmpeg pipe)."""
+    import numpy as np
+
+    argv = [
+        ffmpeg_bin,
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-frames:v",
+        str(max_frames),
+        "-vf",
+        f"scale={MOTION_FRAME_W}:{MOTION_FRAME_H}",
+        "-pix_fmt",
+        "gray",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    result = run(argv, capture_output=True, timeout=_MEASURE_TIMEOUT_S)
+    if result.returncode != 0:
+        raise RuntimeError(f"frame decode failed for {path} (rc={result.returncode})")
+    size = MOTION_FRAME_W * MOTION_FRAME_H
+    raw = result.stdout
+    count = len(raw) // size
+    return [
+        np.frombuffer(raw, dtype=np.uint8, count=size, offset=i * size).reshape(
+            MOTION_FRAME_H, MOTION_FRAME_W
+        )
+        for i in range(count)
+    ]
+
+
+def shake_residual(frames) -> float:
+    """RMS (px) of the camera trajectory's deviation from its smoothed self.
+
+    Translation only (rotation is not measured). The trajectory is the running
+    sum of per-pair phase-correlation shifts; the smoothed version is a moving
+    average with odd-reflected edges, so a constant-velocity pan has ~0 residual.
+    """
+    import cv2
+    import numpy as np
+
+    if len(frames) < MOTION_MIN_FRAMES:
+        raise ValueError(f"need {MOTION_MIN_FRAMES} frames to measure shake, got {len(frames)}")
+    grey = [np.asarray(f, dtype=np.float32) for f in frames]
+    window = cv2.createHanningWindow((grey[0].shape[1], grey[0].shape[0]), cv2.CV_32F)
+    steps = [cv2.phaseCorrelate(a, b, window)[0] for a, b in zip(grey, grey[1:])]
+    traj = np.cumsum(np.asarray(steps, dtype=np.float64), axis=0)
+    pad = min(MOTION_SMOOTH_WINDOW // 2, len(traj) - 1)
+    padded = np.pad(traj, ((pad, pad), (0, 0)), mode="reflect", reflect_type="odd")
+    kernel = np.ones(2 * pad + 1) / (2 * pad + 1)
+    smooth = np.stack(
+        [np.convolve(padded[:, k], kernel, mode="valid") for k in range(traj.shape[1])], axis=1
+    )
+    return float(np.sqrt(np.mean(np.sum((traj - smooth) ** 2, axis=1))))
+
+
+def border_coverage(frames) -> float:
+    """Mean fraction of the outer edge band that is near-black."""
+    import numpy as np
+
+    fractions = []
+    for f in frames:
+        a = np.asarray(f)
+        h, w = a.shape
+        bh, bw = max(1, int(h * MOTION_BORDER_BAND)), max(1, int(w * MOTION_BORDER_BAND))
+        band = np.ones(a.shape, dtype=bool)
+        band[bh:-bh, bw:-bw] = False
+        fractions.append(float(np.mean(a[band] <= MOTION_BLACK_LEVEL)))
+    return float(np.mean(fractions))
+
+
+@dataclass(frozen=True)
+class MotionGateResult:
+    """Outcome of judging a stabilise output on camera motion."""
+
+    input_residual: float
+    output_residual: float
+    border_coverage: float
+    passed: bool
+    reason: str = ""
+
+
+def gate_on_motion(
+    input_residual: float, output_residual: float, coverage: float
+) -> MotionGateResult:
+    """Keep the output only when shake dropped enough and borders stayed small."""
+    reasons = []
+    if input_residual < MOTION_MIN_INPUT_RESIDUAL:
+        reasons.append(
+            f"input shake residual {input_residual:.3f}px is below "
+            f"{MOTION_MIN_INPUT_RESIDUAL}px; nothing to stabilise"
+        )
+    elif output_residual > input_residual * MOTION_MAX_RESIDUAL_RATIO:
+        reasons.append(
+            f"shake residual {output_residual:.3f}px did not drop to "
+            f"{MOTION_MAX_RESIDUAL_RATIO:.0%} of input {input_residual:.3f}px"
+        )
+    if coverage > MOTION_MAX_BORDER_COVERAGE:
+        reasons.append(f"black border coverage {coverage:.3f} exceeds {MOTION_MAX_BORDER_COVERAGE}")
+    if not reasons:
+        return MotionGateResult(input_residual, output_residual, coverage, True)
+    reason = "; ".join(reasons) + "; discarding stabilised output"
+    return MotionGateResult(input_residual, output_residual, coverage, False, reason)
+
+
+def judge_stabilisation(
+    input_path: StrPath,
+    output_path: StrPath,
+    *,
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ffmpeg_bin: str = "ffmpeg",
+    read_frames: Callable[..., list] = read_grey_frames,
+) -> MotionGateResult:
+    """Measure shake residual (input and output) and output border coverage, then gate."""
+    before = read_frames(input_path, run=run, ffmpeg_bin=ffmpeg_bin)
+    after = read_frames(output_path, run=run, ffmpeg_bin=ffmpeg_bin)
+    return gate_on_motion(shake_residual(before), shake_residual(after), border_coverage(after))
+
+
 @dataclass(frozen=True)
 class PictureStepsResult:
     """Path to grade (``src`` when nothing was kept) plus the record of what ran."""
@@ -529,7 +684,7 @@ def apply_picture_steps(
 ) -> PictureStepsResult:
     """Deflicker then stabilise ``src`` into ``out_dir``; never raises.
 
-    Each step is gated on measured luma jitter: a discarded (or failed) step
+    Deflicker is gated on luma jitter, stabilise on camera motion: a discarded (or failed) step
     deletes its output and the chain continues with the previous input. The
     returned ``record`` carries ``deflicker_applied`` / ``stabilize_applied``
     plus per-step jitter numbers. Intermediates other than the returned path
@@ -574,15 +729,18 @@ def apply_picture_steps(
                 res = run(argv, capture_output=True, text=True, timeout=_ENCODE_TIMEOUT_S)
                 if res.returncode != 0:
                     raise RuntimeError(f"vidstab rc={res.returncode}: {res.stderr[-2000:]}")
-            gate = gate_on_jitter(
-                measure_luma_jitter(current, run=run), measure_luma_jitter(out, run=run)
-            )
+            gate = judge_stabilisation(current, out, run=run)
         except Exception as exc:
             out.unlink(missing_ok=True)
             logger.warning("stabilise failed, continuing with input: %s", exc)
             record["steps"]["stabilize"] = {"kept": False, "error": str(exc)}
         else:
-            record["steps"]["stabilize"] = _step_record(gate)
+            record["steps"]["stabilize"] = {
+                "input_residual": gate.input_residual,
+                "output_residual": gate.output_residual,
+                "border_coverage": gate.border_coverage,
+                "kept": gate.passed,
+            }
             if gate.passed:
                 if current != Path(src):
                     current.unlink(missing_ok=True)
