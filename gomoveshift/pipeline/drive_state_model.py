@@ -545,6 +545,10 @@ class PipelineState:
     # ``--superlong-day`` sentinel — mirrored onto
     # config.drive.superlong_publish_day by flag_registry.py.
     superlong_publish_day: Optional[str] = None
+    # ``--gps-captions`` sentinel ("off"/"events") — mirrored onto
+    # config.drive.gps_captions by flag_registry.py so a resume without the flag
+    # keeps the burned captions (and the LF fingerprint) of the first run.
+    gps_captions: Optional[str] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks

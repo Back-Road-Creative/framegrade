@@ -2453,6 +2453,27 @@ def run_day_pipeline(
             )
             continue
 
+        if _lf_cards is not None:
+            # Chapter times are LF-body-relative, so a card sits at T + the lead the
+            # file ACTUALLY carries (the montage may be shorter than planned, or absent
+            # when there are no peaks); the planned lead only keys the fingerprint.
+            try:
+                _real_lead = float(probe_media(prepended).duration) - float(
+                    probe_media(concatenated).duration
+                )
+            except Exception as exc:  # noqa: BLE001 -- keep the planned lead
+                logger.warning("Day %s: LF %d caption lead not probed (%s)", date, idx, exc)
+                _real_lead = float(montage_duration)
+            if abs(_real_lead - float(montage_duration)) > 0.05:
+                _lf_cards, _lf_suppressed = regular_lf_caption_cards(
+                    lf_chapters_fn(lf_plan, lf_location),
+                    _caption_ev[idx],
+                    kit.town_events,
+                    lead_s=max(0.0, _real_lead),
+                    duration_sec=float(_drive_cfg.regular_lf_lower_third_duration_sec),
+                    min_gap_sec=float(_drive_cfg.regular_lf_lower_third_min_gap_sec),
+                )
+
         # prefer_nvenc=True: the day master just finished on NVENC, so the
         # LF OST re-encode should too. The helper retries the NVENC probe
         # once to ride out post-encode session release (otherwise a busy

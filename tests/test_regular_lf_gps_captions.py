@@ -56,7 +56,16 @@ def _cfg(captions: str) -> SimpleNamespace:
     )
 
 
-def _run(tmp_path, captions: str, *, with_route: bool = True):
+def _probe_for(wm_duration: float):
+    """Concat body is 300 s; the montage-prefixed file is ``wm_duration`` long."""
+
+    def probe(path, *a, **k):
+        return SimpleNamespace(duration=wm_duration if "wm" in str(path) else 300.0)
+
+    return probe
+
+
+def _run(tmp_path, captions: str, *, with_route: bool = True, cfg=None, wm_duration=315.0):
     ep = tmp_path / "ep.mp4"
     ep.write_bytes(b"\x00")
     for n in ("master", "seg", "wm"):
@@ -78,6 +87,7 @@ def _run(tmp_path, captions: str, *, with_route: bool = True):
 
     def fake_apply_ost(**kwargs):
         calls.append(kwargs)
+        kwargs["output_path"].write_bytes(b"\x00")
         return kwargs["output_path"]
 
     with (
@@ -91,7 +101,7 @@ def _run(tmp_path, captions: str, *, with_route: bool = True):
         patch.object(day_pipeline, "apply_ost", side_effect=fake_apply_ost),
         patch.object(day_pipeline, "plan_shorts", return_value=[]),
         patch.object(day_pipeline, "compute_day_file_boundaries", return_value=[(0.0, 300.0)]),
-        patch.object(day_pipeline, "probe_media", return_value=SimpleNamespace(duration=60.0)),
+        patch.object(day_pipeline, "probe_media", side_effect=_probe_for(wm_duration)),
     ):
         try:
             day_pipeline.run_day_pipeline(
@@ -99,7 +109,7 @@ def _run(tmp_path, captions: str, *, with_route: bool = True):
                 day_scores=None,
                 output_dir=tmp_path / "out",
                 location="Alphaville",
-                config=_cfg(captions),
+                config=cfg or _cfg(captions),
                 lf_plans=[lf_plan],
                 state=state,
                 lf_chapters_fn=lambda lf, loc: CHAPTERS,
@@ -121,7 +131,7 @@ def test_off_is_todays_call(tmp_path):
 
 def test_events_derive_space_suppress_and_persist(tmp_path):
     calls, state = _run(tmp_path, "events")
-    # Body times shift by the 15 s montage lead; Deltaton (320 s) is inside the
+    # Body times shift by the 15 s montage lead (315 s file minus 300 s body); Deltaton (320 s) is inside the
     # 45 s gap after Alphaville's card; Ghostburg is not on the retained route.
     assert calls[0]["lower_thirds"] == [("Alphaville, SC", 315.0), ("Charlieville, SC", 915.0)]
     assert calls[0]["lower_third_duration_sec"] == 8.0
@@ -183,3 +193,96 @@ def test_cli_flag_parses():
     )
     flag = next(a for a in sub.choices["drive"]._actions if a.dest == "gps_captions")
     assert flag.choices == ["off", "events"] and flag.default is None
+
+
+# -- montage lead: chapter times are LF-body-relative ---------------------------------
+# ChapterGenerator maps GPS through ``included_segments`` against
+# ``lf.total_duration`` (the segments' sum, models.py "Sum of segment durations +
+# transitions"), and nothing adds the montage; ost_applier burns on the file with the
+# montage prepended. So a chapter at body time T is visible at T + the REAL lead.
+
+
+@pytest.mark.parametrize(
+    "wm_duration, expected_alpha",
+    [
+        (315.0, 315.0),  # planned 15 s montage
+        (308.0, 308.0),  # montage came out shorter than planned: card follows the footage
+        (300.0, 300.0),  # no montage prepended (no peaks): lead 0
+    ],
+)
+def test_card_lands_where_the_viewer_sees_the_chapters_footage(
+    tmp_path, wm_duration, expected_alpha
+):
+    calls, state = _run(tmp_path, "events", wm_duration=wm_duration)
+    body_t = 300.0  # "5:00 Entering Alphaville" in the body-relative chapters
+    lead = wm_duration - 300.0
+    assert calls[0]["lower_thirds"][0] == ("Alphaville, SC", body_t + lead)
+    assert calls[0]["lower_thirds"][0][1] == expected_alpha
+    rec = state.get("regular_lf_captions")["2026-02-20"]["1"]
+    assert rec["lower_thirds"][0]["time_sec"] == expected_alpha
+
+
+# -- resume keeps the choice -----------------------------------------------------------
+
+
+def _drive_cfg(captions: str = "off"):
+    from gomoveshift.config import Config
+
+    cfg = Config()
+    cfg.drive.gps_captions = captions
+    return cfg
+
+
+def _state_with(cli: str | None, cfg):
+    from gomoveshift.pipeline.drive_state_model import PipelineState
+    from gomoveshift.pipeline.flag_registry import apply_cli_to_state
+
+    state = PipelineState()
+    apply_cli_to_state(state, {"gps_captions": cli}, cfg)
+    return state
+
+
+def test_choice_is_persisted_in_state():
+    cfg = _drive_cfg()
+    state = _state_with("events", cfg)
+    assert state.gps_captions == "events"
+    assert cfg.drive.gps_captions == "events"
+    assert state.to_dict()["gps_captions"] == "events"
+
+
+def test_resume_without_flag_keeps_captions_and_fingerprint(tmp_path):
+    from gomoveshift.pipeline.flag_registry import merge_on_resume
+
+    first_cfg = _drive_cfg()
+    saved = _state_with("events", first_cfg).to_dict()
+    cfg1 = _cfg("events")
+    calls1, _ = _run(tmp_path, "events", cfg=cfg1)
+    assert len(calls1) == 1
+
+    resume_cfg = _drive_cfg()  # a fresh process: config default is off
+    resumed = _state_with(None, resume_cfg)
+    merge_on_resume(resumed, saved, resume_cfg)
+    assert resume_cfg.drive.gps_captions == "events"
+    assert resumed.gps_captions == "events"
+
+    # Same on-disk run dir: the burned final is fresh iff the fingerprint is unchanged.
+    calls2, _ = _run(tmp_path, "events", cfg=_cfg(resume_cfg.drive.gps_captions))
+    assert calls2 == []
+
+
+def test_cli_flag_differing_from_saved_wins_and_is_persisted(caplog):
+    import logging
+
+    from gomoveshift.pipeline.flag_registry import merge_on_resume
+
+    saved = _state_with("events", _drive_cfg()).to_dict()
+    cfg = _drive_cfg()
+    state = _state_with("off", cfg)
+    with caplog.at_level(logging.INFO):
+        merge_on_resume(state, saved, cfg)
+    assert state.gps_captions == "off"
+    assert cfg.drive.gps_captions == "off"
+    assert state.to_dict()["gps_captions"] == "off"
+    assert any(
+        "gps_captions" in r.getMessage() and r.levelno == logging.INFO for r in caplog.records
+    )

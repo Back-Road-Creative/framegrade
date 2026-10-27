@@ -746,6 +746,7 @@ class DrivePipelineOrchestrator:
         lf_mode: Optional[str] = None,
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
+        gps_captions: Optional[str] = None,
     ) -> DrivePipelineResult:
         """Execute the full Drive Pipeline (or a single phase).
 
@@ -975,6 +976,7 @@ class DrivePipelineOrchestrator:
                 lf_mode=lf_mode,
                 superlong_enabled=superlong_enabled,
                 superlong_publish_day=superlong_publish_day,
+                gps_captions=gps_captions,
             )
             stages_dir = stages_base
             if str(output_base).startswith("/mnt/"):
@@ -1803,6 +1805,7 @@ class DrivePipelineOrchestrator:
         lf_mode: Optional[str] = None,
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
+        gps_captions: Optional[str] = None,
     ) -> tuple[PipelineState, bool, bool, bool]:
         """Construct the fresh ``PipelineState`` + coerce CLI sentinels.
 
@@ -1873,6 +1876,7 @@ class DrivePipelineOrchestrator:
                 "lf_mode": lf_mode,
                 "superlong_enabled": superlong_enabled,
                 "superlong_publish_day": superlong_publish_day,
+                "gps_captions": gps_captions,
             },
             config=self.config,
         )

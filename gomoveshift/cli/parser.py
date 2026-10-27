@@ -529,7 +529,8 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "(overrides config.drive.superlong_publish_day / "
         "superlong_publish_day_by_region). Same vocabulary as --lf-day.",
     )
-    # Per-invocation (not persisted): a resume that omits it renders "off".
+    # Persisted in drive state (flag_registry sentinel): a resume that omits it keeps
+    # the saved choice; a differing value wins and is persisted.
     p.add_argument(
         "--gps-captions",
         dest="gps_captions",
