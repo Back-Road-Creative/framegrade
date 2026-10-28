@@ -43,12 +43,16 @@ from .encoding_constants import (
 from .ffmpeg_filters import (
     DEFAULT_CRF,
     DEFAULT_LUFS,
+    DEFAULT_OUTPUT_HEIGHT,
+    DEFAULT_OUTPUT_WIDTH,
     DEFAULT_PRESET,
+    _crop_size,
     build_crop_filter,
     build_ost_filter,
     get_video_dimensions,
     shorten_ost_for_shorts,
 )
+from .reframe import plan_tracked_crop
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +234,7 @@ def render_short_ffmpeg(
     skip_audio_norm: bool = False,
     skip_audio: bool = False,
     use_nvenc: Optional[bool] = None,
+    reframe: str = "center",
 ) -> bool:
     """
     Render a single short with center crop, OST, and optional audio normalization.
@@ -252,6 +257,9 @@ def render_short_ffmpeg(
         skip_audio_norm: Skip loudnorm filter (default False — always normalize
             since source audio is not always pre-normalized)
         use_nvenc: Use NVENC GPU encoding. None = auto-detect.
+        reframe: "center" (default, fixed centre crop) or "tracked" (opt-in:
+            the crop follows the road with a dead zone and a pan-speed cap;
+            see ``reframe.py``). Crop size and scaler are the same either way.
 
     Returns:
         True if rendering succeeded
@@ -268,8 +276,31 @@ def render_short_ffmpeg(
     if src_width is None or src_height is None:
         src_width, src_height = get_video_dimensions(source_video)
 
+    if reframe not in ("center", "tracked"):
+        raise ValueError(f"reframe must be 'center' or 'tracked', got {reframe!r}")
+    track = None
+    if reframe == "tracked":
+        try:
+            track = plan_tracked_crop(
+                source_video,
+                start_time,
+                duration,
+                src_width,
+                src_height,
+                _crop_size(src_width, src_height, DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT)[0],
+            )
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            logger.warning(
+                "tracked reframe unavailable for %s (%s) — using the centre crop",
+                output_path.name,
+                e,
+            )
+
     # Build filter chain: crop → OST
-    crop_filter = build_crop_filter(src_width, src_height)
+    if track is None:
+        crop_filter = build_crop_filter(src_width, src_height)
+    else:
+        crop_filter = build_crop_filter(src_width, src_height, track=track)
     ost_filter = build_ost_filter(location, subscribe_text, duration)
 
     video_filter = f"{crop_filter},{ost_filter}"
