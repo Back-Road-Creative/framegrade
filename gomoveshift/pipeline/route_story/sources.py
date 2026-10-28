@@ -40,6 +40,22 @@ _OSM_FILTERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("waterway", ("river", "stream")),
 )
 
+# The `highway` classes the bundle's road layer keeps. OSM defines `_link` ramps
+# only for the first five; service/track/path/footway/cycleway are left out on purpose.
+OSM_ROAD_CLASSES: tuple[str, ...] = (
+    "motorway",
+    "motorway_link",
+    "trunk",
+    "trunk_link",
+    "primary",
+    "primary_link",
+    "secondary",
+    "secondary_link",
+    "tertiary",
+    "tertiary_link",
+    "unclassified",
+    "residential",
+)
 
 DEM_3DEP_PROVENANCE_NAME = "USGS 3DEP DEM"
 # Bumped whenever ``_grid_plan`` changes what ground an ArcGIS export lands on;
@@ -485,6 +501,36 @@ def _osm_kind(tags: dict[str, str]) -> str | None:
     return None
 
 
+def _overpass_json(session: Any, query: str, endpoint: str | None) -> tuple[dict[str, Any], str]:
+    """Run ``query`` against the Overpass mirrors; return ``(payload, endpoint_used)``.
+
+    With no ``endpoint`` the service's own mirror list is tried in order: the
+    canonical Overpass host can refuse a client's IPv4 on 443, so a single
+    hard-coded host would make every OSM fetch fail on such a network. An
+    explicit ``endpoint`` is used alone.
+    """
+    headers = {"User-Agent": _OSM_USER_AGENT}
+    endpoints = (endpoint,) if endpoint else OVERPASS_ENDPOINTS
+    failures: list[str] = []
+    for candidate in endpoints:
+        try:
+            content = _request(
+                session,
+                "OpenStreetMap Overpass",
+                candidate,
+                {"data": query},
+                headers=headers,
+                timeout=OSM_QUERY_TIMEOUT_S,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            failures.append(f"{candidate}: {exc}")
+            continue
+        return json.loads(content), candidate
+    raise SourceFetchError(
+        "OpenStreetMap Overpass fetch failed at every endpoint: " + "; ".join(failures)
+    )
+
+
 def fetch_osm_labels(
     session: Any,
     bbox: tuple[float, float, float, float],
@@ -498,29 +544,7 @@ def fetch_osm_labels(
     hard-coded host would make every label fetch fail on such a network. An explicit ``endpoint`` is used alone.
     """
     _validate_bbox(bbox)
-    query = _osm_query(bbox)
-    headers = {"User-Agent": _OSM_USER_AGENT}
-    endpoints = (endpoint,) if endpoint else OVERPASS_ENDPOINTS
-    failures: list[str] = []
-    content = None
-    for candidate in endpoints:
-        try:
-            content = _request(
-                session,
-                "OpenStreetMap Overpass",
-                candidate,
-                {"data": query},
-                headers=headers,
-                timeout=OSM_QUERY_TIMEOUT_S,
-            )
-            break
-        except (OSError, RuntimeError, ValueError) as exc:
-            failures.append(f"{candidate}: {exc}")
-    if content is None:
-        raise SourceFetchError(
-            "OpenStreetMap Overpass fetch failed at every endpoint: " + "; ".join(failures)
-        )
-    payload = json.loads(content)
+    payload, _used = _overpass_json(session, _osm_query(bbox), endpoint)
     features = []
     for element in payload.get("elements", []):
         tags = element.get("tags") or {}
@@ -556,6 +580,65 @@ def fetch_osm_labels(
     provenance = SourceProvenance(
         name=OSM_PROVENANCE_NAME,
         url=endpoint,
+        licence="ODbL 1.0",
+        attribution="© OpenStreetMap contributors",
+        acquired="unknown",
+    )
+    return {"type": "FeatureCollection", "features": features, "provenance": provenance}
+
+
+def _osm_roads_query(bbox: tuple[float, float, float, float]) -> str:
+    west, south, east, north = bbox
+    pattern = "|".join(OSM_ROAD_CLASSES)
+    return (
+        f"[out:json][timeout:{OSM_SERVER_BUDGET_S}];\n"
+        f'way[highway~"^({pattern})$"]({south},{west},{north},{east});\n'
+        "out geom;"
+    )
+
+
+def fetch_osm_roads(
+    session: Any,
+    bbox: tuple[float, float, float, float],
+    *,
+    endpoint: str | None = None,
+) -> dict[str, Any]:
+    """Fetch the bbox's ``highway`` ways as a GeoJSON FeatureCollection of LineStrings.
+
+    Only the :data:`OSM_ROAD_CLASSES` are kept. A way with fewer than two
+    points is dropped, and features are sorted by ``osm_id`` so the bytes are
+    deterministic. Endpoint fallback and errors are those of
+    :func:`fetch_osm_labels`.
+    """
+    _validate_bbox(bbox)
+    payload, used = _overpass_json(session, _osm_roads_query(bbox), endpoint)
+    features = []
+    for element in payload.get("elements", []):
+        tags = element.get("tags") or {}
+        highway = tags.get("highway")
+        if element.get("type") != "way" or highway not in OSM_ROAD_CLASSES:
+            continue
+        coordinates = [
+            [point["lon"], point["lat"]]
+            for point in element.get("geometry") or []
+            if "lat" in point and "lon" in point
+        ]
+        if len(coordinates) < 2:
+            continue
+        properties: dict[str, Any] = {"highway": highway, "osm_id": element.get("id")}
+        if tags.get("name"):
+            properties["name"] = tags["name"]
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coordinates},
+                "properties": properties,
+            }
+        )
+    features.sort(key=lambda f: f["properties"]["osm_id"])
+    provenance = SourceProvenance(
+        name=OSM_PROVENANCE_NAME,
+        url=used,
         licence="ODbL 1.0",
         attribution="© OpenStreetMap contributors",
         acquired="unknown",

@@ -7,6 +7,7 @@ Bundle layout (shared verbatim with the fetch and scene code)::
     <bundle>/imagery/{z}/{x}/{y}.jpg        256px XYZ, Web Mercator
     <bundle>/terrain/{z}/{x}/{y}.png        256px Terrain-RGB (Mapbox encoding)
     <bundle>/labels.geojson
+    <bundle>/roads.geojson                  OSM highway LineStrings (schema /2 onward)
     <bundle>/route.geojson
     <bundle>/vendor/maplibre-gl-6.10.0/
 
@@ -30,7 +31,9 @@ from PIL import Image
 from ...paths import gms_route_story_cache_dir
 from .metrics import RoutePoint
 
-MANIFEST_SCHEMA = "route-story-bundle/1"
+MANIFEST_SCHEMA = "route-story-bundle/2"
+# /1 is the legacy layout without ``roads.geojson``; both stay verifiable.
+MANIFEST_SCHEMAS = ("route-story-bundle/1", MANIFEST_SCHEMA)
 TILE_SIZE = 256
 
 _EARTH_RADIUS_M = 6_371_008.8
@@ -420,10 +423,15 @@ def _sha256_file(path: Path) -> str:
 
 
 def write_manifest(root: Path, manifest_fields: dict) -> Path:
-    """Write ``manifest.json`` with a sha256 of every other file under root."""
+    """Write ``manifest.json`` with a sha256 of every other file under root.
+
+    The schema is the current one (``/2``) when ``manifest_fields`` carries the
+    ``roads`` block, else the legacy ``/1`` layout that has no road layer.
+    """
     root = Path(root)
     files = {str(p.relative_to(root).as_posix()): _sha256_file(p) for p in _iter_bundle_files(root)}
-    return rewrite_manifest(root, {**manifest_fields, "schema": MANIFEST_SCHEMA, "files": files})
+    schema = MANIFEST_SCHEMA if "roads" in manifest_fields else MANIFEST_SCHEMAS[0]
+    return rewrite_manifest(root, {**manifest_fields, "schema": schema, "files": files})
 
 
 def rewrite_manifest(root: Path, manifest: dict) -> Path:
@@ -455,7 +463,7 @@ def verify_bundle(root: Path) -> list[str]:
         return ["manifest.json is missing"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     problems: list[str] = []
-    if manifest.get("schema") != MANIFEST_SCHEMA:
+    if manifest.get("schema") not in MANIFEST_SCHEMAS:
         problems.append(f"unexpected schema: {manifest.get('schema')!r}")
     files: dict = manifest.get("files", {})
     on_disk = {p.relative_to(root).as_posix() for p in _iter_bundle_files(root)}
@@ -468,9 +476,21 @@ def verify_bundle(root: Path) -> list[str]:
             problems.append(f"checksum mismatch: {relpath}")
     for relpath in sorted(on_disk - set(files)):
         problems.append(f"extra file not in manifest: {relpath}")
+    if manifest.get("schema") == MANIFEST_SCHEMA:
+        problems.extend(_roads_layer_problems(root, manifest))
     problems.extend(_declared_zoom_problems(root, manifest))
     problems.extend(_imagery_extent_problems(manifest))
     problems.extend(_duplicate_route_feature_problems(root))
+    return problems
+
+
+def _roads_layer_problems(root: Path, manifest: dict) -> list[str]:
+    """Flag a /2 bundle that lacks its road layer or the manifest block describing it."""
+    problems: list[str] = []
+    if not (root / "roads.geojson").is_file():
+        problems.append("missing file: roads.geojson (required by schema /2)")
+    if not isinstance(manifest.get("roads"), dict):
+        problems.append("manifest has no roads block (required by schema /2)")
     return problems
 
 

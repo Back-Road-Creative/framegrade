@@ -84,7 +84,7 @@ def verify_receipt(path: Path, *, video_prober: VideoProber | None = None) -> Ve
     data = json.loads(path.read_text(encoding="utf-8"))
     schema = data.get("schema")
 
-    if schema == bundle_module.MANIFEST_SCHEMA:
+    if schema in bundle_module.MANIFEST_SCHEMAS:
         return _verify_bundle_manifest(path.parent)
     if schema == PROOF_RECEIPT_SCHEMA:
         return _verify_proof_receipt(data, video_prober=video_prober or _default_video_prober)
