@@ -252,7 +252,9 @@ def _bound_chapters(chapters: Sequence[dict], index: EvidenceIndex) -> list:
     """``(start_s, place, window)`` per chapter, bound to evidenced names.
 
     A generated title is decorated ("Start - X, Y", "Entering Z"), so its place
-    is the first evidenced name it says and its window every one it says. A
+    is the first evidenced name it says and its window every route place it
+    says: Waypost reads the window as retained-route places, so a region there
+    is refused as ``route_place_unknown``. A
     title naming none is dropped; consecutive chapters on one place collapse to
     the earliest. A list that no longer opens at 0:00 or is under three
     chapters is sent as none: chapter blocks are optional, a refusal is not."""
@@ -263,7 +265,8 @@ def _bound_chapters(chapters: Sequence[dict], index: EvidenceIndex) -> list:
             continue
         if bound and bound[-1][1] == named[0]:
             continue
-        bound.append((_seconds(c["timestamp"]), named[0], named))
+        window = [n for n in named if not index[_key(n)][0].startswith("region-")]
+        bound.append((_seconds(c["timestamp"]), named[0], window))
     if len(bound) < _MIN_CHAPTERS or bound[0][0] != 0:
         return []
     return bound
@@ -335,9 +338,11 @@ def attach_drive_text(route_entry: Optional[dict], metadata: dict, label: str, *
 
 def reattach_with_chapters(route_entry: Optional[dict], metadata: dict, chapters) -> dict:
     """Re-run :func:`attach_drive_text` with the LF's chapters, from the inputs
-    the first attach kept; a no-op for an LF that never attached."""
+    the first attach kept (chapters from an earlier reattach are replaced); a
+    no-op for an LF that never attached."""
     inputs = dict(metadata.get("drive_text_inputs") or {})
     if not inputs:
         return metadata
     label = inputs.pop("label")
+    inputs.pop("chapters", None)
     return attach_drive_text(route_entry, metadata, label, **inputs, chapters=list(chapters))
