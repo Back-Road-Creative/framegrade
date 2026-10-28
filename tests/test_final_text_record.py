@@ -186,6 +186,20 @@ class TestBuild:
         review = _metadata(state)["final_text_review"]
         assert review["verdict"] == "agree", review
 
+    def test_part_suffix_of_a_multi_lf_drive_agrees(self):
+        # title_builder appends " — Part N of M" to every LF of a split drive;
+        # the review must not read "Part" as an unbacked place name.
+        title = TITLE + " — Part 1 of 2"
+        review = _metadata(_state(), title=title)["final_text_review"]
+        assert review["verdict"] == "agree", review
+
+    def test_part_suffix_does_not_back_an_unknown_place(self):
+        state = _state(per_lf_ost_text={1: "Longmere to Pellmere, Westmark"})
+        title = "Longmere to Pellmere, Westmark in 4K — Part 2 of 2"
+        review = _metadata(state, title=title)["final_text_review"]
+        assert review["verdict"] != "agree"
+        assert "name_unbacked:title:part" not in review.get("reasons", [])
+
     def test_gps_less_lf_has_no_review(self):
         state = _state(per_lf_location_evidence=None, per_lf_route_record=None)
         assert _metadata(state)["final_text_review"] is None

@@ -28,6 +28,7 @@ from typing import Optional
 
 from seo_manager.analytics.drive_templates import LAYOUT as DRIVE_LAYOUT
 from seo_manager.analytics.final_text_review import (
+    DEFAULT_FILLER_WORDS,
     RECORD_VERSION,
     FinalTextPolicy,
     FinalTextReviewRefused,
@@ -77,7 +78,14 @@ logger = logging.getLogger(__name__)
 
 #: The GMS route-claim policy agreed with Waypost: a place needs a minute of
 #: retained footage; a region stands in for places only with full coverage.
-GMS_TEXT_POLICY = FinalTextPolicy("gms-route-claims-1", MIN_PLACE_S, REGION_MIN_COVERAGE)
+#: "part" is filler because title_builder appends " — Part N of M" to every LF
+#: of a split drive; without it every multi-LF title is refused as unbacked.
+GMS_TEXT_POLICY = FinalTextPolicy(
+    "gms-route-claims-2",
+    MIN_PLACE_S,
+    REGION_MIN_COVERAGE,
+    filler_words=(*DEFAULT_FILLER_WORDS, "part"),
+)
 
 _REGION_LEVELS = ("county", "state")
 
