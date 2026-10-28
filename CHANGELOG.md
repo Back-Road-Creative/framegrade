@@ -5,6 +5,28 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-10-28
+
+### Added
+
+- Regular long-form videos can carry a route-only map inset: one clip per video, rendered from an offline bundle and timed through the cut receipt (saved beside the concat as `<concat>.receipt.json`), composited in the existing OST encode and recorded in drive state. Not reachable until the `--map-inset` flags land; nothing changes when it is off.
+- `gomoveshift/pipeline/map_inset.py`: renders an opt-in, route-only corner map inset as an RGBA `.mov` overlay plus a JSON receipt, from an offline Route Story bundle (imagery with the recorded route and a position marker, no road vectors, no network). The marker follows the source clock through the edit timeline and hides during cuts, insert holds, crossfades and GPS gaps. Privacy trim and zones apply before any framing or drawing, and the render refuses, listing every reason, rather than write a partial clip.
+- `--map-inset roads` (`config.drive.map_inset = "roads"`): an opt-in third mode that renders like `route` and also draws the bundle's nearby roads under the route line, with the OpenStreetMap attribution on the credit strip. It refuses before any encode when the bundle has no usable road layer (missing file or manifest entry, degraded, or zero roads) and when no road lies in view. `route` and `off` are unchanged.
+- `--map-inset off|route` on the drive command (plus `--map-inset-bundle`, `--map-inset-trim-start-m`, `--map-inset-trim-end-m` and a repeatable `--map-inset-privacy-zone`): opt-in route-only map inset on regular long-form videos, rendered from an offline bundle and composited inside the existing OST encode. Off is unchanged. `route` refuses before any encode, listing every missing input (bundle, trim, GPS), and never falls back silently. The settings persist across a resume, are part of each long-form video's re-burn fingerprint, and the per-video inset receipt is recorded in drive state.
+- `apply_ost` takes an optional `map_inset` (`MapInsetOverlay`: an RGBA clip plus an x/y position). It is composited after the title and logo in the same encode, in explicit 10-bit formats so a 10-bit master keeps its gradients; the inset drops away when its clip ends. A missing clip is an error, never a silent encode without it. Without `map_inset` the ffmpeg command is unchanged.
+- Route Story map bundles now carry an offline road layer: `roads.geojson`, the OpenStreetMap `highway` ways (motorway through residential, plus link ramps) inside the route bbox, fetched through the existing Overpass mirror list and recorded in a manifest `roads` block with ODbL provenance. The bundle manifest schema is now `route-story-bundle/2`; `/1` bundles still verify. A failed or empty road fetch marks the layer degraded without failing the prepare, and a cached bundle with degraded roads re-fetches only its roads.
+
+### Changed
+
+- Pinned `keycut` to v0.2.0. The day-master cut now goes through keycut's `extract_and_concat_ranges_with_receipt` and checks the live assembly receipt with `load_receipt`; a receipt that fails validation makes `extract_and_concat_segments` log the failing field and return None, since a time mapping built from it would be wrong.
+- Pinned Waypost (`seo-manager`) to v0.4.0 (`97334eb`, Back-Road-Creative/waypost#94, #95). The final-text review accepts a town-less route (county and state regions only) instead of refusing it with `missing_field:route_places` and `region_claim_malformed`.
+
+### Fixed
+
+- A multi-part LF title ("… — Part 1 of 2") no longer refuses its final-text review: the GMS text policy (now `gms-route-claims-2`) counts "part" as filler. Reviews stored under the old policy go stale, so Phase D re-runs for pending LFs.
+- A chapter's `segment_places` cites only retained-route places. Region ids there refused the LF (`route_place_unknown:region-…`).
+- `reattach_with_chapters` on metadata that already carries chapters replaces them instead of raising `TypeError`.
+
 ## [0.3.12] - 2026-10-27
 
 ### Added
@@ -239,7 +261,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.13...HEAD
+[0.3.13]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.9...v0.3.10
