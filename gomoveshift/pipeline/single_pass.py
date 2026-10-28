@@ -55,7 +55,7 @@ from .color import (
     sample_frames,
     scale_range_token,
 )
-from .color_filters import cfr_filter
+from .color_filters import OUTPUT_FPS, cfr_filter, check_output_fps
 from .ffmpeg_filters import (
     BRAND_TEXT,
     FONT_PATH,
@@ -1168,6 +1168,7 @@ class SinglePassProcessor:
         source_range: str = "full",
         tonemap_filter: str = "",
         upscale_filter: str = "",
+        output_fps: str = OUTPUT_FPS,
     ) -> str:
         """
         Build the combined video filter chain:
@@ -1251,7 +1252,7 @@ class SinglePassProcessor:
 
         # 6. Explicit CFR conversion, last. See color_filters.cfr_filter for why
         #    this is a filter rather than the output-side -r, and why it is last.
-        filters.append(cfr_filter())
+        filters.append(cfr_filter(output_fps))
 
         return ",".join(filters)
 
@@ -1297,6 +1298,7 @@ class SinglePassProcessor:
         source_range: str = "full",
         tonemap_filter: str = "",
         upscale_filter: str = "",
+        output_fps: str = OUTPUT_FPS,
     ) -> str:
         """Privacy-blur ``filter_complex`` (input 0 = video, 1 = privacy mask).
 
@@ -1367,7 +1369,7 @@ class SinglePassProcessor:
         ]
         # CFR conversion rides the tail, strictly AFTER the composite — the
         # mask pairs 1:1 with SOURCE frames (see color_filters.cfr_filter).
-        tail.append(cfr_filter())
+        tail.append(cfr_filter(output_fps))
         overlay = f"overlay=format={BLUR_OVERLAY_FORMAT}"
         if tail:
             segs.append(f"[b1][bla]{overlay}[ov]")
@@ -1420,6 +1422,7 @@ class SinglePassProcessor:
         fps: float,
         use_nvenc: bool,
         source_bitrate_kbps: int = 0,
+        output_fps: str = OUTPUT_FPS,
     ) -> list[str]:
         """
         Build encoding args from frozen constants (no config overrides).
@@ -1430,6 +1433,7 @@ class SinglePassProcessor:
             fps,
             has_nvenc=use_nvenc,
             source_bitrate_kbps=source_bitrate_kbps,
+            output_fps=output_fps,
         )
 
     # ── Main Process Method ────────────────────────────────────────────
@@ -1521,6 +1525,7 @@ class SinglePassProcessor:
         font: Optional[str],
         filter_complex: Optional[str] = None,
         blur_mask_path: Optional[Path] = None,
+        output_fps: str = OUTPUT_FPS,
     ) -> SinglePassResult:
         """Assemble FFmpeg arguments and run the single-pass encode.
 
@@ -1546,6 +1551,7 @@ class SinglePassProcessor:
             fps,
             use_nvenc,
             source_bitrate_kbps=source_bitrate_kbps,
+            output_fps=output_fps,
         )
 
         # Remove -c:a copy and -movflags from enc_args — we set our own
@@ -1737,6 +1743,7 @@ class SinglePassProcessor:
         skip_audio: bool = False,
         video_info: Optional[dict] = None,
         blur_mask_path: Optional[Path] = None,
+        output_fps: str = OUTPUT_FPS,
     ) -> SinglePassResult:
         """
         Process video with combined color + OST + audio in a single encode.
@@ -1771,6 +1778,7 @@ class SinglePassProcessor:
         height = info["height"]
         width = info["width"]
         fps = info["fps"]
+        check_output_fps(output_fps, fps)
 
         if duration <= 0:
             return SinglePassResult(success=False)
@@ -1856,6 +1864,7 @@ class SinglePassProcessor:
                 skip_ost=skip_ost,
                 source_range=_scale_range_token(info.get("color_range", "")),
                 tonemap_filter=tonemap_filter,
+                output_fps=output_fps,
             )
             if plan is not None:
                 filter_kwargs["upscale_filter"] = plan.filter
@@ -1882,6 +1891,7 @@ class SinglePassProcessor:
                 font,
                 filter_complex=filter_complex,
                 blur_mask_path=blur_mask_path,
+                output_fps=output_fps,
             )
 
             if not result.success:
