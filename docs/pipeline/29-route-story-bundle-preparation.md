@@ -126,6 +126,25 @@ the ladder's coarsest, most orienting entries (`place`, `summit`, `gap`). The ma
 block also records `bbox` (the `naip_coarse` band bbox actually searched), so the receipt states the
 area labels came from.
 
+**Roads are an offline vector layer, fetched over the route bbox.** `prepare_bundle` makes one
+extra Overpass query per prepare, `fetch_osm_roads`, for the `highway` ways inside the route
+footprint (the route plus its focal margin, not the wider regional labels bbox), and writes them
+as `roads.geojson`: a FeatureCollection of `LineString` features
+`{highway, osm_id, name?}` sorted by `osm_id`, so a later map inset can draw nearby roads. Only the
+classes in `sources.OSM_ROAD_CLASSES` are kept (motorway through residential, plus the `_link`
+ramps OSM defines); service roads, tracks, paths and footways are not. The fetch shares
+`sources._overpass_json` (mirror fallback, user agent, timeout) with `fetch_osm_labels`. The
+manifest's `roads` block holds `bbox`, `count`, `degraded`, `problems` and a `provenance` string
+naming OpenStreetMap and ODbL 1.0. Films do not need roads, so a failed or empty fetch never fails
+the prepare: it writes an empty FeatureCollection and records `degraded: true` with the reason
+(`"roads: no highway ways in bbox"` for an empty answer, never silently fine). Manifest schema is
+now `route-story-bundle/2`; `verify_bundle` still accepts `/1`, and flags a `/2` bundle with no
+`roads.geojson` or no `roads` block. `ROADS_SOURCE_VERSION` is part of the cache address, so a
+pre-roads bundle is never a cache hit for the new layout and is re-prepared in full. A cache hit
+whose manifest records `roads.degraded` re-runs the road fetch alone over the recorded bbox
+(`prepare._repair_degraded_roads`) and rewrites `roads.geojson` and the manifest entry only when
+the retry is undegraded.
+
 The zoom ranges are chosen against each source's native resolution rather than picked: 3DEP is
 ~10 m/px so z13 (~15.6 m/px at this latitude) is the finest terrain zoom that fabricates no
 detail; NAIP at 2 m/px matches z15. **What the manifest declares comes from the write report, not

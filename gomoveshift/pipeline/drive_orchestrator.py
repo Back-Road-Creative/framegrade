@@ -747,6 +747,11 @@ class DrivePipelineOrchestrator:
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
         gps_captions: Optional[str] = None,
+        map_inset: Optional[str] = None,
+        map_inset_bundle: Optional[str] = None,
+        map_inset_trim_start_m: Optional[float] = None,
+        map_inset_trim_end_m: Optional[float] = None,
+        map_inset_privacy_zones: Optional[list] = None,
     ) -> DrivePipelineResult:
         """Execute the full Drive Pipeline (or a single phase).
 
@@ -977,6 +982,11 @@ class DrivePipelineOrchestrator:
                 superlong_enabled=superlong_enabled,
                 superlong_publish_day=superlong_publish_day,
                 gps_captions=gps_captions,
+                map_inset=map_inset,
+                map_inset_bundle=map_inset_bundle,
+                map_inset_trim_start_m=map_inset_trim_start_m,
+                map_inset_trim_end_m=map_inset_trim_end_m,
+                map_inset_privacy_zones=map_inset_privacy_zones,
             )
             stages_dir = stages_base
             if str(output_base).startswith("/mnt/"):
@@ -1806,6 +1816,11 @@ class DrivePipelineOrchestrator:
         superlong_enabled: Optional[bool] = None,
         superlong_publish_day: Optional[str] = None,
         gps_captions: Optional[str] = None,
+        map_inset: Optional[str] = None,
+        map_inset_bundle: Optional[str] = None,
+        map_inset_trim_start_m: Optional[float] = None,
+        map_inset_trim_end_m: Optional[float] = None,
+        map_inset_privacy_zones: Optional[list] = None,
     ) -> tuple[PipelineState, bool, bool, bool]:
         """Construct the fresh ``PipelineState`` + coerce CLI sentinels.
 
@@ -1877,6 +1892,11 @@ class DrivePipelineOrchestrator:
                 "superlong_enabled": superlong_enabled,
                 "superlong_publish_day": superlong_publish_day,
                 "gps_captions": gps_captions,
+                "map_inset": map_inset,
+                "map_inset_bundle": map_inset_bundle,
+                "map_inset_trim_start_m": map_inset_trim_start_m,
+                "map_inset_trim_end_m": map_inset_trim_end_m,
+                "map_inset_privacy_zones": map_inset_privacy_zones,
             },
             config=self.config,
         )

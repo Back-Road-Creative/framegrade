@@ -154,6 +154,16 @@ _DEFAULT_OVERPASS_ELEMENTS = [
 ]
 
 
+_DEFAULT_ROADS_ELEMENTS = [
+    {
+        "type": "way",
+        "id": 10,
+        "tags": {"highway": "residential", "name": "Test Road"},
+        "geometry": [{"lat": 35.26, "lon": -83.48}, {"lat": 35.261, "lon": -83.481}],
+    }
+]
+
+
 class FakeSession:
     """Answers 3DEP/NAIP/Overpass/GNIS calls by URL; records every request made.
 
@@ -170,6 +180,8 @@ class FakeSession:
         gnis_rows: list[str] | None = None,
         overpass_raises: bool = False,
         overpass_elements: list[dict] | None = None,
+        roads_elements: list[dict] | None = None,
+        roads_raises: bool = False,
         gibs_daily_cloudy: bool = False,
         # Well above `prepare.MIN_SHARED_BORDER_COVERAGE` by default so the
         # borders wiring is transparent to every pre-existing test that
@@ -185,6 +197,10 @@ class FakeSession:
         self.overpass_elements = (
             overpass_elements if overpass_elements is not None else _DEFAULT_OVERPASS_ELEMENTS
         )
+        self.roads_elements = (
+            roads_elements if roads_elements is not None else _DEFAULT_ROADS_ELEMENTS
+        )
+        self.roads_raises = roads_raises
         self.gibs_daily_cloudy = gibs_daily_cloudy
         self.borders_coverage_fraction = borders_coverage_fraction
         self.borders_raises = borders_raises
@@ -228,6 +244,10 @@ class FakeSession:
         if "prd-tnm.s3.amazonaws.com" in url:
             return FakeResponse(_gnis_zip_bytes(self.gnis_rows))
         if "overpass" in url:
+            if "way[highway" in params["data"]:
+                if self.overpass_raises or self.roads_raises:
+                    raise RuntimeError("simulated Overpass roads outage")
+                return FakeResponse(json.dumps({"elements": self.roads_elements}).encode())
             if self.overpass_raises:
                 raise RuntimeError("simulated Overpass outage")
             return FakeResponse(json.dumps({"elements": self.overpass_elements}).encode())
@@ -497,7 +517,10 @@ def test_prepare_bundle_falls_back_to_copernicus_on_dem_coverage_error(
 def test_prepare_bundle_single_overpass_query(_default_run: _PreparedRun) -> None:
     session = _default_run.session
     overpass_calls = [c for c in session.calls if "overpass" in c["url"]]
-    assert len(overpass_calls) == 1
+    # One label query and one road query, each fetched exactly once.
+    roads_calls = [c for c in overpass_calls if "way[highway" in c["params"]["data"]]
+    assert len(overpass_calls) == 2
+    assert len(roads_calls) == 1
 
 
 def test_prepare_bundle_is_idempotent_and_skips_refetch(
@@ -855,7 +878,12 @@ def test_prepare_bundle_fetches_labels_over_the_naip_coarse_band_bbox(
     west, south, east, north = naip_coarse_bbox
     expected_clause = f"({south},{west},{north},{east})"
 
-    overpass_calls = [c for c in session.calls if "overpass" in c["url"]]
+    # Road queries use the (tighter) route bbox; see test_route_story_roads.
+    overpass_calls = [
+        c
+        for c in session.calls
+        if "overpass" in c["url"] and "way[highway" not in c["params"]["data"]
+    ]
     assert overpass_calls
     for call in overpass_calls:
         assert expected_clause in call["params"]["data"]

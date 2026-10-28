@@ -976,6 +976,11 @@ def _cmd_drive_impl(args, config):
             superlong_enabled=getattr(args, "superlong_enabled", None),
             superlong_publish_day=getattr(args, "superlong_publish_day", None),
             gps_captions=getattr(args, "gps_captions", None),
+            map_inset=getattr(args, "map_inset", None),
+            map_inset_bundle=getattr(args, "map_inset_bundle", None),
+            map_inset_trim_start_m=getattr(args, "map_inset_trim_start_m", None),
+            map_inset_trim_end_m=getattr(args, "map_inset_trim_end_m", None),
+            map_inset_privacy_zones=getattr(args, "map_inset_privacy_zones", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The
