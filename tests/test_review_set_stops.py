@@ -212,6 +212,7 @@ def test_deterministic_output(tmp_path):
 
 
 def test_default_path_untouched():
-    # Library only: importing the module registers nothing on the CLI.
-    parser = Path(__file__).parent.parent / "gomoveshift" / "cli" / "parser.py"
-    assert "review-set" not in parser.read_text(encoding="utf-8")
+    # The library stays independent of the CLI that now wraps it (review-set stops).
+    src = Path(__file__).parent.parent / "gomoveshift" / "pipeline" / "review_set_stops.py"
+    assert "gomoveshift.cli" not in src.read_text(encoding="utf-8")
+    assert "from ..cli" not in src.read_text(encoding="utf-8")
