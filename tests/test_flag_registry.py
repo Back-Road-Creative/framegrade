@@ -99,6 +99,9 @@ _VALUE_SAMPLES = {  # non-bool sentinel rows: (cli_value, saved_value)
     "map_inset_trim_start_m": (100.0, 200.0),
     "map_inset_trim_end_m": (100.0, 200.0),
     "map_inset_privacy_zones": (["1,2,3"], ["4,5,6"]),
+    "short_reframe": ("tracked", "center"),
+    "output_cadence": ("source", "fixed"),
+    "insert_still_motion": ("push_in", "none"),
 }
 _VALUE_RULES = [r for r in _MERGED_RULES if r.state_field in _VALUE_SAMPLES]
 assert len(_BOOL_RULES) + len(_VALUE_RULES) == len(_MERGED_RULES)

@@ -72,6 +72,7 @@ from ..config import resolve_lf_mode
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
+from .color_filters import cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
@@ -130,6 +131,7 @@ from .short_planner import (
     DEFAULT_TARGET_DURATION_SEC,
     plan_shorts,
 )
+from .shorts_extractor import reframe_kwargs
 from .shorts_extractor import render_short_ffmpeg as _render_short_ffmpeg
 from .social_generator import assert_day_title_stamps
 from .stop_mask import (
@@ -811,6 +813,7 @@ def _render_day_shorts(
     state=None,
     stop_mask=None,
     short_route_fn: Optional[Callable] = None,
+    reframe: str = "center",
 ) -> tuple:
     """Extract + OST-burn every planned short for one day (Step 5).
 
@@ -1296,6 +1299,7 @@ def _render_day_shorts(
             start_time=float(short_range.start_sec),
             duration=float(short_duration),
             location=short_ost_text,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         if not rendered_ok:
             logger.warning(
@@ -1770,6 +1774,7 @@ def _produce_superlong_parts(
             lower_third_duration_sec=lt_duration_sec,
             lower_third_min_gap_sec=lt_min_gap_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
         )
         if ost_result is None:
             raise RuntimeError(f"Superlong OST failed: day {date} part {part.part_index}")
@@ -2623,6 +2628,7 @@ def run_day_pipeline(
             montage_duration=montage_duration,
             crossfade_sec=ost_crossfade_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
             **(
                 {}
                 if _lf_cards is None
@@ -2893,6 +2899,7 @@ def run_day_pipeline(
         short_route_fn=short_route_fn,
         state=state,
         stop_mask=stop_mask,
+        **reframe_kwargs(config),
     )
 
     logger.info(

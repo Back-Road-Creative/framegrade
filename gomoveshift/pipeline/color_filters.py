@@ -49,6 +49,23 @@ def source_output_fps(source_fps: float) -> str:
     )
 
 
+def resolve_output_fps(output_fps: str, source_fps: float) -> str:
+    """Turn the ``"source"`` cadence request into the probed source's supported rate.
+
+    Anything else passes through untouched, so the default path never consults the source.
+    """
+    return source_output_fps(source_fps) if output_fps == "source" else output_fps
+
+
+def cadence_kwargs(config) -> dict:
+    """``{"output_fps": "source"}`` when ``--output-cadence source`` is on, else ``{}``.
+
+    Empty by default so every encode call site receives exactly what it did before.
+    """
+    drive = getattr(config, "drive", None)
+    return {"output_fps": "source"} if getattr(drive, "output_cadence", "fixed") == "source" else {}
+
+
 def check_output_fps(output_fps: str, source_fps: float) -> str:
     """Validate an output rate: the default, or exactly the probed source rate."""
     _check_supported(output_fps)

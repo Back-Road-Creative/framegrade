@@ -18,3 +18,7 @@ By default every long-form master is published at the frozen 29.97 cadence (`OUT
 ## Verification
 
 `tests/test_source_cadence.py` encodes a synthetic 59.94 fps lavfi clip with real ffmpeg: the default gives `r_frame_rate` 30000/1001 and half the frames; source mode gives 60000/1001 and every source frame.
+
+## Turning it on
+
+`gomoveshift drive ... --output-cadence source` (config `drive.output_cadence`, default `fixed`) makes the day-master encode and the long-form and superlong OST burns keep the probed source rate instead of the frozen 29.97. `resolve_output_fps` turns the request into the supported rate string at the encode, so a source that is not 29.97, 30, 59.94 or 60 fps stops with the "no supported output rate" error before the encode starts; nothing is resampled. `fixed` (or omitting the flag) passes no `output_fps` and leaves every argv as it is. Shorts and inserts are not part of this option. The flag is a resume sentinel: a resume that leaves it out keeps the first run's choice.

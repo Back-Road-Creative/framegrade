@@ -43,6 +43,7 @@ from .cache import (
     save_cache_json,
 )
 from .color_correction import GRADE_ALGO_VERSION
+from .color_filters import cadence_kwargs
 from .ffmpeg_runner import check_disk_space, run_ffmpeg_retry_enomem
 
 logger = logging.getLogger(__name__)
@@ -1663,6 +1664,7 @@ def encode_day_master(
             # LF too" switch. Shorts are always muted regardless.
             skip_audio=bool(cfg.drive.skip_audio),
             blur_mask_path=blur_mask_path,
+            **cadence_kwargs(cfg),
         )
     except Exception as e:
         logger.error("  Day %s master encode raised: %s", date, e)

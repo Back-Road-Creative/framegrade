@@ -55,7 +55,7 @@ from .color import (
     sample_frames,
     scale_range_token,
 )
-from .color_filters import OUTPUT_FPS, cfr_filter, check_output_fps
+from .color_filters import OUTPUT_FPS, cfr_filter, check_output_fps, resolve_output_fps
 from .ffmpeg_filters import (
     BRAND_TEXT,
     FONT_PATH,
@@ -1778,6 +1778,7 @@ class SinglePassProcessor:
         height = info["height"]
         width = info["width"]
         fps = info["fps"]
+        output_fps = resolve_output_fps(output_fps, fps)
         check_output_fps(output_fps, fps)
 
         if duration <= 0:

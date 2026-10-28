@@ -219,6 +219,15 @@ def _probe_video_stream_duration(path: Path) -> float:
         return 0.0
 
 
+def reframe_kwargs(config) -> dict:
+    """``{"reframe": "tracked"}`` when ``--short-reframe tracked`` is on, else ``{}``.
+
+    Empty by default so every short render call receives exactly what it did before.
+    """
+    mode = getattr(getattr(config, "drive", None), "short_reframe", "center")
+    return {} if mode == "center" else {"reframe": mode}
+
+
 def render_short_ffmpeg(
     source_video: Path,
     output_path: Path,
@@ -566,6 +575,7 @@ def render_shorts_batched(
     max_workers: int = 3,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    reframe: str = "center",
 ) -> dict[int, bool]:
     """
     Batch-render shorts using a two-phase approach to reduce source reads.
@@ -596,6 +606,7 @@ def render_shorts_batched(
         max_workers: Parallel encode workers
         batch_size: Not used in current impl (kept for API compatibility)
         progress_callback: Optional callback(completed_count, total_count)
+        reframe: 9:16 crop placement forwarded to ``render_short_ffmpeg``
 
     Returns:
         Dict mapping short index -> success (True/False)
@@ -716,6 +727,7 @@ def render_shorts_batched(
             src_height=src_height,
             use_nvenc=use_nvenc,
             skip_audio=skip_audio,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         return idx, success
 
@@ -1158,6 +1170,7 @@ class PipelineShortsExtractor:
                     skip_audio=self.config.drive.skip_audio,
                     max_workers=effective_workers,
                     progress_callback=_batch_progress,
+                    **reframe_kwargs(self.config),
                 )
             except Exception as e:
                 logger.warning(f"Batched rendering failed ({e}), falling back to individual")
@@ -1225,6 +1238,7 @@ class PipelineShortsExtractor:
                     src_height=src_height,
                     use_nvenc=use_nvenc,
                     skip_audio=self.config.drive.skip_audio,
+                    **reframe_kwargs(self.config),
                 )
                 if success:
                     # Persist the burned-OST fingerprint (see batched path).

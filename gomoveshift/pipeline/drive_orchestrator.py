@@ -752,6 +752,9 @@ class DrivePipelineOrchestrator:
         map_inset_trim_start_m: Optional[float] = None,
         map_inset_trim_end_m: Optional[float] = None,
         map_inset_privacy_zones: Optional[list] = None,
+        short_reframe: Optional[str] = None,
+        output_cadence: Optional[str] = None,
+        insert_still_motion: Optional[str] = None,
     ) -> DrivePipelineResult:
         """Execute the full Drive Pipeline (or a single phase).
 
@@ -987,6 +990,9 @@ class DrivePipelineOrchestrator:
                 map_inset_trim_start_m=map_inset_trim_start_m,
                 map_inset_trim_end_m=map_inset_trim_end_m,
                 map_inset_privacy_zones=map_inset_privacy_zones,
+                short_reframe=short_reframe,
+                output_cadence=output_cadence,
+                insert_still_motion=insert_still_motion,
             )
             stages_dir = stages_base
             if str(output_base).startswith("/mnt/"):
@@ -1821,6 +1827,9 @@ class DrivePipelineOrchestrator:
         map_inset_trim_start_m: Optional[float] = None,
         map_inset_trim_end_m: Optional[float] = None,
         map_inset_privacy_zones: Optional[list] = None,
+        short_reframe: Optional[str] = None,
+        output_cadence: Optional[str] = None,
+        insert_still_motion: Optional[str] = None,
     ) -> tuple[PipelineState, bool, bool, bool]:
         """Construct the fresh ``PipelineState`` + coerce CLI sentinels.
 
@@ -1897,6 +1906,9 @@ class DrivePipelineOrchestrator:
                 "map_inset_trim_start_m": map_inset_trim_start_m,
                 "map_inset_trim_end_m": map_inset_trim_end_m,
                 "map_inset_privacy_zones": map_inset_privacy_zones,
+                "short_reframe": short_reframe,
+                "output_cadence": output_cadence,
+                "insert_still_motion": insert_still_motion,
             },
             config=self.config,
         )
