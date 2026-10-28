@@ -100,6 +100,7 @@ class MapInsetInputs:
     trim: object  # RouteTrim
     zones: list  # list[PrivacyZone]
     signature: str  # stable hash of the options + bundle manifest + route
+    roads: bool = False  # ``--map-inset roads``: draw the bundle's road layer too
 
 
 def day_route_segments(day_points) -> list:
@@ -125,14 +126,55 @@ def day_route_segments(day_points) -> list:
     return [s for s in segments if len(s) >= 2]
 
 
+def _road_layer_check(bundle: Path) -> tuple[list[str], str]:
+    """Why a bundle cannot supply the road layer (every reason), plus the
+    sha256 of ``roads.geojson`` (empty when unreadable)."""
+    reasons: list[str] = []
+    digest = ""
+    roads_path = bundle / "roads.geojson"
+    if not roads_path.is_file():
+        reasons.append(f"map bundle {bundle} has no roads.geojson")
+    try:
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        manifest = None  # the manifest problem is already listed
+    meta = manifest.get("roads") if isinstance(manifest, dict) else None
+    if isinstance(manifest, dict) and not isinstance(meta, dict):
+        reasons.append(f"map bundle {bundle} has no roads entry in its manifest")
+    if isinstance(meta, dict) and meta.get("degraded"):
+        problems = "; ".join(str(p) for p in meta.get("problems") or []) or "none recorded"
+        reasons.append(f"map bundle {bundle} road layer is degraded ({problems})")
+    if roads_path.is_file():
+        raw = roads_path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        try:
+            features = json.loads(raw).get("features") or []
+        except (ValueError, AttributeError):
+            features = []
+            reasons.append(f"map bundle {bundle} roads.geojson cannot be read")
+        else:
+            lines = [
+                f
+                for f in features
+                if isinstance(f, dict)
+                and (f.get("geometry") or {}).get("type") == "LineString"
+                and len((f.get("geometry") or {}).get("coordinates") or []) >= 2
+            ]
+            if not lines:
+                reasons.append(f"map bundle {bundle} roads.geojson has zero road features")
+    return reasons, digest
+
+
 def map_inset_inputs(drive, day_points, *, date: str = "") -> MapInsetInputs:
-    """Validate ``--map-inset route`` inputs; one :class:`RouteClaimRefusedError`
+    """Validate ``--map-inset route|roads`` inputs; one :class:`RouteClaimRefusedError`
     lists EVERY missing input and says nothing was encoded (never a silent
     fallback to no inset, never a partial overlay)."""
 
     from gomoveshift.pipeline.route_story.route_privacy import RouteTrim
 
     reasons: list[str] = []
+    mode = "roads" if getattr(drive, "map_inset", "route") == "roads" else "route"
+    roads_digest = ""
     bundle_raw = getattr(drive, "map_inset_bundle", None)
     bundle = Path(bundle_raw) if bundle_raw else None
     manifest_sha = ""
@@ -150,6 +192,9 @@ def map_inset_inputs(drive, day_points, *, date: str = "") -> MapInsetInputs:
         reasons.extend(f"map bundle {bundle}: {p}" for p in problems)
         if not problems:
             manifest_sha = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+        if mode == "roads":
+            road_reasons, roads_digest = _road_layer_check(bundle)
+            reasons.extend(road_reasons)
     start = float(getattr(drive, "map_inset_trim_start_m", 0.0) or 0.0)
     end = float(getattr(drive, "map_inset_trim_end_m", 0.0) or 0.0)
     if not (start > 0 and end > 0):
@@ -168,24 +213,23 @@ def map_inset_inputs(drive, day_points, *, date: str = "") -> MapInsetInputs:
         reasons.append(f"no usable GPS trace for day {date or '(unknown)'}")
     if reasons:
         raise RouteClaimRefusedError(
-            "map inset requested (--map-inset route) but cannot be drawn; nothing was "
+            f"map inset requested (--map-inset {mode}) but cannot be drawn; nothing was "
             "encoded. Render without --map-inset, or fix: " + "; ".join(reasons)
         )
     trim = RouteTrim(start_m=start, end_m=end)
-    signature = hashlib.sha256(
-        json.dumps(
-            {
-                "mode": "route",
-                "bundle_manifest_sha256": manifest_sha,
-                "trim": [start, end],
-                "zones": sorted([z.center_lat, z.center_lon, z.radius_m] for z in zones),
-                "layout": ["bottom-left", 0.20],
-                "route": [[(p.time_s, p.latitude, p.longitude) for p in s] for s in segments],
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
-    return MapInsetInputs(bundle, segments, trim, zones, signature)
+    signed = {
+        "mode": "route",
+        "bundle_manifest_sha256": manifest_sha,
+        "trim": [start, end],
+        "zones": sorted([z.center_lat, z.center_lon, z.radius_m] for z in zones),
+        "layout": ["bottom-left", 0.20],
+        "route": [[(p.time_s, p.latitude, p.longitude) for p in s] for s in segments],
+    }
+    if mode == "roads":  # route-mode signatures stay byte-identical
+        signed["mode"] = "roads"
+        signed["roads_sha256"] = roads_digest
+    signature = hashlib.sha256(json.dumps(signed, sort_keys=True).encode()).hexdigest()
+    return MapInsetInputs(bundle, segments, trim, zones, signature, roads=mode == "roads")
 
 
 @dataclass

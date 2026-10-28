@@ -256,6 +256,24 @@ def test_decorated_titles_bind_to_the_evidenced_place():
     assert "Fort Fremont" in text and "Entering" not in text
 
 
+def test_chapter_window_cites_route_places_not_regions():
+    # Waypost reads a chapter's segment_places as retained-route places; a
+    # region id there refuses the LF (route_place_unknown).
+    meta = _attach(
+        _chapters(
+            ("0:00", "Start - Longwood, Beaufort County, South Carolina"),
+            ("2:00", "Entering Fort Fremont, Beaufort County"),
+            ("4:00", "Finish - Lands End, South Carolina"),
+        )
+    )
+    route_ids = {p["evidence_id"] for p in _ROUTE["record"]["places"]}
+    windows = [
+        e["segment_places"] for e in meta["final_text_description"] if e.get("kind") == "chapter"
+    ]
+    assert len(windows) == 3
+    assert all(w and set(w) <= route_ids for w in windows), windows
+
+
 def test_unevidenced_chapter_is_dropped_not_refused():
     from gomoveshift.pipeline.drive_text_adapter import evidence_index, lf_drive_facts
 
@@ -316,3 +334,13 @@ def test_reattach_with_real_titles_does_not_refuse():
     reattach_with_chapters(_ROUTE, meta, chapters)
     assert "drive_text_refusal" not in meta
     assert meta["final_text_description"]
+
+
+def test_reattach_replaces_chapters_already_attached():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text, reattach_with_chapters
+
+    meta = attach_drive_text(_ROUTE, {}, "Longwood", final_seconds=600.0)
+    chapters = [{"timestamp": f"{i}:00", "title": t} for i, t in enumerate(_REAL_TITLES)]
+    reattach_with_chapters(_ROUTE, meta, chapters)
+    reattach_with_chapters(_ROUTE, meta, chapters[:3])
+    assert meta["drive_text_inputs"]["chapters"] == chapters[:3]
