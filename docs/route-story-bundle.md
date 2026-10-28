@@ -13,6 +13,7 @@ job of the scene package (`route_story/scene/vendor.py`).
 <bundle>/imagery/{z}/{x}/{y}.jpg        256px XYZ tiles, Web Mercator, y down from north
 <bundle>/terrain/{z}/{x}/{y}.png        256px Terrain-RGB (Mapbox encoding)
 <bundle>/labels.geojson                 FeatureCollection of Point features {name, kind, source}
+<bundle>/roads.geojson                  FeatureCollection of OSM highway LineStrings {highway, osm_id, name?} (schema /2)
 <bundle>/route.geojson                  FeatureCollection of LineString segments
 <bundle>/vendor/maplibre-gl-6.10.0/     maplibre-gl.js, maplibre-gl.css (written by the scene package)
 ```
@@ -44,11 +45,13 @@ steps.
   deterministic: sorted iteration order, fixed encoder parameters, no
   embedded timestamps.
 - `write_manifest(root, manifest_fields)` writes `manifest.json` (schema
-  `"route-story-bundle/1"`) with a sha256 of every other file under `root`,
+  `"route-story-bundle/2"`) with a sha256 of every other file under `root`,
   sorted keys, UTF-8, trailing newline — identical inputs give byte-identical
   manifests. `verify_bundle(root)` returns a list of problems: a missing
   manifest, a missing/checksummed-wrong file, an extra file not in the
-  manifest, or a schema mismatch. An empty list means the bundle is intact.
+  manifest, or a schema mismatch. Schemas `/1` (legacy, no road layer) and `/2`
+  are both accepted (`MANIFEST_SCHEMAS`); a `/2` manifest must also carry a
+  `roads` block and a `roads.geojson` file. An empty list means the bundle is intact.
 - `bundle_dir_for(footprint, source_versions)` returns the content-addressed
   cache directory (first 16 hex chars of a sha256 over the footprint rounded
   to 1e-6 and the sorted source versions) under
