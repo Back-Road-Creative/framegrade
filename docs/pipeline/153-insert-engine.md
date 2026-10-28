@@ -16,9 +16,15 @@
 
 Under a still the LF's own track (already attenuated by the loudness pass) is kept; no new gain is applied. Under a clip the LF audio is muted for the span and the clip's own audio plays.
 
+## Still motion
+
+`plan_inserts(..., still_motion="none"|"push_in")`. `"none"` (default) is the single static card looped by ffmpeg: card bytes and encode argv are unchanged. `"push_in"` renders one card per output frame of the hold (`round(hold_s * lf_fps)`, at least 2) through `route_story.hud.still_card_frame(still, w, h, progress)` with `progress` running 0.0 to 1.0, then feeds the `insert_NN_card_%04d.png` sequence to the encode as an image-sequence input (`-framerate <lf_fps> -i pattern`, no `-loop`). The card recipe applies its own smoothstep, so the scale grows monotonically from 1.0x to the existing `STILL_PUSH_IN_MAX_SCALE` (1.06) and no further; there is no second easing or maximum. `InsertPlan.card_frames` is the frame count (0 for a static card).
+
+Why pre-rendered frames rather than an ffmpeg `zoompan`/`scale` expression: the card is the full still recipe (full-bleed or blurred backdrop plus foreground, letterbox canvas), so rendering it per frame reuses it exactly and cannot drift from the static card; an ffmpeg-side zoom would re-implement the backdrop composite. The cost is about `hold_s * fps` PIL resizes per still (a 4 s hold at 30 fps is 120 cards) written to the work dir, paid at plan time, before any encode; the encode itself only decodes PNGs. Hard cuts, keyframe alignment and the LF audio under a still are unchanged: only the overlay input differs.
+
 ## Upscale record
 
-A clip is fitted to the LF frame through `quality.upscale_plan(w, h, rendition, policy)`, with the rendition's size set to the LF's. When the plan is not `None` the clip is an upscale: `InsertPlan.upscaled_from = [w, h]`, `scaler_filter` begins with the `zscale` chain, and the result repeats the source size.
+A clip is fitted to the LF frame through `quality.upscale_plan(w, h, rendition, policy)`, with the rendition's size set to the LF's. When the plan is not `None` the clip is an upscale: `InsertPlan.upscaled_from = [w, h]`, `scaler_filter` begins with the `zscale` chain, and the result repeats the source size. The plan also exposes `InsertPlan.upscaled` (bool) and `upscale_factor`, the linear cover-fit growth `max(lf_w / w, lf_h / h)` (1.0 and `False` for a clip already at or above the LF frame, and for every still), so no caller can claim native resolution for an upscaled clip. Clip audio mixing is unchanged.
 
 ## GPS anchoring
 

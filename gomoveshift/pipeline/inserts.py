@@ -42,6 +42,7 @@ from .route_story.metrics import RoutePoint
 logger = logging.getLogger(__name__)
 
 STYLES = ("full", "letterbox")
+STILL_MOTIONS = ("none", "push_in")
 STILL_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic"}
 
 
@@ -84,6 +85,12 @@ class InsertPlan:
     upscaled_from: Optional[list[int]] = None
     lf_fps: float = 30.0
     lf_duration: float = 0.0
+    # Clip fit disclosure: ``upscale_factor`` is the linear cover-fit growth of the
+    # clip into the LF frame (1.0 when native or larger), ``upscaled`` is True iff > 1.
+    upscaled: bool = False
+    upscale_factor: float = 1.0
+    # Push-in stills: ``card_path`` is then a ``%04d`` frame pattern of this many frames.
+    card_frames: int = 0
 
 
 @dataclass(frozen=True)
@@ -291,11 +298,18 @@ def _load_still_default(path: Path) -> Image.Image:
     return hud._load_still(path)
 
 
-def _render_card(still: Image.Image, width: int, height: int, style: str) -> Image.Image:
+def _render_card(
+    still: Image.Image, width: int, height: int, style: str, progress: float = 0.0
+) -> Image.Image:
+    """The still card at ``progress`` through the hold (0.0 = the static card).
+
+    ``still_card_frame`` applies its own smoothstep to ``progress``, so callers
+    pass the linear fraction.
+    """
     from .route_story.hud import still_card_frame
 
     if style == "full":
-        return still_card_frame(still, width, height, 0.0)
+        return still_card_frame(still, width, height, progress)
     scale = min(width / still.width, height / still.height)
     fitted = still.resize(
         (max(1, round(still.width * scale)), max(1, round(still.height * scale))),
@@ -303,7 +317,21 @@ def _render_card(still: Image.Image, width: int, height: int, style: str) -> Ima
     )
     canvas = Image.new("RGB", (width, height), (0, 0, 0))
     canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
-    return still_card_frame(canvas, width, height, 0.0)
+    return still_card_frame(canvas, width, height, progress)
+
+
+def _render_push_in_frames(
+    still: Image.Image, width: int, height: int, style: str, hold_s: float, fps: float, out: Path
+) -> int:
+    """Write one card per output frame of the hold to ``out`` (a ``%04d`` pattern).
+
+    Progress runs 0.0 -> 1.0 linearly; the card recipe eases it, so the scale
+    grows monotonically up to ``STILL_PUSH_IN_MAX_SCALE`` and no further.
+    """
+    n = max(2, round(hold_s * fps))
+    for k in range(n):
+        _render_card(still, width, height, style, k / (n - 1)).save(Path(str(out) % (k + 1)))
+    return n
 
 
 def plan_inserts(
@@ -317,8 +345,13 @@ def plan_inserts(
     load_still: Callable[[Path], Image.Image] = _load_still_default,
     work_dir: Path,
     gate: Optional[InsertGate] = None,
+    still_motion: str = "none",
 ) -> list[InsertPlan]:
     """Plan every insert; raises before any encode (bad style, refused upscale).
+
+    ``still_motion="push_in"`` renders each still as a frame sequence (one card
+    per output frame) pushing in across the hold; the default ``"none"`` keeps
+    the single static card and the unchanged encode.
 
     With a ``gate`` every insert first passes the county, blur and GPS-strip
     gates (:func:`gate_inserts`) and a still is drawn from its gated copy.
@@ -327,6 +360,8 @@ def plan_inserts(
     not ``GOP_DURATION_SEC`` arithmetic: encoders add scene-cut keyframes, so a
     fixed grid can name a time that is not a keyframe and break the stream copy.
     """
+    if still_motion not in STILL_MOTIONS:
+        raise ValueError(f"still_motion must be one of {STILL_MOTIONS}, got {still_motion!r}")
     for ins in inserts:
         if ins.style not in STYLES:
             raise ValueError(f"insert style must be one of {STYLES}, got {ins.style!r}")
@@ -340,18 +375,25 @@ def plan_inserts(
     target = replace(rendition, width=lf.width, height=lf.height)
     plans: list[InsertPlan] = []
     for i, ins in enumerate(sorted(inserts, key=lambda x: x.at_s)):
-        card_path, flt, up = None, "", None
+        card_path, flt, up, frames, factor = None, "", None, 0, 1.0
         if Path(ins.media).suffix.lower() in STILL_SUFFIXES:
             kind, dur = "still", float(ins.hold_s)
-            card = _render_card(load_still(ins.media), lf.width, lf.height, ins.style)
-            card_path = work_dir / f"insert_{i:02d}_card.png"
-            card.save(card_path)
+            if still_motion == "push_in":
+                card_path = work_dir / f"insert_{i:02d}_card_%04d.png"
+                frames = _render_push_in_frames(
+                    load_still(ins.media), lf.width, lf.height, ins.style, dur, lf.fps, card_path
+                )
+            else:
+                card = _render_card(load_still(ins.media), lf.width, lf.height, ins.style)
+                card_path = work_dir / f"insert_{i:02d}_card.png"
+                card.save(card_path)
         else:
             kind, m = "clip", probe(ins.media)
             dur = m.duration
             up_plan = upscale_plan(m.width, m.height, target, profile.upscale)
             if up_plan is not None:
                 flt, up = up_plan.filter, list(up_plan.source)
+                factor = max(lf.width / m.width, lf.height / m.height)
             else:
                 flt = (
                     f"scale={lf.width}:{lf.height}:force_original_aspect_ratio=increase,"
@@ -361,8 +403,11 @@ def plan_inserts(
         if plans and cut_in < plans[-1].cut_out:
             raise InsertError(f"insert at {ins.at_s}s shares a GOP with the previous insert")
         plans.append(
-            InsertPlan(ins, kind, cut_in, cut_out, dur, card_path, flt, up, lf.fps, lf.duration)
-        )
+            InsertPlan(
+                ins, kind, cut_in, cut_out, dur, card_path, flt, up, lf.fps, lf.duration,
+                upscaled=up is not None, upscale_factor=factor, card_frames=frames,
+            )
+        )  # fmt: skip
     return plans
 
 
@@ -372,8 +417,11 @@ def _encode_argv(lf_path: Path, plan: InsertPlan, out: Path) -> list[str]:
     window = f"enable='between(t,{a:.3f},{b:.3f})'"
     argv = ["ffmpeg", "-y", "-ss", f"{plan.cut_in}", "-to", f"{plan.cut_out}", "-i", str(lf_path)]
     if plan.kind == "still":
-        argv += ["-loop", "1", "-framerate", f"{plan.lf_fps}", "-t", f"{plan.duration}", "-i"]
-        argv += [str(plan.card_path)]
+        if plan.card_frames:  # push-in: one card per output frame, no loop
+            argv += ["-framerate", f"{plan.lf_fps}", "-i", str(plan.card_path)]
+        else:
+            argv += ["-loop", "1", "-framerate", f"{plan.lf_fps}", "-t", f"{plan.duration}", "-i"]
+            argv += [str(plan.card_path)]
         graph = (
             f"[1:v]setpts=PTS-STARTPTS+{a:.3f}/TB[c];[0:v][c]overlay=eof_action=pass:{window}[v]"
         )
