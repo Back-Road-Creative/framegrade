@@ -554,18 +554,20 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--map-inset",
         dest="map_inset",
-        choices=["off", "route"],
+        choices=["off", "route", "roads"],
         default=None,
         help="Regular long-form videos only: 'route' composites a route-only map "
-        "inset (from an offline bundle) onto each LF (config.drive.map_inset, "
-        "default off). Refuses before encoding when its inputs are missing.",
+        "inset (from an offline bundle) onto each LF; 'roads' does the same and "
+        "also draws nearby roads under the route (needs a bundle prepared with the "
+        "road layer) (config.drive.map_inset, default off). Refuses before "
+        "encoding when its inputs are missing.",
     )
     p.add_argument(
         "--map-inset-bundle",
         dest="map_inset_bundle",
         default=None,
         metavar="PATH",
-        help="Offline map bundle directory for --map-inset route.",
+        help="Offline map bundle directory for --map-inset route or roads.",
     )
     p.add_argument(
         "--map-inset-trim-start-m",

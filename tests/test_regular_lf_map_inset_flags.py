@@ -44,7 +44,7 @@ def test_cli_flags_parse_with_sentinel_defaults():
 
         parser = _build_parser()
     mode = _flag(parser, "map_inset")
-    assert mode.choices == ["off", "route"] and mode.default is None
+    assert mode.choices == ["off", "route", "roads"] and mode.default is None
     for dest in ("map_inset_bundle", "map_inset_trim_start_m", "map_inset_trim_end_m"):
         assert _flag(parser, dest).default is None
     zone = _flag(parser, "map_inset_privacy_zones")

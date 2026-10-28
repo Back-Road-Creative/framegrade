@@ -2320,8 +2320,8 @@ class DriveConfig(BaseModel):
             )
         if self.gps_captions not in ("off", "events"):
             raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
-        if self.map_inset not in ("off", "route"):
-            raise ValueError(f"map_inset must be 'off' or 'route', got {self.map_inset!r}")
+        if self.map_inset not in ("off", "route", "roads"):
+            raise ValueError(f"map_inset must be 'off', 'route' or 'roads', got {self.map_inset!r}")
         if self.map_inset_trim_start_m < 0 or self.map_inset_trim_end_m < 0:
             raise ValueError("map_inset trim distances must be >= 0")
         for zone in self.map_inset_privacy_zones:

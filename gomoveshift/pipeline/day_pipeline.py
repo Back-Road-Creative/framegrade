@@ -310,6 +310,7 @@ def _render_lf_map_inset(
             workdir=work_dir,
             trim=inputs.trim,
             zones=inputs.zones,
+            **({"roads": True} if inputs.roads else {}),
         )
     except MapInsetRefused as exc:
         raise RuntimeError(
@@ -1939,7 +1940,10 @@ def run_day_pipeline(
     # Opt-in regular-LF route map inset: refuse BEFORE any encode, listing every
     # missing input (bundle, trim, GPS), never fall back to no inset.
     _inset_inputs = None
-    if getattr(getattr(config, "drive", None), "map_inset", "off") == "route":
+    if getattr(getattr(config, "drive", None), "map_inset", "off") in (
+        "route",
+        "roads",
+    ):
         from .route_claims import map_inset_inputs
 
         _inset_inputs = map_inset_inputs(

@@ -1,8 +1,9 @@
 """Route-only map inset: the recorded route and a position marker over bundle imagery.
 
 An opt-in corner overlay for long driving videos, drawn from an offline Route
-Story bundle only: "imagery with route", never a street map (no road vectors,
-no network). Privacy comes first: ``trim_route`` and ``mask_zones`` run before
+Story bundle only: "imagery with route" (no network). Road vectors appear only in
+the separate opt-in ``roads`` mode, which draws the bundle's ``roads.geojson``
+under the route. Privacy comes first: ``trim_route`` and ``mask_zones`` run before
 any framing, label or pixel exists. The base image is rendered once; only the
 marker changes per frame, following the *source* clock through the edit
 timeline (the caller aligns the GPS clock to it).
@@ -59,6 +60,17 @@ _HALO_RGB = "#071219"
 _LINE_RGB = "#a2b7be"
 _MARKER_RGB = "#f5b73b"
 _MARKER_RING_RGB = "#182329"
+
+# Roads mode: muted lines under the route, wider for major classes.
+_ROAD_MAJOR_RGB = "#8a9a9f"
+_ROAD_MINOR_RGB = "#5f6f74"
+ROAD_MAJOR_CLASSES = frozenset(
+    {"motorway", "trunk", "primary", "motorway_link", "trunk_link", "primary_link"}
+)
+ROAD_MAJOR_WIDTH_DIVISOR = 130
+ROAD_MINOR_WIDTH_DIVISOR = 300
+ROADS_CREDIT = "Roads: © OpenStreetMap contributors"
+MODE_ROUTE, MODE_ROADS = "route", "roads"
 
 
 class MapInsetRefused(ValueError):  # noqa: N818 -- a refusal, named for what the caller sees
@@ -125,6 +137,7 @@ class InsetPlan:
     manifest_sha256: str
     timeline: EditTimeline = field(repr=False)
     index: _RouteIndex = field(repr=False)
+    mode: str = MODE_ROUTE
 
     def project(self, latitude: float, longitude: float) -> tuple[float, float]:
         """Inset pixel of a position (north-up, linear in degrees over the extent)."""
@@ -185,9 +198,10 @@ class InsetReceipt:
     credits: tuple[str, ...]
     wall_time_s: float
     schema: str = RECEIPT_SCHEMA
+    mode: str = MODE_ROUTE  # recorded only when it is not the default route mode
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "schema": self.schema,
             "bundle_manifest_sha256": self.bundle_manifest_sha256,
             "privacy": self.privacy,
@@ -199,6 +213,9 @@ class InsetReceipt:
             "credits": list(self.credits),
             "wall_time_s": self.wall_time_s,
         }
+        if self.mode != MODE_ROUTE:
+            data["mode"] = self.mode
+        return data
 
     @classmethod
     def load(cls, path: Path) -> InsetReceipt:
@@ -217,6 +234,7 @@ class InsetReceipt:
                 hidden_frames=hidden,
                 credits=tuple(str(c) for c in data["credits"]),
                 wall_time_s=float(data["wall_time_s"]),
+                mode=str(data.get("mode", MODE_ROUTE)),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"malformed {RECEIPT_SCHEMA} receipt: {error!r}") from error
@@ -309,14 +327,67 @@ def _safe_labels(
     return safe
 
 
-def _draw_credit(image: Image.Image, credit: str) -> None:
+def credit_text(credit: str, *, roads: bool = False) -> str:
+    """The credit strip text; the OSM line is added in roads mode only."""
+    text = f"Imagery: {credit}"
+    return f"{text} · {ROADS_CREDIT}" if roads else text
+
+
+def road_width_px(highway: str, width: int) -> int:
+    """Line width of a road class, scaled with the inset width."""
+    if highway in ROAD_MAJOR_CLASSES:
+        return max(2, width // ROAD_MAJOR_WIDTH_DIVISOR)
+    return max(1, width // ROAD_MINOR_WIDTH_DIVISOR)
+
+
+def _load_roads(bundle: Path) -> list[tuple[str, list[tuple[float, float]]]]:
+    """``(highway, [(lon, lat), ...])`` per LineString of ``roads.geojson``."""
+    path = bundle / "roads.geojson"
+    if not path.is_file():
+        return []
+    roads = []
+    try:
+        features = json.loads(path.read_text(encoding="utf-8")).get("features", ())
+    except (OSError, ValueError, AttributeError):
+        return []
+    for feature in features:
+        try:
+            geometry = feature["geometry"]
+            if geometry["type"] != "LineString":
+                continue
+            coords = [(float(c[0]), float(c[1])) for c in geometry["coordinates"]]
+            highway = str(feature["properties"].get("highway", ""))
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+            continue
+        if len(coords) >= 2:
+            roads.append((highway, coords))
+    return roads
+
+
+def _roads_in_view(
+    roads: Sequence[tuple[str, list[tuple[float, float]]]],
+    extent: tuple[float, float, float, float],
+) -> list[tuple[str, list[tuple[float, float]]]]:
+    """Roads whose bounding box meets the extent (a cheap per-feature reject)."""
+    west, south, east, north = extent
+    kept = []
+    for highway, coords in roads:
+        lons = [c[0] for c in coords]
+        lats = [c[1] for c in coords]
+        if max(lons) < west or min(lons) > east or max(lats) < south or min(lats) > north:
+            continue
+        kept.append((highway, coords))
+    return kept
+
+
+def _draw_credit(image: Image.Image, credit: str, *, roads: bool = False) -> None:
     width, height = image.size
     size = max(8, width // 34)
     font = _font(size)
     draw = ImageDraw.Draw(image)
     lines: list[str] = []
     current = ""
-    for word in f"Imagery: {credit}".split():
+    for word in credit_text(credit, roads=roads).split():
         trial = f"{current} {word}".strip()
         if current and draw.textlength(trial, font=font) > width - 8:
             lines.append(current)
@@ -338,6 +409,7 @@ def _render_base(
     segments: Sequence[Sequence[RoutePoint]],
     labels: Sequence[MapLabel],
     size: tuple[int, int],
+    roads: Sequence[tuple[str, list[tuple[float, float]]]] | None = None,
 ) -> Image.Image:
     width, height = size
     west, south, east, north = extent
@@ -354,6 +426,21 @@ def _render_base(
     )
     span_lon, span_lat = east - west, north - south
     draw = ImageDraw.Draw(image)
+    # Minor roads first so a major road stays on top where they meet.
+    for major in (False, True):
+        for highway, line in roads or ():
+            if (highway in ROAD_MAJOR_CLASSES) != major:
+                continue
+            pixels = [
+                ((lon - west) / span_lon * width, (north - lat) / span_lat * height)
+                for lon, lat in line
+            ]
+            draw.line(
+                pixels,
+                fill=_ROAD_MAJOR_RGB if major else _ROAD_MINOR_RGB,
+                width=road_width_px(highway, width),
+                joint="curve",
+            )
     for segment in segments:
         coords = [
             ((p.longitude - west) / span_lon * width, (north - p.latitude) / span_lat * height)
@@ -364,7 +451,7 @@ def _render_base(
             draw.line(coords, fill=_LINE_RGB, width=route_line_width_px(width), joint="curve")
     _draw_map_labels(image, labels, west, north, span_lon, span_lat, height)
     base = image.convert("RGBA")
-    _draw_credit(base, raster.credit)
+    _draw_credit(base, raster.credit, roads=roads is not None)
     return base
 
 
@@ -391,8 +478,12 @@ def plan_route_inset(
     zones: Sequence[PrivacyZone] = (),
     min_coverage: float = 0.5,
     workdir: Path | None = None,
+    roads: bool = False,
 ) -> InsetPlan:
     """Check every refusal reason, then render the cached base image.
+
+    ``roads=True`` also draws the bundle's ``roads.geojson`` under the route and
+    refuses when the layer is missing or no road lies in the framed extent.
 
     Raises :class:`MapInsetRefused` (listing all reasons) before rendering anything.
     """
@@ -460,6 +551,14 @@ def plan_route_inset(
             )
     base = None
     credit = ""
+    road_lines = None
+    if roads and bundle_ok:
+        if not (bundle / "roads.geojson").is_file():
+            reasons.append("roads were requested but the bundle has no roads.geojson")
+        elif extent is not None:
+            road_lines = _roads_in_view(_load_roads(bundle), extent)
+            if not road_lines:
+                reasons.append("roads were requested but there are no roads in view of the route")
     if bundle_ok and extent is not None:
         # Imagery is only checked once the bundle and the framing are usable.
         with tempfile.TemporaryDirectory() as scratch:
@@ -468,7 +567,7 @@ def plan_route_inset(
             reasons.extend(imagery_reasons)
             if not reasons and raster is not None:
                 labels = _safe_labels(_load_labels(bundle), zones, trimmed_away)
-                base = _render_base(raster, extent, kept_segments, labels, size)
+                base = _render_base(raster, extent, kept_segments, labels, size, road_lines)
                 credit = raster.credit
     if reasons or base is None or extent is None or trim_result is None or zone_result is None:
         raise MapInsetRefused(reasons)
@@ -481,12 +580,13 @@ def plan_route_inset(
         extent=extent,
         segments=tuple(tuple(s) for s in kept_segments),
         base=base,
-        credits=(credit,),
+        credits=(credit, ROADS_CREDIT) if roads else (credit,),
         hidden_counts=hidden,
         privacy=receipt_fragment(trim_result, zone_result if zones else None),
         manifest_sha256=hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest(),
         timeline=timeline,
         index=index,
+        mode=MODE_ROADS if roads else MODE_ROUTE,
     )
 
 
@@ -564,6 +664,7 @@ def render_route_inset(
             hidden_frames=dict(plan.hidden_counts),
             credits=plan.credits,
             wall_time_s=round(time.perf_counter() - started, 3),
+            mode=plan.mode,
         )
         partial_receipt.write_text(
             json.dumps(receipt.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
