@@ -20,8 +20,47 @@ logger = logging.getLogger(__name__)
 # regardless of source fps, so 59.94/60 fps sources are decimated at encode time.
 OUTPUT_FPS = "30000/1001"
 
+# Opt-in source-cadence output: a caller may name one of these instead of the
+# frozen default, but only when it equals the probed source rate (no upsampling).
+SUPPORTED_OUTPUT_FPS = ("30000/1001", "60000/1001", "30", "60")
 
-def cfr_filter() -> str:
+
+def _fps_value(rate: str) -> float:
+    num, _, den = rate.partition("/")
+    return float(num) / float(den or 1)
+
+
+def _check_supported(rate: str) -> str:
+    if rate not in SUPPORTED_OUTPUT_FPS:
+        raise ValueError(
+            f"unsupported output rate {rate!r}; supported: {', '.join(SUPPORTED_OUTPUT_FPS)}"
+        )
+    return rate
+
+
+def source_output_fps(source_fps: float) -> str:
+    """The supported output-rate string equal to a probed source rate, else refuse."""
+    for rate in SUPPORTED_OUTPUT_FPS:
+        if abs(_fps_value(rate) - source_fps) < 0.01:
+            return rate
+    raise ValueError(
+        f"source rate {source_fps:.3f} fps has no supported output rate "
+        f"({', '.join(SUPPORTED_OUTPUT_FPS)})"
+    )
+
+
+def check_output_fps(output_fps: str, source_fps: float) -> str:
+    """Validate an output rate: the default, or exactly the probed source rate."""
+    _check_supported(output_fps)
+    if output_fps != OUTPUT_FPS and abs(_fps_value(output_fps) - source_fps) >= 0.01:
+        raise ValueError(
+            f"output rate {output_fps} does not match the source rate {source_fps:.3f} fps; "
+            "source-cadence output never changes the rate"
+        )
+    return output_fps
+
+
+def cfr_filter(fps: str = OUTPUT_FPS) -> str:
     """The explicit constant-frame-rate conversion for the video chain.
 
     **Frames are DROPPED or DUPLICATED — never blended.** For an exact 59.94
@@ -41,7 +80,7 @@ def cfr_filter() -> str:
     composite: the mask is materialised one frame per SOURCE frame and
     ``alphamerge`` pairs them 1:1, so decimating first would desync the mask.
     """
-    return f"fps={OUTPUT_FPS}"
+    return f"fps={_check_supported(fps)}"
 
 
 # ── FFmpeg Filter Generation ─────────────────────────────────────────
@@ -484,9 +523,14 @@ def get_encoding_args(
     source_bitrate_kbps: int = 0,
     normalize_audio: bool = False,
     cpu_by_choice: bool = False,
+    output_fps: str = OUTPUT_FPS,
 ) -> list[str]:
     """
     Generate optimal ffmpeg encoding arguments from frozen constants.
+
+    ``output_fps`` defaults to the frozen publish cadence; an explicit
+    supported rate (opt-in source cadence) stamps that rate and keeps the
+    GOP at 2 s of it. ``fps`` (the source rate) is not consulted.
 
     ``cpu_by_choice=True`` marks a caller that picks libx265 on purpose
     (not because the GPU is missing), so the "NVENC unavailable" warning —
@@ -508,8 +552,8 @@ def get_encoding_args(
     # All output normalized to 29.97fps regardless of source fps. The real
     # conversion is the explicit ``cfr_filter()`` in the video chain; this arg
     # only stamps the rate. See OUTPUT_FPS.
-    output_fps = OUTPUT_FPS
-    gop_size = 60  # 2-second keyframe interval at 29.97fps output
+    _check_supported(output_fps)
+    gop_size = round(2 * _fps_value(output_fps))  # 2-second keyframe interval (60 at 29.97)
 
     # Pick codec-specific args
     if not has_nvenc and not cpu_by_choice:

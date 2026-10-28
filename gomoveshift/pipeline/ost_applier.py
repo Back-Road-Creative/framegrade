@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from gomoveshift.pipeline.color_filters import OUTPUT_FPS, check_output_fps
 from gomoveshift.pipeline.exceptions import ProbeFailedError
 from gomoveshift.pipeline.ffmpeg_filters import (
     BRAND_TEXT,
@@ -214,6 +215,7 @@ def _resolve_encoding_args(
     info: dict,
     prefer_nvenc: bool,
     input_name: str,
+    output_fps: str = OUTPUT_FPS,
 ) -> list:
     """Pick NVENC encoding args for the OST burn-in re-encode.
 
@@ -224,6 +226,9 @@ def _resolve_encoding_args(
     fail. Second probe failure propagates: there is no libx265
     fallback path, so any unrecoverable probe failure aborts
     the run rather than silently CPU-encoding for hours.
+
+    ``output_fps`` is the frozen cadence by default. Source-cadence mode passes
+    the master's own rate so ``-r`` is a no-op rather than a re-decimation.
     """
     from .color import detect_nvenc, get_encoding_args
     from .color_filters import NVENCUnavailableError
@@ -246,6 +251,7 @@ def _resolve_encoding_args(
         time.sleep(5)
         # Second probe — let NVENCUnavailableError propagate.
         has_nvenc = detect_nvenc()
+    check_output_fps(output_fps, info["fps"])
     return get_encoding_args(
         width=info["width"],
         height=info["height"],
@@ -253,6 +259,7 @@ def _resolve_encoding_args(
         has_nvenc=has_nvenc,
         source_bitrate_kbps=info["bitrate_kbps"],
         normalize_audio=True,
+        output_fps=output_fps,
     )
 
 
@@ -1178,6 +1185,7 @@ def apply_ost(
     media_profile: Optional[object] = None,
     website_cta: bool = True,
     map_inset: Optional[MapInsetOverlay] = None,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Burn an OST location overlay onto a video with layout-specific timing.
 
@@ -1226,6 +1234,11 @@ def apply_ost(
             command, in 10-bit. A missing clip file is an error (``None``),
             never an encode without the inset the caller asked for. ``None``
             leaves the ffmpeg argv exactly as it was before the parameter existed.
+
+        output_fps: Output rate stamped by the encode. Default is the frozen
+            29.97; source-cadence mode passes the master's own rate (the only
+            other accepted value), so ``-r`` never re-decimates. A rate that is
+            unsupported or differs from the input's raises ``ValueError``.
 
     Returns:
         ``output_path`` on success, or ``None`` on any failure (missing
@@ -1364,7 +1377,7 @@ def apply_ost(
 
     # Build encoder args. _resolve_encoding_args retries the NVENC probe
     # once when prefer_nvenc is True — see its docstring.
-    enc_args = _resolve_encoding_args(info, prefer_nvenc, input_path.name)
+    enc_args = _resolve_encoding_args(info, prefer_nvenc, input_path.name, output_fps)
 
     # --no-audio: a silent day master (encoded -an) yields LF segments with no
     # audio stream. Attaching an -af/-map 0:a filter to a stream that isn't
