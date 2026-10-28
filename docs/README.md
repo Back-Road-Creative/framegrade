@@ -21,7 +21,7 @@ to read them.
 - [unattended-cadence.md](unattended-cadence.md): where publish slots come from.
 - [w9c2-final-text-bind.md](w9c2-final-text-bind.md): the final-text byte-bind on publication.
 - [w9c3-short-tags.md](w9c3-short-tags.md): which tags a Short may carry.
-- [pipeline/](pipeline/): the numbered feature notes, from location labels (01) to the tracked Short reframe (170). Each number is used once; the GPU grade chain spike (159) and the blur composite ablation (154) are the measured spikes.
+- [pipeline/](pipeline/): the numbered feature notes, from location labels (01) to source-cadence output (171). Each number is used once; the GPU grade chain spike (159) and the blur composite ablation (154) are the measured spikes.
 
 ## Route Story
 
