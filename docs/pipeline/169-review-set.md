@@ -1,4 +1,4 @@
-# Review set (`gomoveshift review-set`)
+## Review set (`gomoveshift review-set`)
 
 > Reference, not contract. The source wins if this disagrees with it.
 
@@ -11,7 +11,7 @@ only gathers evidence: it never changes a render. Each subcommand is a thin wrap
 Every failure (missing file, non-empty output directory, schema error) prints one
 `Error: ...` line to stderr and exits 1.
 
-## `scan` -- candidate windows per condition
+### `scan` -- candidate windows per condition
 
 ```
 gomoveshift review-set scan --scores scores_2026-01-02.npz \
@@ -33,7 +33,7 @@ The `ScanThresholds` defaults are **provisional starting values, not tuned again
 footage**. Treat the windows as candidates to look at, not as a classification. The
 command exposes no tuning flags.
 
-## `stops` -- stop and kept runs for one sequence
+### `stops` -- stop and kept runs for one sequence
 
 ```
 gomoveshift review-set stops --stop-mask stop_mask_2026-01-02.npz \
@@ -45,7 +45,7 @@ seconds and a kept/cut decision. With `--receipt`, each kept run also carries it
 time ranges; without one, output times are omitted and the document says so. `--sequence`
 overrides the label taken from the file name.
 
-## `render` -- paired stills and excerpts
+### `render` -- paired stills and excerpts
 
 ```
 gomoveshift review-set render --source src.mp4 --output out.mp4 \
