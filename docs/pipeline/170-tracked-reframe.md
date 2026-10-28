@@ -1,6 +1,6 @@
 ## Tracked vertical reframe (implementation)
 
-- **What it is** (`gomoveshift/pipeline/reframe.py`): an opt-in way to place the 9:16 short crop. The default stays a fixed centre crop. `render_short_ffmpeg(..., reframe="tracked")` instead lets the crop window slide sideways to follow the road. This unit adds no CLI flag; a later `--short-reframe` flag is its caller.
+- **What it is** (`gomoveshift/pipeline/reframe.py`): an opt-in way to place the 9:16 short crop. The default stays a fixed centre crop. `render_short_ffmpeg(..., reframe="tracked")` instead lets the crop window slide sideways to follow the road. `gomoveshift drive --short-reframe tracked` turns it on (see Turning it on).
 - **Signal.** One small gray frame per second (`fps=1/1`, 160 px wide) is decoded from the source clip. `frame_centre` takes the horizontal-gradient energy of each column inside the road band (35%-80% of the height, so sky and bonnet are ignored), adds a flat prior equal to its mean, and returns the energy-weighted centre. A uniform frame reads as centred and one strong edge cannot fling the window sideways.
 - **Plan** (`plan_crop_track`, pure). The centres are low-passed (time constant 3 s), then the window moves only by the part of its error that lies outside a dead zone (10% of the crop width), at most 8% of the crop width per second, and never past its target, so there is no overshoot. The result is clamped inside the frame. A steady subject leaves the window where it is; jitter smaller than the dead zone does nothing.
 - **Filter.** `build_crop_filter(..., track=...)` writes the crop x as a flat sum of clipped linear ramps over `t` (`crop=W:H:x='x0+d1*clip((t-t0)/dt,0,1)+...'`). `track=None` returns the exact legacy string. Crop size, the `zscale`/`spline36` scaler and `setsar=1` are unchanged, so `crop_upscaled_from` still describes the real upscale.
@@ -8,3 +8,7 @@
 - **Audio.** Unchanged: shorts stay muted (`-an`).
 - **Failure.** If the sampling decode fails, the render logs a warning naming the short and uses the centre crop; an unknown mode raises `ValueError`.
 - **Tests:** `tests/test_reframe.py` (planner on synthetic signals, default argv identical, real-ffmpeg cases skip without ffmpeg and ffprobe).
+
+## Turning it on
+
+`gomoveshift drive ... --short-reframe tracked` (config `drive.short_reframe`, default `center`) passes `reframe="tracked"` to every `render_short_ffmpeg` call: the batched render, its per-short fallback and the day pipeline's short burn. Omitted, no `reframe` argument is passed and the shorts are byte-identical to today. The flag is a resume sentinel (`flag_registry`): a resume that leaves it out keeps the first run's choice, and shorts already rendered are not redone.

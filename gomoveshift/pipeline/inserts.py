@@ -832,6 +832,15 @@ def shift_photo_inserts(inserts: Sequence[Insert], delta_s: float) -> list[Inser
     ]
 
 
+def still_motion_kwargs(config) -> dict:
+    """``{"still_motion": "push_in"}`` when ``--insert-still-motion push_in`` is on, else ``{}``.
+
+    Empty by default so ``plan_inserts`` receives exactly what it did before.
+    """
+    mode = getattr(getattr(config, "drive", None), "insert_still_motion", "none")
+    return {} if mode == "none" else {"still_motion": mode}
+
+
 def splice_lf_inserts(
     lf_path: Path,
     inserts: Sequence[Insert],
@@ -862,6 +871,7 @@ def splice_lf_inserts(
         rendition=RENDITIONS["youtube_longform"],
         work_dir=Path(work_dir),
         gate=gate,
+        **still_motion_kwargs(config),
     )
     out = lf_path.with_name(f"{lf_path.stem}.inserted{lf_path.suffix}")
     result = apply(lf_path, plans, out)

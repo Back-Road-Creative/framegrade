@@ -73,7 +73,11 @@ def _detect_nvenc_cached() -> bool:
 
 
 def _short_ost_fingerprint(
-    location: str, subscribe_text: str, start_time: float, end_time: float
+    location: str,
+    subscribe_text: str,
+    start_time: float,
+    end_time: float,
+    reframe: str = "center",
 ) -> str:
     """Stable hash of the material render inputs for one short.
 
@@ -87,11 +91,17 @@ def _short_ost_fingerprint(
     The clip's WINDOW (``start_time``/``end_time``) is part of the hash so a
     re-planned short at the SAME rank/index but a DIFFERENT (possibly parked)
     window re-renders instead of reusing the old render of the prior window.
+
+    A non-default ``reframe`` is appended so a resume with a changed
+    ``--short-reframe`` re-renders; ``"center"`` adds nothing, so the default
+    hash is byte-identical to the one older runs wrote.
     """
     raw = (
         f"{location or ''}\x00{subscribe_text or ''}"
         f"\x00{float(start_time):.4f}:{float(end_time):.4f}"
     )
+    if reframe != "center":
+        raw += f"\x00reframe={reframe}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -217,6 +227,15 @@ def _probe_video_stream_duration(path: Path) -> float:
         return 0.0
     except Exception:
         return 0.0
+
+
+def reframe_kwargs(config) -> dict:
+    """``{"reframe": "tracked"}`` when ``--short-reframe tracked`` is on, else ``{}``.
+
+    Empty by default so every short render call receives exactly what it did before.
+    """
+    mode = getattr(getattr(config, "drive", None), "short_reframe", "center")
+    return {"reframe": mode} if isinstance(mode, str) and mode != "center" else {}
 
 
 def render_short_ffmpeg(
@@ -566,6 +585,7 @@ def render_shorts_batched(
     max_workers: int = 3,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    reframe: str = "center",
 ) -> dict[int, bool]:
     """
     Batch-render shorts using a two-phase approach to reduce source reads.
@@ -596,6 +616,7 @@ def render_shorts_batched(
         max_workers: Parallel encode workers
         batch_size: Not used in current impl (kept for API compatibility)
         progress_callback: Optional callback(completed_count, total_count)
+        reframe: 9:16 crop placement forwarded to ``render_short_ffmpeg``
 
     Returns:
         Dict mapping short index -> success (True/False)
@@ -716,6 +737,7 @@ def render_shorts_batched(
             src_height=src_height,
             use_nvenc=use_nvenc,
             skip_audio=skip_audio,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         return idx, success
 
@@ -1079,7 +1101,11 @@ class PipelineShortsExtractor:
                 and fp_path.is_file()
                 and fp_path.read_text().strip()
                 == _short_ost_fingerprint(
-                    short_location, subscribe_text, short.start_time, short.end_time
+                    short_location,
+                    subscribe_text,
+                    short.start_time,
+                    short.end_time,
+                    **reframe_kwargs(self.config),
                 )
             ):
                 logger.info(f"  Short #{short.index} — already rendered (OST unchanged), skipping")
@@ -1158,6 +1184,7 @@ class PipelineShortsExtractor:
                     skip_audio=self.config.drive.skip_audio,
                     max_workers=effective_workers,
                     progress_callback=_batch_progress,
+                    **reframe_kwargs(self.config),
                 )
             except Exception as e:
                 logger.warning(f"Batched rendering failed ({e}), falling back to individual")
@@ -1179,6 +1206,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                     rendered_shorts.append(
@@ -1225,6 +1253,7 @@ class PipelineShortsExtractor:
                     src_height=src_height,
                     use_nvenc=use_nvenc,
                     skip_audio=self.config.drive.skip_audio,
+                    **reframe_kwargs(self.config),
                 )
                 if success:
                     # Persist the burned-OST fingerprint (see batched path).
@@ -1234,6 +1263,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                 return short, output_path, success

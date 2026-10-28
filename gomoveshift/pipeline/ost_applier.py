@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from gomoveshift.pipeline.color_filters import OUTPUT_FPS, check_output_fps
+from gomoveshift.pipeline.color_filters import OUTPUT_FPS, check_output_fps, resolve_output_fps
 from gomoveshift.pipeline.exceptions import ProbeFailedError
 from gomoveshift.pipeline.ffmpeg_filters import (
     BRAND_TEXT,
@@ -228,7 +228,8 @@ def _resolve_encoding_args(
     the run rather than silently CPU-encoding for hours.
 
     ``output_fps`` is the frozen cadence by default. Source-cadence mode passes
-    the master's own rate so ``-r`` is a no-op rather than a re-decimation.
+    the master's own rate so ``-r`` is a no-op rather than a re-decimation; the
+    literal ``"source"`` resolves to the probed rate here.
     """
     from .color import detect_nvenc, get_encoding_args
     from .color_filters import NVENCUnavailableError
@@ -251,6 +252,7 @@ def _resolve_encoding_args(
         time.sleep(5)
         # Second probe — let NVENCUnavailableError propagate.
         has_nvenc = detect_nvenc()
+    output_fps = resolve_output_fps(output_fps, info["fps"])
     check_output_fps(output_fps, info["fps"])
     return get_encoding_args(
         width=info["width"],

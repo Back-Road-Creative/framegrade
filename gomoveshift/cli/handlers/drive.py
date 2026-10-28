@@ -981,6 +981,9 @@ def _cmd_drive_impl(args, config):
             map_inset_trim_start_m=getattr(args, "map_inset_trim_start_m", None),
             map_inset_trim_end_m=getattr(args, "map_inset_trim_end_m", None),
             map_inset_privacy_zones=getattr(args, "map_inset_privacy_zones", None),
+            short_reframe=getattr(args, "short_reframe", None),
+            output_cadence=getattr(args, "output_cadence", None),
+            insert_still_motion=getattr(args, "insert_still_motion", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The

@@ -595,6 +595,34 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Drop every route point within RADIUS_M metres of LAT,LON from the "
         "map inset (repeatable).",
     )
+    # Opt-in media-quality options. All sentinels (flag_registry), so a resume that
+    # omits them keeps the first run's choice.
+    p.add_argument(
+        "--short-reframe",
+        dest="short_reframe",
+        choices=["center", "tracked"],
+        default=None,
+        help="9:16 short crop: 'center' is the fixed centre crop; 'tracked' slides "
+        "the window sideways to follow the road (config.drive.short_reframe, "
+        "default center).",
+    )
+    p.add_argument(
+        "--output-cadence",
+        dest="output_cadence",
+        choices=["fixed", "source"],
+        default=None,
+        help="Master output rate: 'fixed' is the 29.97 publish rate; 'source' keeps "
+        "the probed source rate (59.94, 60, 29.97 or 30 fps) and refuses any other "
+        "rate rather than resampling (config.drive.output_cadence, default fixed).",
+    )
+    p.add_argument(
+        "--insert-still-motion",
+        dest="insert_still_motion",
+        choices=["none", "push_in"],
+        default=None,
+        help="Insert still cards: 'none' holds a static card; 'push_in' eases a slow "
+        "push-in across the hold (config.drive.insert_still_motion, default none).",
+    )
     p.add_argument("--fresh", action="store_true", help="Force restart from scratch")
     p.add_argument("--no-tmux", action="store_true", help="Skip tmux launcher")
     # The four upload flags use the
