@@ -288,4 +288,5 @@ def test_montage_cannot_burn_place_text_of_its_own():
             "work_dir",
             "master_path",
             "file_boundaries",
+            "output_fps",
         }

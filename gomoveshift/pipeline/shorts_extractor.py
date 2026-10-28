@@ -235,7 +235,7 @@ def reframe_kwargs(config) -> dict:
     Empty by default so every short render call receives exactly what it did before.
     """
     mode = getattr(getattr(config, "drive", None), "short_reframe", "center")
-    return {} if mode == "center" else {"reframe": mode}
+    return {"reframe": mode} if isinstance(mode, str) and mode != "center" else {}
 
 
 def render_short_ffmpeg(
