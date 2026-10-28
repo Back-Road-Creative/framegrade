@@ -23,6 +23,7 @@ from ..models import DrivePipelineResult
 from ..publishing.title_kit import build_title_kit
 from ._drive_state import load_drive_state, save_drive_state
 from .auto_enqueue import auto_enqueue_shorts
+from .color_filters import source_cadence_conflicts
 from .drive_phases.phase_a import PhaseA
 from .drive_phases.phase_b_preview import PhaseBPreview
 from .drive_phases.phase_bc_day_first import PhaseBCDayFirst, _day_dir_has_finals
@@ -454,6 +455,24 @@ def reset_force_sidecar_reset_after_resume(state, cli_value: Optional[bool]) -> 
     ``force_sidecar_reset`` is. Mutates ``state`` in place.
     """
     state.force_sidecar_reset = True if cli_value else None
+
+
+def refuse_source_cadence_conflicts(config, state=None) -> None:
+    """Stop ``--output-cadence source`` before any encode when a stage would mix rates.
+
+    The insert splice and the trail-film opening re-encode a span at the fixed
+    29.97 rate and stream-copy-join it to the master. See
+    ``color_filters.source_cadence_conflicts``.
+    """
+    drive = config.drive
+    if (getattr(state, "output_cadence", None) or drive.output_cadence) != "source":
+        return
+    found = source_cadence_conflicts(drive)
+    if found:
+        raise PipelineValidationError(
+            f"--output-cadence source conflicts with {' and '.join(found)}: "
+            "those stages re-encode at the fixed 29.97 rate and would mix cadences"
+        )
 
 
 def reset_ost_opt_ins_after_resume(
@@ -1049,6 +1068,9 @@ class DrivePipelineOrchestrator:
             reset_force_sidecar_reset_after_resume(state, force_sidecar_reset)
             # Same for the per-run OST signals (see its docstring).
             reset_ost_opt_ins_after_resume(state, ost_audit_confirmed, ost_system_review)
+            # Source cadence cannot ride a fixed-rate stream-copy join: refuse
+            # before any phase runs (after the merge, so a saved choice counts).
+            refuse_source_cadence_conflicts(self.config, state)
             # ── Stale-schedule recompute on resume ──────────────────────────
             # The fingerprint re-runs phase_d when CLI FLAGS change, but a
             # saved ``drive_schedule`` whose region no longer matches the

@@ -22,3 +22,12 @@ By default every long-form master is published at the frozen 29.97 cadence (`OUT
 ## Turning it on
 
 `gomoveshift drive ... --output-cadence source` (config `drive.output_cadence`, default `fixed`) makes the day-master encode and the long-form and superlong OST burns keep the probed source rate instead of the frozen 29.97. `resolve_output_fps` turns the request into the supported rate string at the encode, so a source that is not 29.97, 30, 59.94 or 60 fps stops with the "no supported output rate" error before the encode starts; nothing is resampled. `fixed` (or omitting the flag) passes no `output_fps` and leaves every argv as it is. Shorts and inserts are not part of this option. The flag is a resume sentinel: a resume that leaves it out keeps the first run's choice.
+
+### Compatible and refused combinations
+
+Some stages re-encode a span at the fixed 29.97 rate and stream-copy-join it to the master, which would leave a 59.94 file at two cadences. They are handled one of two ways:
+
+- Rate follows the source (compatible): the long-form and superlong segment extraction, including its stop-mask join repairs (`extract_and_concat_segments`), and the montage prepend (`prepend_montage`, `build_montage`, and the re-encode fallback in `_trim_peak_to`) pass the master's probed rate to `lf_reencode_args(output_fps)`. The default call is unchanged.
+- Refused up front (before any encode, after the resume merge, so a saved choice counts): `--output-cadence source` with `--insert-photos` or `--insert-clip` (the insert splice), or with the trail film opening on. The trail film is tri-state, so only an explicit `--no-trail` clears it. The run stops with a one-line `PipelineValidationError` naming the option.
+
+Shorts, thumbnails and the legacy per-episode concats (`stop_processor`, `assembly/encoder`, `route_story/assembly`, `ingest/concatenator`) stay at the fixed rate and are not part of the day-first path this option covers.

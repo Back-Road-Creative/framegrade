@@ -66,6 +66,33 @@ def cadence_kwargs(config) -> dict:
     return {"output_fps": "source"} if getattr(drive, "output_cadence", "fixed") == "source" else {}
 
 
+def probe_source_fps(path: Path) -> float:
+    """The first video stream's frame rate, from ffprobe."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=avg_frame_rate", "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+    num, _, den = out.partition("/")
+    return float(num) / float(den or 1)
+
+
+def source_cadence_conflicts(drive) -> list[str]:
+    """Options that stream-copy-join pieces re-encoded at the fixed rate.
+
+    The insert splice and the trail-film opening re-encode a span at 29.97 and
+    join it to the master with a stream copy, which would leave a 59.94 file at
+    two cadences. ``trail`` is tri-state (``None`` = auto), so only an explicit
+    ``--no-trail`` clears it.
+    """
+    found = []
+    if getattr(drive, "insert_photos", "") or getattr(drive, "insert_clips", []):
+        found.append("--insert-photos/--insert-clip")
+    if getattr(drive, "trail", None) is not False:
+        found.append("the trail film (pass --no-trail)")
+    return found
+
+
 def check_output_fps(output_fps: str, source_fps: float) -> str:
     """Validate an output rate: the default, or exactly the probed source rate."""
     _check_supported(output_fps)

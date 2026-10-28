@@ -385,3 +385,102 @@ def test_splice_passes_still_motion_only_when_enabled(tmp_path, motion, expect):
     if expect is None:
         assert "still_motion" not in kw
         assert set(kw) == {"profile", "rendition", "work_dir", "gate"}
+
+
+# ── source cadence vs stream-copy joins ───────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "kw,named",
+    [
+        ({"insert_photos": "a.jpg", "trail": False}, "--insert-photos"),
+        ({"insert_clips": ["c.mp4"], "trail": False}, "--insert-clip"),
+        ({"trail": None}, "--no-trail"),
+        ({"trail": True}, "--no-trail"),
+    ],
+)
+def test_source_cadence_is_refused_up_front_for_conflicting_stages(kw, named):
+    from gomoveshift.pipeline.drive_orchestrator import refuse_source_cadence_conflicts
+    from gomoveshift.pipeline.exceptions import PipelineValidationError
+
+    cfg = _drive_config(output_cadence="source", **kw)
+    with pytest.raises(PipelineValidationError, match=named):
+        refuse_source_cadence_conflicts(cfg)
+
+
+def test_source_cadence_passes_without_conflicting_stages_and_fixed_never_refuses():
+    from gomoveshift.pipeline.drive_orchestrator import refuse_source_cadence_conflicts
+
+    refuse_source_cadence_conflicts(_drive_config(output_cadence="source", trail=False))
+    refuse_source_cadence_conflicts(_drive_config(trail=None, insert_photos="a.jpg"))
+
+
+def test_a_saved_source_cadence_is_refused_too():
+    from types import SimpleNamespace
+
+    from gomoveshift.pipeline.drive_orchestrator import refuse_source_cadence_conflicts
+    from gomoveshift.pipeline.exceptions import PipelineValidationError
+
+    with pytest.raises(PipelineValidationError):
+        refuse_source_cadence_conflicts(
+            _drive_config(trail=None), SimpleNamespace(output_cadence="source")
+        )
+
+
+def test_run_refuses_after_the_resume_merge_and_before_any_phase():
+    src = inspect.getsource(
+        __import__(
+            "gomoveshift.pipeline.drive_orchestrator", fromlist=["x"]
+        ).DrivePipelineOrchestrator.run
+    )
+    assert (
+        src.index("reset_ost_opt_ins_after_resume(")
+        < src.index("refuse_source_cadence_conflicts(")
+        < src.index("invalidate_phase_d_if_schedule_region_stale(")
+    )
+
+
+def test_repair_encode_args_default_unchanged_and_follow_the_source_rate():
+    from gomoveshift.pipeline import montage_builder as mb
+
+    default = mb.lf_reencode_args()
+    assert default[default.index("-r") + 1] == "30000/1001"
+    assert mb.lf_reencode_args("30000/1001") == default
+    fast = mb.lf_reencode_args("60000/1001")
+    assert fast[fast.index("-r") + 1] == "60000/1001" and fast != default
+    assert mb.reencode_args_for("unused.mp4") == default
+    with patch.object(mb, "probe_source_fps", return_value=60000 / 1001):
+        assert mb.reencode_args_for("m.mp4", "source") == fast
+
+
+def test_extract_and_prepend_thread_the_cadence():
+    tree = ast.parse(Path("gomoveshift/pipeline/day_pipeline.py").read_text())
+    for callee in ("extract_and_concat_segments", "prepend_montage"):
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == callee
+        ]
+        assert calls, callee
+        for c in calls:
+            splats = [k.value for k in c.keywords if k.arg is None]
+            assert any(
+                isinstance(v, ast.Call) and getattr(v.func, "id", "") == "cadence_kwargs"
+                for v in splats
+            ) or any(getattr(v, "id", "") == "_extract_kw" for v in splats), callee
+
+
+def test_short_fingerprint_default_is_byte_identical_and_reframe_changes_it():
+    import hashlib
+
+    from gomoveshift.pipeline.shorts_extractor import _short_ost_fingerprint as fp
+
+    old = hashlib.sha256("Loc\x00Sub\x001.0000:2.0000".encode()).hexdigest()
+    assert fp("Loc", "Sub", 1.0, 2.0) == old
+    assert fp("Loc", "Sub", 1.0, 2.0, reframe="center") == old
+    assert fp("Loc", "Sub", 1.0, 2.0, reframe="tracked") != old
+
+
+def test_shorts_cache_prefilter_and_writers_pass_the_reframe():
+    src = Path("gomoveshift/pipeline/shorts_extractor.py").read_text()
+    assert src.count("**reframe_kwargs(self.config)") >= 5

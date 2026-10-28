@@ -72,7 +72,7 @@ from ..config import resolve_lf_mode
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
-from .color_filters import cadence_kwargs
+from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
@@ -92,6 +92,7 @@ from .montage_builder import (
     GOP_DURATION_SEC,
     lf_reencode_args,
     prepend_montage,
+    reencode_args_for,
     to_cut_segment,
 )
 from .ost_applier import MapInsetOverlay, apply_ost
@@ -336,6 +337,7 @@ def extract_and_concat_segments(
     work_dir: Path,
     stop_mask=None,
     receipt_sidecar: bool = False,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Cut each scored segment out of the day master and concat the pieces
     in drive_plan order, without re-encoding.
@@ -420,7 +422,11 @@ def extract_and_concat_segments(
         # Pin the shared long-form encoder args + AAC 256k audio — keycut
         # would otherwise derive an encoder from the master's codec at CRF 18
         # and stream-copy the audio.
-        reencode_args=lf_reencode_args(),
+        reencode_args=(
+            lf_reencode_args()
+            if output_fps == OUTPUT_FPS
+            else reencode_args_for(master_path, output_fps)
+        ),
         # This concat is an INTERMEDIATE: apply_ost re-encodes it into the
         # final artifact (which writes its own faststart) and cleanup deletes
         # it. keycut's default would rewrite the moov atom over the whole
@@ -1748,6 +1754,7 @@ def _produce_superlong_parts(
             output_path=raw_concat,
             work_dir=work_dir,
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
         if concatenated is None:
             # HARD fail, never a skip. A warning here let the day report
@@ -2539,6 +2546,7 @@ def run_day_pipeline(
             # start back into parked footage. None on GPS-less/legacy/
             # disabled days → legacy behavior.
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
         _concat_receipt = receipt_sidecar_path(raw_concat)
         if _inset_inputs is not None:
@@ -2565,6 +2573,7 @@ def run_day_pipeline(
             work_dir=work_dir,
             master_path=master_source_for_extract,
             file_boundaries=file_boundaries,
+            **cadence_kwargs(config),
         )
         if prepended is None:
             logger.warning(

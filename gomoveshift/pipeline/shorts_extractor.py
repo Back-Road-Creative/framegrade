@@ -73,7 +73,11 @@ def _detect_nvenc_cached() -> bool:
 
 
 def _short_ost_fingerprint(
-    location: str, subscribe_text: str, start_time: float, end_time: float
+    location: str,
+    subscribe_text: str,
+    start_time: float,
+    end_time: float,
+    reframe: str = "center",
 ) -> str:
     """Stable hash of the material render inputs for one short.
 
@@ -87,11 +91,17 @@ def _short_ost_fingerprint(
     The clip's WINDOW (``start_time``/``end_time``) is part of the hash so a
     re-planned short at the SAME rank/index but a DIFFERENT (possibly parked)
     window re-renders instead of reusing the old render of the prior window.
+
+    A non-default ``reframe`` is appended so a resume with a changed
+    ``--short-reframe`` re-renders; ``"center"`` adds nothing, so the default
+    hash is byte-identical to the one older runs wrote.
     """
     raw = (
         f"{location or ''}\x00{subscribe_text or ''}"
         f"\x00{float(start_time):.4f}:{float(end_time):.4f}"
     )
+    if reframe != "center":
+        raw += f"\x00reframe={reframe}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -1091,7 +1101,11 @@ class PipelineShortsExtractor:
                 and fp_path.is_file()
                 and fp_path.read_text().strip()
                 == _short_ost_fingerprint(
-                    short_location, subscribe_text, short.start_time, short.end_time
+                    short_location,
+                    subscribe_text,
+                    short.start_time,
+                    short.end_time,
+                    **reframe_kwargs(self.config),
                 )
             ):
                 logger.info(f"  Short #{short.index} — already rendered (OST unchanged), skipping")
@@ -1192,6 +1206,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                     rendered_shorts.append(
@@ -1248,6 +1263,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                 return short, output_path, success
