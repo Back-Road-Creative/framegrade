@@ -78,7 +78,7 @@ dependencies = [
     # falls back to CPU). Preflight refuses
     # to start a blur run without ``CUDAExecutionProvider``
     # (``preflight.check_blur_inference_provider``).
-    "onnxruntime-gpu[cuda,cudnn]==1.22.0",
+    "onnxruntime-gpu[cuda,cudnn]==1.31.0",
     "deface>=1.5.0",
     # Waypost (distribution name seo-manager) and gps-journey — former workspace
     # siblings, now public repos and the source of truth for that code. Pinned to
