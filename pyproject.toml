@@ -109,7 +109,7 @@ dependencies = [
     # likewise only adds `deface`, declared directly above.
     "sun-track @ git+https://github.com/Back-Road-Creative/sun-track@v0.1.0",
     "pycube-lut @ git+https://github.com/Back-Road-Creative/pycube-lut@v0.1.0",
-    "keycut @ git+https://github.com/Back-Road-Creative/keycut@v0.1.2",
+    "keycut @ git+https://github.com/Back-Road-Creative/keycut@v0.2.0",
     # redactcam is pinned to a COMMIT, not a tag, unlike its three siblings:
     # redactcam's release.yml is tag-triggered, so cutting a `v*` tag to move this
     # pin would also publish a Windows installer as a side effect. ``[gpu]``:

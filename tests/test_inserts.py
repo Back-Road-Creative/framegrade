@@ -125,5 +125,12 @@ def test_montage_helpers_extracted_keep_argv(tmp_path, monkeypatch):
     keycut.concat_demuxer([src], out, tmp_path / "l.txt")
     assert mb.copy_range_argv(src, 1.0, 3.0, out) == seen[0]
     assert mb.reencode_range_argv(src, 1.0, 3.0, out) == seen[1]
+    # keycut >= 0.1.2 seeks on the INPUT side (`-ss S -i src`), then zeroes the
+    # output clock and bounds the length with `-t D` (keycut/extract.py
+    # reencode_range); the pre-0.1.2 form was `-i src -ss S -to E`.
+    assert seen[1] == [
+        "ffmpeg", "-y", "-ss", "1.0", "-i", str(src), "-ss", "0", "-t", "2.0",
+        *mb.lf_reencode_args(), str(out),
+    ]  # fmt: skip
     assert mb.concat_copy_argv(tmp_path / "l.txt", out) == seen[2]
     assert mb.keyframe_span(10.5, 14.5, KEYFRAMES, 100.0) == (10.0, 16.0)

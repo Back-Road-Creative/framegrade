@@ -18,7 +18,7 @@ What this can and cannot establish:
 
 * A **40-hex commit pin** (today only ``redactcam``) is verified EXACTLY: ``vcs_info.commit_id``
   must equal the pinned SHA.
-* A **tag or branch pin** (today ``sun-track`` / ``pycube-lut`` / ``keycut`` at ``v0.1.0``) is
+* A **tag or branch pin** (today ``sun-track`` / ``pycube-lut`` at ``v0.1.0``, ``keycut`` at ``v0.2.0``) is
   verified only as far as ``vcs_info.requested_revision`` — the revision NAME that was asked for.
   Which commit a tag points at cannot be resolved without a network call to the remote, so a
   moved tag is deliberately out of scope.
