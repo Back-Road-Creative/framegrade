@@ -87,6 +87,14 @@ def _insert_clip_arg(raw: str) -> str:
     return raw
 
 
+def _map_inset_zone_arg(raw: str) -> str:
+    """argparse ``type=`` for ``--map-inset-privacy-zone``: validate, keep the raw spec."""
+    from ..pipeline.route_story.film import _privacy_zone_arg
+
+    _privacy_zone_arg(raw)
+    return raw
+
+
 def _comma_components(s: str) -> list[str]:
     """Split a label on commas, strip whitespace, drop empties."""
     return [c.strip() for c in s.split(",") if c.strip()]
@@ -540,6 +548,50 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "card per GPS-supported town event of each LF's own chapters "
         "(config.drive.gps_captions, default off). Refuses before encoding when "
         "an LF has no retained-route evidence.",
+    )
+    # Opt-in route-only map inset on regular long-form videos. All sentinels
+    # (flag_registry), so a resume that omits them keeps the first run's choice.
+    p.add_argument(
+        "--map-inset",
+        dest="map_inset",
+        choices=["off", "route"],
+        default=None,
+        help="Regular long-form videos only: 'route' composites a route-only map "
+        "inset (from an offline bundle) onto each LF (config.drive.map_inset, "
+        "default off). Refuses before encoding when its inputs are missing.",
+    )
+    p.add_argument(
+        "--map-inset-bundle",
+        dest="map_inset_bundle",
+        default=None,
+        metavar="PATH",
+        help="Offline map bundle directory for --map-inset route.",
+    )
+    p.add_argument(
+        "--map-inset-trim-start-m",
+        dest="map_inset_trim_start_m",
+        type=float,
+        default=None,
+        metavar="METRES",
+        help="Hide the first METRES of the route (required > 0 with --map-inset route).",
+    )
+    p.add_argument(
+        "--map-inset-trim-end-m",
+        dest="map_inset_trim_end_m",
+        type=float,
+        default=None,
+        metavar="METRES",
+        help="Hide the last METRES of the route (required > 0 with --map-inset route).",
+    )
+    p.add_argument(
+        "--map-inset-privacy-zone",
+        dest="map_inset_privacy_zones",
+        type=_map_inset_zone_arg,
+        action="append",
+        default=None,
+        metavar="LAT,LON,RADIUS_M",
+        help="Drop every route point within RADIUS_M metres of LAT,LON from the "
+        "map inset (repeatable).",
     )
     p.add_argument("--fresh", action="store_true", help="Force restart from scratch")
     p.add_argument("--no-tmux", action="store_true", help="Skip tmux launcher")

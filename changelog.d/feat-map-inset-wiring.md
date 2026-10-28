@@ -1,0 +1,3 @@
+### Added
+
+- `--map-inset off|route` on the drive command (plus `--map-inset-bundle`, `--map-inset-trim-start-m`, `--map-inset-trim-end-m` and a repeatable `--map-inset-privacy-zone`): opt-in route-only map inset on regular long-form videos, rendered from an offline bundle and composited inside the existing OST encode. Off is unchanged. `route` refuses before any encode, listing every missing input (bundle, trim, GPS), and never falls back silently. The settings persist across a resume, are part of each long-form video's re-burn fingerprint, and the per-video inset receipt is recorded in drive state.
