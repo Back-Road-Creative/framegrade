@@ -19,6 +19,7 @@ import pytest
 
 from _state_helpers import make_state
 from gomoveshift.pipeline import day_pipeline
+from gomoveshift.pipeline.color_filters import cadence_kwargs
 from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
 from gomoveshift.pipeline.route_claims import (
     TIMELINE,
@@ -281,12 +282,19 @@ def test_montage_cannot_burn_place_text_of_its_own():
     ]
     assert calls
     for call in calls:
-        assert {k.arg for k in call.keywords} <= {
+        # The only splat allowed is the cadence opt-in, which yields output_fps alone.
+        splats = [k.value for k in call.keywords if k.arg is None]
+        assert all(
+            isinstance(v, ast.Call) and getattr(v.func, "id", None) == "cadence_kwargs"
+            for v in splats
+        )
+        assert {k.arg for k in call.keywords if k.arg is not None} <= {
             "raw_lf_path",
             "peaks",
             "output_path",
             "work_dir",
             "master_path",
             "file_boundaries",
-            "output_fps",
         }
+    on = SimpleNamespace(drive=SimpleNamespace(output_cadence="source"))
+    assert set(cadence_kwargs(on)) == {"output_fps"}

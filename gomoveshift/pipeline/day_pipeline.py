@@ -2573,9 +2573,7 @@ def run_day_pipeline(
             work_dir=work_dir,
             master_path=master_source_for_extract,
             file_boundaries=file_boundaries,
-            # Named, never splatted: the M1 guard reads these keywords to
-            # prove the montage is handed no place text.
-            output_fps=cadence_kwargs(config).get("output_fps", OUTPUT_FPS),
+            **cadence_kwargs(config),
         )
         if prepended is None:
             logger.warning(
