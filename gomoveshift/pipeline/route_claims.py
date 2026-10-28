@@ -32,6 +32,7 @@ import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from gomoveshift.pipeline.geo_constants import US_STATE_ABBREVS
@@ -74,6 +75,117 @@ logger = logging.getLogger(__name__)
 
 class RouteClaimRefusedError(RuntimeError):
     """No label the retained footage's GPS supports could be chosen."""
+
+
+def parse_privacy_zone(text: str):
+    """``"LAT,LON,RADIUS_M"`` -> ``PrivacyZone`` (reuses the route-story CLI parser).
+
+    Raises ``ValueError`` on anything the film CLI would reject."""
+    import argparse
+
+    from gomoveshift.pipeline.route_story.film import _privacy_zone_arg
+
+    try:
+        return _privacy_zone_arg(str(text))
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class MapInsetInputs:
+    """Everything a route-only map inset needs, checked once before any encode."""
+
+    bundle: Path
+    segments: list  # list[list[RoutePoint]] in master seconds, split at GPS gaps
+    trim: object  # RouteTrim
+    zones: list  # list[PrivacyZone]
+    signature: str  # stable hash of the options + bundle manifest + route
+
+
+def day_route_segments(day_points) -> list:
+    """Usable day-GPS ``(t_master, lat, lon)`` fixes as ``RoutePoint`` segments,
+    split wherever consecutive fixes are more than ``GAP_S`` apart. A segment of
+    one fix draws nothing and is dropped."""
+    from gomoveshift.pipeline.route_story.metrics import RoutePoint
+
+    fixes = sorted(
+        {
+            (float(t), float(la), float(lo))
+            for t, la, lo in (day_points or [])
+            if _valid(la, lo) and math.isfinite(float(t))
+        }
+    )
+    segments, current = [], []
+    for t, la, lo in fixes:
+        if current and t - current[-1].time_s > GAP_S + _EPS:
+            segments.append(current)
+            current = []
+        current.append(RoutePoint(time_s=t, latitude=la, longitude=lo))
+    segments.append(current)
+    return [s for s in segments if len(s) >= 2]
+
+
+def map_inset_inputs(drive, day_points, *, date: str = "") -> MapInsetInputs:
+    """Validate ``--map-inset route`` inputs; one :class:`RouteClaimRefusedError`
+    lists EVERY missing input and says nothing was encoded (never a silent
+    fallback to no inset, never a partial overlay)."""
+
+    from gomoveshift.pipeline.route_story.route_privacy import RouteTrim
+
+    reasons: list[str] = []
+    bundle_raw = getattr(drive, "map_inset_bundle", None)
+    bundle = Path(bundle_raw) if bundle_raw else None
+    manifest_sha = ""
+    if bundle is None:
+        reasons.append("no --map-inset-bundle was given")
+    elif not (bundle / "manifest.json").is_file():
+        reasons.append(f"map bundle {bundle} has no manifest.json")
+    else:
+        from gomoveshift.pipeline.route_story import bundle as _bundle
+
+        try:
+            problems = list(_bundle.verify_bundle(bundle))
+        except Exception as exc:  # unreadable manifest etc.: a reason, not a crash
+            problems = [f"cannot be read: {exc}"]
+        reasons.extend(f"map bundle {bundle}: {p}" for p in problems)
+        if not problems:
+            manifest_sha = hashlib.sha256((bundle / "manifest.json").read_bytes()).hexdigest()
+    start = float(getattr(drive, "map_inset_trim_start_m", 0.0) or 0.0)
+    end = float(getattr(drive, "map_inset_trim_end_m", 0.0) or 0.0)
+    if not (start > 0 and end > 0):
+        reasons.append(
+            "route trim start and end must both be > 0 m so the inset never shows "
+            f"where a drive began or ended (got start={start:g}, end={end:g})"
+        )
+    zones = []
+    for raw in getattr(drive, "map_inset_privacy_zones", None) or []:
+        try:
+            zones.append(parse_privacy_zone(raw))
+        except ValueError as exc:
+            reasons.append(f"privacy zone {raw!r}: {exc}")
+    segments = day_route_segments(day_points)
+    if not segments:
+        reasons.append(f"no usable GPS trace for day {date or '(unknown)'}")
+    if reasons:
+        raise RouteClaimRefusedError(
+            "map inset requested (--map-inset route) but cannot be drawn; nothing was "
+            "encoded. Render without --map-inset, or fix: " + "; ".join(reasons)
+        )
+    trim = RouteTrim(start_m=start, end_m=end)
+    signature = hashlib.sha256(
+        json.dumps(
+            {
+                "mode": "route",
+                "bundle_manifest_sha256": manifest_sha,
+                "trim": [start, end],
+                "zones": sorted([z.center_lat, z.center_lon, z.radius_m] for z in zones),
+                "layout": ["bottom-left", 0.20],
+                "route": [[(p.time_s, p.latitude, p.longitude) for p in s] for s in segments],
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return MapInsetInputs(bundle, segments, trim, zones, signature)
 
 
 @dataclass
