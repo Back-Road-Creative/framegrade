@@ -58,6 +58,7 @@ from .sources import (
     COPERNICUS_PROVENANCE_NAME,
     DEM_3DEP_PROVENANCE_NAME,
     NAIP_PROVENANCE_NAME,
+    OSM_PROVENANCE_NAME,
     GeoRaster,
     SourceCoverageError,
     SourceFetchError,
@@ -68,12 +69,18 @@ from .sources import (
     fetch_gibs_reference_features,
     fetch_naip_imagery,
     fetch_osm_labels,
+    fetch_osm_roads,
     gibs_scene_for,
 )
 
 # Bumped from "osm-1" now that a bundle's labels are a GNIS+OSM merge, not OSM
 # alone — the two shapes must never share a content-addressed cache entry.
 LABELS_SOURCE_VERSION = "gnis-osm-1"
+
+# Folded into the bundle id so a pre-roads (schema /1) bundle never answers a
+# request for the schema /2 layout.
+ROADS_SOURCE_VERSION = "osm-highway-1"
+ROADS_PROVENANCE = f"{OSM_PROVENANCE_NAME}; ODbL 1.0; © OpenStreetMap contributors"
 
 GNIS_PROVENANCE_NAME = "GNIS Domestic Names"
 
@@ -416,6 +423,82 @@ def _repair_degraded_labels(
     )
 
 
+def _fetch_roads(
+    session: Any,
+    bbox: tuple[float, float, float, float],
+    *,
+    overpass_endpoint: str | None,
+) -> tuple[list[dict[str, Any]], bool, tuple[str, ...]]:
+    """Fetch the route bbox's OSM roads; never raises.
+
+    Route Story films do not need roads, so a failed or empty fetch is a
+    ``degraded`` layer carrying its reason, not a failed prepare. Returns
+    ``(features, degraded, problems)``.
+    """
+    try:
+        features = fetch_osm_roads(session, bbox, endpoint=overpass_endpoint)["features"]
+    except (SourceFetchError, OSError) as exc:
+        return [], True, (f"roads: {exc}",)
+    if not features:
+        return [], True, ("roads: no highway ways in bbox",)
+    return features, False, ()
+
+
+def _write_roads(bundle_root: Path, features: Sequence[dict[str, Any]]) -> None:
+    (bundle_root / "roads.geojson").write_text(
+        json.dumps({"type": "FeatureCollection", "features": list(features)}),
+        encoding="utf-8",
+    )
+
+
+def _roads_manifest(
+    bbox: tuple[float, float, float, float],
+    features: Sequence[dict[str, Any]],
+    degraded: bool,
+    problems: Sequence[str],
+) -> dict[str, Any]:
+    return {
+        "bbox": list(bbox),
+        "count": len(features),
+        "degraded": degraded,
+        "problems": list(problems),
+        "provenance": ROADS_PROVENANCE,
+    }
+
+
+def _repair_degraded_roads(
+    session: Any, report: PrepareReport, *, overpass_endpoint: str | None
+) -> PrepareReport:
+    """Retry the road fetch alone on a cache hit whose roads came back degraded.
+
+    Same reasoning as ``_repair_degraded_labels``: the road source is not
+    in the imagery/terrain cache address beyond its version, so a prepare that
+    lost Overpass would otherwise leave an empty road layer for good. The bbox
+    comes from the manifest. The layer is upgraded only when the retry is
+    undegraded; anything else leaves every byte where it was. The report has no
+    road fields, so it is returned unchanged.
+    """
+    manifest_path = report.bundle_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    roads = manifest.get("roads")
+    if not isinstance(roads, dict) or not roads.get("degraded") or not roads.get("bbox"):
+        return report
+    bbox = tuple(roads["bbox"])
+    features, degraded, problems = _fetch_roads(session, bbox, overpass_endpoint=overpass_endpoint)
+    if degraded:
+        return report
+    _write_roads(report.bundle_dir, features)
+    manifest["roads"] = _roads_manifest(bbox, features, degraded, problems)
+    manifest["files"]["roads.geojson"] = bundle_file_digest(report.bundle_dir / "roads.geojson")
+    rewrite_manifest(report.bundle_dir, manifest)
+    logger.info(
+        "route-story bundle %s: roads repaired in place (%d ways)",
+        report.bundle_dir.name,
+        len(features),
+    )
+    return report
+
+
 def _report_from_existing(
     bundle_root: Path,
     footprint: Footprint,
@@ -488,6 +571,7 @@ def _band_source_versions(
         "regional_margin_km": repr(regional_margin_km),
         "arcgis_export": ARCGIS_EXPORT_GRID_VERSION,
         "labels": LABELS_SOURCE_VERSION,
+        "roads": ROADS_SOURCE_VERSION,
         "maplibre": MAPLIBRE_VERSION,
         # Any Blue Marble raster (shared z2-4 or per-bundle z5-8) is graded
         # by `backdrop.grade_backdrop` before tiling — bumping the recipe
@@ -1092,7 +1176,7 @@ def prepare_bundle(
         trip_date_imagery,
     )
     if cached is not None:
-        return _repair_degraded_labels(
+        repaired = _repair_degraded_labels(
             session,
             cached,
             route_bbox=bbox,
@@ -1100,6 +1184,7 @@ def prepare_bundle(
             overpass_endpoint=overpass_endpoint,
             label_sources=label_sources,
         )
+        return _repair_degraded_roads(session, repaired, overpass_endpoint=overpass_endpoint)
 
     imagery_bands = plan_imagery_bands(
         bbox, focal_margin_m=margin_m, regional_margin_km=regional_margin_km
@@ -1153,6 +1238,10 @@ def prepare_bundle(
         label_sources=label_sources,
     )
     label_features = _filter_context_labels(label_features, bbox)
+    # The route-level bbox (route plus focal margin), not the regional labels one.
+    road_features, roads_degraded, road_problems = _fetch_roads(
+        session, bbox, overpass_endpoint=overpass_endpoint
+    )
 
     source_versions = {
         **_band_source_versions(
@@ -1262,6 +1351,7 @@ def prepare_bundle(
         json.dumps(_route_geojson(selection)), encoding="utf-8"
     )
     _write_labels(bundle_root, label_features)
+    _write_roads(bundle_root, road_features)
     ensure_maplibre(bundle_root, fetch_maplibre)
 
     manifest_fields = {
@@ -1355,6 +1445,7 @@ def prepare_bundle(
             "count": len(label_features),
             "bbox": list(naip_coarse_band.bbox),
         },
+        "roads": _roads_manifest(bbox, road_features, roads_degraded, road_problems),
     }
     write_manifest(bundle_root, manifest_fields)
     problems = verify_bundle(bundle_root)
