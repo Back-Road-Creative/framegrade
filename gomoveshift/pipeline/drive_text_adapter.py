@@ -240,6 +240,11 @@ def _named_in(label: str, index: EvidenceIndex) -> List[str]:
     return [text for _, _, text in sorted(found)]
 
 
+def _binned(record: Optional[dict]) -> bool:
+    """``record`` carries the per-bin places the zero-tolerance gate re-checks."""
+    return isinstance(record, dict) and "bins" in record
+
+
 def _seconds(stamp: str) -> int:
     parts = [int(x) for x in str(stamp).split(":")]
     return sum(v * 60**i for i, v in enumerate(reversed(parts)))
@@ -285,14 +290,21 @@ def lf_drive_facts(
     insert_count: int = 0,
     us: bool = False,
     chapters: Sequence[dict] = (),
+    record: Optional[dict] = None,
 ) -> DriveFacts:
     """The facts a drive description states for one LF or superlong part.
 
-    The hook and location name the first evidenced place in ``label``; a label
-    that names none is refused (``name_unbacked:place``)."""
+    The hook and location name the first evidenced place in ``label`` that holds
+    every retained second of ``record`` (the first one when none does, or when
+    ``record`` has no ``bins`` to check); a label that names none is refused
+    (``name_unbacked:place``)."""
     named = _named_in(label, index)
     if not named:
         raise DriveTextRefusedError([f"name_unbacked:place:{_key(label)}"])
+    if _binned(record):
+        from .route_claims import recheck_place_text
+
+        named.sort(key=lambda n: bool(recheck_place_text(record, n)))  # stable: label order
     year = month = None
     if recording_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", recording_date):
         year, month = int(recording_date[:4]), int(recording_date[5:7])
@@ -325,10 +337,21 @@ def attach_drive_text(route_entry: Optional[dict], metadata: dict, label: str, *
     upload is held -- the pipeline run itself keeps going."""
     metadata.pop("drive_text_refusal", None)
     metadata["drive_text_inputs"] = {"label": label, **facts_kw}
+    record = (route_entry or {}).get("record")
     try:
         index = evidence_index(route_entry)
-        data = build_drive_data(lf_drive_facts(label, index, **facts_kw), index)
-        metadata["final_text_description"] = drive_entries(data)
+        data = build_drive_data(lf_drive_facts(label, index, record=record, **facts_kw), index)
+        entries = drive_entries(data)
+        if _binned(record):
+            # The upload's zero-tolerance place gate, run where the text is made,
+            # so an audit pass refuses what the upload would.
+            from .final_text_record import FinalTextReviewError, _place_gate
+
+            try:
+                _place_gate({"route_record": record}, None, "", compose_description(entries), [])
+            except FinalTextReviewError as exc:
+                raise DriveTextRefusedError(exc.reasons) from exc  # the gate logged the issues
+        metadata["final_text_description"] = entries
     except DriveTextRefusedError as exc:
         logger.error("DRIVE-TEXT: %s", exc)
         metadata["final_text_description"] = []
