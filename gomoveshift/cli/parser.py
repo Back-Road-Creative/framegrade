@@ -3562,6 +3562,18 @@ def _add_review_set_parser(subparsers: argparse._SubParsersAction) -> None:
     t.add_argument("--receipt", type=Path, default=None, help="Keycut assembly receipt (JSON).")
     t.add_argument("--sequence", default=None, help="Sequence label (default: from the file name).")
     t.add_argument("--out", type=Path, required=True, help="Write the stops JSON here.")
+    q = actions.add_parser(
+        "pairs",
+        help="Pair scan windows with output times (unpaired windows are listed with a reason)",
+    )
+    q.add_argument("--scan", type=Path, required=True, help="Scan JSON from `review-set scan`.")
+    q.add_argument("--stops", type=Path, required=True, help="Stops JSON from `review-set stops`.")
+    q.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Write the pairs JSON here (default: stdout); `render --pairs` reads it.",
+    )
     r = actions.add_parser(
         "render",
         help="Write paired stills, excerpts and provenance for source/output time pairs",

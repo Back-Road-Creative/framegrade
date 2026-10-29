@@ -1,7 +1,7 @@
-"""Handler for ``gomoveshift review-set {scan,stops,render}``.
+"""Handler for ``gomoveshift review-set {scan,stops,pairs,render}``.
 
-Thin wrappers over ``pipeline/review_set_scan``, ``review_set_stops`` and
-``review_set_render``: parse the inputs, call the library, write the result.
+Thin wrappers over ``pipeline/review_set_scan``, ``review_set_stops``,
+``review_set_pairs`` and ``review_set_render``: parse the inputs, call the library, write the result.
 Any expected failure (missing file, non-empty output directory, schema error)
 prints one ``Error:`` line to stderr and returns 1 -- never a traceback.
 """
@@ -81,17 +81,32 @@ def _cmd_stops(args) -> int:
     return 0
 
 
+def _load_pairs(path: Path) -> list[tuple[float, float]]:
+    """Read ``--pairs``: a JSON list of 2-lists, or a ``review-set pairs`` document."""
+    raw = _read_json(path, "pairs file")
+    if isinstance(raw, dict) and "pairs" in raw:
+        raw = raw["pairs"]
+    if not isinstance(raw, list) or not all(isinstance(p, list) and len(p) == 2 for p in raw):
+        raise ValueError(f"pairs file must be a JSON list of [source_t, output_t]: {path}")
+    return [(float(s), float(o)) for s, o in raw]
+
+
+def _cmd_pairs(args) -> int:
+    from ...pipeline.review_set_pairs import build_pairs
+
+    scan = _read_json(args.scan, "scan file")
+    if not args.stops.is_file():
+        raise FileNotFoundError(f"stops file not found: {args.stops}")
+    _emit(build_pairs(scan, args.stops), args.out)
+    return 0
+
+
 def _cmd_render(args, config) -> int:
     from ...pipeline.review_set_render import render_review_set
 
     pairs = [parse_pair(p) for p in args.pair or []]
     if args.pairs is not None:
-        raw = _read_json(args.pairs, "pairs file")
-        if not isinstance(raw, list) or not all(isinstance(p, list) and len(p) == 2 for p in raw):
-            raise ValueError(
-                f"pairs file must be a JSON list of [source_t, output_t]: {args.pairs}"
-            )
-        pairs = [(float(s), float(o)) for s, o in raw] + pairs
+        pairs = _load_pairs(args.pairs) + pairs
     if not pairs:
         raise ValueError("give at least one pair (--pairs FILE or --pair S:O)")
     result = render_review_set(
@@ -113,6 +128,8 @@ def cmd_review_set(args, config) -> int:
             return _cmd_scan(args)
         if args.review_set_action == "stops":
             return _cmd_stops(args)
+        if args.review_set_action == "pairs":
+            return _cmd_pairs(args)
         if args.review_set_action == "render":
             return _cmd_render(args, config)
     except _USER_ERRORS as exc:
