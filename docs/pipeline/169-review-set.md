@@ -14,10 +14,18 @@ Every failure (missing file, non-empty output directory, schema error) prints on
 ### `scan` -- candidate windows per condition
 
 ```
-gomoveshift review-set scan --scores scores_2026-01-02.npz \
-    --stop-mask stop_mask_2026-01-02.npz --gps gps.json --tonemap clip.tonemap.json \
+gomoveshift review-set scan --scores <stages_dir>/drive_scores.npz \
+    --stop-mask <stages_dir>/stop_mask_2026-01-02.npz \
+    --gps <stages_dir>/gps_points_2026-01-02.json --tonemap clip.tonemap.json \
     --out scan.json
 ```
+
+A drive writes all three inputs to its stages directory: the score cache
+(`drive_scores.npz`), the stop mask (`stop_mask_<date>.npz`) and the day's usable GPS
+fixes (`gps_points_<date>.json`, a JSON list of `[t, lat, lon]` floats in the same
+day-start seconds the stop mask uses). The GPS file is written beside the stop mask and
+only when the day has at least one usable fix; a write failure logs a warning and never
+aborts the day.
 
 Reads the per-second score cache (`scores` array) and, optionally, the stop-mask npz
 (`states`), a JSON list of GPS fixes (`[t, lat, lon]` rows or `{time, lat, lon}` objects)
@@ -45,6 +53,23 @@ seconds and a kept/cut decision. With `--receipt`, each kept run also carries it
 time ranges; without one, output times are omitted and the document says so. `--sequence`
 overrides the label taken from the file name.
 
+### `pairs` -- scan windows mapped to output times
+
+```
+gomoveshift review-set pairs --scan scan.json --stops stops.json --out pairs.json
+```
+
+For each scan window the midpoint is looked up in the stops runs. When it falls in a
+kept run that has output times (`stops` was given a `--receipt`), the pair is
+`[source_t, output_t]` with `output_t = output_start + (midpoint - source_start)`.
+Otherwise the window is not paired; it is listed under `unpaired` with its condition,
+window and a reason: `cut`, `no_output_times`, `outside_runs` or `not_in_output`
+(a kept second the receipt does not carry). Output times are never estimated.
+
+`pairs.json` is the `review-set-pairs/1` document: `pairs`, `detail` (condition,
+window, source and output time per pair) and `unpaired`. `render --pairs` accepts that
+document directly, as well as a bare JSON list. `--out` defaults to stdout.
+
 ### `render` -- paired stills and excerpts
 
 ```
@@ -52,7 +77,7 @@ gomoveshift review-set render --source src.mp4 --output out.mp4 \
     --pair 12.5:9.0 --pair 40:31.5 --out-dir review/ --excerpt-seconds 3
 ```
 
-Pairs come from `--pairs FILE` (a JSON list of `[source_t, output_t]`), repeated
+Pairs come from `--pairs FILE` (a JSON list of `[source_t, output_t]`, or the `pairs` document above), repeated
 `--pair S:O`, or both. For each pair it writes a still and a full-speed excerpt from each
 side plus `provenance.json` (version, git sha, ffmpeg version, effective drive config,
 input sizes and sha256). `--out-dir` must be new or empty. Pass `--synthetic` only for

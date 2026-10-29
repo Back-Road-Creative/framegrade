@@ -77,7 +77,12 @@ from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
-from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
+from .gps_quality import (
+    trim_gps_to_clip_timeline,
+    usable_fix_times,
+    window_median_speed_mps,
+    write_gps_points,
+)
 from .inserts import (
     InsertError,
     insert_label,
@@ -2052,6 +2057,12 @@ def run_day_pipeline(
             )
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Day %s: stop mask persist failed: %s", date, exc)
+        # The GPS fixes the mask was built from, beside it, for
+        # ``review-set scan --gps`` (same timebase; never an empty file).
+        try:
+            write_gps_points(day_gps_points, _mask_base / f"gps_points_{date}.json")
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("Day %s: GPS fixes persist failed: %s", date, exc)
 
     # ── Step 2: assemble regular LFs ──────────────────────────────
     lf_dir = day_dir / "regular_lfs"

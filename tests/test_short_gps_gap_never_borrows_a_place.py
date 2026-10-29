@@ -13,6 +13,7 @@ operator/county anchor (``test_gpsless_short_fallback``), never a destination.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -284,3 +285,49 @@ def test_usable_fix_rule_matches_route_claims_valid():
 
     for lat, lon in [(1.0, 2.0), (0.0, 0.0), (float("nan"), 1.0), (95.0, 1.0), (1.0, -181.0)]:
         assert bool(usable_fix_times([(1.0, lat, lon)])) == route_claims._valid(lat, lon)
+
+
+# ── the GPS fixes persist beside the stop mask ─────────────────────────────
+
+
+def _plan_reached(tmp_path, gps_points_by_date):
+    with patch.object(day_pipeline, "plan_shorts", side_effect=_PlanReachedError):
+        with pytest.raises(_PlanReachedError):
+            _run_day(tmp_path, gps_points_by_date)
+    return tmp_path / "_stages"
+
+
+def test_gps_fixes_persist_beside_the_stop_mask(tmp_path, render_patches):
+    stages = _plan_reached(tmp_path, {_DATE: _trace((0, 20), (200, 1799))})
+    rows = json.loads((stages / f"gps_points_{_DATE}.json").read_text(encoding="utf-8"))
+    assert len(rows) == 21 + 1600
+    assert rows[0] == [0.0, _LAT0, _LON0]
+    assert all(len(r) == 3 and all(isinstance(v, float) for v in r) for r in rows)
+    assert [r[0] for r in rows] == sorted(r[0] for r in rows)
+    assert (stages / f"stop_mask_{_DATE}.npz").is_file()
+
+
+def test_gps_fixes_accept_dict_points_and_skip_unusable_ones(tmp_path, render_patches):
+    pts = [
+        {"time": 1.0, "lat": 39.0, "lon": -77.0},
+        {"time": 2.0, "lat": 0.0, "lon": 0.0},
+        (3.0, None, -77.0),
+        (4.0, 39.5, -77.5),
+    ]
+    stages = _plan_reached(tmp_path, {_DATE: pts})
+    rows = json.loads((stages / f"gps_points_{_DATE}.json").read_text(encoding="utf-8"))
+    assert rows == [[1.0, 39.0, -77.0], [4.0, 39.5, -77.5]]
+
+
+@pytest.mark.parametrize("points", [None, [], [(1.0, None, None)]])
+def test_no_usable_fix_writes_no_gps_file(tmp_path, render_patches, points):
+    stages = _plan_reached(tmp_path, {_DATE: points} if points is not None else {})
+    assert (stages / f"stop_mask_{_DATE}.npz").is_file()
+    assert not (stages / f"gps_points_{_DATE}.json").exists()
+
+
+def test_gps_write_failure_warns_and_never_aborts(tmp_path, render_patches, caplog):
+    with patch.object(day_pipeline, "write_gps_points", side_effect=OSError("disk full")):
+        stages = _plan_reached(tmp_path, {_DATE: _trace((0, 50))})
+    assert (stages / f"stop_mask_{_DATE}.npz").is_file()
+    assert "GPS fixes persist failed" in caplog.text

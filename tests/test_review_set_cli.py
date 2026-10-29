@@ -227,3 +227,93 @@ def test_parse_pair():
     assert h.parse_pair("1.5:2") == (1.5, 2.0)
     with pytest.raises(ValueError):
         h.parse_pair("1:2:3")
+
+
+# -- pairs ------------------------------------------------------------------
+
+
+def _pairs_inputs(tmp_path):
+    """Synthetic scan + stops documents: a tunnel window in a kept run, a night one in a cut."""
+    from gomoveshift.pipeline.review_set_stops import SCHEMA_ID as STOPS_SCHEMA
+
+    scan = tmp_path / "scan.json"
+    scan.write_text(
+        json.dumps(
+            {
+                "conditions": {
+                    "tunnel": {"status": "ok", "heuristic": False,
+                               "windows": [{"start_s": 10, "end_s": 20}]},
+                    "night": {"status": "ok", "heuristic": False,
+                              "windows": [{"start_s": 60, "end_s": 70}]},
+                }
+            }
+        )
+    )  # fmt: skip
+    stops = tmp_path / "stops.json"
+    stops.write_text(
+        json.dumps(
+            {
+                "schema": STOPS_SCHEMA, "sequence": "synthetic", "states_source": "npz",
+                "total_seconds": 100, "state_seconds": {}, "mask_summary": {},
+                "output_times": {"available": True, "reason": None}, "receipt": None,
+                "runs": [
+                    {"state": "MOVING", "start_s": 0, "end_s": 50, "decision": "kept",
+                     "output_ranges": [{"span_index": 0, "source_start_s": 0.0,
+                                        "source_end_s": 50.0, "output_start_s": 5.0,
+                                        "output_end_s": 55.0}]},
+                    {"state": "STOPPED", "start_s": 50, "end_s": 100, "decision": "cut"},
+                ],
+            }
+        )
+    )  # fmt: skip
+    return scan, stops
+
+
+def test_parse_pairs():
+    a = _build_parser().parse_args(
+        ["review-set", "pairs", "--scan", "s", "--stops", "t", "--out", "o"]
+    )
+    assert a.review_set_action == "pairs"
+
+
+def test_pairs_end_to_end_and_render_reads_the_document(tmp_path, capsys):
+    scan, stops = _pairs_inputs(tmp_path)
+    out = tmp_path / "pairs.json"
+    rc, _ = _run(
+        ["review-set", "pairs", "--scan", str(scan), "--stops", str(stops), "--out", str(out)],
+        capsys,
+    )
+    assert rc == 0
+    doc = json.loads(out.read_text())
+    assert doc["pairs"] == [[15.0, 20.0]]
+    assert doc["unpaired"] == [
+        {"condition": "night", "window": [60.0, 70.0], "reason": "cut"}
+    ]  # fmt: skip
+    # render's --pairs accepts the document (and still the bare list)
+    assert h._load_pairs(out) == [(15.0, 20.0)]
+    bare = tmp_path / "bare.json"
+    bare.write_text("[[1, 2]]")
+    assert h._load_pairs(bare) == [(1.0, 2.0)]
+
+
+@pytest.mark.parametrize("missing", ["scan", "stops"])
+def test_pairs_missing_input_is_one_line(missing, tmp_path, capsys):
+    scan, stops = _pairs_inputs(tmp_path)
+    {"scan": scan, "stops": stops}[missing].unlink()
+    rc, cap = _run(
+        ["review-set", "pairs", "--scan", str(scan), "--stops", str(stops),
+         "--out", str(tmp_path / "o.json")],
+        capsys,
+    )  # fmt: skip
+    assert rc == 1 and cap.err.startswith("Error:") and cap.err.count("\n") == 1
+
+
+def test_pairs_bad_stops_schema_is_one_line(tmp_path, capsys):
+    scan, stops = _pairs_inputs(tmp_path)
+    stops.write_text('{"schema": "nope"}')
+    rc, cap = _run(
+        ["review-set", "pairs", "--scan", str(scan), "--stops", str(stops),
+         "--out", str(tmp_path / "o.json")],
+        capsys,
+    )  # fmt: skip
+    assert rc == 1 and cap.err.count("\n") == 1 and "Traceback" not in cap.err
