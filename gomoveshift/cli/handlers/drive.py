@@ -222,6 +222,9 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
     """
     if getattr(args, "no_auto_publish_journal", False):
         return
+    # A discovery run renders and uploads nothing, even with --youtube-upload on.
+    if any(getattr(args, f, False) for f in _DISCOVERY_FLAGS):
+        return
     if not resolve_youtube_upload(args):
         logger.info(
             "auto-publish-journal: YouTube upload was off for this run; nothing to merge "
