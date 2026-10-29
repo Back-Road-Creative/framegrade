@@ -62,9 +62,9 @@ def _build(tmp_path, label):
 
 
 def test_build_metadata_gives_the_review_waypost_entries(tmp_path):
-    _, _, meta = _build(tmp_path, "Harrow")
+    _, _, meta = _build(tmp_path, "Harrow, Westmark")  # Westmark holds the Pellmere half
     assert "drive_text_refusal" not in meta
-    assert "Location: Harrow" in compose_description(meta["final_text_description"])
+    assert "Location: Westmark" in compose_description(meta["final_text_description"])
     assert meta["final_text_review"]["description_layout"] == "gms-drive-1"
 
 
