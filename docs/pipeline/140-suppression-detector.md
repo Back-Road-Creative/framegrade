@@ -41,8 +41,8 @@ and calls `classify_youtube_shorts_feed` unchanged, then translates the returned
 map into the one thing worth showing on the SEO tab: the latest day's status and how many
 consecutive days it has held. Nothing else is computed — this module produces no n, no p-value, no
 deviation, so the console must not invent one for a status that carries none; that is the whole
-difference from how the same view treats an `AnomalyFinding`. Facebook is not translated: there is
-no reel-views series in `channel_daily` yet for `classify_facebook_reel_reach` to read (see
-`cli/handlers/metrics.py::_apply_bounded_response`'s own note on the same gap). The row is still
+difference from how the same view treats an `AnomalyFinding`. Facebook is not translated: `channel_daily`
+now stores Page daily series under `facebook:<metric>` dimensions (`docs/facebook-metrics.md`), but
+`classify_facebook_reel_reach` is not yet switched onto them. The row is still
 report-only on the console exactly as it is from the CLI — the "nothing acts on its own" rule is
 unchanged by having a second reader.

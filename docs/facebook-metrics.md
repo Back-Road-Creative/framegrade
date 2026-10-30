@@ -48,6 +48,45 @@ The fields survive tracking-record and observation serialization. Collection
 health reports measurement availability, not a claim that every metric or
 monetization field is present.
 
+## Reel reach
+
+After a Reel's play counts are measured, the collector asks for its reach
+(unique accounts) on the same endpoint, one lifetime metric per request, in
+this order: `post_impressions_unique`, then `post_total_media_view_unique`.
+The first numeric answer is stored as `reach`, and `reach_metric` records
+which name answered. A name Graph refuses is skipped for the rest of the run,
+and a refusal never makes the measured observation unanswered. No answer
+leaves `reach` unknown (`null`), never zero. Video-format posts get no reach
+request. Neither name has been confirmed against the live Page yet.
+
+The follower vs non-follower split is not collected: its Graph shape for
+Reels has not been verified, so no field is stored for it.
+
+## Page daily series
+
+Each nightly `metrics collect` also pulls Page-level daily insights into the
+brand's `channel_daily` store (`tracking.channel_daily.pull_facebook_page_daily`):
+one row per day under dimension `facebook:<metric>`, value `page`, the number
+in `views`. Candidate metrics, each on its own request so a retired name
+cannot reject the others: `page_media_view`, `page_total_media_view_unique`,
+`page_video_views`, `page_impressions_unique`.
+
+- **Day label.** Page insights close a day at midnight Pacific; each value is
+  stored under that Pacific day (`end_time` minus one second), not UTC.
+- **Backfill.** A metric with no stored rows backfills from 2026-06-01 in
+  windows of at most 90 days; later runs re-pull from three days before its
+  last stored day, because recent days settle. A re-pulled day replaces its
+  row. Only one request is made per window; `paging.next` is never followed.
+- **Refusals.** A refused metric stops after its first window, logs Graph's
+  message and is reported `unavailable`; nothing is stored for it.
+- **Cron line.** The run prints
+  `FB_PAGE_DAILY page_media_view=<rows|unavailable> ...` for every candidate,
+  which is how the answering names are confirmed.
+
+`classify_facebook_reel_reach` still reads the interim reel-plays series
+(`docs/pipeline/141-bounded-response.md`); switching it onto a Page series is
+a separate change.
+
 The credential's Graph version is preserved. Meta retired v20 on September
 24, 2026: review a credential pinned to that version separately, including its
 publishing consumers, rather than silently changing it during collection.

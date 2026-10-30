@@ -118,6 +118,10 @@ class PlatformMetrics:
     reel_initial_plays: Optional[int] = None
     reel_replays: Optional[int] = None
     reel_total_plays: Optional[int] = None
+    #: Facebook Reel reach: unique accounts, never impressions. ``reach_metric``
+    #: names the Meta metric that answered (``docs/facebook-metrics.md``).
+    reach: Optional[int] = None
+    reach_metric: Optional[str] = None
 
     @property
     def engagement_rate(self) -> Optional[float]:

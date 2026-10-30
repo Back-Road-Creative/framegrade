@@ -39,8 +39,13 @@ from ...tracking import (
     upsert_audience_online,
     upsert_from_metrics,
 )
+from ...tracking.channel_daily import (
+    FACEBOOK_PAGE_METRICS,
+    pull_channel_daily,
+    pull_facebook_page_daily,
+    shorts_feed_share,
+)
 from ...tracking.channel_daily import load_rows as load_channel_daily_rows
-from ...tracking.channel_daily import pull_channel_daily, shorts_feed_share
 from ...tracking.channel_enrol import enrol_channel
 from ...tracking.collector import YouTubeCollector
 from ...tracking.evidence_export import build_evidence_bundle
@@ -202,6 +207,7 @@ def _cmd_metrics_collect(args, config) -> int:
 
     pulled = _pull_channel_daily(collector, brand)
     print(f"Pulled {pulled} channel-daily row(s) for {brand}")
+    _pull_facebook_page_daily(collector, brand)
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     return 0
@@ -384,6 +390,25 @@ def _pull_channel_daily(collector: MetricsCollector, brand: str) -> int:
     except Exception as exc:  # noqa: BLE001 - never fail collect on a channel-daily pull error
         logger.warning("channel-daily pull skipped: %s", exc)
         return 0
+
+
+def _pull_facebook_page_daily(collector: MetricsCollector, brand: str) -> None:
+    """Best-effort Facebook Page daily pull into the same channel-daily
+    store (`tracking.channel_daily.pull_facebook_page_daily`): the first
+    run backfills from 2026-06-01, later runs re-pull a short settle window.
+    Prints one ``FB_PAGE_DAILY`` line naming which metric names Graph
+    answered; a failure is logged and swallowed like `_pull_channel_daily`.
+    """
+    try:
+        status = pull_facebook_page_daily(collector.facebook, brand, date.today())
+    except Exception as exc:  # noqa: BLE001 - never fail collect on a page-daily pull error
+        logger.warning("facebook page-daily pull skipped: %s", exc)
+        return
+    fields = " ".join(
+        f"{m}={'unavailable' if status.get(m) is None else status[m]}"
+        for m in FACEBOOK_PAGE_METRICS
+    )
+    print(f"FB_PAGE_DAILY {fields}")
 
 
 #: Days of Facebook history the detector needs strictly BEFORE a day it classifies,
