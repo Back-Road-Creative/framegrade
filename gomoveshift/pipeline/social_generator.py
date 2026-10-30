@@ -1460,17 +1460,27 @@ class SocialGenerator:
         # never end up in the tag list.
         location_for_tags = _strip_series_suffix(self.location)
 
+        # Strip a leading operator title word ("To"/"Through"/...) from EACH
+        # comma component (``parse_lf_label``, as ``_arc_safe_anchor`` does), so
+        # "To Goleen, County Cork" cannot leak "To Goleen" into the phrase tags
+        # or into ``_region_tags``' string-parse fallback. No-op without one.
+        location_stripped = ", ".join(
+            place
+            for place in (parse_lf_label(p).place for p in location_for_tags.split(","))
+            if place.strip()
+        )
+
         if not interactive:
             # Add location parts as phrase tags (split by comma, not whitespace)
             self._dedup_add(
                 tags,
-                [p.strip() for p in location_for_tags.split(",") if len(p.strip()) > 2],
+                [p.strip() for p in location_stripped.split(",") if len(p.strip()) > 2],
             )
 
         # Region-derived tags ("Ireland road trip", etc.) replace the
         # hardcoded "road trip USA" that used to appear on every video.
         self._dedup_add(
-            tags, _region_tags(self.location, self.resolved_location, self._own_regions)
+            tags, _region_tags(location_stripped, self.resolved_location, self._own_regions)
         )
 
         # Add road names from roads list

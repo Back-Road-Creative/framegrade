@@ -13,6 +13,7 @@ from gomoveshift.pipeline._series_utils import _TITLE_PREFIX_RE, is_title_prefix
 from gomoveshift.pipeline.content_validator import ContentValidator
 from gomoveshift.pipeline.geo_constants import US_STATE_ABBREVS
 from gomoveshift.pipeline.pipeline_validator import GateResult
+from gomoveshift.pipeline.place_shape import _hyphenate_route_ref, _road_ref_members
 
 if TYPE_CHECKING:
     from .place_corrections import PlaceCorrections
@@ -1050,6 +1051,70 @@ _COUNTY_TOKEN_RE = re.compile(r"\bCounty\b", re.IGNORECASE)
 # source for the curated word list -- see its docstring for why.
 
 
+# A lead component (before the first comma) that is neither county-shaped nor
+# road-shaped is a settlement ("Goleen, County Cork"): flagging it "county-only"
+# only because the trace's ``ordered_place_sequence`` lacks that name is a false
+# positive. A road-shaped lead must still warn, because the road+county label
+# shapes ("R591, County Cork", "US-64, Jackson County, NC") are what this gate
+# exists to catch.
+#
+# Route ref: 1-3 letters + digits, optional separator (N71, R591, M8, US-64,
+# US 64, I-95, SR 12), optionally followed by a modifier word ("US 64 Business").
+_ROAD_REF_RE = re.compile(
+    r"^[A-Za-z]{1,3}[\s-]?\d+[A-Za-z]?(?:\s+(?:Business|Bypass|Alt(?:ernate)?|Spur|Loop|Truck|Scenic))?$",
+    re.IGNORECASE,
+)
+# Spelled-out route + number ("Interstate 40", "NC Highway 28", "Hwy. 64",
+# "State Route 28", "County Road 9"), an OSM concurrency ref joining refs with
+# ';' ("US 64;NC 28"), or a name ending in a road noun ("Cherohala Skyway",
+# "Capital Beltway", "M50 Motorway").
+_ROAD_WORD_RE = re.compile(
+    r"^(?:(?:[A-Za-z]{2}|US|State|County)\s+)?(?:Route|Hwy|Highway|Interstate|Road)\.?\s+\d+[A-Za-z]?"
+    r"(?:\s+(?:Business|Bypass|Alt(?:ernate)?|Spur|Loop|Truck|Scenic))?$"
+    r"|.*;.*"
+    r"|.*\b(?:Road|Rd|Drive|Way|Highway|Parkway|Byway|Street|Lane|Avenue|Ave|"
+    r"Boulevard|Blvd|Pkwy|Hwy|Trail|Trace|Pike|Turnpike|Skyway|Expressway|"
+    r"Freeway|Bypass|Causeway|Loop|Motorway|Beltway)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _road_metadata_match(lead: str, resolved: dict) -> bool:
+    """True when ``lead`` names a road the resolver itself recorded
+    (``resolved_location`` ``road`` / ``road_refs`` / ``road_votes``).
+
+    The resolver's own road determination beats a string-shape guess and
+    catches spellings the static regexes do not anticipate."""
+    lead_norm = lead.strip().lower()
+    lead_hyph = _hyphenate_route_ref(lead.strip()).lower()
+    candidates: list[str] = []
+    road = resolved.get("road")
+    if isinstance(road, str) and road:
+        candidates.append(road)
+    refs = resolved.get("road_refs")
+    if isinstance(refs, (list, tuple)):
+        candidates.extend(r for r in refs if isinstance(r, str))
+    votes = resolved.get("road_votes")
+    if isinstance(votes, dict):
+        candidates.extend(k for k in votes if isinstance(k, str))
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate.lower() in (lead_norm, lead_hyph):
+            return True
+        for member in _road_ref_members(candidate):
+            if member.lower() in (lead_norm, lead_hyph):
+                return True
+    return False
+
+
+def _is_road_shaped(lead: str, resolved: "dict | None" = None) -> bool:
+    """True when ``lead`` (the label's first comma component) names a road."""
+    lead = lead.strip()
+    if _ROAD_REF_RE.match(lead) or _ROAD_WORD_RE.match(lead):
+        return True
+    return bool(resolved) and _road_metadata_match(lead, resolved)
+
+
 def _label_quality_diagnosis(metadata_json: dict) -> "tuple[str, list[str]] | None":
     """Single source of truth for the title-vs-place / county-only verdict.
 
@@ -1077,6 +1142,12 @@ def _label_quality_diagnosis(metadata_json: dict) -> "tuple[str, list[str]] | No
     if is_title_prefixed(label):
         return ("title", settlements)
     if _COUNTY_TOKEN_RE.search(label) and not label_names_a_settlement:
+        lead = label.split(",", 1)[0].strip()
+        # A settlement-shaped lead (neither county- nor road-shaped) is a real
+        # place, not a bare county. A road spelling nothing here recognises is
+        # read as a settlement: the cost is a missed WARN, never a failed run.
+        if not (_COUNTY_TOKEN_RE.search(lead) or _is_road_shaped(lead, resolved)):
+            return None
         return ("county_only", settlements)
     return None
 

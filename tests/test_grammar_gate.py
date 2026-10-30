@@ -150,3 +150,10 @@ class TestShortsCsvGrammarGate:
         post = _make_post(1, youtube_title="Slow Drive Through To Clonakilty")
         with pytest.raises(ValueError, match="row 0"):
             _build_csv(tmp_path, post)
+
+    def test_csv_tag_starting_with_preposition_hard_fails_even_mid_cell(self, tmp_path: Path):
+        # The offending tag was not the FIRST tag in the comma-joined cell, so
+        # a whole-cell check never saw it as "starting with" a preposition.
+        post = _make_post(1, youtube_tags="dashcam, To Goleen, driving")
+        with pytest.raises(ValueError, match="(?i)grammar"):
+            _build_csv(tmp_path, post)
