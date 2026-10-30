@@ -87,7 +87,7 @@ GMS_TEXT_POLICY = FinalTextPolicy(
     filler_words=(*DEFAULT_FILLER_WORDS, "part"),
 )
 
-_REGION_LEVELS = ("county", "state")
+_REGION_LEVELS = ("county", "counties", "state")
 
 #: The description layout every GMS drive upload (long-form, superlong part) is
 #: reviewed under; Waypost's id, never a literal here.

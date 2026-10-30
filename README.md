@@ -205,7 +205,7 @@ against GPS samples from the footage the edit keeps. A title that names all
 visited places must also have a truthful state suffix: `Alder and Birch, VA`
 is refused if a retained sample resolves to West Virginia. A place list alone
 does not validate a trailing state abbreviation. GPS gaps still require their
-own evidence before a broader county or state fallback can be approved.
+own evidence before a broader county, two-county or state fallback can be approved.
 Pinned Census polygons can supply a bounded region check for those gaps;
 the pipeline waits for a matching Waypost review contract before using it.
 See [retained-route region proof](docs/pipeline/80-census-boundary-proof.md).

@@ -68,7 +68,10 @@ _CONTAINMENT_WORDS = re.compile(
 #: Settlement fields of the detailed geocode, most significant first (the
 #: title builder's ladder; ``name`` is POI-prone and never read).
 _SETTLEMENT_KEYS = ("city", "town", "village", "hamlet", "locality", "suburb")
-_LEVELS = ("county", "state")
+#: Narrowest first. "counties" is two counties of one state, labelled
+#: "A & B Counties, ST": a drive across one county line, which no single
+#: county holds, is not widened to its whole state.
+_LEVELS = ("county", "counties", "state")
 
 logger = logging.getLogger(__name__)
 
@@ -440,19 +443,46 @@ class RouteEvidence:
             for (t, c, st), sec in totals.items()
         ]
 
-    def region_claim(self, level: str) -> Optional[dict]:
-        """The ``level`` region ("county"/"state") most retained time is in, with
-        the containment evidence a region label needs; ``None`` if none known."""
+    def _county_pair(self) -> Optional[list]:
+        """The two counties the retained bins resolve to, most time first, when
+        both are counties ("... County") of one state; else ``None``."""
         votes = Counter()
         for b in self.bins:
-            name = getattr(b, level)
-            if name:
-                votes[name] += b.seconds
-        if not votes:
+            if b.county:
+                votes[b.county] += b.seconds
+        pair = [name for name, _sec in votes.most_common()]
+        states = {b.state for b in self.bins if b.county in pair}
+        if len(pair) != 2 or len(states) != 1 or None in states:
             return None
-        name = votes.most_common(1)[0][0]
-        inside = sum(1 for b in self.bins if getattr(b, level) == name)
-        other = sum(1 for b in self.bins if getattr(b, level) and getattr(b, level) != name)
+        return pair if all(c.endswith(" County") for c in pair) else None
+
+    def region_claim(self, level: str) -> Optional[dict]:
+        """The ``level`` region ("county"/"counties"/"state") most retained time
+        is in, with the containment evidence a region label needs; ``None`` if
+        none known."""
+        if level == "counties":
+            pair = self._county_pair()
+            if pair is None:
+                return None
+            name = " & ".join(c.removesuffix(" County") for c in pair) + " Counties"
+
+            def of(item):
+                return name if item.county in pair else item.county
+
+        else:
+
+            def of(item):
+                return getattr(item, level)
+
+            votes = Counter()
+            for b in self.bins:
+                if of(b):
+                    votes[of(b)] += b.seconds
+            if not votes:
+                return None
+            name = votes.most_common(1)[0][0]
+        inside = sum(1 for b in self.bins if of(b) == name)
+        other = sum(1 for b in self.bins if of(b) and of(b) != name)
         unresolved = len(self.bins) - inside - other
         proof = self.boundary_proofs.get(level)
         # A proof covers only the exact retained seconds it checked.
@@ -469,9 +499,7 @@ class RouteEvidence:
         claim = {
             "level": level,
             "name": name,
-            "required_place_ids": [
-                p.evidence_id for p in self.required if getattr(p, level) == name
-            ],
+            "required_place_ids": [p.evidence_id for p in self.required if of(p) == name],
             "coverage": self.coverage,
             "gaps": [g.describe() for g in self.gaps],
             "samples_inside": inside,
@@ -485,6 +513,9 @@ class RouteEvidence:
         if level == "county":
             states = Counter(b.state for b in self.bins if b.county == name and b.state)
             claim["state"] = states.most_common(1)[0][0] if states else None
+        if level == "counties":
+            claim["counties"] = pair
+            claim["state"] = next(b.state for b in self.bins if b.county in pair)
         if proved:
             claim["boundary_proof"] = proof
         return claim
@@ -693,7 +724,7 @@ def _region_ok(claim: Optional[dict], ev: RouteEvidence, min_coverage: float) ->
                 f"{claim['samples_other']} retained sample(s) geocoded outside "
                 f"{claim['name']} despite the boundary proof (zero tolerance)"
             ]
-        if claim["level"] == "county" and claim.get("state"):
+        if claim["level"] in ("county", "counties") and claim.get("state"):
             state_claim = ev.region_claim("state")
             if state_claim is None or state_claim["name"] != claim["state"]:
                 return ["county state has no matching retained-route claim"]
@@ -760,9 +791,10 @@ def place_text_issues(text: str, ev: RouteEvidence) -> list:
         claim = ev.region_claim(level)
         if not claim or not claim.get("boundary_proof"):
             continue
-        named = (
-            claim["name"] in c_named if level == "county" else _state_key(claim["name"]) in s_named
-        )
+        if level == "state":
+            named = _state_key(claim["name"]) in s_named
+        else:
+            named = set(claim.get("counties") or [claim["name"]]) <= c_named
         if named and pinned_boundary_proof(claim["boundary_proof"], claim):
             proof_covers = True
     names = ", ".join(sorted(t_named | c_named | {k.title() for k in s_named}))
@@ -808,7 +840,7 @@ def region_label(claim: dict) -> str:
     name = claim["name"]
     if claim["level"] == "state":
         return name
-    state = claim.get("state")
+    state = claim.get("state")  # county or counties
     return f"{name}, {US_STATE_ABBREVS.get(state, state)}" if state else name
 
 
