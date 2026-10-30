@@ -377,9 +377,9 @@ def _suppression_rows(brand: str) -> List[Dict[str, Any]]:
     that carries none; that is the whole difference from `_finding_row`
     above.
 
-    Facebook is not translated here: there is no reel-views series in
-    `channel_daily` yet for `classify_facebook_reel_reach` to read (see
-    `cli/handlers/metrics.py::_apply_bounded_response`'s own note).
+    Facebook is not translated here: `channel_daily` now stores the Page
+    daily series (``facebook:<metric>`` rows), but `classify_facebook_reel_reach`
+    is not yet switched onto it (see `docs/facebook-metrics.md`).
     """
     rows = load_channel_daily_rows(brand)
     if not rows:

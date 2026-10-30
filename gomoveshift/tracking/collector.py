@@ -23,7 +23,8 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Literal, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, Literal, NamedTuple, Optional
+from zoneinfo import ZoneInfo
 
 from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, load_meta_credentials
 from gomoveshift.publishing.tiktok_auth import TikTokAuthError, get_valid_tiktok_credentials
@@ -1146,6 +1147,13 @@ _FB_REEL_METRICS: Dict[str, str] = {
     "avg_view_duration_seconds": "post_video_avg_time_watched",
 }
 
+#: Reel reach candidates, each its own lifetime request so a retired name
+#: cannot reject the play-count bundle; the first numeric answer wins.
+_FB_REEL_REACH_METRICS = ("post_impressions_unique", "post_total_media_view_unique")
+
+#: Page insights report a day closed at midnight Pacific (``end_time``).
+_FB_PAGE_DAY_TZ = ZoneInfo("America/Los_Angeles")
+
 #: Scope gating both insight edges; a token may lack it,
 #: so every read degrades instead of raising. Page cap guards a bad cursor chain.
 _FB_INSIGHTS_SCOPE = "read_insights"
@@ -1172,6 +1180,13 @@ class FacebookCollector:
         self._scope_warned = False
         self._last_failure: Optional[tuple[str, str]] = None
         self._last_post_format = ""
+        #: Reach candidates Graph refused this run; never asked again.
+        self._refused_reach_metrics: set[str] = set()
+
+    @property
+    def last_failure_detail(self) -> str:
+        """Graph's message for the last refused request ('' when none)."""
+        return self._last_failure[1] if self._last_failure else ""
 
     def _creds(self) -> Dict[str, Any]:
         if not self._credentials_loaded:
@@ -1266,6 +1281,8 @@ class FacebookCollector:
 
         names = _FB_VIDEO_METRICS
         values = read_metrics(names)
+        reach: Optional[float] = None
+        reach_metric: Optional[str] = None
         if values:
             self._last_post_format = "video"
         elif self._last_failure is None:
@@ -1273,6 +1290,7 @@ class FacebookCollector:
             values = read_metrics(names)
             if values:
                 self._last_post_format = "reel"
+                reach, reach_metric = self._read_reel_reach(read_metrics)
 
         # A metric Graph did not report is unknown, not zero. `values` is built
         # only from entries Graph actually returned, so an absent name means it
@@ -1292,7 +1310,66 @@ class FacebookCollector:
             reel_initial_plays=_reported_metric(values.get("blue_reels_play_count")),
             reel_replays=_reported_metric(values.get("fb_reels_replay_count")),
             reel_total_plays=_reported_metric(values.get("fb_reels_total_plays")),
+            reach=_reported_metric(reach),
+            reach_metric=reach_metric,
         )
+
+    def _read_reel_reach(
+        self, read_metrics: Callable[[Dict[str, str]], Dict[str, float]]
+    ) -> tuple[Optional[float], Optional[str]]:
+        """First numeric reach candidate for a measured Reel. A refusal is
+        remembered for the run and never becomes the observation's failure:
+        the play counts were already measured."""
+        measured_failure = self._last_failure
+        try:
+            for metric in _FB_REEL_REACH_METRICS:
+                if metric in self._refused_reach_metrics:
+                    continue
+                self._last_failure = None
+                value = read_metrics({"reach": metric}).get(metric)
+                if self._last_failure is not None:
+                    self._refused_reach_metrics.add(metric)
+                    continue
+                if value is not None:
+                    return value, metric
+            return None, None
+        finally:
+            self._last_failure = measured_failure
+
+    def fetch_page_daily(
+        self, metric: str, since: str, until: str
+    ) -> Optional[List[tuple[str, int]]]:
+        """One Page insight's daily values for ``[since, until)`` as
+        ``(pacific_day, value)`` pairs; ``None`` when Graph refused or the
+        token cannot ask. One request: a time-ranged answer's ``paging.next``
+        is the NEXT date window, so it is never followed."""
+        self._last_failure = None
+        if not self.is_available() or not self._has_insights_scope():
+            return None
+        creds = self._creds()
+        url = f"https://graph.facebook.com/{self._graph_version()}/{creds.get('page_id')}/insights"
+        params = {
+            "metric": metric,
+            "period": "day",
+            "since": since,
+            "until": until,
+            "access_token": creds.get("page_access_token"),
+        }
+        body = self._get(url, params)
+        if body is None:
+            return None
+        points: List[tuple[str, int]] = []
+        for entry in body.get("data") or []:
+            if entry.get("name") != metric or entry.get("period") != "day":
+                continue
+            for point in entry.get("values") or []:
+                value, end_time = point.get("value"), point.get("end_time")
+                if not isinstance(value, (int, float)) or not end_time:
+                    continue
+                closed = datetime.strptime(end_time, "%Y-%m-%dT%H:%M:%S%z")
+                day = (closed.astimezone(_FB_PAGE_DAY_TZ) - timedelta(seconds=1)).date()
+                points.append((day.isoformat(), int(value)))
+        return points
 
     def collect_observation(
         self, video_id: str, published_at: Optional[str] = None

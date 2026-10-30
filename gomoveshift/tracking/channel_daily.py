@@ -15,6 +15,11 @@ layout (``<root>/<project>/tracking/<project>.json``): one JSON file under
 ``<root>/<brand>/tracking/channel_daily.json``, keyed by brand instead of
 project since this pull is channel-wide, not scoped to one drive. No new
 database engine and no second storage root.
+
+Facebook Page-level daily insights share the store under a
+``facebook:<metric>`` dimension (value ``"page"``), labelled by the Meta
+(Pacific) day: `pull_facebook_page_daily` self-backfills each metric from
+`FACEBOOK_BACKFILL_START` and then re-pulls a short settle window nightly.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +43,22 @@ CONTENT_TYPE_DIMENSION = "creatorContentType"
 SHORTS_TRAFFIC_SOURCE = "SHORTS"
 
 _DIMENSIONS = (TRAFFIC_SOURCE_DIMENSION, CONTENT_TYPE_DIMENSION)
+
+#: Page-level daily metrics tried, each on its own request: Meta retires
+#: insight names without notice, so one refused name must not sink the rest.
+#: Which ones answer is printed nightly (``FB_PAGE_DAILY``).
+FACEBOOK_PAGE_METRICS = (
+    "page_media_view",
+    "page_total_media_view_unique",
+    "page_video_views",
+    "page_impressions_unique",
+)
+#: First day an empty store backfills from.
+FACEBOOK_BACKFILL_START = "2026-06-01"
+#: Days before the last stored day that are re-pulled while Meta settles them.
+_FACEBOOK_SETTLE_DAYS = 3
+#: Longest ``since``..``until`` span one Page-insights request is sent.
+_FACEBOOK_WINDOW_DAYS = 90
 
 
 def _store_path(brand: str, root: Optional[Path] = None) -> Path:
@@ -152,3 +174,78 @@ def shorts_feed_share(rows: List[Dict[str, Any]]) -> Dict[str, float]:
         if row.get("value") == SHORTS_TRAFFIC_SOURCE:
             shorts_views[day] += views
     return {day: shorts_views.get(day, 0) / total for day, total in totals.items() if total}
+
+
+def _facebook_dimension(metric: str) -> str:
+    return f"facebook:{metric}"
+
+
+def _facebook_windows(start: date, until: date) -> List[tuple[str, str]]:
+    """``[since, until)`` spans tiling ``start``..``until``, none longer
+    than `_FACEBOOK_WINDOW_DAYS`."""
+    windows: List[tuple[str, str]] = []
+    while start < until:
+        end = min(start + timedelta(days=_FACEBOOK_WINDOW_DAYS), until)
+        windows.append((start.isoformat(), end.isoformat()))
+        start = end
+    return windows
+
+
+def pull_facebook_page_daily(
+    facebook_collector,
+    brand: str,
+    today: date,
+    root: Optional[Path] = None,
+) -> Dict[str, Optional[int]]:
+    """Pull each of `FACEBOOK_PAGE_METRICS` through yesterday and upsert the
+    days into ``brand``'s channel-daily store.
+
+    A metric with nothing stored backfills from `FACEBOOK_BACKFILL_START`;
+    otherwise it re-pulls from `_FACEBOOK_SETTLE_DAYS` before its last stored
+    day. ``facebook_collector`` is a `collector.FacebookCollector` (anything
+    with ``fetch_page_daily`` and ``last_failure_detail``).
+
+    Returns rows pulled per metric, or ``None`` for a metric Graph refused:
+    that metric stops at its first refused window and is never stored as 0.
+    """
+    existing = load_rows(brand, root=root)
+    backfill = date.fromisoformat(FACEBOOK_BACKFILL_START)
+    status: Dict[str, Optional[int]] = {}
+    new_rows: List[Dict[str, Any]] = []
+    for metric in FACEBOOK_PAGE_METRICS:
+        days = list(facebook_page_series(existing, metric))
+        start = backfill
+        if days:
+            start = max(
+                backfill, date.fromisoformat(max(days)) - timedelta(days=_FACEBOOK_SETTLE_DAYS)
+            )
+        pulled: Optional[int] = 0
+        for since, until in _facebook_windows(start, today):
+            points = facebook_collector.fetch_page_daily(metric, since, until)
+            if points is None:
+                logger.warning(
+                    "Facebook page metric %s unavailable: %s",
+                    metric,
+                    facebook_collector.last_failure_detail or "no answer",
+                )
+                pulled = None
+                break
+            pulled = (pulled or 0) + len(points)
+            new_rows.extend(
+                {"day": day, "dimension": _facebook_dimension(metric), "value": "page", "views": v}
+                for day, v in points
+            )
+        status[metric] = pulled
+    if new_rows:
+        _save_rows(brand, upsert_rows(existing, new_rows), root=root)
+    return status
+
+
+def facebook_page_series(rows: List[Dict[str, Any]], metric: str) -> Dict[str, int]:
+    """``{day: value}`` for one Page metric from `load_rows`'s rows."""
+    dimension = _facebook_dimension(metric)
+    return {
+        r["day"]: r["views"]
+        for r in rows
+        if r.get("dimension") == dimension and r.get("day") and isinstance(r.get("views"), int)
+    }

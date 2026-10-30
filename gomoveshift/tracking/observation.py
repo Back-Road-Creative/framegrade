@@ -102,6 +102,7 @@ def has_numbers(metrics: PlatformMetrics) -> bool:
             metrics.reel_initial_plays,
             metrics.reel_replays,
             metrics.reel_total_plays,
+            metrics.reach,
         )
     )
 

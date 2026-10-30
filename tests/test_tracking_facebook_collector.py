@@ -215,6 +215,8 @@ REEL_METRICS = (
     "blue_reels_play_count,fb_reels_replay_count,fb_reels_total_plays,"
     "post_video_view_time,post_video_avg_time_watched"
 )
+#: Reel reach candidates, tried one request at a time in this order.
+REEL_REACH_METRICS = ("post_impressions_unique", "post_total_media_view_unique")
 
 
 @pytest.mark.parametrize("graph_version", ["v21.0", "v26.0"])
@@ -241,10 +243,16 @@ def test_reel_metrics_are_recovered_without_relabeling_plays_as_views(graph_vers
     assert (metrics.views, metrics.impressions) == (None, None)
     assert (metrics.watch_time_seconds, metrics.avg_view_duration_seconds) == (45.0, 5.0)
     assert compare_views([obs]).blended_views is None
-    assert len(session.calls) == 2
+    # Video, then the Reel bundle, then reach: each reach candidate is its own
+    # request so a retired one cannot reject the play counts above.
     assert all(url.endswith("/video_1/video_insights") for url, _ in session.calls)
-    assert [params["metric"] for _, params in session.calls] == [VIDEO_METRICS, REEL_METRICS]
+    assert [params["metric"] for _, params in session.calls] == [
+        VIDEO_METRICS,
+        REEL_METRICS,
+        *REEL_REACH_METRICS,
+    ]
     assert all(params["period"] == "lifetime" for _, params in session.calls)
+    assert (metrics.reach, metrics.reach_metric) == (None, None)
 
 
 def test_reel_only_zero_is_measured_and_survives_record_round_trip():
@@ -346,3 +354,68 @@ def test_collect_all_persists_play_only_measurement(tmp_path, monkeypatch):
     assert legacy.reel_initial_plays is None
     assert legacy.reel_replays is None
     assert legacy.reel_total_plays is None
+
+
+def _reel_session(*reach_responses):
+    return _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(200, _insights_body({"fb_reels_total_plays": 125})),
+        *reach_responses,
+    )
+
+
+def test_reel_reach_comes_from_its_own_request_with_provenance():
+    from gomoveshift.tracking.observation import MetricObservation, ObservationStatus
+
+    session = _reel_session(_FakeResponse(200, _insights_body({"post_impressions_unique": 80})))
+    obs = FacebookCollector(credentials=_creds(), session=session).collect_observation("video_1")
+
+    assert obs.status == ObservationStatus.MEASURED
+    assert (obs.cumulative.reach, obs.cumulative.reach_metric) == (80, "post_impressions_unique")
+    assert obs.cumulative.impressions is None  # reach is not impressions
+    assert session.calls[2][1]["metric"] == "post_impressions_unique"
+    assert len(session.calls) == 3
+    back = MetricObservation.from_dict(obs.to_dict())
+    assert (back.cumulative.reach, back.cumulative.reach_metric) == (80, "post_impressions_unique")
+
+
+def test_refused_reach_candidate_falls_through_and_is_not_retried_this_run():
+    from gomoveshift.tracking.observation import ObservationStatus
+
+    refused = _FakeResponse(400, {"error": {"code": 100, "message": "(#100) invalid metric"}})
+    viewers = _FakeResponse(200, _insights_body({"post_total_media_view_unique": 61}))
+    session = _FakeSession(
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(200, _insights_body({"fb_reels_total_plays": 125})),
+        refused,
+        viewers,
+        _FakeResponse(200, {"data": []}),
+        _FakeResponse(200, _insights_body({"fb_reels_total_plays": 9})),
+        _FakeResponse(200, _insights_body({"post_total_media_view_unique": 7})),
+    )
+    collector = FacebookCollector(credentials=_creds(), session=session)
+
+    first = collector.collect_observation("video_1")
+    second = collector.collect_observation("video_2")
+
+    # A refused reach lookup never turns a measured reel into a failure.
+    assert first.status == ObservationStatus.MEASURED
+    assert (first.cumulative.reach, first.cumulative.reach_metric) == (
+        61,
+        "post_total_media_view_unique",
+    )
+    assert (second.cumulative.reach, second.cumulative.reel_total_plays) == (7, 9)
+    second_reach_calls = [p["metric"] for _, p in session.calls[6:]]
+    assert second_reach_calls == ["post_total_media_view_unique"]
+
+
+def test_reel_with_no_reach_answer_keeps_reach_unknown():
+    from gomoveshift.tracking.observation import ObservationStatus
+
+    refused = _FakeResponse(400, {"error": {"code": 100, "message": "(#100) invalid metric"}})
+    obs = FacebookCollector(
+        credentials=_creds(), session=_reel_session(refused)
+    ).collect_observation("video_1")
+    assert obs.status == ObservationStatus.MEASURED
+    assert obs.cumulative.reel_total_plays == 125
+    assert (obs.cumulative.reach, obs.cumulative.reach_metric) == (None, None)

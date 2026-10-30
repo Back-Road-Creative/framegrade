@@ -58,8 +58,8 @@ the shadow log fills without anyone running anything by hand.
   over every stored `channel_daily` row for the brand. Facebook is classified via
   `classify_facebook_reel_reach` over an interim daily reel-plays series that
   `tracking.facebook_series.facebook_reel_plays_series` builds from the nightly cumulative
-  observation log (`short.observation_log["facebook"]`; there is no per-day Facebook pull in
-  `channel_daily`): the per-fetch delta of `reel_total_plays` between consecutive MEASURED entries
+  observation log (`short.observation_log["facebook"]`; the Page daily series now stored in `channel_daily` under
+  `facebook:<metric>` is not read by the detector yet): the per-fetch delta of `reel_total_plays` between consecutive MEASURED entries
   of a post, attributed to the New York day of the later fetch and summed over shorts; a counter
   that moved backwards is skipped, and a post's first observation counts in full only when it was
   fetched within a day of posting. Days with no observation are absent, so gaps shorten the
