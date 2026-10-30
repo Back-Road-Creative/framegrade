@@ -1841,6 +1841,13 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
         )
 
 
+def _lf_plan_seconds(segments) -> float:
+    """Summed length of an LF plan's segments (what its concat holds)."""
+    return sum(
+        float(getattr(s, "end_time", 0.0)) - float(getattr(s, "start_time", 0.0)) for s in segments
+    )
+
+
 def run_day_pipeline(
     day_batch: DayBatch,
     day_scores: np.ndarray,
@@ -2531,17 +2538,23 @@ def run_day_pipeline(
             continue
 
         # Upstream of the stream copy + montage prepend + OST re-encode: this
-        # LF's three coexisting artifacts must fit on the cache volume now.
+        # LF's three coexisting artifacts must fit on the cache volume now,
+        # and so must each later LF beside the finals burned before it (a
+        # later LF whose final is already on disk is out of the free figure).
         # The day's length is the end of its last file boundary.
+        _plans = list(lf_plans or [])
+        _pos = next(i for i, p in enumerate(_plans) if p is lf_plan)
         check_lf_work_space(
             master_source_for_extract,
             lf_dir,
-            sum(
-                float(getattr(s, "end_time", 0.0)) - float(getattr(s, "start_time", 0.0))
-                for s in segments
-            ),
+            _lf_plan_seconds(segments),
             float(file_boundaries[-1][1]) if file_boundaries else 0.0,
             lf_index=idx,
+            later_lf_secs=[
+                _lf_plan_seconds(getattr(p, "segments", []) or [])
+                for n, p in enumerate(_plans[_pos + 1 :], start=_pos + 2)
+                if not (lf_dir / f"lf_{int(getattr(p, 'index', n)):02d}.mp4").is_file()
+            ],
         )
         trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
