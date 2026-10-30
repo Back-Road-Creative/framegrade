@@ -219,26 +219,31 @@ def _no_youtube_durations(video_ids: list[str]) -> dict[str, float]:
     return {}
 
 
-def _default_youtube_duration_lookup(video_ids: list[str]) -> dict[str, float]:
-    """Batched ``videos.list(contentDetails)`` duration lookup — the real
-    network implementation, used automatically unless a test injects a fake.
+def _default_youtube_live_lookup(video_ids: list[str]) -> dict[str, dict]:
+    """Batched ``videos.list(snippet,contentDetails)`` lookup of what YouTube
+    shows now: ``{video_id: {"title": str, "seconds": float}}``.
 
     Any failure (no credentials, no network, API error) degrades to an empty
-    result so callers fall back to ffprobe rather than hard-failing a merge
-    over a lookup outage unrelated to the upload itself.
+    result so callers fall back to their stored or ffprobed values rather
+    than hard-failing a merge over a lookup outage unrelated to the upload.
     """
     try:
         from .drive_phases.phase_d_scheduling import _build_readonly_youtube_service
         from .site_sync.channel_manifest import parse_iso8601_duration
 
         service = _build_readonly_youtube_service()
-        out: dict[str, float] = {}
+        out: dict[str, dict] = {}
         for start in range(0, len(video_ids), 50):
             batch = video_ids[start : start + 50]
-            response = service.videos().list(part="contentDetails", id=",".join(batch)).execute()
+            response = (
+                service.videos().list(part="snippet,contentDetails", id=",".join(batch)).execute()
+            )
             for video in response.get("items", []):
                 duration = video.get("contentDetails", {}).get("duration", "")
-                out[video["id"]] = float(parse_iso8601_duration(duration))
+                out[video["id"]] = {
+                    "title": str(video.get("snippet", {}).get("title") or ""),
+                    "seconds": float(parse_iso8601_duration(duration)),
+                }
         return out
     except Exception as exc:
         # Never silent: without this line a credentials/network outage
@@ -246,12 +251,18 @@ def _default_youtube_duration_lookup(video_ids: list[str]) -> dict[str, float]:
         # which names the wrong cause and sends the operator to the encode
         # rather than to their auth.
         logger.warning(
-            "YouTube duration lookup failed (%s: %s); falling back to ffprobe "
-            "on the local encodes, which a cleaned-up run may no longer have.",
+            "YouTube lookup failed (%s: %s); falling back to stored values or "
+            "ffprobe on the local encodes, which a cleaned-up run may no longer have.",
             type(exc).__name__,
             exc,
         )
         return {}
+
+
+def _default_youtube_duration_lookup(video_ids: list[str]) -> dict[str, float]:
+    """Durations from :func:`_default_youtube_live_lookup` — the real network
+    implementation the CLI injects into ``plan_merge``."""
+    return {vid: meta["seconds"] for vid, meta in _default_youtube_live_lookup(video_ids).items()}
 
 
 def ffprobe_duration_seconds(path: Path) -> float:
@@ -458,9 +469,10 @@ def plan_merge(
         # Duration: prefer YouTube's published contentDetails (the source of
         # truth once uploaded — survives a deleted local encode). Fall back
         # to ffprobe on the local encode only when YouTube has no duration
-        # for this video_id.
+        # for this video_id. A zero is not a length: a video still processing
+        # reports PT0S.
         yt_seconds = yt_durations.get(video_id)
-        if yt_seconds is not None:
+        if yt_seconds is not None and yt_seconds > 0:
             seconds = yt_seconds
         else:
             lf_path = lf_paths.get(lf_idx)

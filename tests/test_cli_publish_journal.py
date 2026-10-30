@@ -446,6 +446,53 @@ def test_replay_pending_apply_keeps_future_entry(tmp_path, capsys):
     assert [e.youtube_id for e in remaining] == ["REPLAY_VID"]
 
 
+def test_replay_pending_takes_title_and_duration_from_youtube(tmp_path):
+    """A replay writes what YouTube shows now, not what the drive stored: the
+    video may have been retitled live since (Ace Basin LF 1) or stored a zero
+    duration while still processing (Ace Basin LF 2)."""
+    site = _make_site(tmp_path, "sample-trip")
+    pending = _seed_pending_for_replay(tmp_path, site, "2025-01-01T00:00:00Z")
+    journey = site / "content" / "journeys" / "sample-trip.md"
+    asked = []
+
+    def live(ids):
+        asked.append(list(ids))
+        return {"REPLAY_VID": {"title": "Retitled Live", "seconds": 5080.0}}
+
+    rc = run_replay_pending(pending_files=[pending], apply=True, live_lookup=live)
+    assert rc == 0
+    assert asked == [["REPLAY_VID"]]
+    text = journey.read_text()
+    assert "Retitled Live" in text
+    assert "1:24:40" in text
+    assert "Replay Test" not in text
+
+
+def test_replay_pending_keeps_stored_values_youtube_cannot_supply(tmp_path):
+    site = _make_site(tmp_path, "sample-trip")
+    pending = _seed_pending_for_replay(tmp_path, site, "2025-01-01T00:00:00Z")
+    journey = site / "content" / "journeys" / "sample-trip.md"
+
+    rc = run_replay_pending(
+        pending_files=[pending],
+        apply=True,
+        live_lookup=lambda ids: {"REPLAY_VID": {"title": "", "seconds": 0.0}},
+    )
+    assert rc == 0
+    text = journey.read_text()
+    assert "Replay Test" in text
+    assert "10:00" in text
+
+
+def test_cmd_publish_journal_replay_looks_up_youtube(monkeypatch, tmp_path):
+    import gomoveshift.cli.handlers.publish_journal as pj
+
+    seen = {}
+    monkeypatch.setattr(pj, "run_replay_pending", lambda **k: seen.update(k) or 0)
+    assert cmd_publish_journal(_replay_args(tmp_path, str(tmp_path)), config=None) == 0
+    assert seen["live_lookup"] is pj._default_youtube_live_lookup
+
+
 def test_replay_pending_no_files_is_success(capsys):
     """An empty scan is the normal steady state, not a cron failure."""
     rc = run_replay_pending(pending_files=[], apply=True)

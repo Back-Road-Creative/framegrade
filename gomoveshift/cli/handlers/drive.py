@@ -255,6 +255,7 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
                 AmbiguousJourneyError,
                 JourneyAlreadyExistsError,
                 create_draft_journey,
+                extend_adjacent_journey,
                 resolve_journey_by_date,
             )
 
@@ -266,6 +267,15 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
             if run_date:
                 try:
                     slug = resolve_journey_by_date(Path(site_path), run_date)
+                    if not slug:
+                        slug = extend_adjacent_journey(Path(site_path), run_date)
+                        if slug:
+                            logger.info(
+                                "auto-publish-journal: run date %s is the day after "
+                                "journey %s ends; extended its trip by one day.",
+                                run_date,
+                                slug,
+                            )
                 except AmbiguousJourneyError as exc:
                     logger.error(
                         "Journal auto-publish REFUSED — the site will NOT update for this run: %s",

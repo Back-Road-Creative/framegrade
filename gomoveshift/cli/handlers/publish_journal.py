@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 from contextlib import ExitStack
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -30,8 +31,10 @@ from ...pipeline.journal_git_ops import (
 from ...pipeline.journal_publisher import (
     VideoEntry,
     _default_youtube_duration_lookup,
+    _default_youtube_live_lookup,
     apply_merge,
     ffprobe_duration_seconds,
+    format_duration,
     journey_lock,
     load_journey,
     plan_merge,
@@ -47,6 +50,11 @@ from ...pipeline.pending_journal import (
     save_pending,
     split_by_readiness,
 )
+from ...pipeline.site_sync.journey_by_date import (
+    AmbiguousJourneyError,
+    extend_adjacent_journey,
+    resolve_journey_by_date,
+)
 from ...pipeline.site_sync.videos_yaml import VideoLibrary
 from ...pipeline.youtube_sidecar import load_superlong_sidecar
 
@@ -55,6 +63,23 @@ logger = logging.getLogger(__name__)
 
 def _resolve_journey_path(site_path: Path, slug: str) -> Path:
     return site_path / "content" / "journeys" / f"{slug}.md"
+
+
+def _journey_for_day(
+    site_path: Path, day: str, extend: bool, failures: list[str]
+) -> Optional[Path]:
+    """The existing journey that holds ``day``, as the drive hook picks it: the
+    trip whose range contains the day, else (``extend`` only, since it writes)
+    the trip that ended the day before, extended by one day. ``None`` when no
+    single journey fits; an ambiguous day is reported, never guessed."""
+    try:
+        slug = resolve_journey_by_date(site_path, day)
+        if not slug and extend:
+            slug = extend_adjacent_journey(site_path, day)
+    except AmbiguousJourneyError as exc:
+        failures.append(f"{day}: {exc} Entries kept pending.")
+        return None
+    return _resolve_journey_path(site_path, slug) if slug else None
 
 
 def _deferrals_to_pending(deferrals: list[VideoEntry], journey_path: Path) -> list[PendingEntry]:
@@ -279,6 +304,7 @@ def run_replay_pending(
     out=None,
     err=None,
     now: Optional[datetime] = None,
+    live_lookup: Callable[[list[str]], dict[str, dict]] = lambda ids: {},
 ) -> int:
     """Flush any deferred entries whose ``publish_at`` has now passed.
 
@@ -295,6 +321,13 @@ def run_replay_pending(
     per journey). When ``auto_push`` is additionally set, the commit is
     pushed to ``origin``. A dirty tracked working tree skips that repo's
     writes entirely (skip-and-log) — never auto-stash, per design.
+
+    ``live_lookup`` (``{video_id: {"title", "seconds"}}``; the CLI injects
+    :func:`_default_youtube_live_lookup`) supplies each ready entry's title and
+    duration as YouTube shows them now. The sidecar's values were stored at
+    drive time: the video may have been retitled live since, or reported a
+    zero duration while still processing. A title or duration the lookup
+    cannot supply keeps the stored one.
     """
     out = out if out is not None else sys.stdout
     err = err if err is not None else sys.stderr
@@ -335,6 +368,21 @@ def run_replay_pending(
             pending_by_journey.setdefault(Path(entry.journey_path), []).append(
                 (pending_path, entry)
             )
+
+    # A ready entry whose journey file is gone (a stray draft set aside, a
+    # renamed slug) could never flush and would sit pending forever. Send it to
+    # the journey that holds its day instead. The entry keeps its stored
+    # journey_path, which is also what consumes it from the sidecar below.
+    for journey_path in [p for p in pending_by_journey if not p.is_file()]:
+        stranded = []
+        for pair in pending_by_journey.pop(journey_path):
+            target = _journey_for_day(journey_path.parents[2], pair[1].day_date, apply, failures)
+            if target is None or target == journey_path:
+                stranded.append(pair)
+            else:
+                pending_by_journey.setdefault(target, []).append(pair)
+        if stranded:
+            pending_by_journey[journey_path] = stranded
 
     # Dirty-WT pre-check when auto-commit is on: any journey whose enclosing
     # git repo is dirty is dropped from this run BEFORE its sidecar entries
@@ -390,6 +438,16 @@ def run_replay_pending(
     # missing-file, plan-error, or crashing journey keeps its entries so a
     # later clean run can still flush them (no consume-before-confirm loss).
     flushed_keys: set[tuple[str, str]] = set()
+
+    ready_ids = sorted({e.youtube_id for pairs in pending_by_journey.values() for _p, e in pairs})
+    live = live_lookup(ready_ids) if ready_ids else {}
+    for pairs in pending_by_journey.values():
+        for i, (pending_path, entry) in enumerate(pairs):
+            meta = live.get(entry.youtube_id) or {}
+            title = str(meta.get("title") or "") or entry.title
+            seconds = float(meta.get("seconds") or 0)
+            duration = format_duration(seconds) if seconds > 0 else entry.duration
+            pairs[i] = (pending_path, replace(entry, title=title, duration=duration))
 
     for journey_path, entry_pairs in pending_by_journey.items():
         if not journey_path.is_file():
@@ -455,6 +513,7 @@ def run_replay_pending(
             # written (insert) or already present (skip). Safe to consume.
             for _src, entry in entry_pairs:
                 flushed_keys.add((str(journey_path), entry.youtube_id))
+                flushed_keys.add((str(Path(entry.journey_path)), entry.youtube_id))
 
         total_ready += len(plan.inserts)
 
@@ -620,6 +679,7 @@ def cmd_publish_journal(args, config):  # noqa: ARG001 -- config unused, signatu
             apply=bool(getattr(args, "apply", False)),
             auto_commit=bool(getattr(args, "auto_commit", False)),
             auto_push=bool(getattr(args, "auto_push", False)),
+            live_lookup=_default_youtube_live_lookup,
         )
     missing: list[str] = []
     if not getattr(args, "state_path", None):
