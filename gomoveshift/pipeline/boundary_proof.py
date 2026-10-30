@@ -19,7 +19,7 @@ import zipfile
 from pathlib import Path
 
 from shapely.geometry import MultiPolygon, Point, Polygon
-from shapely.ops import transform
+from shapely.ops import transform, unary_union
 
 from .geo_constants import US_STATE_ABBREVS
 from .route_claims import retained_windows_key
@@ -36,6 +36,9 @@ _SOURCES = {
         "2e17ea40dff3e00163eec87a26efa0b0ff7e8fe364a191bf1a7754dcb49ea326",  # pragma: allowlist secret (public Census SHA-256)
     ),
 }
+#: A claim level proven on another level's archive: two counties are proven
+#: inside the union of their county polygons.
+_SOURCE_LEVEL = {"counties": "county"}
 MAX_SPEED_M_S = 70.0  # 252 km/h; above any legal road speed, still an assumption.
 GPS_ERROR_M = 100.0  # No DOP/fix-type in source GPX; fail near a boundary.
 _MAX_ARCHIVE_BYTES = 100_000_000  # Official county ZIP is ~83 MB; reject excess.
@@ -54,7 +57,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def pinned_boundary_proof(proof: dict, claim: dict) -> bool:
     """Refuse a stale or weaker persisted proof before it overrides GPS gaps."""
-    level = claim.get("level")
+    level = _SOURCE_LEVEL.get(claim.get("level"), claim.get("level"))
     if level not in _SOURCES or not isinstance(proof, dict):
         return False
     filename, digest = _SOURCES[level]
@@ -251,13 +254,19 @@ class CensusBoundaryProver:
         return polygon
 
     def prove(self, windows, claim: dict) -> dict:
-        level, name = claim["level"], claim["name"]
+        name = claim["name"]
+        level = _SOURCE_LEVEL.get(claim["level"], claim["level"])
         state = claim.get("state") if level == "county" else name
         statefp = _state_fips(state)
         if statefp is None:
             return {"verified": False, "reason": f"unknown US state {state!r}"}
         try:
-            polygon = self.load_region(level, name, statefp)
+            if claim["level"] == "counties":
+                polygon = unary_union(
+                    [self.load_region(level, c, statefp) for c in claim["counties"]]
+                )
+            else:
+                polygon = self.load_region(level, name, statefp)
             result = prove_windows_inside(windows, polygon)
         except (
             BoundaryArchiveError,

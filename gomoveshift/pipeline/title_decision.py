@@ -215,16 +215,23 @@ def _title_route_issues(title: str, route_evidence) -> list[str]:
         for b in route_evidence.bins
     ):
         return [f"title claims {sorted(claimed_states)!r} but retained GPS samples lie outside"]
-    if not named:
-        for level in ("county", "state"):
-            claim = route_evidence.region_claim(level)
-            if claim and re.search(
-                rf"(?<!\w){re.escape(claim['name'])}(?!\w)", title, re.IGNORECASE
-            ):
-                why = _region_ok(claim, route_evidence, REGION_MIN_COVERAGE)
-                if not why:
-                    return []
-                return [f"region {claim['name']!r}: {reason}" for reason in why]
+    # A title naming no place outside a region's own name is a region title,
+    # even when a town shares that name ("Beaufort & Colleton Counties").
+    for level in ("county", "counties", "state"):
+        claim = route_evidence.region_claim(level)
+        region = claim and re.compile(rf"(?<!\w){re.escape(claim['name'])}(?!\w)", re.IGNORECASE)
+        if not region or not region.search(title):
+            continue
+        rest = region.sub(" ", title)
+        if any(
+            re.search(rf"(?<!\w){re.escape(p.name)}(?!\w)", rest, re.IGNORECASE)
+            for p in route_evidence.places
+        ):
+            continue
+        why = _region_ok(claim, route_evidence, REGION_MIN_COVERAGE)
+        if not why:
+            return []
+        return [f"region {claim['name']!r}: {reason}" for reason in why]
     issues = [
         f"omits {p.name!r} ({p.retained_seconds:.0f} s of retained footage)"
         for p in required
@@ -239,12 +246,12 @@ def _region_only_title_facts(label: str, baseline: str, route_evidence, suffix: 
     from .geo_constants import US_STATE_ABBREVS
     from .route_claims import REGION_MIN_COVERAGE, _region_ok
 
-    for level in ("county", "state"):
+    for level in ("county", "counties", "state"):
         claim = route_evidence.region_claim(level)
         if not claim or _region_ok(claim, route_evidence, REGION_MIN_COVERAGE):
             continue
         name = claim["name"]
-        if level == "county":
+        if level != "state":
             state_claim = route_evidence.region_claim("state")
             if not state_claim or _region_ok(state_claim, route_evidence, REGION_MIN_COVERAGE):
                 continue

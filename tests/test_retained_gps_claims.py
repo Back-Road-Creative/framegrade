@@ -150,7 +150,8 @@ def test_route_leaving_the_region_gets_no_region_fallback():
     ev = measure_route([w], _BandGeocoder(), bin_s=10.0)
     assert ev.region_claim("county")["samples_outside"] > 0
     label, note = select_supported_label("Harrow, Westmark", ev)
-    assert label == "Westmark"  # falls back further, to the state that contains it all
+    # Falls back further, to the two counties that contain it all (not the state).
+    assert label == "Ashby & Brell Counties, Westmark"
 
 
 def test_unavailable_boundary_refuses_instead_of_guessing():
@@ -283,9 +284,9 @@ def test_entry_point_aggregates_refusals_and_checks_operator_labels():
     assert "LF 2: operator label 'Harrow, Westmark'" in msg and "'Pellmere'" in msg
 
 
-def test_entry_point_two_counties_fall_back_to_state():
+def test_entry_point_two_counties_fall_back_to_both_counties():
     out = _enrich([_lf(1, (0.0, 280.0), (620.0, 900.0))], {1: "Harrow, Westmark"})
-    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Westmark"
+    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Ashby & Brell Counties, Westmark"
 
 
 def test_dry_run_prints_the_refusal_before_any_encode(capsys):
