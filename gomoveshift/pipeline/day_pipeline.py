@@ -135,6 +135,7 @@ from .short_planner import (
     DEFAULT_MIN_DURATION_SEC,
     DEFAULT_MIN_GAP_SEC,
     DEFAULT_TARGET_DURATION_SEC,
+    ShortRange,
     plan_shorts,
 )
 from .shorts_extractor import reframe_kwargs
@@ -241,9 +242,9 @@ def cap_shorts_to_per_lf_capacity(
 
     Capping here is the robust-by-construction fix: a short that cannot be
     placed is never rendered, so the downstream gate has nothing to catch.
-    Only OVER-full LFs are trimmed — an under-full LF keeps everything it
-    has, because levelling every LF to the same count would throw away
-    footage that does have a slot.
+    Only OVER-full LFs are trimmed here — an under-full LF keeps everything
+    it has. Levelling it UP is ``fill_shorts_to_per_lf_capacity``'s job,
+    which refills it from its own source window after this trim.
 
     Returns ``(kept, dropped)``, both in the input's order (which is rank
     order from ``short_planner``, best first). Within an LF the surviving
@@ -293,6 +294,128 @@ def cap_shorts_to_per_lf_capacity(
     kept = [sr for i, sr in enumerate(short_ranges) if i not in drop]
     dropped = [sr for i, sr in enumerate(short_ranges) if i in drop]
     return kept, dropped
+
+
+def fill_shorts_to_per_lf_capacity(
+    short_ranges: list,
+    lf_plans: list,
+    file_boundaries: list,
+    per_lf_capacity: Optional[int],
+    day_scores,
+    plan_mask,
+    plan_kwargs: dict,
+) -> tuple[list, list]:
+    """Refill every under-capacity LF from ITS OWN source window.
+
+    ``plan_shorts`` is day-wide, so when the best-scoring windows cluster in
+    one LF's footage the cap trims that LF to capacity and leaves the others
+    empty: their publish windows have nothing to post. For each LF holding
+    fewer than ``per_lf_capacity`` shorts this plans ``capacity - held`` more
+    with ``plan_shorts`` under the SAME mask the day-wide plan used
+    (``plan_mask``: stop mask + GPS-gap veto) PLUS
+
+    * every second outside the LF's source window (the hull of its segments in
+      master time, minus the master intervals of OTHER LFs), so a refill pick
+      comes from the same day master the LF is cut from and cannot be
+      attributed elsewhere, and
+    * every already-kept short widened by ``min_gap_sec``, so picks never
+      overlap or crowd an existing one.
+
+    Each pick is re-checked with ``assign_shorts_to_lfs_by_source_window`` and
+    discarded unless it lands on the intended LF. Refill picks are ranked after
+    every existing short and appended, keeping the best-first order
+    ``_render_day_shorts`` expects. An LF whose window cannot hold its share
+    is logged and left short; the SHORTS-CONTRACT gate judges the final count.
+
+    Returns ``(all_shorts, added)``. A ``None``/non-positive capacity, no LFs,
+    no scores, or a failed attribution is a no-op.
+    """
+    shorts = list(short_ranges)
+    if (
+        not per_lf_capacity
+        or per_lf_capacity <= 0
+        or not lf_plans
+        or day_scores is None
+        or getattr(day_scores, "size", 0) == 0
+    ):
+        return shorts, []
+    timestamps = np.asarray(day_scores)[:, COL_TIMESTAMP]
+    min_gap = float(plan_kwargs.get("min_gap_sec", DEFAULT_MIN_GAP_SEC))
+    try:
+        lf_intervals = {
+            int(getattr(lf, "index", 0)): [
+                r
+                for r in segments_to_master_ranges(
+                    [to_cut_segment(seg) for seg in (getattr(lf, "segments", None) or [])],
+                    file_boundaries,
+                )
+                if r[1] > r[0]
+            ]
+            for lf in lf_plans
+        }
+        buckets = assign_shorts_to_lfs_by_source_window(shorts, lf_plans, file_boundaries)
+    except Exception as exc:  # noqa: BLE001 — fail-safe, same policy as the cap
+        logger.warning("Shorts per-LF refill skipped — short→LF mapping failed (%s)", exc)
+        return shorts, []
+
+    added: list = []
+    for lf in lf_plans:
+        lf_index = int(getattr(lf, "index", 0))
+        held = len(buckets.get(lf_index, []))
+        want = per_lf_capacity - held
+        if want <= 0:
+            continue
+        own = lf_intervals.get(lf_index) or []
+        if not own:
+            logger.warning(
+                "LF %s holds %d of %d shorts and has no resolvable source window to refill from",
+                lf_index,
+                held,
+                per_lf_capacity,
+            )
+            continue
+        lo, hi = min(r[0] for r in own), max(r[1] for r in own)
+        mask = np.zeros(len(timestamps), dtype=bool)
+        if plan_mask is not None:
+            mask |= np.asarray(plan_mask, dtype=bool)[: len(timestamps)]
+        mask |= (timestamps < lo) | (timestamps >= hi)
+        for other, ivs in lf_intervals.items():
+            if other == lf_index:
+                continue
+            for s0, e0 in ivs:
+                inside_own = any(o0 <= s0 and e0 <= o1 for o0, o1 in own)
+                if not inside_own:
+                    mask |= (timestamps >= s0) & (timestamps < e0)
+        for sr in shorts:
+            mask |= (timestamps >= sr.start_sec - min_gap) & (timestamps < sr.end_sec + min_gap)
+        picks = plan_shorts(day_scores, stop_mask=mask, **{**plan_kwargs, "target_count": want})
+        next_rank = max([int(getattr(sr, "rank", 0) or 0) for sr in shorts] + [0]) + 1
+        accepted: list = []
+        for pick in picks:
+            cand = ShortRange(
+                start_sec=pick.start_sec,
+                end_sec=pick.end_sec,
+                integrated_score=pick.integrated_score,
+                rank=next_rank + len(accepted),
+                moment_kind=pick.moment_kind,
+            )
+            trial = shorts + accepted + [cand]
+            where = assign_shorts_to_lfs_by_source_window(trial, lf_plans, file_boundaries)
+            if len(trial) - 1 in where.get(lf_index, []):
+                accepted.append(cand)
+        shorts.extend(accepted)
+        added.extend(accepted)
+        buckets = assign_shorts_to_lfs_by_source_window(shorts, lf_plans, file_boundaries)
+        if len(accepted) < want:
+            logger.warning(
+                "LF %s holds %d of %d shorts after refilling from its own source window "
+                "(%d added) — its window cannot hold its share",
+                lf_index,
+                held + len(accepted),
+                per_lf_capacity,
+                len(accepted),
+            )
+    return shorts, added
 
 
 def _render_lf_map_inset(
@@ -2870,13 +2993,10 @@ def run_day_pipeline(
         else []
     )
     logger.info("Day %s: %d short ranges planned", date, len(short_ranges))
-    # SHORTS-CONTRACT gate: the
-    # required count and the planned count are both in scope right here —
-    # compare them BEFORE any shorts encode/CSV/upload instead of logging
-    # a shortfall and continuing.
+    # SHORTS-CONTRACT gate (enforced below, on the FINAL post-cap/refill count):
+    # compared BEFORE any shorts encode/CSV/upload instead of logging a
+    # shortfall and continuing.
     allow_short_count = bool(state.get("allow_short_count")) if state is not None else False
-    if day_scores is not None:
-        _enforce_shorts_contract(len(short_ranges), target_count, date, allow_short_count)
 
     # PER-LF CAPACITY: the contract above is drive-wide and
     # the planner is day-wide, but slots are per-LF — so the right TOTAL can
@@ -2905,6 +3025,33 @@ def run_day_pipeline(
                 _per_lf_capacity,
                 len(short_ranges),
             )
+        # The planner is day-wide, so the top windows can all sit in one LF's
+        # footage: refill every under-capacity LF from its OWN source window.
+        short_ranges, _refilled = fill_shorts_to_per_lf_capacity(
+            short_ranges,
+            lf_plans or [],
+            compute_day_file_boundaries(day_batch),
+            _per_lf_capacity,
+            day_scores,
+            _plan_mask,
+            _shorts_kw,
+        )
+        if _refilled:
+            logger.info(
+                "Day %s: refilled %d shorts into under-capacity LFs from their own "
+                "source windows — %d will be rendered",
+                date,
+                len(_refilled),
+                len(short_ranges),
+            )
+    if day_scores is not None:
+        # Judge the count that will actually be rendered. The day total can
+        # never exceed what the LFs' publish windows hold, so the requirement
+        # is capped at ``per-LF capacity × LFs``.
+        _required_final = target_count
+        if target_count is not None and _per_lf_capacity is not None and lf_plans:
+            _required_final = min(target_count, _per_lf_capacity * len(lf_plans))
+        _enforce_shorts_contract(len(short_ranges), _required_final, date, allow_short_count)
 
     # ── Step 5: extract + OST each short (rank-ordered) ───────────
     # Location anchor for a short on a GPS-less day: the operator
