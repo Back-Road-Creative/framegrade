@@ -195,6 +195,26 @@ def test_plan_merge_falls_back_to_ffprobe_when_youtube_has_no_duration():
     assert plan.errors == []
 
 
+def test_plan_merge_treats_a_zero_youtube_duration_as_missing():
+    """A video still processing on YouTube reports duration PT0S; that is not
+    its length. Ace Basin LF 2 was journaled as "00:00" this way."""
+    journey_path = FIXTURE_DIR / "sample_trip.md"
+    doc, body = load_journey(journey_path)
+    state = _state_for_three_days()
+    ffprobe = _fake_ffprobe({"/tmp/lf_01.mp4": 2527.0})
+
+    plan = plan_merge(
+        state,
+        doc,
+        ffprobe_duration=ffprobe,
+        youtube_duration_lookup=lambda ids: {vid: 0.0 for vid in ids},
+    )
+
+    inserts = {entry.lf_index: entry for entry in plan.inserts}
+    assert inserts[1].duration == "42:07"
+    assert plan.errors == []
+
+
 def test_apply_merge_writes_new_entry_and_preserves_existing(tmp_path):
     src = FIXTURE_DIR / "sample_trip.md"
     work = tmp_path / "sample_trip.md"
