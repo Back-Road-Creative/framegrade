@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-10-30
+
+### Changed
+
+- Pinned Waypost (`seo-manager`) to v0.4.0 (`97334eb`, Back-Road-Creative/waypost#95). The final-text review now accepts a region-only drive that has no town to name, and refuses a title, description or chapter that drops the region (Back-Road-Creative/waypost#94).
+
+### Fixed
+
+- `--day-gpx` slices each later chapter of a split Insta360 recording at its own start: the filename time plus the earlier chapters' durations. Before, every chapter was sliced at the recording start, so the second 30-minute chapter carried the first chapter's GPS (Phase A's 60 min start tolerance let it through). A chapter whose predecessor is missing from the source dir is refused. See `docs/pipeline/71-generic-source-ingest-full-drive-lf-mode.md`.
+- Drive chapters no longer bind a town named inside a region's name ("Beaufort County" is not the town of Beaufort), and a chapter's window holds route places only, so Waypost's review stops refusing a whole long-form over `route_place_unknown:region-…`.
+- The long-form work-space gate now prices every long-form the run still burns, not just the current one. Each final stays on the cache volume while the next long-form writes its three artifacts, so the gate before a day's first concat now sizes the peak: the worst long-form's work plus the finals burned before it. A later long-form whose final already exists is not counted again. Before this, a day could pass the gate for LF 1 and then stop at LF 2's gate hours later (Ace Basin, 2026-10-27: LF 2 needed 145.8 GiB, and ~125 GiB was left beside LF 1's final).
+- A multi-LF day no longer ships an LF with no shorts. The day-wide shorts planner could put every top-scoring window in one LF's footage; the per-LF cap then trimmed that LF and nothing refilled the others. `fill_shorts_to_per_lf_capacity` now plans each under-capacity LF's missing shorts from that LF's own source window (stop mask and GPS-gap veto kept, other LFs' footage and already-picked shorts masked). The SHORTS-CONTRACT gate now judges the final post-cap, post-refill count, so an LF whose window truly cannot hold its share is refused unless `--allow-short-count` is passed.
+
 ## [0.3.14] - 2026-10-29
 
 ### Added
@@ -283,7 +296,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...HEAD
+[0.3.15]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.11...v0.3.12
