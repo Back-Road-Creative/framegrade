@@ -225,6 +225,73 @@ def test_gate_reports_every_problem_at_once():
     assert len(gate.gate_problems(SHA, "v0.3.11", "0.3.10", on_main=False, runs=[])) == 3
 
 
+class _Clock:
+    """Fake monotonic clock that sleep() advances."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def __call__(self):
+        return self.now
+
+
+def _running(sha=SHA):
+    return {"head_sha": sha, "status": "in_progress", "conclusion": None}
+
+
+def test_gate_waits_while_ci_is_still_running_on_the_commit():
+    # v0.3.14: the tag was pushed two minutes after the merge, before main's
+    # CI finished, and the gate refused instead of waiting for it.
+    gate = _load("release_gate")
+    answers = iter([[_running()], [{"head_sha": SHA, "status": "queued"}], [_ok_run()]])
+    clock = _Clock()
+    runs = gate.wait_for_ci(
+        lambda: next(answers), SHA, timeout=600, poll=30, sleep=clock.sleep, clock=clock
+    )
+    assert runs == [_ok_run()] and clock.sleeps == [30, 30]
+    assert gate.gate_problems(SHA, "v0.3.10", "0.3.10", on_main=True, runs=runs) == []
+
+
+def test_gate_wait_is_bounded():
+    gate = _load("release_gate")
+    clock = _Clock()
+    runs = gate.wait_for_ci(
+        lambda: [_running()], SHA, timeout=90, poll=30, sleep=clock.sleep, clock=clock
+    )
+    assert runs == [_running()] and sum(clock.sleeps) <= 90
+    out = gate.gate_problems(SHA, "v0.3.10", "0.3.10", on_main=True, runs=runs)
+    assert len(out) == 1 and "ci.yml" in out[0]
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [],
+        [{"head_sha": SHA, "status": "completed", "conclusion": "failure"}],
+        [_running("b" * 40)],
+        [_ok_run(), _running()],
+    ],
+)
+def test_gate_does_not_wait_without_a_running_ci_for_this_commit(runs):
+    gate = _load("release_gate")
+    clock = _Clock()
+    assert (
+        gate.wait_for_ci(lambda: runs, SHA, timeout=600, poll=30, sleep=clock.sleep, clock=clock)
+        == runs
+    )
+    assert clock.sleeps == []
+
+
+def test_gate_job_outlives_the_ci_wait(wf):
+    gate = _load("release_gate")
+    assert wf["jobs"]["gate"]["timeout-minutes"] * 60 > gate.CI_WAIT_SECONDS + 300
+
+
 def test_sums_format_and_order(tmp_path):
     gate = _load("release_gate")
     a, b = tmp_path / "b.exe", tmp_path / "a.txt"

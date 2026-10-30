@@ -7,8 +7,10 @@ Run by .github/workflows/windows-release.yml:
 
 ``gate`` refuses a tag unless (1) the tagged commit is on main, (2) the tag is
 ``vX.Y.Z`` and names the version in pyproject.toml, and (3) ci.yml has a
-completed, successful run for that exact commit. Every problem is printed and
-the exit code is 1, so nothing is built.
+completed, successful run for that exact commit. While ci.yml is still running
+on the commit (a tag pushed right after the merge), the gate waits for it, up to
+``CI_WAIT_SECONDS``, instead of refusing. Every problem is printed and the exit
+code is 1, so nothing is built.
 
 ``sums`` size-gates every asset (GitHub Releases' 2 GiB per-file limit, the
 same gate build_release.py applies to its outputs) and writes ``SHA256SUMS``
@@ -25,6 +27,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +36,10 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 _TAG = re.compile(r"v(\d+\.\d+\.\d+)")
+# main's ci.yml takes 10-12 minutes; the gate job's timeout sits above this.
+CI_WAIT_SECONDS = 30 * 60
+CI_POLL_SECONDS = 30
+_UNFINISHED = {"queued", "in_progress", "waiting", "requested", "pending"}
 
 
 def tag_version(tag: str) -> str | None:
@@ -71,6 +79,34 @@ def gate_problems(
             "then re-run this workflow"
         )
     return problems
+
+
+def wait_for_ci(
+    fetch: Callable[[], list[dict[str, Any]]],
+    sha: str,
+    *,
+    timeout: float,
+    poll: float,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[dict[str, Any]]:
+    """ci.yml runs for ``sha``, re-fetched while one is unfinished and none passed.
+
+    Returns as soon as there is nothing to wait for (a run passed, or no run for
+    the commit is still going) or ``timeout`` seconds have gone by.
+    """
+    deadline = clock() + timeout
+    runs = fetch()
+    while clock() + poll <= deadline:
+        mine = [r for r in runs if r.get("head_sha") == sha]
+        if any(r.get("conclusion") == "success" for r in mine):
+            break
+        if not any(r.get("status") in _UNFINISHED for r in mine):
+            break
+        print(f"ci.yml is still running on {sha}; checking again in {poll:g}s", file=sys.stderr)
+        sleep(poll)
+        runs = fetch()
+    return runs
 
 
 def sums_text(paths: list[Path]) -> str:
@@ -125,7 +161,10 @@ def _gate() -> int:
     )
     with (ROOT / "pyproject.toml").open("rb") as fh:
         version = tomllib.load(fh)["project"]["version"]
-    problems = gate_problems(sha, tag, version, on_main=_on_main(sha), runs=_ci_runs(repo, sha))
+    runs = wait_for_ci(
+        lambda: _ci_runs(repo, sha), sha, timeout=CI_WAIT_SECONDS, poll=CI_POLL_SECONDS
+    )
+    problems = gate_problems(sha, tag, version, on_main=_on_main(sha), runs=runs)
     for p in problems:
         print(f"release refused: {p}", file=sys.stderr)
     if not problems:
