@@ -282,10 +282,14 @@ starts with a month token.
 
 The single shared `CAPTION_TEMPLATES` pool + `HOOKS` prefix is gone. `SocialGenerator`
 composes ONE caption per platform (`SocialPost.captions: dict[str, str]`, keyed
-`"youtube" | "facebook" | "instagram" | "tiktok"`) from a small per-platform template
-pool (`YOUTUBE_CAPTION_TEMPLATES`, `FACEBOOK_CAPTION_TEMPLATES`,
-`INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES` — ≤4 sentence shapes each, no
-hook-pool prefix). `SocialPost.caption` stays and is an alias for the Instagram text —
+`"youtube" | "facebook" | "instagram" | "tiktok"`) from independently rotated parts: an
+opener from the platform's own pool (`YOUTUBE_CAPTION_TEMPLATES`,
+`FACEBOOK_CAPTION_TEMPLATES`, `INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES` —
+12+ openers each, no hook-pool prefix), then a data-only detail clause
+(`CAPTION_DETAIL_TEMPLATES`, built from `terrain_desc` only) or, for an `interactive`
+short, an engagement prompt (`INTERACTIVE_PROMPT_TEMPLATES`). Each part walks its own
+pool in a per-project shuffled order (`_rotating_pick`, seeded with `_project_seed`), so
+output is deterministic per project + short and two projects at one place open differently. `SocialPost.caption` stays and is an alias for the Instagram text —
 every legacy reader of `.caption` (`content_gates.py`, the Metricool CSV shared column,
 `console/pubqueue.py`, `instagram_adapter.py`) keeps reading it unchanged.
 
@@ -298,12 +302,14 @@ instead, so the place can never leak through a caption on an interactive short.
 
 **No two platforms identical.** `_build_platform_captions` also raises `ValueError`
 naming the short index and the two colliding platforms if any two platform captions for
-the same short come out byte-identical. Distinctness across shorts (not just across
-platforms for one short) is what the per-short hashtag-order shuffle
-(`_platform_hashtags`, seeded on `short_index` independently of the template pick) is
-for: with only ≤4 templates per platform, a batch of 5+ shorts is guaranteed by the
-pigeonhole principle to repeat a template shape, so the hashtag order is the thing that
-keeps two same-template captions from being byte-identical.
+the same short come out byte-identical. Distinctness across shorts is by construction: a 12-short batch never repeats an
+opener (the pools hold 12+ entries), and the generic hashtags rotate per short
+(`GENERIC_HASHTAGS`, `GENERIC_HASHTAGS_PER_POST` drawn with a `short_index` seed; the
+place and region tags are never part of that draw). Across batches,
+`anti_spam_gate.check_batch(..., recent_texts=...)` refuses (`cross-batch-repeat`) any
+caption or YouTube title whose first 6 normalized words match text spooled in the last 60
+days; `cmd_enqueue_plan` loads that text with `recent_platform_texts` from the sidecars
+the queue's deliveries point at.
 
 **Shape per platform:**
 - **YouTube** — description-style, 1–2 sentences naming place + terrain, a trailing

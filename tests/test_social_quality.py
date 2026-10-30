@@ -160,14 +160,16 @@ class TestTitleDiversity:
 class TestTemplatePoolSize:
     """Template pools must be large enough to avoid repetition."""
 
-    def test_caption_pools_capped_at_four_per_platform(self):
-        """Each platform's caption pool is <=4 sentence shapes — a
-        template is a sentence SHAPE only, never a fixed 28+ pool (the old
-        single shared CAPTION_TEMPLATES/HOOKS pools this replaced)."""
+    def test_caption_opener_pools_cover_a_twelve_short_batch(self):
+        """Each platform's opener pool holds >=12 entries, none repeated, and
+        every opener carries the mandatory {location} slot: a caption is an
+        opener composed with a detail/prompt part (never a whole fixed
+        template), and 12 distinct openers keep a 12-short batch from
+        repeating one (the anti-spam gate's 6-word-prefix rule)."""
         for platform, templates in _ALL_PLATFORM_CAPTION_TEMPLATES.items():
-            assert 1 <= len(templates) <= 4, (
-                f"{platform}: expected 1-4 caption templates, got {len(templates)}"
-            )
+            assert len(templates) >= 12, f"{platform}: only {len(templates)} openers"
+            assert len(set(templates)) == len(templates), f"{platform}: duplicate opener"
+            assert all("{location}" in t for t in templates), platform
 
     def test_title_frames_capped_at_six(self):
         """Composed titles draw from at most 6 grammar frames — a frame

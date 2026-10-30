@@ -41,7 +41,7 @@ from ...console.library import privacy_status_blocks_publish, privacy_status_for
 from ...console.settings import current_brand
 from ...pipeline.drive_state_model import PipelineState
 from ...pipeline.review_gate import compute_gate_cd_hash
-from ...publishing.anti_spam_gate import check_batch
+from ...publishing.anti_spam_gate import check_batch, recent_platform_texts
 from ...publishing.brand_policy import load_brand_policy
 from ...publishing.dynamic_schedule import weekly_volume_from_ladder
 from ...publishing.enqueue_from_plan import (
@@ -566,8 +566,13 @@ def cmd_enqueue_plan(args, config) -> int:
         # Cross-batch uniqueness/count is a property no single sidecar's
         # generator call can see, so this is the one gate that runs here
         # rather than at generation time.
+        planned_records = _planned_records(sidecars, max_shorts)
         anti_spam_violations = check_batch(
-            _planned_records(sidecars, max_shorts), per_location_cap=policy.per_location_cap
+            planned_records,
+            per_location_cap=policy.per_location_cap,
+            recent_texts=recent_platform_texts(
+                conn, exclude_projects={r.project_name for r in planned_records}
+            ),
         )
         if anti_spam_violations:
             print(

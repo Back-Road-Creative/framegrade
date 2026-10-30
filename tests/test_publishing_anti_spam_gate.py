@@ -292,3 +292,83 @@ def test_title_prefix_key_strips_hashtags_and_short_titles():
     assert shared_prefix_groups(["A b c one", "", "a B c two", "Other title entirely", "A b"]) == {
         ("a", "b", "c"): [0, 2]
     }
+
+
+# -- rule 5: cross-batch-repeat -------------------------------------------
+
+
+def test_cross_batch_repeat_is_a_violation():
+    record = _record(
+        facebook=FacebookPayload(description="Would you drive through County Cork today? #Cork")
+    )
+    recent = {"facebook": ["Would you drive through County Cork this fall?\n\n#x"]}
+
+    violations = check_batch([record], per_location_cap=None, recent_texts=recent)
+
+    assert [(v.index, v.platform, v.rule) for v in violations] == [
+        (0, "facebook", "cross-batch-repeat")
+    ]
+
+
+def test_cross_batch_distinct_first_words_is_clean():
+    record = _record(facebook=FacebookPayload(description="Tracing the R572 past Sheep's Head"))
+    recent = {"facebook": ["Would you drive through County Cork this fall?"]}
+
+    assert check_batch([record], per_location_cap=None, recent_texts=recent) == []
+
+
+def test_cross_batch_compares_same_platform_only():
+    record = _record(facebook=FacebookPayload(description="Rolling through County Cork at dusk"))
+    recent = {"instagram": ["Rolling through County Cork at dusk again"]}
+
+    assert check_batch([record], per_location_cap=None, recent_texts=recent) == []
+
+
+def test_cross_batch_youtube_title_repeat():
+    record = _record(youtube=_yt("Kerry's coast road unwinds past three river bends #Shorts"))
+    recent = {"youtube": ["Kerry's coast road unwinds past two bridges"]}
+
+    violations = check_batch([record], per_location_cap=None, recent_texts=recent)
+
+    assert any(v.rule == "cross-batch-repeat" and v.platform == "youtube" for v in violations)
+
+
+def test_recent_texts_default_changes_nothing():
+    record = _record(facebook=FacebookPayload(description="Rolling through County Cork at dusk"))
+
+    assert check_batch([record], per_location_cap=None) == []
+
+
+# -- recent_platform_texts loader -----------------------------------------
+
+
+def test_recent_platform_texts_reads_spooled_sidecar_text(tmp_path):
+    from datetime import timedelta
+
+    from gomoveshift.pipeline.drive_phases.phase_d import _serialize_publish_plan
+    from gomoveshift.publishing.anti_spam_gate import recent_platform_texts
+    from gomoveshift.publishing.models import PublishPlan
+    from gomoveshift.publishing.queue import enqueue, open_queue_db
+
+    record = _record(
+        short_index=1,
+        youtube=_yt("A title about the coast", "Desc about the coast."),
+        facebook=FacebookPayload(description="Rolling through County Cork at dusk"),
+    )
+    sidecar = tmp_path / "proj_publish_plan.json"
+    sidecar.write_text(_serialize_publish_plan(PublishPlan(shorts=(record,))), encoding="utf-8")
+    conn = open_queue_db(tmp_path)
+    enqueue(conn, "proj", 1, "facebook", "h1", sidecar_path=str(sidecar))
+    enqueue(conn, "proj", 1, "youtube", "h1", sidecar_path=str(sidecar))
+    enqueue(conn, "proj", 1, "tiktok", "h1")  # no sidecar: skipped, never raises
+    now = datetime.now(timezone.utc)
+
+    texts = recent_platform_texts(conn, now=now)
+    assert texts["facebook"] == ["Rolling through County Cork at dusk"]
+    assert "A title about the coast" in texts["youtube"]
+    assert "Desc about the coast." in texts["youtube"]
+    assert "tiktok" not in texts
+    # excluded project (the batch's own rows) and aged-out window
+    assert recent_platform_texts(conn, now=now, exclude_projects={"proj"}) == {}
+    assert recent_platform_texts(conn, now=now + timedelta(days=61)) == {}
+    conn.close()

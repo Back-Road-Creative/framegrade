@@ -7,16 +7,31 @@ single-record generator call can.
 the rolling-ceiling gate and before anything is written to the queue: a
 violating batch is refused whole, nothing spooled, the same "nothing was
 written to the queue" shape the media/privacy/ceiling gates already use.
+
+Two scopes: every rule but one is within-batch. ``cross-batch-repeat`` compares
+each record's platform text against ``recent_texts`` -- the captions/titles
+already spooled in the last 60 days, loaded by :func:`recent_platform_texts`
+-- and refuses a text that opens with the same 6 words as one of them.
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import AbstractSet, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .models import PublishRecord
+
+logger = logging.getLogger(__name__)
+
+#: Words two texts must share, from the start, to count as the same opener.
+CROSS_BATCH_PREFIX_WORDS = 6
+#: How far back spooled text counts as "already posted".
+CROSS_BATCH_WINDOW_DAYS = 60
 
 #: The single source of truth for the 100 retired legacy title templates
 #: (``TITLE_TEMPLATES`` / ``EXTENDED_TITLE_TEMPLATES`` / ``_pick_tiktok_title``).
@@ -221,8 +236,73 @@ def _location_key(record: PublishRecord) -> Optional[str]:
     return regions[0] if regions else None
 
 
+def text_opener_key(text: str) -> Tuple[str, ...]:
+    """The cross-batch comparison key: the text's first 6 normalized words
+    (hashtags are trailing, so they never reach it)."""
+    return tuple(_normalize_words(text)[:CROSS_BATCH_PREFIX_WORDS])
+
+
+def _record_texts(record: PublishRecord) -> Dict[str, List[str]]:
+    """Every comparable text per platform; YouTube carries its title too."""
+    texts = {platform: [text] for platform, text in _platform_texts(record).items()}
+    youtube = record.payloads.youtube
+    if youtube and _bare_title(youtube.title).strip():
+        texts.setdefault("youtube", []).insert(0, _bare_title(youtube.title).strip())
+    return texts
+
+
+def recent_platform_texts(
+    conn: sqlite3.Connection,
+    *,
+    since_days: int = CROSS_BATCH_WINDOW_DAYS,
+    now: Optional[datetime] = None,
+    exclude_projects: AbstractSet[str] = frozenset(),
+) -> Dict[str, List[str]]:
+    """Platform -> captions/titles already spooled in the last ``since_days``.
+
+    The queue stores no text itself; each delivery row names the sidecar it
+    was enqueued from, so the text is read back from that plan file. Shadow
+    and cancelled rows never publish and are skipped, as are rows of
+    ``exclude_projects`` (the batch being checked: re-running the same plan
+    must not repeat against itself) and sidecars that are gone or unreadable.
+    """
+    from .plan_io import load_publish_plan
+
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=since_days)).isoformat()
+    rows = conn.execute(
+        "SELECT DISTINCT project_name, short_index, platform, sidecar_path FROM deliveries "
+        "WHERE sidecar_path IS NOT NULL AND shadow=0 AND status != 'cancelled' "
+        "AND created_at >= ?",
+        (cutoff,),
+    ).fetchall()
+    plans: Dict[str, Optional[Mapping[Tuple[str, int], PublishRecord]]] = {}
+    out: Dict[str, List[str]] = defaultdict(list)
+    for row in rows:
+        if row["project_name"] in exclude_projects:
+            continue
+        path = row["sidecar_path"]
+        if path not in plans:
+            try:
+                plan = load_publish_plan(path)
+                plans[path] = {(r.project_name, r.short_index): r for r in plan.shorts}
+            except Exception as exc:  # missing/malformed sidecar: nothing to compare
+                logger.warning("anti-spam: skipping unreadable sidecar %s: %s", path, exc)
+                plans[path] = None
+        by_key = plans[path]
+        record = by_key.get((row["project_name"], row["short_index"])) if by_key else None
+        if record is None:
+            continue
+        for text in _record_texts(record).get(row["platform"], []):
+            if text not in out[row["platform"]]:
+                out[row["platform"]].append(text)
+    return dict(out)
+
+
 def check_batch(
-    records: Sequence[PublishRecord], *, per_location_cap: Optional[int]
+    records: Sequence[PublishRecord],
+    *,
+    per_location_cap: Optional[int],
+    recent_texts: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[Violation]:
     """Every anti-spam violation across the whole batch, all at once -- the
     same refuse-whole shape as ``_rolling_ceiling_violations``: a batch that
@@ -273,6 +353,28 @@ def check_batch(
                     )
                 )
             seen[platform] = text
+
+    if recent_texts:
+        recent_keys = {
+            platform: {text_opener_key(t): t for t in texts if text_opener_key(t)}
+            for platform, texts in recent_texts.items()
+        }
+        for index, record in enumerate(records):
+            for platform, texts in _record_texts(record).items():
+                known = recent_keys.get(platform, {})
+                for text in texts:
+                    match = known.get(text_opener_key(text))
+                    if match is not None:
+                        violations.append(
+                            Violation(
+                                index,
+                                platform,
+                                "cross-batch-repeat",
+                                f"text opens with the same {CROSS_BATCH_PREFIX_WORDS} words "
+                                f"as one already spooled: {text[:60]!r} ~ {match[:60]!r}",
+                            )
+                        )
+                        break
 
     if per_location_cap is not None:
         by_location: Dict[str, List[int]] = defaultdict(list)

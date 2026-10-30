@@ -222,3 +222,33 @@ def test_clean_batch_spools_normally(tmp_path):
 
     assert rc == 0
     assert _spooled_count(tmp_path) == 2
+
+
+def test_cross_batch_repeat_of_a_spooled_title_refuses_the_new_batch(tmp_path, capsys):
+    import dataclasses
+
+    title = "Killarney's coast road unwinds past three river bends"
+    first = tmp_path / "first"
+    first.mkdir()
+    _sidecar(first, _record(1, title))
+    assert _run(tmp_path, first, brand="no-such-brand") == 0
+
+    second = tmp_path / "second"
+    second.mkdir()
+    _sidecar(second, dataclasses.replace(_record(1, title + " again"), project_name="other"))
+    capsys.readouterr()
+
+    rc = _run(tmp_path, second, brand="no-such-brand")
+
+    assert rc == 1
+    assert "rule=cross-batch-repeat" in capsys.readouterr().out
+    assert _spooled_count(tmp_path) == 1
+
+
+def test_rerunning_the_same_plan_is_not_a_cross_batch_repeat(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    _sidecar(out, _record(1, "Killarney's coast road unwinds past three river bends"))
+    assert _run(tmp_path, out, brand="no-such-brand") == 0
+
+    assert _run(tmp_path, out, brand="no-such-brand") == 0

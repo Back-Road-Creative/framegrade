@@ -586,40 +586,107 @@ def _frame_fields(template: str) -> "set[str]":
     return {name for _, name, _, _ in Formatter().parse(template) if name}
 
 
-# ─── Per-platform caption templates ────────────────────────────────
-# One SHORT template pool per platform — no shared "all platforms" pool and
-# no hook-pool prefix (a caption that opens with the same rotating hook line
-# regardless of platform is the templated-spam shape the anti-spam gate refuses at enqueue).
-# Every template requires {location} — the mandatory place fact slot; when a
+# ─── Per-platform caption parts ────────────────────────────────────
+# A caption is COMPOSED, never drawn whole from a fixed pool: an opener
+# fragment (this platform's own pool, so no phrase is shared across
+# platforms), then either a data-only detail clause or, for an ``interactive``
+# short, an engagement prompt. Each part rotates through its own pool in a
+# per-project shuffled order (``_rotating_pick``), independently of the others,
+# so a batch of up to ``len(opener pool)`` shorts never repeats an opener and
+# two projects at the same place open differently. The pools are sized to the
+# 12-short batch the anti-spam gate's 6-word-prefix rule is held to; a
+# longer batch wraps, and ``check_batch`` refuses a repeat across batches.
+#
+# Every opener requires {location} -- the mandatory place fact slot; when a
 # short is flagged ``interactive``, ``_build_platform_captions`` fills
 # {location} with LOCATION_WITHHELD instead so the place is never named,
-# never by omitting the slot from some templates and not others.
+# never by omitting the slot from some openers and not others. Details draw
+# only from data the format map already carries (never an invented fact).
 YOUTUBE_CAPTION_TEMPLATES = [
-    "A drive along {terrain_desc} through {location}.",
-    "POV driving through {location}, following {terrain_desc}.",
-    "This short traces {terrain_desc} in and around {location}.",
-    "Behind the wheel through {location} — {terrain_desc} the whole way.",
+    "POV driving through {location}.",
+    "A drive through {location}.",
+    "Behind the wheel through {location}.",
+    "This short follows the road through {location}.",
+    "Following the route through {location}.",
+    "Driving through {location} from the driver's seat.",
+    "A stretch of road in {location}.",
+    "Passing through {location} by car.",
+    "Out on the road in {location}.",
+    "The road through {location}, as driven.",
+    "Rolling along through {location}.",
+    "Traveling through {location}.",
 ]
 
 FACEBOOK_CAPTION_TEMPLATES = [
     "Would you drive through {location}?",
-    "Ever been through {location}?",
-    "Just {terrain_desc} through {location}.",
-    "{location} — worth the detour?",
+    "{location} \u2014 worth the detour?",
+    "Pulling into {location} on this one.",
+    "Next stop: {location}.",
+    "Back on the road in {location}.",
+    "Here's the drive through {location}.",
+    "Cutting through {location}.",
+    "Passing through {location}.",
+    "Following the road into {location}.",
+    "Come along through {location}.",
+    "Behind the wheel in {location}.",
+    "Another mile through {location}.",
+    "Heading out through {location}.",
+    "Wheels rolling through {location}.",
 ]
 
 INSTAGRAM_CAPTION_TEMPLATES = [
-    "POV driving through {location} {weather_emoji}",
-    "Rolling through {location} {weather_emoji}",
-    "{location}, from behind the wheel {weather_emoji}",
-    "Just {location} and the open road {weather_emoji}",
+    "POV driving through {location}",
+    "Rolling through {location}",
+    "{location}, from behind the wheel",
+    "Just {location} and the open road",
+    "Open road, {location}",
+    "Cruising into {location}",
+    "Driving the stretch through {location}",
+    "Eyes on the road in {location}",
+    "Another drive through {location}",
+    "Hello from {location}",
+    "Along the road in {location}",
+    "Making our way through {location}",
+    "On the move in {location}",
+    "Wheel time in {location}",
 ]
 
 TIKTOK_CAPTION_TEMPLATES = [
     "POV: driving through {location}",
-    "Somewhere in {location}",
-    "{location} — {terrain_desc}",
+    "{location} from the driver's seat",
     "Just driving through {location}",
+    "Ride along through {location}",
+    "Drive with me through {location}",
+    "Rolling into {location}",
+    "Pass through {location} with me",
+    "Stay on the road through {location}",
+    "Next up, {location}",
+    "Come drive {location} with me",
+    "Taking you through {location}",
+    "One drive through {location}",
+    "Heading into {location}",
+    "Back behind the wheel in {location}",
+]
+
+#: The data-only detail clause that follows an opener. Each slot is a field
+#: the format map always carries -- never an invented fact.
+CAPTION_DETAIL_TEMPLATES = [
+    "{terrain_desc} the whole way.",
+    "Mostly {terrain_desc}.",
+    "Nothing but {terrain_desc} ahead.",
+    "Just {terrain_desc}.",
+    "Taking in the {terrain_desc}.",
+]
+
+#: An ``interactive`` short withholds its place, so it asks for a guess
+#: instead of carrying a detail clause.
+INTERACTIVE_PROMPT_TEMPLATES = [
+    "Where do you think this is?",
+    "Can you guess the route?",
+    "Any guesses where this is?",
+    "Could you place this drive?",
+    "Where would you say this was filmed?",
+    "Think you know where this is?",
 ]
 
 _PLATFORM_CAPTION_TEMPLATES = {
@@ -628,6 +695,19 @@ _PLATFORM_CAPTION_TEMPLATES = {
     "instagram": INSTAGRAM_CAPTION_TEMPLATES,
     "tiktok": TIKTOK_CAPTION_TEMPLATES,
 }
+
+#: Generic hashtags rotated per short (``_platform_hashtags`` takes
+#: ``GENERIC_HASHTAGS_PER_POST`` of them), so no two posts need carry the same
+#: fixed generic pair.
+GENERIC_HASHTAGS = [
+    "#POVDriving",
+    "#RoadTrip",
+    "#DriveWithMe",
+    "#POVDrive",
+    "#OpenRoad",
+    "#DrivingVideo",
+]
+GENERIC_HASHTAGS_PER_POST = 2
 
 # The place-withheld filler for an ``interactive`` short's captions —
 # never a real place, so the interactive family can't leak one through a
@@ -1002,18 +1082,33 @@ class SocialGenerator:
         """
         return self._compose_title(short_index, "titles", max_len=100, facts=facts)
 
-    def _pick_platform_template(self, platform: str, short_index: int) -> str:
-        """Pick this platform's caption template for ``short_index``.
+    def _rotating_pick(self, pool: "list[str]", platform: str, part: str, short_index: int) -> str:
+        """The ``short_index``-th entry of ``pool`` in this project's shuffled order.
 
-        Project+series-level shuffle keyed by platform (not shared with any
-        other platform's order) so two platforms never happen to walk their
-        pools in lockstep.
+        One shuffle per (project, platform, part): each part of a caption walks
+        its own pool, so openers, details and prompts never rotate in lockstep,
+        and no two shorts of a batch share an entry until the pool wraps.
         """
-        templates = _PLATFORM_CAPTION_TEMPLATES[platform]
-        project_rng = random.Random(self._project_seed(f"captions:{platform}"))
-        shuffled = list(templates)
-        project_rng.shuffle(shuffled)
-        return shuffled[(short_index - 1) % len(shuffled)]
+        order = list(pool)
+        random.Random(self._project_seed(f"captions:{platform}:{part}")).shuffle(order)
+        return order[(short_index - 1) % len(order)]
+
+    def _compose_caption(
+        self, platform: str, short_index: int, fmap: "dict[str, str]", interactive: bool
+    ) -> str:
+        """One platform caption sentence: opener + (detail | engagement prompt)."""
+
+        def fill(pool: "list[str]", part: str) -> str:
+            text = self._rotating_pick(pool, platform, part, short_index).format_map(fmap).strip()
+            return text[:1].upper() + text[1:]
+
+        opener = fill(_PLATFORM_CAPTION_TEMPLATES[platform], "opener")
+        if opener[-1] not in ".?!":
+            opener += "."
+        tail = fill(
+            INTERACTIVE_PROMPT_TEMPLATES if interactive else CAPTION_DETAIL_TEMPLATES, "tail"
+        )
+        return f"{opener} {tail}"
 
     def _platform_hashtags(
         self, platform: str, short_index: int, interactive: bool, limit: int
@@ -1024,14 +1119,13 @@ class SocialGenerator:
         #CountyKerry #Ireland). Withheld entirely when ``interactive`` — a
         location hashtag would leak the place a withheld caption just hid.
 
-        Order is shuffled with a seed keyed on ``short_index`` (not just the
-        template pick's ``(short_index - 1) % len(pool)`` cycle) — with only
-        4 templates per platform, a batch of 5+ shorts is guaranteed by the
-        pigeonhole principle to repeat a template; the independent per-short
-        hashtag order is what keeps those two captions from being byte-
-        identical.
+        The generic tags are ``GENERIC_HASHTAGS_PER_POST`` drawn from
+        ``GENERIC_HASHTAGS`` with a seed keyed on ``short_index``, so no two
+        posts need carry the same fixed pair; order is shuffled by the same
+        per-short seed. The place and region tags are never part of that draw.
         """
-        tags = ["#POVDriving", "#RoadTrip"]
+        rng = random.Random(self._project_seed(f"captions:{platform}:tags:{short_index}"))
+        tags = rng.sample(GENERIC_HASHTAGS, GENERIC_HASHTAGS_PER_POST)
         terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
         if terrain_ht:
             tags.append(terrain_ht[0])
@@ -1042,7 +1136,6 @@ class SocialGenerator:
                 if loc_ht.lower() not in seen_lower:
                     tags.append(loc_ht)
                     seen_lower.add(loc_ht.lower())
-        rng = random.Random(self._project_seed(f"captions:{platform}:tags:{short_index}"))
         rng.shuffle(tags)
         if not mandatory:
             return tags[:limit]
@@ -1163,16 +1256,16 @@ class SocialGenerator:
         yt = (
             hand_caption.strip()
             if hand_caption
-            else (self._pick_platform_template("youtube", short_index).format_map(fmap))
+            else self._compose_caption("youtube", short_index, fmap, interactive)
         )
         if self.recording_date:
             yt += f"\n\nFilmed {self.recording_date}."
         captions["youtube"] = yt
 
         # Facebook — one line, <=2 hashtags.
-        fb_base = first_sentence or self._pick_platform_template(
-            "facebook", short_index
-        ).format_map(fmap)
+        fb_base = first_sentence or self._compose_caption(
+            "facebook", short_index, fmap, interactive
+        )
         mandatory = [] if interactive else self._mandatory_location_tags()
         captions["facebook"] = self._append_hashtags(
             fb_base, self._platform_hashtags("facebook", short_index, interactive, limit=2)
@@ -1180,9 +1273,9 @@ class SocialGenerator:
 
         # Instagram — short line + recording date + up to 8 tags. This is
         # the legacy shared-column shape (``post.caption`` below).
-        ig_base = first_sentence or self._pick_platform_template(
-            "instagram", short_index
-        ).format_map(fmap)
+        ig_base = first_sentence or (
+            f"{self._compose_caption('instagram', short_index, fmap, interactive)} {weather_emoji}"
+        )
         if self.recording_date:
             ig_base += f"\n\n📹 {self.recording_date}"
         # Enforce Twitter's 280 char limit for Metricool compatibility: drop
@@ -1197,9 +1290,7 @@ class SocialGenerator:
         captions["instagram"] = ig_caption
 
         # TikTok — <=150 chars, <=4 tags.
-        tt_base = first_sentence or self._pick_platform_template("tiktok", short_index).format_map(
-            fmap
-        )
+        tt_base = first_sentence or self._compose_caption("tiktok", short_index, fmap, interactive)
         tt_caption = self._fit_hashtag_caption(
             tt_base,
             self._platform_hashtags("tiktok", short_index, interactive, limit=4),
