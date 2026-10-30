@@ -54,11 +54,18 @@ call recording a higher cap once the state improves.
 every project's nightly `metrics collect` invocation reaches it once the cron is enabled, so
 the shadow log fills without anyone running anything by hand.
 
-- **YouTube only.** It classifies YouTube's Shorts-feed share history via
-  `tracking.suppression.classify_youtube_shorts_feed` over every stored `channel_daily` row for
-  the brand. **There is no Facebook reel-views series in `channel_daily` yet** (`classify_facebook_
-  reel_reach` exists in `tracking/suppression.py` but nothing pulls or stores the rows it would
-  need) -- Facebook is never classified or acted on here, only YouTube.
+- **YouTube and Facebook.** YouTube is classified via `tracking.suppression.classify_youtube_shorts_feed`
+  over every stored `channel_daily` row for the brand. Facebook is classified via
+  `classify_facebook_reel_reach` over an interim daily reel-plays series that
+  `tracking.facebook_series.facebook_reel_plays_series` builds from the nightly cumulative
+  observation log (`short.observation_log["facebook"]`; there is no per-day Facebook pull in
+  `channel_daily`): the per-fetch delta of `reel_total_plays` between consecutive MEASURED entries
+  of a post, attributed to the New York day of the later fetch and summed over shorts; a counter
+  that moved backwards is skipped, and a post's first observation counts in full only when it was
+  fetched within a day of posting. Days with no observation are absent, so gaps shorten the
+  detector's windows. Each classified platform prints `SUPPRESSION <platform>=<status> days=<n>`
+  to the cron log; Facebook prints `WARMUP` until 28 days of series exist. Facebook has no
+  recovery branch: once SUPPRESSED it stays so (known gap).
 - **Shadow by default, always.** `--response-mode {shadow,live}` on `metrics collect` (default
   `shadow`) is the only switch; the scheduled line that runs `metrics collect` is operator-only to edit, so
   going live for real is a human editing that line, not a code change in this repo. A missing/no
@@ -84,5 +91,3 @@ the shadow log fills without anyone running anything by hand.
 - **The 14-day shadow window** (`mode="live"` for the first time) is the operator's call, made either by
   editing the `metrics collect` scheduled line to add `--response-mode live`, or by a manual console
   override on a specific platform -- not a config flag flipped by code in this repo.
-- **Facebook classification** needs a `channel_daily` reel-views pull before
-  `classify_facebook_reel_reach` has anything to read; not part of the nightly wiring.

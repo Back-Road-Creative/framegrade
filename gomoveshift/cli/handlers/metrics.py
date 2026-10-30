@@ -19,7 +19,7 @@ import logging
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ...console.settings import current_brand
 from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
@@ -44,10 +44,14 @@ from ...tracking.channel_daily import pull_channel_daily, shorts_feed_share
 from ...tracking.channel_enrol import enrol_channel
 from ...tracking.collector import YouTubeCollector
 from ...tracking.evidence_export import build_evidence_bundle
+from ...tracking.facebook_series import facebook_reel_plays_series
 from ...tracking.interval import latest_interval
 from ...tracking.observation import ObservationStatus
 from ...tracking.slot_performance import read_sidecar_slot
-from ...tracking.suppression import classify_youtube_shorts_feed
+from ...tracking.suppression import (
+    classify_facebook_reel_reach,
+    classify_youtube_shorts_feed,
+)
 from ..logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -382,6 +386,25 @@ def _pull_channel_daily(collector: MetricsCollector, brand: str) -> int:
         return 0
 
 
+#: Days of Facebook history the detector needs before it can classify.
+_FACEBOOK_WARMUP_DAYS = 28
+
+
+def _facebook_reel_series() -> Dict[str, float]:
+    """Daily Facebook reel plays for the account, derived from every tracked
+    short's nightly observation log (`tracking.facebook_series`)."""
+    return facebook_reel_plays_series(TrackingStore().load_all_records())
+
+
+def _suppression_line(platform: str, day_states: dict) -> str:
+    """One cron-log line: the latest day's status, ``WARMUP`` while Facebook's
+    series is shorter than the detector's 28-day baseline."""
+    status = day_states[max(day_states)]
+    if platform == "facebook" and len(day_states) < _FACEBOOK_WARMUP_DAYS:
+        status = "WARMUP"
+    return f"SUPPRESSION {platform}={status} days={len(day_states)}"
+
+
 def _apply_bounded_response(config, brand: str, mode: str) -> None:
     """Wire the already-built, shadow-first bounded response
     (`publishing.response_policy` / `publishing.dispatch.
@@ -390,11 +413,13 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
 
     Classifies YouTube's Shorts-feed share history via `tracking.
     suppression.classify_youtube_shorts_feed` over every stored
-    `channel_daily` row for `brand` -- there is NO equivalent Facebook
-    reel-views series in `channel_daily` yet (`grep -rn
-    "classify_facebook_reel_reach" gomoveshift/tracking/suppression.py`
-    exists but nothing in `channel_daily` stores reel-views rows), so
-    Facebook is never classified or acted on here.
+    `channel_daily` row for `brand`, and Facebook's reel plays via
+    `classify_facebook_reel_reach` over the interim daily series built from
+    the nightly observation log (`_facebook_reel_series`; `channel_daily`
+    holds no Facebook rows). Facebook has no recovery branch: once
+    SUPPRESSED it stays so. A platform with no series is left out of
+    `states`; one `SUPPRESSION <platform>=<status> days=<n>` line per
+    classified platform goes to the cron log.
 
     `mode` defaults to ``"shadow"`` (``args.response_mode``, itself
     defaulting to ``"shadow"`` in the CLI parser) -- this call never
@@ -411,11 +436,24 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
     try:
         rows = load_channel_daily_rows(brand)
         day_states = classify_youtube_shorts_feed(rows) if rows else {}
-        if not day_states:
+        try:
+            fb_series = _facebook_reel_series()
+        except Exception as exc:  # noqa: BLE001 - a Facebook series failure must not block YouTube
+            logger.warning("facebook series skipped: %s", exc)
+            fb_series = {}
+        fb_states = classify_facebook_reel_reach(fb_series) if fb_series else {}
+        if not day_states and not fb_states:
             print(f"Bounded response: no channel-daily rows for {brand}")
             return
 
-        today = max(day_states)
+        states = {}
+        if day_states:
+            states["youtube"] = day_states
+        if fb_states:
+            states["facebook"] = fb_states
+        for platform, platform_states in states.items():
+            print(_suppression_line(platform, platform_states))
+        today = max(max(v) for v in states.values())
         ladder = load_brand_policy(brand).daily_ladder
         storage_path = Path(config.seo.storage_path)
         conn = open_queue_db(storage_path)
@@ -423,7 +461,7 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
             decisions = apply_suppression_response(
                 conn,
                 brand=brand,
-                states={"youtube": day_states},
+                states=states,
                 today=today,
                 ladder=ladder,
                 mode=mode,
