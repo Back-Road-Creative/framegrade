@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-10-30
+
+### Fixed
+
+- The label-quality backstop no longer warns "county-only" on a settlement-led label such as "Goleen, County Cork"; road-led labels ("R591, County Cork", "NC Highway 28, Macon County, NC", "M50 Motorway, County Dublin", or any road the resolver recorded) still warn. The check stays warn-only.
+- The shorts CSV grammar gate now checks each YouTube tag on its own, so a tag that starts with a bare preposition is caught anywhere in the cell, not only when it is first.
+- Shorts tags strip a leading title word ("To", "Through") from each location component, so "To Goleen, County Cork" no longer yields a "To Goleen" tag.
+- A `--per-lf-location` correction on a Phase-D-only resume now reaches shorts whose burned label was inherited from their parent long-form. Phase D read every short's label from the day's shorts OST audit sidecar, which a resume never re-derives, so the corrected text stayed in those shorts' metadata. A short whose own clip GPS named the place is unchanged.
+
 ## [0.3.17] - 2026-10-30
 
 ### Added
@@ -322,7 +331,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...HEAD
+[0.3.18]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...v0.3.18
 [0.3.17]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...v0.3.15
