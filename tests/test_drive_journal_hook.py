@@ -297,6 +297,25 @@ def test_date_resolution_zero_matches_never_overwrites_existing(monkeypatch, tmp
     assert any("REFUSED" in r.getMessage() for r in caplog.records)
 
 
+def test_date_resolution_day_after_a_trip_extends_it_instead_of_a_draft(monkeypatch, tmp_path):
+    # Ace Basin 2026-02-21 was day 2 of sc-2026 (trip 2026-02-20..2026-02-20).
+    stages = tmp_path / "stages"
+    _state_with_date(stages, "usa", "2026-02-21")
+    site = _site_with_journeys(tmp_path, ("sc-2026", "2026-02-20", "2026-02-20"))
+    called = {}
+    monkeypatch.setattr(_RPJ, lambda **k: called.update(k) or 0)
+    orch = _FakeOrch(tmp_path / "proj", stages)
+    _maybe_auto_publish_journal(
+        _args(region="usa", site_path=site, publish="tue"),
+        orch,
+        _cfg({}),
+    )
+    assert called.get("journey_slug") == "sc-2026"
+    jdir = site / "content" / "journeys"
+    assert not (jdir / "usa-2026-02-21.md").exists()
+    assert "end_date: '2026-02-21'" in (jdir / "sc-2026.md").read_text()
+
+
 def test_date_resolution_single_match_creates_no_draft(monkeypatch, tmp_path):
     stages = tmp_path / "stages"
     _state_with_date(stages, "usa", "2026-03-04")

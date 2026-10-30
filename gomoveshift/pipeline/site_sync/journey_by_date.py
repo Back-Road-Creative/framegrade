@@ -10,10 +10,16 @@ than guessed at.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
-from ..journal_publisher import load_journey, serialize_journey
+from .._atomic_write import atomic_write_text
+from ..journal_publisher import (
+    _day_number_for_new_date,
+    journey_lock,
+    load_journey,
+    serialize_journey,
+)
 
 
 class AmbiguousJourneyError(ValueError):
@@ -86,6 +92,74 @@ def resolve_journey_by_date(site_path: Path, run_date: str) -> str | None:
             "--auto-publish-journal SLUG for this run."
         )
     return matches[0]
+
+
+def extend_adjacent_journey(site_path: Path, run_date: str) -> str | None:
+    """Extend the one journey whose trip ended the day before ``run_date``.
+
+    A multi-day trip is driven and processed one day at a time, so the second
+    day's run finds a journey whose ``trip.end_date`` is the day before. That
+    day belongs in the same journey, not in a new draft. The trip's
+    ``end_date`` (and ``duration_days`` when present) move to ``run_date`` and
+    an empty day stub is added in date order, as ``apply_merge`` would; the
+    merge then lands the videos in it. Returns the extended slug, ``None``
+    when no trip ends the day before. Only forward: a trip starting the day
+    after is left alone, since prepending a day renumbers a published day 1.
+    Raises :class:`AmbiguousJourneyError` when two or more trips end the day
+    before.
+    """
+    day = _parse_date(run_date)
+    if day is None:
+        return None
+    journeys_dir = Path(site_path) / "content" / "journeys"
+    if not journeys_dir.is_dir():
+        return None
+
+    eve = day - timedelta(days=1)
+    matches: list[Path] = []
+    for path in sorted(journeys_dir.glob("*.md")):
+        if path.stem == "_index":
+            continue
+        try:
+            doc, _body = load_journey(path)
+        except (OSError, ValueError):
+            continue
+        trip = doc.get("trip") or {}
+        if _parse_date(trip.get("end_date")) == eve and _parse_date(trip.get("start_date")):
+            matches.append(path)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousJourneyError(
+            f"run date {run_date} is the day after {len(matches)} journeys' trips "
+            f"end ({', '.join(p.stem for p in matches)}); refusing to guess. Set "
+            "config.drive.active_journey_by_region or pass "
+            "--auto-publish-journal SLUG for this run."
+        )
+
+    path = matches[0]
+    with journey_lock(path):
+        doc, body = load_journey(path)
+        trip = doc["trip"]
+        trip["end_date"] = run_date
+        if "duration_days" in trip:
+            start = _parse_date(trip.get("start_date"))
+            trip["duration_days"] = (day - start).days + 1
+        days = doc.setdefault("days", [])
+        if run_date not in {str(d.get("date")) for d in days}:
+            days.append(
+                {
+                    "day_number": _day_number_for_new_date(days, run_date),
+                    "date": run_date,
+                    "day_of_week": day.strftime("%A"),
+                    "heading": "",
+                    "narrative": "",
+                    "videos": [],
+                }
+            )
+        atomic_write_text(path, serialize_journey(doc, body))
+    return path.stem
 
 
 def derive_journey_slug(region: str, run_date: str) -> str:
