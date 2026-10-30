@@ -186,6 +186,13 @@ class TestBuild:
         review = _metadata(state)["final_text_review"]
         assert review["verdict"] == "agree", review
 
+    def test_multi_part_suffix_agrees(self):
+        # A split drive's parts are told apart by " — Part k of K"; "Part"
+        # names nothing, so it must not refuse as name_unbacked:title:part.
+        state = _state()
+        review = _metadata(state, title=TITLE + " \u2014 Part 1 of 2")["final_text_review"]
+        assert review["verdict"] == "agree", review
+
     def test_gps_less_lf_has_no_review(self):
         state = _state(per_lf_location_evidence=None, per_lf_route_record=None)
         assert _metadata(state)["final_text_review"] is None
@@ -367,7 +374,7 @@ class TestPhaseD:
                 drive_plan=SimpleNamespace(regular_lfs=[lf]),
                 regular_lf_paths=["/v/lf.mp4"],
                 state=state,
-                location="Harrow",
+                location="Harrow, Westmark",  # Westmark holds the Pellmere half
                 publish_day_full="Wednesday",
                 project_base="p",
                 output_base=tmp_path,

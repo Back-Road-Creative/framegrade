@@ -5,6 +5,50 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-10-29
+
+### Added
+
+- `plan_inserts(..., still_motion="push_in")` renders still inserts with the existing eased push-in (up to the existing maximum scale) as a per-frame card sequence; the default `"none"` keeps the static card and encode unchanged.
+- `InsertPlan.upscaled` and `InsertPlan.upscale_factor` record whether, and by how much, a clip insert is upscaled to the long-form frame.
+- `--short-reframe center|tracked`, `--output-cadence fixed|source` and `--insert-still-motion none|push_in` on the drive command: opt-in switches for the tracked vertical reframe, source-rate output and the insert still push-in. Each defaults to today's behaviour, passes nothing extra to the encode when absent, and is remembered across a resume. `--output-cadence source` refuses a source rate it cannot keep (anything but 29.97, 30, 59.94 or 60 fps) rather than resampling it.
+- `gomoveshift review-set {scan,stops,render}`: command group over the review-set libraries. `scan` lists candidate windows per condition from a score cache, `stops` writes the stop/kept runs of a sequence, `render` writes paired stills, excerpts and provenance. Documented in `docs/pipeline/169-review-set.md`. No existing command changes.
+- `gomoveshift review-set pairs`: maps scan windows to `[source_t, output_t]` pairs through the stops document's output times, and lists every window it cannot pair (`cut`, `no_output_times`, `outside_runs`, `not_in_output`) instead of estimating. `review-set render --pairs` now also accepts that document.
+- A drive writes the day's usable GPS fixes to `<stages_dir>/gps_points_<date>.json` beside `stop_mask_<date>.npz`, the file `review-set scan --gps` reads. The stop-mask file is unchanged.
+- `gomoveshift.pipeline.review_set_render.render_review_set`: library helper that renders paired source/output PNG stills and full-speed re-encoded excerpts for a list of (source time, output time) pairs, with a `provenance.json` (package version, git sha or null, ffmpeg version, effective drive config, input sizes and sha256, synthetic flag). Refuses a non-empty output directory. Not wired into the CLI; nothing existing changes.
+- `gomoveshift.pipeline.review_set_scan.scan_review_set`: library that proposes candidate review windows per lighting and motion condition (daylight, overcast, dusk/night, golden hour, tunnel, creeping, parked traffic, HDR gradients, GPS gaps) from the per-second score cache and, when supplied, the stop-mask states, GPS fixes and tonemap sidecar. Each window records the rule and thresholds that fired. Backlight, foliage and wet windshield report `unsupported` instead of being guessed; a missing optional input reports `no_input`. Nothing calls it yet, so existing output is unchanged.
+- `gomoveshift.pipeline.review_set_stops` (library only, no CLI yet): reads a day's `stop_mask_<date>.npz` and emits one schema-versioned JSON per sequence with the contiguous MOVING/STOPPED/CREEPING/UNCERTAIN runs in source seconds, the kept/cut decision for each (from `mask`, so CREEPING is never cut), the mask summary, and, when an assembly receipt is given, each kept run's output time range from `EditTimeline`. Without a receipt the output times are omitted and the document says why.
+- Opt-in source-cadence output (library parameter `output_fps`): a 59.94/60 fps source can keep its own rate through the master encode and the OST burn instead of being decimated to 29.97. The default is unchanged and stays 29.97. Only the source's own rate is accepted (`30000/1001`, `30`, `60000/1001`, `60`); any other value refuses with a clear error. The keyframe interval stays 2 s at the chosen rate, and the `fps` filter stays the chain tail after the privacy-blur composite.
+- Opt-in tracked vertical reframe for shorts: `render_short_ffmpeg(..., reframe="tracked")` slides the 9:16 crop to follow the road using a low-pass, a dead zone and a pan-speed cap, so it never chases. The default `reframe="center"` produces the identical filter and ffmpeg arguments. Crop size, scaler and the declared upscale are unchanged, and shorts stay muted.
+
+### Fixed
+
+- `docs/pipeline/169-review-set.md` showed the wrong score-cache and GPS file names for `review-set scan`.
+- A drive description's hook and `Location` line now name the first place in the LF label that holds every retained second, not the first town the label happens to say: "Beaufort County, South Carolina" over a route that also crosses Colleton County now prints "South Carolina", not "Beaufort". The upload's zero-tolerance place gate also runs where the text is made, so an audit (`--skip-upload`) pass refuses a description the upload would refuse (`place_outside_text`) instead of agreeing and failing at `videos.insert`.
+- `gomoveshift drive --dry-run` (and `--list-lfs`/`--label-dry-run`) with `--youtube-upload` no longer runs the post-Phase-D journal hook, so a plan render no longer creates a draft journey on the site and then fails with "state['youtube_uploads'] is empty".
+
+## [0.3.13] - 2026-10-28
+
+### Added
+
+- Regular long-form videos can carry a route-only map inset: one clip per video, rendered from an offline bundle and timed through the cut receipt (saved beside the concat as `<concat>.receipt.json`), composited in the existing OST encode and recorded in drive state. Not reachable until the `--map-inset` flags land; nothing changes when it is off.
+- `gomoveshift/pipeline/map_inset.py`: renders an opt-in, route-only corner map inset as an RGBA `.mov` overlay plus a JSON receipt, from an offline Route Story bundle (imagery with the recorded route and a position marker, no road vectors, no network). The marker follows the source clock through the edit timeline and hides during cuts, insert holds, crossfades and GPS gaps. Privacy trim and zones apply before any framing or drawing, and the render refuses, listing every reason, rather than write a partial clip.
+- `--map-inset roads` (`config.drive.map_inset = "roads"`): an opt-in third mode that renders like `route` and also draws the bundle's nearby roads under the route line, with the OpenStreetMap attribution on the credit strip. It refuses before any encode when the bundle has no usable road layer (missing file or manifest entry, degraded, or zero roads) and when no road lies in view. `route` and `off` are unchanged.
+- `--map-inset off|route` on the drive command (plus `--map-inset-bundle`, `--map-inset-trim-start-m`, `--map-inset-trim-end-m` and a repeatable `--map-inset-privacy-zone`): opt-in route-only map inset on regular long-form videos, rendered from an offline bundle and composited inside the existing OST encode. Off is unchanged. `route` refuses before any encode, listing every missing input (bundle, trim, GPS), and never falls back silently. The settings persist across a resume, are part of each long-form video's re-burn fingerprint, and the per-video inset receipt is recorded in drive state.
+- `apply_ost` takes an optional `map_inset` (`MapInsetOverlay`: an RGBA clip plus an x/y position). It is composited after the title and logo in the same encode, in explicit 10-bit formats so a 10-bit master keeps its gradients; the inset drops away when its clip ends. A missing clip is an error, never a silent encode without it. Without `map_inset` the ffmpeg command is unchanged.
+- Route Story map bundles now carry an offline road layer: `roads.geojson`, the OpenStreetMap `highway` ways (motorway through residential, plus link ramps) inside the route bbox, fetched through the existing Overpass mirror list and recorded in a manifest `roads` block with ODbL provenance. The bundle manifest schema is now `route-story-bundle/2`; `/1` bundles still verify. A failed or empty road fetch marks the layer degraded without failing the prepare, and a cached bundle with degraded roads re-fetches only its roads.
+
+### Changed
+
+- Pinned `keycut` to v0.2.0. The day-master cut now goes through keycut's `extract_and_concat_ranges_with_receipt` and checks the live assembly receipt with `load_receipt`; a receipt that fails validation makes `extract_and_concat_segments` log the failing field and return None, since a time mapping built from it would be wrong.
+- Pinned Waypost (`seo-manager`) to v0.4.0 (`97334eb`, Back-Road-Creative/waypost#94, #95). The final-text review accepts a town-less route (county and state regions only) instead of refusing it with `missing_field:route_places` and `region_claim_malformed`.
+
+### Fixed
+
+- A multi-part LF title ("… — Part 1 of 2") no longer refuses its final-text review: the GMS text policy (now `gms-route-claims-2`) counts "part" as filler. Reviews stored under the old policy go stale, so Phase D re-runs for pending LFs.
+- A chapter's `segment_places` cites only retained-route places. Region ids there refused the LF (`route_place_unknown:region-…`).
+- `reattach_with_chapters` on metadata that already carries chapters replaces them instead of raising `TypeError`.
+
 ## [0.3.12] - 2026-10-27
 
 ### Added
@@ -239,7 +283,9 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...HEAD
+[0.3.14]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.13...v0.3.14
+[0.3.13]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...v0.3.13
 [0.3.12]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.11...v0.3.12
 [0.3.11]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.10...v0.3.11
 [0.3.10]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.9...v0.3.10

@@ -2069,6 +2069,12 @@ class DriveConfig(BaseModel):
     map_inset_trim_start_m: float = 0.0
     map_inset_trim_end_m: float = 0.0
     map_inset_privacy_zones: list[str] = Field(default_factory=list)
+    # Opt-in media-quality options (``--short-reframe`` / ``--output-cadence`` /
+    # ``--insert-still-motion``). The defaults are today's behaviour: a fixed centre
+    # crop, the frozen 29.97 publish rate, and a static insert still card.
+    short_reframe: str = "center"
+    output_cadence: str = "fixed"
+    insert_still_motion: str = "none"
     regular_lf_lower_third_duration_sec: float = 8.0
     regular_lf_lower_third_min_gap_sec: float = 45.0
     # Superlong per-part publish DAY. Saturday is a placeholder default chosen because it
@@ -2318,6 +2324,15 @@ class DriveConfig(BaseModel):
             raise ValueError(
                 f"superlong_split_grace must be in [0, 0.5], got {self.superlong_split_grace}"
             )
+        for _field, _allowed in (
+            ("short_reframe", ("center", "tracked")),
+            ("output_cadence", ("fixed", "source")),
+            ("insert_still_motion", ("none", "push_in")),
+        ):
+            if getattr(self, _field) not in _allowed:
+                raise ValueError(
+                    f"{_field} must be one of {_allowed}, got {getattr(self, _field)!r}"
+                )
         if self.gps_captions not in ("off", "events"):
             raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
         if self.map_inset not in ("off", "route", "roads"):
