@@ -5,6 +5,25 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.17] - 2026-10-30
+
+### Added
+
+- `metrics collect` now builds a daily Facebook reel-plays series from the nightly observation log (`tracking.facebook_series.facebook_reel_plays_series`) and feeds it to `classify_facebook_reel_reach`, so Facebook is classified shadow-first beside YouTube. The run prints `SUPPRESSION facebook=<status> days=<n>` (`WARMUP` below 28 days) and the equivalent `SUPPRESSION youtube=` line.
+- A backtest fixture (`tests/test_suppression_facebook_backtest.py`) shows the detector flags the August 2026 Facebook reel-reach collapse.
+
+### Changed
+
+- Facebook, Instagram, TikTok and YouTube captions are composed from independently rotated parts (an opener, a data-only detail or an engagement prompt for interactive shorts) instead of four fixed templates per platform, so a 12-short batch never repeats an opener.
+- Generic hashtags rotate per short from a pool of six instead of every post carrying `#POVDriving #RoadTrip`; the place and region tags stay mandatory.
+- `enqueue-plan` refuses a batch whose caption or YouTube title opens with the same six words as text already spooled in the last 60 days (`cross-batch-repeat`).
+
+### Fixed
+
+- A drive recorded the day after a journaled trip ends now joins that trip's journey: `extend_adjacent_journey` extends `trip.end_date` (and `duration_days`) by one day and adds the day stub, instead of the drive hook creating a separate `draft: true` journey. Ace Basin (2026-02-21) had been split off `sc-2026` this way. A trip starting the day after is not extended backwards, and two adjoining trips are refused.
+- `publish-journal --replay-pending` now writes each ready entry's title and duration as YouTube shows them at replay time, not the values stored at drive time. A video retitled live before it published (Ace Basin LF 1) was going to reach the journal under its old title. A video still processing at upload reports a zero duration, and `plan_merge` now treats that as missing and falls back to ffprobe instead of journaling `00:00` (Ace Basin LF 2).
+- `publish-journal --replay-pending` no longer strands a due entry whose journey file is gone: it flushes it into the journey that holds the entry's day (a trip range holding it, else the trip that ended the day before, extended on `--apply`), records the route there, and consumes the entry. Ace Basin's two long-forms had been deferred into a draft journey that should never have existed; once that draft was set aside, they would have stayed pending every hour. No match or an ambiguous day still keeps the entry pending.
+
 ## [0.3.16] - 2026-10-30
 
 ### Fixed
@@ -303,7 +322,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...HEAD
+[0.3.17]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.13...v0.3.14
