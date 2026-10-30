@@ -231,13 +231,18 @@ def compose(data: DriveTextData) -> Tuple[str, List[str]]:
 
 def _named_in(label: str, index: EvidenceIndex) -> List[str]:
     """Evidence names the label says as whole words, in label order, places
-    before regions."""
-    found = []
+    before regions. A name said only inside a longer evidenced name is not
+    said: "Beaufort County" names the county, not the town of Beaufort."""
+    spans = []
     for key, (eid, text) in index.items():
-        m = re.search(rf"(?<!\w){re.escape(text)}(?!\w)", label or "", re.IGNORECASE)
-        if m:
-            found.append((eid.startswith("region-"), m.start(), text))
-    return [text for _, _, text in sorted(found)]
+        for m in re.finditer(rf"(?<!\w){re.escape(text)}(?!\w)", label or "", re.IGNORECASE):
+            spans.append((m.start(), m.end(), eid.startswith("region-"), text))
+    found = {
+        (region, start, text)
+        for start, end, region, text in spans
+        if not any(s <= start and end <= e and e - s > end - start for s, e, _, _ in spans)
+    }
+    return list(dict.fromkeys(text for _, _, text in sorted(found)))
 
 
 def _binned(record: Optional[dict]) -> bool:
@@ -257,21 +262,23 @@ def _bound_chapters(chapters: Sequence[dict], index: EvidenceIndex) -> list:
     """``(start_s, place, window)`` per chapter, bound to evidenced names.
 
     A generated title is decorated ("Start - X, Y", "Entering Z"), so its place
-    is the first evidenced name it says and its window every route place it
-    says: Waypost reads the window as retained-route places, so a region there
-    is refused as ``route_place_unknown``. A
-    title naming none is dropped; consecutive chapters on one place collapse to
-    the earliest. A list that no longer opens at 0:00 or is under three
-    chapters is sent as none: chapter blocks are optional, a refusal is not."""
+    is the first route place it says and its window every route place it says;
+    a region ("Beaufort County") is no chapter place, and Waypost refuses one in
+    a window (``route_place_unknown``) and a chapter with an empty window
+    (``chapter_without_window``). A title naming no route place is dropped;
+    consecutive chapters on one place collapse to the earliest. A list that no
+    longer opens at 0:00 or is under three chapters is sent as none: chapter
+    blocks are optional, a refusal is not."""
     bound: list = []
     for c in chapters:
-        named = _named_in(c["title"], index)
+        named = [
+            n for n in _named_in(c["title"], index) if not index[_key(n)][0].startswith("region-")
+        ]
         if not named:
             continue
         if bound and bound[-1][1] == named[0]:
             continue
-        window = [n for n in named if not index[_key(n)][0].startswith("region-")]
-        bound.append((_seconds(c["timestamp"]), named[0], window))
+        bound.append((_seconds(c["timestamp"]), named[0], named))
     if len(bound) < _MIN_CHAPTERS or bound[0][0] != 0:
         return []
     return bound

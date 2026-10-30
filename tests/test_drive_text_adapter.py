@@ -336,6 +336,74 @@ def test_reattach_with_real_titles_does_not_refuse():
     assert meta["final_text_description"]
 
 
+# --- a town named inside a region's name is not that town -------------------
+
+_NESTED = {
+    "record": {
+        "places": [
+            {"name": n, "evidence_id": f"ev-{i}"}
+            for i, n in enumerate(["Beaufort", "Port Royal", "Lobeco"])
+        ]
+    },
+    "region_claims": [
+        {"level": "county", "name": "Beaufort County"},
+        {"level": "state", "name": "South Carolina"},
+    ],
+}
+
+
+def test_town_inside_a_region_name_is_not_named():
+    from gomoveshift.pipeline.drive_text_adapter import _named_in, evidence_index
+
+    named = _named_in("Start - Beaufort County, South Carolina", evidence_index(_NESTED))
+    assert named == ["Beaufort County", "South Carolina"]
+
+
+def test_region_only_chapter_is_dropped_not_bound_to_a_nested_town():
+    from gomoveshift.pipeline.drive_text_adapter import evidence_index, lf_drive_facts
+
+    facts = lf_drive_facts(
+        "Port Royal",
+        evidence_index(_NESTED),
+        final_seconds=600.0,
+        chapters=_chapters(
+            ("0:00", "Start - Port Royal, Beaufort County"),
+            ("1:00", "Entering Beaufort County"),
+            ("2:00", "Entering Beaufort"),
+            ("3:00", "Entering Lobeco, Beaufort County"),
+            ("4:00", "Finish - Beaufort County, South Carolina"),
+        ),
+    )
+    assert [(s, p) for s, p, _ in facts.chapters] == [
+        (0, "Port Royal"),
+        (120, "Beaufort"),
+        (180, "Lobeco"),
+    ]
+
+
+def test_chapter_windows_hold_route_places_only():
+    """Waypost refuses a chapter window naming a region
+    (``route_place_unknown:region-…``), which refused the whole LF."""
+    meta = attach_drive_text_nested(
+        _chapters(
+            ("0:00", "Start - Port Royal, Beaufort County, South Carolina"),
+            ("2:00", "Entering Beaufort, Beaufort County"),
+            ("4:00", "Finish - Lobeco, South Carolina"),
+        )
+    )
+    route_ids = {p["evidence_id"] for p in _NESTED["record"]["places"]}
+    chapters = [e for e in meta["final_text_description"] if e["kind"] == "chapter"]
+    assert len(chapters) == 3
+    for entry in chapters:
+        assert set(entry["segment_places"]) <= route_ids, entry
+
+
+def attach_drive_text_nested(chapters):
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text
+
+    return attach_drive_text(_NESTED, {}, "Port Royal", final_seconds=600.0, chapters=chapters)
+
+
 def test_reattach_replaces_chapters_already_attached():
     from gomoveshift.pipeline.drive_text_adapter import attach_drive_text, reattach_with_chapters
 
