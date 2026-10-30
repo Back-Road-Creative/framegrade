@@ -139,7 +139,9 @@ def test_purge_lf_intermediates_keeps_everything_without_a_final(tmp_path, final
 
 
 class TestLfWorkSpace:
-    def _check(self, tmp_path, *, free_gb, lf_sec=3600.0, master_gb=60, master_sec=7200.0):
+    def _check(
+        self, tmp_path, *, free_gb, lf_sec=3600.0, master_gb=60, master_sec=7200.0, later=()
+    ):
         from gomoveshift.pipeline.preflight import check_lf_work_space
 
         master = tmp_path / "day_master.mp4"
@@ -148,7 +150,25 @@ class TestLfWorkSpace:
             patch.object(Path, "stat", return_value=SimpleNamespace(st_size=master_gb * _GB)),
             patch("shutil.disk_usage", return_value=SimpleNamespace(free=free_gb * _GB)),
         ):
-            check_lf_work_space(master, tmp_path, lf_sec, master_sec, lf_index=2)
+            check_lf_work_space(
+                master, tmp_path, lf_sec, master_sec, lf_index=2, later_lf_secs=later
+            )
+
+    def test_a_later_lf_is_priced_on_top_of_this_lfs_final(self, tmp_path):
+        """Each final stays on the cache volume, so the next LF burns beside it:
+        30 GB final + 30 GB x3.1 = 123 GB, x1.1 margin = ~135 GB. 110 GB holds
+        this LF alone but would stop the run at the next LF's gate hours later
+        (Ace Basin 2026-10-27: LF2 needed 145.8 GiB, ~125 GiB left)."""
+        with pytest.raises(RuntimeError, match=r"(?i)work space for LF 2.*1 later long-form"):
+            self._check(tmp_path, free_gb=110, later=[3600.0])
+
+    def test_room_for_every_remaining_lf_passes(self, tmp_path):
+        self._check(tmp_path, free_gb=140, later=[3600.0])
+
+    def test_a_short_later_lf_does_not_raise_the_need(self, tmp_path):
+        """The peak is the worst single LF plus the finals before it, not a sum
+        of every LF's work: a 6-minute later LF (3 GB) never exceeds this one."""
+        self._check(tmp_path, free_gb=110, later=[360.0])
 
     def test_three_coexisting_artifacts_are_priced(self, tmp_path):
         """A 30 GB share needs about 102 GB (x3.1, x1.1 margin). 70 GB holds
@@ -211,6 +231,7 @@ def _two_lf_day(tmp_path, *, state, on_assemble=None, space=None):
 
     def _space(master_path, output_dir, lf_sec, master_sec, **kw):
         trace.append(("space", kw.get("lf_index"), lf_sec, master_sec))
+        trace.append(("later", kw.get("lf_index"), tuple(kw.get("later_lf_secs", ()))))
         if space is not None:
             space(kw.get("lf_index"))
 
@@ -296,6 +317,27 @@ def test_each_lf_is_space_checked_before_its_concat(tmp_path):
     # LF duration is the sum of its kept segments; the master is the whole day.
     assert trace[0][2:] == (200.0, 2400.0)
     assert [e for e in trace if e[:2] == ("space", 2)][0][2:] == (300.0, 2400.0)
+
+
+def test_the_first_lf_gate_prices_every_lf_still_to_burn(tmp_path):
+    """LF 1's gate sees LF 2's length, so a day whose second LF cannot fit
+    beside the first's final stops before any concat, not hours later."""
+    _, _, trace = _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True))
+
+    later = {e[1]: e[2] for e in trace if e[0] == "later"}
+    assert later == {1: (300.0,), 2: ()}
+
+
+def test_a_later_lf_whose_final_exists_is_not_priced_again(tmp_path):
+    """On a resume LF 2's final is already on disk (and already out of the
+    free figure), so LF 1's re-burn must not reserve room for it twice."""
+    lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
+    lf_dir.mkdir(parents=True)
+    (lf_dir / "lf_02.mp4").write_bytes(b"done")
+    _, _, trace = _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True))
+
+    later = {e[1]: e[2] for e in trace if e[0] == "later"}
+    assert later[1] == ()
 
 
 def test_a_space_shortfall_stops_the_day_before_the_concat(tmp_path):

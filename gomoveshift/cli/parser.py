@@ -595,6 +595,34 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Drop every route point within RADIUS_M metres of LAT,LON from the "
         "map inset (repeatable).",
     )
+    # Opt-in media-quality options. All sentinels (flag_registry), so a resume that
+    # omits them keeps the first run's choice.
+    p.add_argument(
+        "--short-reframe",
+        dest="short_reframe",
+        choices=["center", "tracked"],
+        default=None,
+        help="9:16 short crop: 'center' is the fixed centre crop; 'tracked' slides "
+        "the window sideways to follow the road (config.drive.short_reframe, "
+        "default center).",
+    )
+    p.add_argument(
+        "--output-cadence",
+        dest="output_cadence",
+        choices=["fixed", "source"],
+        default=None,
+        help="Master output rate: 'fixed' is the 29.97 publish rate; 'source' keeps "
+        "the probed source rate (59.94, 60, 29.97 or 30 fps) and refuses any other "
+        "rate rather than resampling (config.drive.output_cadence, default fixed).",
+    )
+    p.add_argument(
+        "--insert-still-motion",
+        dest="insert_still_motion",
+        choices=["none", "push_in"],
+        default=None,
+        help="Insert still cards: 'none' holds a static card; 'push_in' eases a slow "
+        "push-in across the hold (config.drive.insert_still_motion, default none).",
+    )
     p.add_argument("--fresh", action="store_true", help="Force restart from scratch")
     p.add_argument("--no-tmux", action="store_true", help="Skip tmux launcher")
     # The four upload flags use the
@@ -3504,6 +3532,75 @@ def _add_library_hygiene_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_review_set_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "review-set",
+        help="Build the human review set: candidate windows, stop runs, source/output pairs",
+        description="Tools for building the human review set of source vs output pairs per "
+        "condition. See docs/pipeline/169-review-set.md.",
+    )
+    actions = p.add_subparsers(dest="review_set_action", metavar="<action>", required=True)
+    s = actions.add_parser(
+        "scan",
+        help="List candidate review windows per condition from a score cache",
+    )
+    s.add_argument("--scores", type=Path, required=True, help="Per-second score cache (.npz).")
+    s.add_argument("--stop-mask", type=Path, default=None, help="stop_mask_<date>.npz (states).")
+    s.add_argument(
+        "--gps",
+        type=Path,
+        default=None,
+        help="JSON list of GPS fixes, [t, lat, lon] rows or {time, lat, lon} objects.",
+    )
+    s.add_argument("--tonemap", type=Path, default=None, help="The .tonemap.json sidecar.")
+    s.add_argument("--out", type=Path, default=None, help="Write the JSON here (default: stdout).")
+    t = actions.add_parser(
+        "stops",
+        help="Write the stop/kept runs of one sequence, with output times when a receipt is given",
+    )
+    t.add_argument("--stop-mask", type=Path, required=True, help="stop_mask_<date>.npz.")
+    t.add_argument("--receipt", type=Path, default=None, help="Keycut assembly receipt (JSON).")
+    t.add_argument("--sequence", default=None, help="Sequence label (default: from the file name).")
+    t.add_argument("--out", type=Path, required=True, help="Write the stops JSON here.")
+    q = actions.add_parser(
+        "pairs",
+        help="Pair scan windows with output times (unpaired windows are listed with a reason)",
+    )
+    q.add_argument("--scan", type=Path, required=True, help="Scan JSON from `review-set scan`.")
+    q.add_argument("--stops", type=Path, required=True, help="Stops JSON from `review-set stops`.")
+    q.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Write the pairs JSON here (default: stdout); `render --pairs` reads it.",
+    )
+    r = actions.add_parser(
+        "render",
+        help="Write paired stills, excerpts and provenance for source/output time pairs",
+    )
+    r.add_argument("--source", type=Path, required=True, help="Source video.")
+    r.add_argument("--output", type=Path, required=True, help="Output video.")
+    r.add_argument(
+        "--pairs", type=Path, default=None, help="JSON list of [source_t, output_t] pairs."
+    )
+    r.add_argument(
+        "--pair",
+        action="append",
+        default=None,
+        metavar="S:O",
+        help="One source_t:output_t pair in seconds; repeatable.",
+    )
+    r.add_argument("--out-dir", type=Path, required=True, help="Empty or new output directory.")
+    r.add_argument(
+        "--excerpt-seconds", type=float, default=3.0, help="Excerpt length per side (default: 3)."
+    )
+    r.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="Mark the inputs as generated test media in provenance.json.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level parser builder
 # ---------------------------------------------------------------------------
@@ -3513,7 +3610,7 @@ _COMMAND_GROUPS = """\
 command groups (run `gomoveshift <command> --help` for any of them):
   process a drive    drive, pipeline, batch, ingest, upload, cleanup, find-stops
   review and console server, console, doctor, health, library-hygiene
-  analyze a video    analyze, process, scan
+  analyze a video    analyze, process, scan, review-set
   route story        route-story-prepare, route-story-proof, route-story-verify, route-story-film
   publishing queue   enqueue-plan, enqueue-asset, dispatch-queue, queue, publishing-status,
                      publish-journal, schedule, sync-site, reconcile-playlists, youtube-auth
@@ -3591,6 +3688,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_enqueue_asset_parser(subparsers)
     _add_dispatch_queue_parser(subparsers)
     _add_queue_parser(subparsers)
+    _add_review_set_parser(subparsers)
     _add_publishing_status_parser(subparsers)
     _add_catalog_inventory_parser(subparsers)
     _add_catalog_classify_parser(subparsers)

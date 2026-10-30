@@ -36,7 +36,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from gomoveshift.paths import gms_config_home
 
@@ -272,10 +272,11 @@ def check_lf_work_space(
     master_duration_sec: float,
     *,
     lf_index: int | None = None,
+    later_lf_secs: Sequence[float] = (),
     safety_factor: float = _LF_WORK_SAFETY_FACTOR,
 ) -> None:
     """Raise RuntimeError if *output_dir* lacks room for one long-form's work
-    files plus its final.
+    files plus its final, and for every later long-form of the run beside it.
 
     Sized from the ACTUAL day master on disk (size / duration), like
     ``check_superlong_output_space``, never an assumed bitrate. Called per LF
@@ -288,6 +289,13 @@ def check_lf_work_space(
     anything log a warning and skip: a master that cannot be read (the concat
     then fails on its own, having written nothing), or a size or day length
     that is not positive. A part with no length prices at zero and passes.
+
+    ``later_lf_secs`` are the lengths of the LFs this run still burns after
+    this one. Each final stays on the cache volume while the next LF's three
+    artifacts are written, so the peak is the worst LF's work plus the finals
+    burned before it. Pricing that here stops a day before its first concat
+    instead of at a later LF's gate hours in (Ace Basin 2026-10-27: LF 2
+    needed 145.8 GiB beside LF 1's 47.9 GiB final, ~125 GiB left).
     """
     try:
         master_bytes = Path(master_path).stat().st_size
@@ -308,13 +316,25 @@ def check_lf_work_space(
         )
         return
 
-    share_bytes = master_bytes / float(master_duration_sec) * float(lf_duration_sec)
-    needed_gb = share_bytes * _LF_WORK_FACTOR * safety_factor / _GB
+    bytes_per_sec = master_bytes / float(master_duration_sec)
+    share_bytes = bytes_per_sec * float(lf_duration_sec)
+    peak_bytes = share_bytes * _LF_WORK_FACTOR
+    finals_before = share_bytes
+    for sec in later_lf_secs:
+        later_bytes = bytes_per_sec * float(sec)
+        peak_bytes = max(peak_bytes, finals_before + later_bytes * _LF_WORK_FACTOR)
+        finals_before += later_bytes
+    needed_gb = peak_bytes * safety_factor / _GB
     free_gb = shutil.disk_usage(output_dir).free / _GB
     if free_gb < needed_gb:
         label = f"LF {lf_index}" if lf_index is not None else "a long-form"
+        later = (
+            f" and {len(later_lf_secs)} later long-form(s) burned beside the finals before them"
+            if later_lf_secs
+            else ""
+        )
         raise RuntimeError(
-            f"Insufficient work space for {label} at {output_dir}: "
+            f"Insufficient work space for {label}{later} at {output_dir}: "
             f"{free_gb:.1f} GB free, need ~{needed_gb:.1f} GB (shortfall "
             f"{needed_gb - free_gb:.1f} GB) - its {share_bytes / _GB:.1f} GB share of "
             f"the day master x {_LF_WORK_FACTOR} (stream copy + montage copy + final "

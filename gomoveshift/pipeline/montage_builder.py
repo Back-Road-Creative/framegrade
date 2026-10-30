@@ -62,6 +62,7 @@ from keycut import (
 )
 
 from ..config import get_config
+from .color_filters import OUTPUT_FPS, probe_source_fps, resolve_output_fps
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +75,17 @@ GOP_DURATION_SEC = 2.1
 
 
 _LF_REENCODE_ARGS: Optional[list[str]] = None
+_LF_REENCODE_ARGS_BY_RATE: dict[str, list[str]] = {}
 
 
-def lf_reencode_args() -> list[str]:
+def reencode_args_for(source, output_fps: str = OUTPUT_FPS) -> list[str]:
+    """``lf_reencode_args`` at the rate a source-cadence run keeps (``"source"`` = probe ``source``)."""
+    if output_fps == "source":
+        output_fps = resolve_output_fps(output_fps, probe_source_fps(Path(source)))
+    return lf_reencode_args() if output_fps == OUTPUT_FPS else lf_reencode_args(output_fps)
+
+
+def lf_reencode_args(output_fps: str = OUTPUT_FPS) -> list[str]:
     """ffmpeg output arguments for the accurate-seek re-encode fallback.
 
     keycut would otherwise derive an encoder from the master's own codec at
@@ -96,18 +105,28 @@ def lf_reencode_args() -> list[str]:
     ``cpu_by_choice=True`` because the CPU encode is deliberate: the shared
     "NVENC unavailable" WARNING would falsely report a GPU fault every run.
 
-    Cached per process: the args are constant.
+    ``output_fps`` is the frozen cadence unless a source-cadence run names the
+    master's own rate, so a repaired join matches the pieces around it.
+
+    Cached per process (and per rate): the args are constant.
     """
     global _LF_REENCODE_ARGS
-    if _LF_REENCODE_ARGS is None:
-        from .color import get_encoding_args
+    from .color import get_encoding_args
 
+    tail = ["-c:a", "aac", "-b:a", "256k"]
+    if output_fps != OUTPUT_FPS:
+        if output_fps not in _LF_REENCODE_ARGS_BY_RATE:
+            _LF_REENCODE_ARGS_BY_RATE[output_fps] = [
+                *get_encoding_args(
+                    3840, 2160, 29.97, has_nvenc=False, cpu_by_choice=True, output_fps=output_fps
+                ),
+                *tail,
+            ]
+        return list(_LF_REENCODE_ARGS_BY_RATE[output_fps])
+    if _LF_REENCODE_ARGS is None:
         _LF_REENCODE_ARGS = [
             *get_encoding_args(3840, 2160, 29.97, has_nvenc=False, cpu_by_choice=True),
-            "-c:a",
-            "aac",
-            "-b:a",
-            "256k",
+            *tail,
         ]
     return list(_LF_REENCODE_ARGS)
 
@@ -256,6 +275,7 @@ def _trim_peak_to(
     file_boundaries,
     output: Path,
     clip_duration: float,
+    output_fps: str = OUTPUT_FPS,
 ) -> bool:
     """Stream-copy a `clip_duration` slice of `peak` from the master
     into `output`. Returns True on success.
@@ -291,7 +311,11 @@ def _trim_peak_to(
         if clip_end <= clip_start:
             return False
         return reencode_range(
-            master_path, clip_start, clip_end, output, encode_args=lf_reencode_args()
+            master_path,
+            clip_start,
+            clip_end,
+            output,
+            encode_args=reencode_args_for(master_path, output_fps),
         )
     clip_start = snap_start_to_keyframe(
         clip_start,
@@ -358,6 +382,7 @@ def build_montage(
     work_dir: Path,
     total_duration: Optional[float] = None,
     max_total_duration: Optional[float] = None,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Assemble a montage from ``peaks`` capped at
     ``max_total_duration`` seconds.
@@ -409,7 +434,14 @@ def build_montage(
     clip_files: list[Path] = []
     for i, peak in enumerate(effective_peaks):
         clip_file = work_dir / f"montage_clip_{i:02d}.mp4"
-        if _trim_peak_to(master_path, peak, file_boundaries, clip_file, clip_duration):
+        if _trim_peak_to(
+            master_path,
+            peak,
+            file_boundaries,
+            clip_file,
+            clip_duration,
+            **({} if output_fps == OUTPUT_FPS else {"output_fps": output_fps}),
+        ):
             clip_files.append(clip_file)
 
     if not clip_files:
@@ -446,6 +478,7 @@ def prepend_montage(
     work_dir: Path,
     master_path: Optional[Path] = None,
     file_boundaries: Optional[list] = None,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Prepend a capped-duration montage built from `peaks` to `raw_lf_path`.
 
@@ -500,6 +533,7 @@ def prepend_montage(
         file_boundaries=file_boundaries,
         output_path=montage,
         work_dir=work_dir,
+        output_fps=output_fps,
     )
     if built is None:
         return None

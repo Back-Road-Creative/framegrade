@@ -72,11 +72,17 @@ from ..config import resolve_lf_mode
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
+from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
-from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
+from .gps_quality import (
+    trim_gps_to_clip_timeline,
+    usable_fix_times,
+    window_median_speed_mps,
+    write_gps_points,
+)
 from .inserts import (
     InsertError,
     insert_label,
@@ -91,6 +97,7 @@ from .montage_builder import (
     GOP_DURATION_SEC,
     lf_reencode_args,
     prepend_montage,
+    reencode_args_for,
     to_cut_segment,
 )
 from .ost_applier import MapInsetOverlay, apply_ost
@@ -128,8 +135,10 @@ from .short_planner import (
     DEFAULT_MIN_DURATION_SEC,
     DEFAULT_MIN_GAP_SEC,
     DEFAULT_TARGET_DURATION_SEC,
+    ShortRange,
     plan_shorts,
 )
+from .shorts_extractor import reframe_kwargs
 from .shorts_extractor import render_short_ffmpeg as _render_short_ffmpeg
 from .social_generator import assert_day_title_stamps
 from .stop_mask import (
@@ -233,9 +242,9 @@ def cap_shorts_to_per_lf_capacity(
 
     Capping here is the robust-by-construction fix: a short that cannot be
     placed is never rendered, so the downstream gate has nothing to catch.
-    Only OVER-full LFs are trimmed — an under-full LF keeps everything it
-    has, because levelling every LF to the same count would throw away
-    footage that does have a slot.
+    Only OVER-full LFs are trimmed here — an under-full LF keeps everything
+    it has. Levelling it UP is ``fill_shorts_to_per_lf_capacity``'s job,
+    which refills it from its own source window after this trim.
 
     Returns ``(kept, dropped)``, both in the input's order (which is rank
     order from ``short_planner``, best first). Within an LF the surviving
@@ -287,6 +296,128 @@ def cap_shorts_to_per_lf_capacity(
     return kept, dropped
 
 
+def fill_shorts_to_per_lf_capacity(
+    short_ranges: list,
+    lf_plans: list,
+    file_boundaries: list,
+    per_lf_capacity: Optional[int],
+    day_scores,
+    plan_mask,
+    plan_kwargs: dict,
+) -> tuple[list, list]:
+    """Refill every under-capacity LF from ITS OWN source window.
+
+    ``plan_shorts`` is day-wide, so when the best-scoring windows cluster in
+    one LF's footage the cap trims that LF to capacity and leaves the others
+    empty: their publish windows have nothing to post. For each LF holding
+    fewer than ``per_lf_capacity`` shorts this plans ``capacity - held`` more
+    with ``plan_shorts`` under the SAME mask the day-wide plan used
+    (``plan_mask``: stop mask + GPS-gap veto) PLUS
+
+    * every second outside the LF's source window (the hull of its segments in
+      master time, minus the master intervals of OTHER LFs), so a refill pick
+      comes from the same day master the LF is cut from and cannot be
+      attributed elsewhere, and
+    * every already-kept short widened by ``min_gap_sec``, so picks never
+      overlap or crowd an existing one.
+
+    Each pick is re-checked with ``assign_shorts_to_lfs_by_source_window`` and
+    discarded unless it lands on the intended LF. Refill picks are ranked after
+    every existing short and appended, keeping the best-first order
+    ``_render_day_shorts`` expects. An LF whose window cannot hold its share
+    is logged and left short; the SHORTS-CONTRACT gate judges the final count.
+
+    Returns ``(all_shorts, added)``. A ``None``/non-positive capacity, no LFs,
+    no scores, or a failed attribution is a no-op.
+    """
+    shorts = list(short_ranges)
+    if (
+        not per_lf_capacity
+        or per_lf_capacity <= 0
+        or not lf_plans
+        or day_scores is None
+        or getattr(day_scores, "size", 0) == 0
+    ):
+        return shorts, []
+    timestamps = np.asarray(day_scores)[:, COL_TIMESTAMP]
+    min_gap = float(plan_kwargs.get("min_gap_sec", DEFAULT_MIN_GAP_SEC))
+    try:
+        lf_intervals = {
+            int(getattr(lf, "index", 0)): [
+                r
+                for r in segments_to_master_ranges(
+                    [to_cut_segment(seg) for seg in (getattr(lf, "segments", None) or [])],
+                    file_boundaries,
+                )
+                if r[1] > r[0]
+            ]
+            for lf in lf_plans
+        }
+        buckets = assign_shorts_to_lfs_by_source_window(shorts, lf_plans, file_boundaries)
+    except Exception as exc:  # noqa: BLE001 — fail-safe, same policy as the cap
+        logger.warning("Shorts per-LF refill skipped — short→LF mapping failed (%s)", exc)
+        return shorts, []
+
+    added: list = []
+    for lf in lf_plans:
+        lf_index = int(getattr(lf, "index", 0))
+        held = len(buckets.get(lf_index, []))
+        want = per_lf_capacity - held
+        if want <= 0:
+            continue
+        own = lf_intervals.get(lf_index) or []
+        if not own:
+            logger.warning(
+                "LF %s holds %d of %d shorts and has no resolvable source window to refill from",
+                lf_index,
+                held,
+                per_lf_capacity,
+            )
+            continue
+        lo, hi = min(r[0] for r in own), max(r[1] for r in own)
+        mask = np.zeros(len(timestamps), dtype=bool)
+        if plan_mask is not None:
+            mask |= np.asarray(plan_mask, dtype=bool)[: len(timestamps)]
+        mask |= (timestamps < lo) | (timestamps >= hi)
+        for other, ivs in lf_intervals.items():
+            if other == lf_index:
+                continue
+            for s0, e0 in ivs:
+                inside_own = any(o0 <= s0 and e0 <= o1 for o0, o1 in own)
+                if not inside_own:
+                    mask |= (timestamps >= s0) & (timestamps < e0)
+        for sr in shorts:
+            mask |= (timestamps >= sr.start_sec - min_gap) & (timestamps < sr.end_sec + min_gap)
+        picks = plan_shorts(day_scores, stop_mask=mask, **{**plan_kwargs, "target_count": want})
+        next_rank = max([int(getattr(sr, "rank", 0) or 0) for sr in shorts] + [0]) + 1
+        accepted: list = []
+        for pick in picks:
+            cand = ShortRange(
+                start_sec=pick.start_sec,
+                end_sec=pick.end_sec,
+                integrated_score=pick.integrated_score,
+                rank=next_rank + len(accepted),
+                moment_kind=pick.moment_kind,
+            )
+            trial = shorts + accepted + [cand]
+            where = assign_shorts_to_lfs_by_source_window(trial, lf_plans, file_boundaries)
+            if len(trial) - 1 in where.get(lf_index, []):
+                accepted.append(cand)
+        shorts.extend(accepted)
+        added.extend(accepted)
+        buckets = assign_shorts_to_lfs_by_source_window(shorts, lf_plans, file_boundaries)
+        if len(accepted) < want:
+            logger.warning(
+                "LF %s holds %d of %d shorts after refilling from its own source window "
+                "(%d added) — its window cannot hold its share",
+                lf_index,
+                held + len(accepted),
+                per_lf_capacity,
+                len(accepted),
+            )
+    return shorts, added
+
+
 def _render_lf_map_inset(
     inputs, *, concat_receipt: Path, prepended: Path, lead_s: float, lf_dir: Path,
     idx: int, work_dir: Path,
@@ -334,6 +465,7 @@ def extract_and_concat_segments(
     work_dir: Path,
     stop_mask=None,
     receipt_sidecar: bool = False,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Cut each scored segment out of the day master and concat the pieces
     in drive_plan order, without re-encoding.
@@ -418,7 +550,11 @@ def extract_and_concat_segments(
         # Pin the shared long-form encoder args + AAC 256k audio — keycut
         # would otherwise derive an encoder from the master's codec at CRF 18
         # and stream-copy the audio.
-        reencode_args=lf_reencode_args(),
+        reencode_args=(
+            lf_reencode_args()
+            if output_fps == OUTPUT_FPS
+            else reencode_args_for(master_path, output_fps)
+        ),
         # This concat is an INTERMEDIATE: apply_ost re-encodes it into the
         # final artifact (which writes its own faststart) and cleanup deletes
         # it. keycut's default would rewrite the moov atom over the whole
@@ -811,6 +947,7 @@ def _render_day_shorts(
     state=None,
     stop_mask=None,
     short_route_fn: Optional[Callable] = None,
+    reframe: str = "center",
 ) -> tuple:
     """Extract + OST-burn every planned short for one day (Step 5).
 
@@ -1296,6 +1433,7 @@ def _render_day_shorts(
             start_time=float(short_range.start_sec),
             duration=float(short_duration),
             location=short_ost_text,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         if not rendered_ok:
             logger.warning(
@@ -1744,6 +1882,7 @@ def _produce_superlong_parts(
             output_path=raw_concat,
             work_dir=work_dir,
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
         if concatenated is None:
             # HARD fail, never a skip. A warning here let the day report
@@ -1770,6 +1909,7 @@ def _produce_superlong_parts(
             lower_third_duration_sec=lt_duration_sec,
             lower_third_min_gap_sec=lt_min_gap_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
         )
         if ost_result is None:
             raise RuntimeError(f"Superlong OST failed: day {date} part {part.part_index}")
@@ -1822,6 +1962,13 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
         raise RuntimeError(
             f"Day {date}: day master {master_path.name} failed the picture gate: {gate.message}"
         )
+
+
+def _lf_plan_seconds(segments) -> float:
+    """Summed length of an LF plan's segments (what its concat holds)."""
+    return sum(
+        float(getattr(s, "end_time", 0.0)) - float(getattr(s, "start_time", 0.0)) for s in segments
+    )
 
 
 def run_day_pipeline(
@@ -2040,6 +2187,12 @@ def run_day_pipeline(
             )
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Day %s: stop mask persist failed: %s", date, exc)
+        # The GPS fixes the mask was built from, beside it, for
+        # ``review-set scan --gps`` (same timebase; never an empty file).
+        try:
+            write_gps_points(day_gps_points, _mask_base / f"gps_points_{date}.json")
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("Day %s: GPS fixes persist failed: %s", date, exc)
 
     # ── Step 2: assemble regular LFs ──────────────────────────────
     lf_dir = day_dir / "regular_lfs"
@@ -2508,17 +2661,23 @@ def run_day_pipeline(
             continue
 
         # Upstream of the stream copy + montage prepend + OST re-encode: this
-        # LF's three coexisting artifacts must fit on the cache volume now.
+        # LF's three coexisting artifacts must fit on the cache volume now,
+        # and so must each later LF beside the finals burned before it (a
+        # later LF whose final is already on disk is out of the free figure).
         # The day's length is the end of its last file boundary.
+        _plans = list(lf_plans or [])
+        _pos = next(i for i, p in enumerate(_plans) if p is lf_plan)
         check_lf_work_space(
             master_source_for_extract,
             lf_dir,
-            sum(
-                float(getattr(s, "end_time", 0.0)) - float(getattr(s, "start_time", 0.0))
-                for s in segments
-            ),
+            _lf_plan_seconds(segments),
             float(file_boundaries[-1][1]) if file_boundaries else 0.0,
             lf_index=idx,
+            later_lf_secs=[
+                _lf_plan_seconds(getattr(p, "segments", []) or [])
+                for n, p in enumerate(_plans[_pos + 1 :], start=_pos + 2)
+                if not (lf_dir / f"lf_{int(getattr(p, 'index', n)):02d}.mp4").is_file()
+            ],
         )
         trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
@@ -2534,6 +2693,7 @@ def run_day_pipeline(
             # start back into parked footage. None on GPS-less/legacy/
             # disabled days → legacy behavior.
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
         _concat_receipt = receipt_sidecar_path(raw_concat)
         if _inset_inputs is not None:
@@ -2560,6 +2720,7 @@ def run_day_pipeline(
             work_dir=work_dir,
             master_path=master_source_for_extract,
             file_boundaries=file_boundaries,
+            **cadence_kwargs(config),
         )
         if prepended is None:
             logger.warning(
@@ -2623,6 +2784,7 @@ def run_day_pipeline(
             montage_duration=montage_duration,
             crossfade_sec=ost_crossfade_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
             **(
                 {}
                 if _lf_cards is None
@@ -2831,13 +2993,10 @@ def run_day_pipeline(
         else []
     )
     logger.info("Day %s: %d short ranges planned", date, len(short_ranges))
-    # SHORTS-CONTRACT gate: the
-    # required count and the planned count are both in scope right here —
-    # compare them BEFORE any shorts encode/CSV/upload instead of logging
-    # a shortfall and continuing.
+    # SHORTS-CONTRACT gate (enforced below, on the FINAL post-cap/refill count):
+    # compared BEFORE any shorts encode/CSV/upload instead of logging a
+    # shortfall and continuing.
     allow_short_count = bool(state.get("allow_short_count")) if state is not None else False
-    if day_scores is not None:
-        _enforce_shorts_contract(len(short_ranges), target_count, date, allow_short_count)
 
     # PER-LF CAPACITY: the contract above is drive-wide and
     # the planner is day-wide, but slots are per-LF — so the right TOTAL can
@@ -2866,6 +3025,33 @@ def run_day_pipeline(
                 _per_lf_capacity,
                 len(short_ranges),
             )
+        # The planner is day-wide, so the top windows can all sit in one LF's
+        # footage: refill every under-capacity LF from its OWN source window.
+        short_ranges, _refilled = fill_shorts_to_per_lf_capacity(
+            short_ranges,
+            lf_plans or [],
+            compute_day_file_boundaries(day_batch),
+            _per_lf_capacity,
+            day_scores,
+            _plan_mask,
+            _shorts_kw,
+        )
+        if _refilled:
+            logger.info(
+                "Day %s: refilled %d shorts into under-capacity LFs from their own "
+                "source windows — %d will be rendered",
+                date,
+                len(_refilled),
+                len(short_ranges),
+            )
+    if day_scores is not None:
+        # Judge the count that will actually be rendered. The day total can
+        # never exceed what the LFs' publish windows hold, so the requirement
+        # is capped at ``per-LF capacity × LFs``.
+        _required_final = target_count
+        if target_count is not None and _per_lf_capacity is not None and lf_plans:
+            _required_final = min(target_count, _per_lf_capacity * len(lf_plans))
+        _enforce_shorts_contract(len(short_ranges), _required_final, date, allow_short_count)
 
     # ── Step 5: extract + OST each short (rank-ordered) ───────────
     # Location anchor for a short on a GPS-less day: the operator
@@ -2893,6 +3079,7 @@ def run_day_pipeline(
         short_route_fn=short_route_fn,
         state=state,
         stop_mask=stop_mask,
+        **reframe_kwargs(config),
     )
 
     logger.info(

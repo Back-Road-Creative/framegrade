@@ -19,6 +19,7 @@ from .encoding_constants import (
     SHORTS_WIDTH,
 )
 from .quality import UPSCALE_KERNEL, UPSCALE_SCALER
+from .reframe import CropTrack, crop_x_expression
 
 logger = logging.getLogger(__name__)
 
@@ -233,9 +234,17 @@ def build_crop_filter(
     src_h: int,
     dst_w: int = DEFAULT_OUTPUT_WIDTH,
     dst_h: int = DEFAULT_OUTPUT_HEIGHT,
+    track: CropTrack | None = None,
 ) -> str:
-    """Build center-crop filter for vertical 9:16 output."""
+    """Build center-crop filter for vertical 9:16 output.
+
+    ``track`` (opt-in, see ``reframe``) replaces the fixed centre with a
+    time-varying x; crop size, scaler and everything after are unchanged.
+    """
     crop_w, crop_h = _crop_size(src_w, src_h, dst_w, dst_h)
+    crop = f"crop={crop_w}:{crop_h}"
+    if track is not None:
+        crop += f":x='{crop_x_expression(track, src_w, crop_w)}'"
     # One scaler for every resize (quality.UPSCALE_SCALER): swscale's default
     # bicubic softens detail-heavy driving footage on the 4K→1080 drop, and a crop narrower than the output is a declared upscale
     # that goes through the same filter. No dither flag is needed: shorts
@@ -244,10 +253,7 @@ def build_crop_filter(
     # setsar=1 last: scaling an even-rounded 1214x2160 window to 1080x1920 makes
     # ffmpeg set SAR 1214:1215 to preserve display aspect, so every Short probed
     # non-square. Forcing 1:1 trades a sub-0.1% aspect error for square pixels.
-    return (
-        f"crop={crop_w}:{crop_h},{UPSCALE_SCALER}=w={dst_w}:h={dst_h}:filter={UPSCALE_KERNEL},"
-        "setsar=1"
-    )
+    return f"{crop},{UPSCALE_SCALER}=w={dst_w}:h={dst_h}:filter={UPSCALE_KERNEL},setsar=1"
 
 
 def measure_text_width(

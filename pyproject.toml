@@ -1,6 +1,6 @@
 [project]
 name = "gomoveshift-video"
-version = "0.3.12"
+version = "0.3.14"
 description = "A media engine that grades video and photos, checks each finished file and builds route films from GPS tracks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -78,16 +78,16 @@ dependencies = [
     # falls back to CPU). Preflight refuses
     # to start a blur run without ``CUDAExecutionProvider``
     # (``preflight.check_blur_inference_provider``).
-    "onnxruntime-gpu[cuda,cudnn]==1.22.0",
+    "onnxruntime-gpu[cuda,cudnn]==1.31.0",
     "deface>=1.5.0",
     # Waypost (distribution name seo-manager) and gps-journey — former workspace
     # siblings, now public repos and the source of truth for that code. Pinned to
-    # the COMMIT of a release tag (waypost v0.3.0, gps-journey v0.2.0): a tag can
+    # the COMMIT of a release tag (waypost v0.4.0, gps-journey v0.2.0): a tag can
     # be moved, a SHA cannot, and a bare name either resolves to whatever copy
     # happens to be installed or 404s on PyPI. ci/siblings.txt pins the same
     # commits. Like the four libraries below, requirements.lock carries no entry
     # for them (an unnamed `git+` line is rejected by `uv pip install --constraint`).
-    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@58168f5079bb0ae22582170552f9173fe846a908",
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@97334ebb7eecab41cb431e136cba90b4057c7c42",
     "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at

@@ -141,3 +141,101 @@ class TestPerLfCapacityCap:
         kept, dropped = cap_shorts_to_per_lf_capacity(shorts, [lf1], boundaries, 2)
         assert kept == shorts
         assert dropped == []
+
+
+class TestPerLfFill:
+    """An under-capacity LF is refilled from its OWN source window."""
+
+    CAP = 3
+    GAP = 60.0
+
+    def _day(self):
+        """1200 s master: LF 1 = [0, 600), LF 2 = [600, 1200). LF 2 scores far higher."""
+        import numpy as np
+
+        ts = np.arange(1200, dtype=float)
+        scores = np.zeros((1200, 9))
+        scores[:, 0] = ts
+        scores[:, 1] = np.where(ts >= 600, 0.9, 0.3)
+        # a little texture so windows differ
+        scores[:, 1] += 0.01 * np.sin(ts / 7.0)
+        boundaries = compute_day_file_boundaries(_batch([1200.0]))
+        lf1 = _lf(1, [_seg(0, 0.0, 600.0)])
+        lf2 = _lf(2, [_seg(0, 600.0, 1200.0)])
+        return scores, boundaries, [lf1, lf2]
+
+    def _planned_and_capped(self, scores, boundaries, lfs, target):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        planned = plan_shorts(scores, target_count=target, min_gap_sec=self.GAP)
+        kept, _ = cap_shorts_to_per_lf_capacity(planned, lfs, boundaries, self.CAP)
+        return kept
+
+    def _fill(self, kept, scores, boundaries, lfs, mask=None):
+        from gomoveshift.pipeline.day_pipeline import fill_shorts_to_per_lf_capacity
+
+        return fill_shorts_to_per_lf_capacity(
+            kept, lfs, boundaries, self.CAP, scores, mask, {"min_gap_sec": self.GAP}
+        )
+
+    def test_top_windows_in_one_lf_still_fill_every_lf(self):
+        import numpy as np
+
+        from gomoveshift.pipeline.day_pipeline import assign_shorts_to_lfs_by_source_window
+
+        scores, boundaries, lfs = self._day()
+        mask = np.zeros(1200, dtype=bool)
+        mask[100:140] = True  # a parked stretch inside LF 1
+        kept = self._planned_and_capped(scores, boundaries, lfs, self.CAP + 2)
+        assert {int(s.start_sec // 600) for s in kept} == {1}  # all LF 2 before refill
+        result, added = self._fill(kept, scores, boundaries, lfs, mask)
+        buckets = assign_shorts_to_lfs_by_source_window(result, lfs, boundaries)
+        assert {k: len(v) for k, v in buckets.items()} == {1: self.CAP, 2: self.CAP}
+        assert len(added) == self.CAP
+        for s in added:
+            assert 0.0 <= s.start_sec and s.end_sec <= 600.0  # LF 1's own window
+            assert not mask[int(s.start_sec) : int(s.end_sec)].any()
+        ordered = sorted(result, key=lambda s: s.start_sec)
+        for a, b in zip(ordered, ordered[1:]):
+            assert a.end_sec <= b.start_sec  # no overlap
+        assert [s.rank for s in result[: len(kept)]] == [s.rank for s in kept]
+        assert [s.rank for s in added] == sorted(s.rank for s in added)
+        assert min(s.rank for s in added) > max(s.rank for s in kept)
+
+    def test_fully_masked_lf_gets_no_refill_and_reaches_the_contract_gate(self):
+        import numpy as np
+        import pytest
+
+        from gomoveshift.pipeline.day_pipeline import _enforce_shorts_contract
+
+        scores, boundaries, lfs = self._day()
+        mask = np.zeros(1200, dtype=bool)
+        mask[:600] = True  # LF 1's whole window is vetoed
+        kept = self._planned_and_capped(scores, boundaries, lfs, self.CAP + 2)
+        result, added = self._fill(kept, scores, boundaries, lfs, mask)
+        assert added == []
+        assert len(result) == self.CAP
+        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT"):
+            _enforce_shorts_contract(len(result), 2 * self.CAP, "2026-10-28", False)
+        _enforce_shorts_contract(len(result), 2 * self.CAP, "2026-10-28", True)
+
+    def test_balanced_day_is_unchanged(self):
+        scores, boundaries, lfs = self._day()
+        kept = [_short(1, 100.0, 138.0), _short(2, 700.0, 738.0), _short(3, 300.0, 338.0)] + [
+            _short(4, 800.0, 838.0),
+            _short(5, 900.0, 938.0),
+            _short(6, 400.0, 438.0),
+        ]
+        result, added = self._fill(kept, scores, boundaries, lfs)
+        assert result == kept
+        assert added == []
+
+    def test_no_capacity_is_a_noop(self):
+        from gomoveshift.pipeline.day_pipeline import fill_shorts_to_per_lf_capacity
+
+        scores, boundaries, lfs = self._day()
+        kept = [_short(1, 700.0, 738.0)]
+        result, added = fill_shorts_to_per_lf_capacity(
+            kept, lfs, boundaries, None, scores, None, {"min_gap_sec": self.GAP}
+        )
+        assert result == kept and added == []

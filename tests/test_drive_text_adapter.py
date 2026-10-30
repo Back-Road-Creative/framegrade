@@ -412,3 +412,58 @@ def test_reattach_replaces_chapters_already_attached():
     reattach_with_chapters(_ROUTE, meta, chapters)
     reattach_with_chapters(_ROUTE, meta, chapters[:3])
     assert meta["drive_text_inputs"]["chapters"] == chapters[:3]
+
+
+# --- the place the description names holds every retained second ----------
+
+# 300 s in the town of Ashby (Ashby County), then 100 s in Ostry (Brell County),
+# all in Westmark. The label "Ashby County, Westmark" says the town "Ashby" as a
+# whole word, but only "Westmark" holds the Ostry footage.
+_BINNED = {
+    "record": {
+        "retained_seconds": 400.0,
+        "places": [
+            {
+                "name": "Ashby",
+                "county": "Ashby County",
+                "state": "Westmark",
+                "retained_seconds": 300.0,
+                "evidence_id": "ev-ashby",
+            },
+            {
+                "name": "Ostry",
+                "county": "Brell County",
+                "state": "Westmark",
+                "retained_seconds": 100.0,
+                "evidence_id": "ev-ostry",
+            },
+        ],
+        "bins": [
+            {"seconds": 300.0, "county": "Ashby County", "state": "Westmark", "town": "Ashby"},
+            {"seconds": 100.0, "county": "Brell County", "state": "Westmark", "town": "Ostry"},
+        ],
+    },
+    "region_claims": [
+        {"level": "county", "name": "Ashby County"},
+        {"level": "state", "name": "Westmark"},
+    ],
+}
+
+
+def test_description_names_the_label_place_that_holds_the_whole_route():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text
+    from gomoveshift.pipeline.route_claims import recheck_place_text
+
+    meta = attach_drive_text(_BINNED, {}, "Ashby County, Westmark", final_seconds=400.0)
+    assert "drive_text_refusal" not in meta
+    text = compose_description(meta["final_text_description"])
+    assert "Location: Westmark" in text
+    assert recheck_place_text(_BINNED["record"], text) == []
+
+
+def test_description_no_label_place_covers_is_refused_before_upload():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text
+
+    meta = attach_drive_text(_BINNED, {}, "Ashby", final_seconds=400.0)
+    assert meta["final_text_description"] == []
+    assert meta["drive_text_refusal"] == ["place_outside_text"]

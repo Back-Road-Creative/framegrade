@@ -556,6 +556,11 @@ class PipelineState:
     map_inset_trim_start_m: Optional[float] = None
     map_inset_trim_end_m: Optional[float] = None
     map_inset_privacy_zones: Optional[list] = None
+    # ``--short-reframe`` / ``--output-cadence`` / ``--insert-still-motion`` sentinels,
+    # mirrored onto the same-named config.drive fields by flag_registry.py.
+    short_reframe: Optional[str] = None
+    output_cadence: Optional[str] = None
+    insert_still_motion: Optional[str] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks
