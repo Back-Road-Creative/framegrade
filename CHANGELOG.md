@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-10-30
+
+### Fixed
+
+- A long-form whose retained GPS runs through exactly two counties of one state is now labelled `"A & B Counties, ST"` instead of falling back to the bare state. The route-claim fallback ladder gains a `counties` level between `county` and `state`; its boundary proof tests the route against the union of the two Census county polygons, the claim reaches Waypost's region claims, and the title and place-text gates accept the pair as naming the route. Ace Basin LF 1 (2026-02-21, Beaufort and Colleton) shipped as "South Carolina in 4K" because no such level existed.
+
 ## [0.3.15] - 2026-10-30
 
 ### Changed
@@ -297,7 +303,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...HEAD
+[0.3.16]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...v0.3.16
 [0.3.15]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.14...v0.3.15
 [0.3.14]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.13...v0.3.14
 [0.3.13]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.12...v0.3.13
