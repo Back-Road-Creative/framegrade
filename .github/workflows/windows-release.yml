@@ -28,11 +28,12 @@ concurrency:
 
 jobs:
   # Tag runs only: the tag commit is on main, the tag names pyproject.toml's
-  # version, and main's CI passed that exact commit. A dry run has no tag to
-  # check and publishes nothing.
+  # version, and main's CI passed that exact commit. A tag pushed while that
+  # CI is still running waits for it (up to 30 minutes, release_gate.py). A dry
+  # run has no tag to check and publishes nothing.
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 40
     permissions:
       contents: read
       actions: read

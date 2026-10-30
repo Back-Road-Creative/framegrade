@@ -11,6 +11,12 @@ Window per video, in UTC: ``[start - HEAD_PAD, start + duration + TAIL_PAD]``.
 * ``start`` is the camera-local time in the ``VID_YYYYMMDD_HHMMSS_...``
   filename shifted by the operator-supplied UTC offset. The offset is never
   guessed: a wrong one yields an empty window (refused) or a gate failure.
+* A long recording is split into chapters that all carry the recording's
+  ``HHMMSS``; only the trailing sequence number moves. A chapter starts where
+  the one before it ends, so its ``start`` adds the durations of the earlier
+  chapters. A chapter whose predecessor is missing is refused: its start
+  cannot be known. (The Phase-A gate allows 60 min of start skew, so a
+  30-min chapter sliced at the recording start would pass it.)
 * ``TAIL_PAD`` runs past the clip end so the last segment keeps an
   authoritative endpoint (A2B-ENDPOINT-LOSS: a slice stopping exactly at the
   clip end loses it).
@@ -46,7 +52,7 @@ TAIL_PAD = 120.0  # seconds past clip end (A2B-ENDPOINT-LOSS)
 MARKER = "gms-day-gpx-slicer"
 CREATION_TIME_TOLERANCE = 60.0  # seconds; beyond this a clock disagreement is logged
 
-VID_RE = re.compile(r"^VID_(\d{8})_(\d{6})_\d{2}_\d{3}\.mp4$", re.IGNORECASE)
+VID_RE = re.compile(r"^VID_(\d{8})_(\d{6})_(\d{2})_(\d{3})\.mp4$", re.IGNORECASE)
 TRKPT = re.compile(r"<trkpt\b.*?</trkpt>", re.DOTALL)
 TIME = re.compile(r"<time>([^<]+)</time>")
 
@@ -106,15 +112,36 @@ def slice_day_gpx(day_gpx: Path, source_dir: Path, utc_offset_hours: float) -> l
         raise DayGpxSliceError(f"no .mp4 files in {source_dir}")
     points = _load_points(day_gpx)
 
-    planned: list[tuple[Path, str, SliceResult]] = []
+    clips = []
     for video in videos:
         m = VID_RE.match(video.name)
         if not m:
             raise DayGpxSliceError(
                 f"{video.name}: cannot read camera time (expected VID_YYYYMMDD_HHMMSS_...)"
             )
-        local = datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S")
+        dur = get_clip_duration(video)
+        if dur <= 0:
+            raise DayGpxSliceError(f"{video.name}: ffprobe duration unavailable")
+        clips.append((video, m.group(1, 2, 3), int(m.group(4)), dur))
+    # Seconds of earlier chapters of the same recording before each clip.
+    lead: dict[Path, float] = {}
+    for key in {k for _, k, _, _ in clips}:
+        chapters = sorted((seq, video, dur) for video, k, seq, dur in clips if k == key)
+        elapsed = 0.0
+        for (seq, video, dur), prev in zip(chapters, [None, *chapters]):
+            if prev is not None and seq != prev[0] + 1:
+                raise DayGpxSliceError(
+                    f"{video.name}: chapter of a recording whose previous chapter "
+                    f"(sequence {prev[0] + 1:03d}) is missing; its start cannot be known"
+                )
+            lead[video] = elapsed
+            elapsed += dur
+
+    planned: list[tuple[Path, str, SliceResult]] = []
+    for video, (date, hms, _lens), _seq, dur in clips:
+        local = datetime.strptime(date + hms, "%Y%m%d%H%M%S")
         start = (local - timedelta(hours=utc_offset_hours)).replace(tzinfo=timezone.utc)
+        start += timedelta(seconds=lead[video])
         ct = _ffprobe_creation_time(video)
         if ct is not None:
             if ct.tzinfo is None:
@@ -131,9 +158,6 @@ def slice_day_gpx(day_gpx: Path, source_dir: Path, utc_offset_hours: float) -> l
                     skew,
                     utc_offset_hours,
                 )
-        dur = get_clip_duration(video)
-        if dur <= 0:
-            raise DayGpxSliceError(f"{video.name}: ffprobe duration unavailable")
         lo = start - timedelta(seconds=HEAD_PAD)
         hi = start + timedelta(seconds=dur + TAIL_PAD)
         keep = [blob for ts, blob in points if lo <= ts <= hi]
