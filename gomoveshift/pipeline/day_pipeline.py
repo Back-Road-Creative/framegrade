@@ -53,6 +53,7 @@ suffix) and the thumbnail text — all three surfaces must match.
 """
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -71,11 +72,17 @@ from ..config import resolve_lf_mode
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
 from .cleanup import purge_day_intermediates, purge_lf_intermediates
+from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
-from .edit_timeline import ReceiptError, load_receipt
+from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
-from .gps_quality import trim_gps_to_clip_timeline, usable_fix_times, window_median_speed_mps
+from .gps_quality import (
+    trim_gps_to_clip_timeline,
+    usable_fix_times,
+    window_median_speed_mps,
+    write_gps_points,
+)
 from .inserts import (
     InsertError,
     insert_label,
@@ -85,13 +92,15 @@ from .inserts import (
     shift_photo_inserts,
     splice_day_lf_inserts,
 )
+from .map_inset import MapInsetRefused, render_route_inset
 from .montage_builder import (
     GOP_DURATION_SEC,
     lf_reencode_args,
     prepend_montage,
+    reencode_args_for,
     to_cut_segment,
 )
-from .ost_applier import apply_ost
+from .ost_applier import MapInsetOverlay, apply_ost
 from .ost_audit_sidecar import (
     OstAuditPendingError,
     OstPostBurnError,
@@ -128,6 +137,7 @@ from .short_planner import (
     DEFAULT_TARGET_DURATION_SEC,
     plan_shorts,
 )
+from .shorts_extractor import reframe_kwargs
 from .shorts_extractor import render_short_ffmpeg as _render_short_ffmpeg
 from .social_generator import assert_day_title_stamps
 from .stop_mask import (
@@ -285,6 +295,45 @@ def cap_shorts_to_per_lf_capacity(
     return kept, dropped
 
 
+def _render_lf_map_inset(
+    inputs, *, concat_receipt: Path, prepended: Path, lead_s: float, lf_dir: Path,
+    idx: int, work_dir: Path,
+):  # fmt: skip
+    """Render one LF's route-inset clip; returns ``(MapInsetOverlay, receipt dict)``.
+
+    The timeline is the concat's keycut receipt shifted by the montage lead the
+    prepended file actually carries. A refusal stops the render, naming the LF:
+    an LF never ships without the map it was asked for."""
+    timeline = EditTimeline.from_receipt(
+        load_receipt(concat_receipt), inserts=[Insert(0.0, lead_s)] if lead_s > 0 else []
+    )
+    clip = lf_dir / f"lf_{idx:02d}_map_inset.mov"
+    try:
+        receipt = render_route_inset(
+            inputs.bundle,
+            inputs.segments,
+            timeline,
+            clip,
+            get_video_dimensions(prepended),
+            workdir=work_dir,
+            trim=inputs.trim,
+            zones=inputs.zones,
+            **({"roads": True} if inputs.roads else {}),
+        )
+    except MapInsetRefused as exc:
+        raise RuntimeError(
+            f"map inset refused for LF {idx}: " + "; ".join(exc.reasons) + " (nothing shipped)"
+        ) from exc
+    x, y = receipt.inset_rect[:2]
+    return MapInsetOverlay(clip_path=clip, x=x, y=y), receipt.to_dict()
+
+
+def receipt_sidecar_path(concat_path: Path) -> Path:
+    """Where ``extract_and_concat_segments(receipt_sidecar=True)`` keeps the receipt."""
+    concat_path = Path(concat_path)
+    return concat_path.with_name(concat_path.name + ".receipt.json")
+
+
 def extract_and_concat_segments(
     master_path: Path,
     segments: list,
@@ -292,6 +341,8 @@ def extract_and_concat_segments(
     output_path: Path,
     work_dir: Path,
     stop_mask=None,
+    receipt_sidecar: bool = False,
+    output_fps: str = OUTPUT_FPS,
 ) -> Optional[Path]:
     """Cut each scored segment out of the day master and concat the pieces
     in drive_plan order, without re-encoding.
@@ -319,11 +370,19 @@ def extract_and_concat_segments(
     does not validate means any later output-to-source time mapping would be
     wrong, so it is logged as an error and None is returned.
 
+    ``receipt_sidecar`` also writes the validated receipt beside the concat as
+    ``<output>.receipt.json`` (atomically) so a later step -- the opt-in map
+    inset -- can rebuild the output-to-source timeline; a stale sidecar is
+    removed first and on every failure path, so one always matches its concat.
+
     Returns the concatenated file, or None on any ffmpeg failure, missing
     input, or a receipt that fails validation.
     """
     master_path = Path(master_path)
     output_path = Path(output_path)
+    sidecar = receipt_sidecar_path(output_path)
+    if receipt_sidecar:
+        sidecar.unlink(missing_ok=True)
 
     if not master_path.exists():
         logger.warning(
@@ -368,7 +427,11 @@ def extract_and_concat_segments(
         # Pin the shared long-form encoder args + AAC 256k audio — keycut
         # would otherwise derive an encoder from the master's codec at CRF 18
         # and stream-copy the audio.
-        reencode_args=lf_reencode_args(),
+        reencode_args=(
+            lf_reencode_args()
+            if output_fps == OUTPUT_FPS
+            else reencode_args_for(master_path, output_fps)
+        ),
         # This concat is an INTERMEDIATE: apply_ost re-encodes it into the
         # final artifact (which writes its own faststart) and cleanup deletes
         # it. keycut's default would rewrite the moov atom over the whole
@@ -392,6 +455,10 @@ def extract_and_concat_segments(
             # A resume must not pick up a concat its receipt cannot describe.
             Path(result).unlink(missing_ok=True)
             return None
+        if receipt_sidecar:
+            partial = sidecar.with_name(sidecar.name + ".part")
+            partial.write_text(json.dumps(receipt.to_dict(), indent=2), encoding="utf-8")
+            partial.replace(sidecar)
     if result is None:
         logger.warning(
             "⚠ segment extract: stream-copy/concat failed (master=%s, "
@@ -757,6 +824,7 @@ def _render_day_shorts(
     state=None,
     stop_mask=None,
     short_route_fn: Optional[Callable] = None,
+    reframe: str = "center",
 ) -> tuple:
     """Extract + OST-burn every planned short for one day (Step 5).
 
@@ -1242,6 +1310,7 @@ def _render_day_shorts(
             start_time=float(short_range.start_sec),
             duration=float(short_duration),
             location=short_ost_text,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         if not rendered_ok:
             logger.warning(
@@ -1690,6 +1759,7 @@ def _produce_superlong_parts(
             output_path=raw_concat,
             work_dir=work_dir,
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
         if concatenated is None:
             # HARD fail, never a skip. A warning here let the day report
@@ -1716,6 +1786,7 @@ def _produce_superlong_parts(
             lower_third_duration_sec=lt_duration_sec,
             lower_third_min_gap_sec=lt_min_gap_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
         )
         if ost_result is None:
             raise RuntimeError(f"Superlong OST failed: day {date} part {part.part_index}")
@@ -1890,6 +1961,21 @@ def run_day_pipeline(
             state, [int(getattr(p, "index", i + 1)) for i, p in enumerate(lf_plans or [])]
         )
 
+    # Opt-in regular-LF route map inset: refuse BEFORE any encode, listing every
+    # missing input (bundle, trim, GPS), never fall back to no inset.
+    _inset_inputs = None
+    if getattr(getattr(config, "drive", None), "map_inset", "off") in (
+        "route",
+        "roads",
+    ):
+        from .route_claims import map_inset_inputs
+
+        _inset_inputs = map_inset_inputs(
+            config.drive,
+            (gps_points_by_date or {}).get(date),
+            date=date,
+        )
+
     # ── Step 1: encode day master (color + audio + OST in one pass) ─
     # OST is burned during the single-pass encode using the day master
     # layout (1s-9s). This eliminates a full re-encode that apply_ost
@@ -1978,6 +2064,12 @@ def run_day_pipeline(
             )
         except Exception as exc:  # noqa: BLE001 — persistence is best-effort
             logger.warning("Day %s: stop mask persist failed: %s", date, exc)
+        # The GPS fixes the mask was built from, beside it, for
+        # ``review-set scan --gps`` (same timebase; never an empty file).
+        try:
+            write_gps_points(day_gps_points, _mask_base / f"gps_points_{date}.json")
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("Day %s: GPS fixes persist failed: %s", date, exc)
 
     # ── Step 2: assemble regular LFs ──────────────────────────────
     lf_dir = day_dir / "regular_lfs"
@@ -2423,6 +2515,10 @@ def run_day_pipeline(
             ost_fingerprint = hashlib.sha256(
                 (ost_fingerprint + repr(_lf_cards) + repr(_lf_suppressed)).encode()
             ).hexdigest()
+        if _inset_inputs is not None:  # toggling or changing the inset re-burns
+            ost_fingerprint = hashlib.sha256(
+                (ost_fingerprint + "|map_inset|" + _inset_inputs.signature).encode()
+            ).hexdigest()
         fp_path = lf_dir / f"lf_{idx:02d}.ost.sha256"
         if (
             final_lf.is_file()
@@ -2463,7 +2559,7 @@ def run_day_pipeline(
         trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"
-        concatenated = extract_and_concat_segments(
+        _extract_kw = dict(
             master_path=master_source_for_extract,
             segments=segments,
             file_boundaries=file_boundaries,
@@ -2474,7 +2570,21 @@ def run_day_pipeline(
             # start back into parked footage. None on GPS-less/legacy/
             # disabled days → legacy behavior.
             stop_mask=stop_mask,
+            **cadence_kwargs(config),
         )
+        _concat_receipt = receipt_sidecar_path(raw_concat)
+        if _inset_inputs is not None:
+            _extract_kw["receipt_sidecar"] = True  # the inset timeline is built from it
+        concatenated = extract_and_concat_segments(**_extract_kw)
+        if concatenated is not None and _inset_inputs is not None and not _concat_receipt.is_file():
+            # A concat without its receipt cannot be mapped back to the source: cut it again.
+            logger.warning("Day %s: LF %d concat has no receipt sidecar; re-extracting", date, idx)
+            concatenated = extract_and_concat_segments(**_extract_kw)
+            if concatenated is not None and not _concat_receipt.is_file():
+                raise RuntimeError(
+                    f"map inset: LF {idx} concat has no receipt after a re-extract "
+                    f"({_concat_receipt}); nothing shipped"
+                )
         if concatenated is None:
             logger.warning("Day %s: LF %d concat failed, skipping", date, idx)
             continue
@@ -2487,6 +2597,7 @@ def run_day_pipeline(
             work_dir=work_dir,
             master_path=master_source_for_extract,
             file_boundaries=file_boundaries,
+            **cadence_kwargs(config),
         )
         if prepended is None:
             logger.warning(
@@ -2496,17 +2607,36 @@ def run_day_pipeline(
             )
             continue
 
-        if _lf_cards is not None:
+        _lead_probed = False
+        if _lf_cards is not None or _inset_inputs is not None:
             # Chapter times are LF-body-relative, so a card sits at T + the lead the
             # file ACTUALLY carries (the montage may be shorter than planned, or absent
             # when there are no peaks); the planned lead only keys the fingerprint.
+            # The map inset is placed by the same real lead.
             try:
                 _real_lead = float(probe_media(prepended).duration) - float(
                     probe_media(concatenated).duration
                 )
+                _lead_probed = True
             except Exception as exc:  # noqa: BLE001 -- keep the planned lead
-                logger.warning("Day %s: LF %d caption lead not probed (%s)", date, idx, exc)
+                logger.warning("Day %s: LF %d lead not probed (%s)", date, idx, exc)
                 _real_lead = float(montage_duration)
+        _inset_overlay, _inset_record = None, None
+        if _inset_inputs is not None:
+            if not _lead_probed:
+                raise RuntimeError(
+                    f"map inset: LF {idx} montage lead could not be probed; nothing shipped"
+                )
+            _inset_overlay, _inset_record = _render_lf_map_inset(
+                _inset_inputs,
+                concat_receipt=_concat_receipt,
+                prepended=prepended,
+                lead_s=_real_lead,
+                lf_dir=lf_dir,
+                idx=idx,
+                work_dir=work_dir,
+            )
+        if _lf_cards is not None:
             if abs(_real_lead - float(montage_duration)) > 0.05:
                 _lf_cards, _lf_suppressed = regular_lf_caption_cards(
                     lf_chapters_fn(lf_plan, lf_location),
@@ -2531,6 +2661,7 @@ def run_day_pipeline(
             montage_duration=montage_duration,
             crossfade_sec=ost_crossfade_sec,
             media_profile=media_profile,
+            **cadence_kwargs(config),
             **(
                 {}
                 if _lf_cards is None
@@ -2544,6 +2675,7 @@ def run_day_pipeline(
                     ),
                 }
             ),
+            **({} if _inset_overlay is None else {"map_inset": _inset_overlay}),
         )
         if ost_result is None:
             raise RuntimeError(
@@ -2588,6 +2720,10 @@ def run_day_pipeline(
                 "lower_thirds": [{"label": lbl, "time_sec": t} for lbl, t in _lf_cards],
                 "lower_thirds_suppressed": _lf_suppressed,
             }
+        if _inset_record is not None and state is not None:  # reviewable receipt
+            state.setdefault("regular_lf_map_inset", {}).setdefault(date, {})[str(idx)] = (
+                _inset_record
+            )
         regular_lf_paths.append(ost_result)
         regular_lf_indices.append(idx)
         # Release this LF's work files now, not at day end: a multi-part day
@@ -2796,6 +2932,7 @@ def run_day_pipeline(
         short_route_fn=short_route_fn,
         state=state,
         stop_mask=stop_mask,
+        **reframe_kwargs(config),
     )
 
     logger.info(

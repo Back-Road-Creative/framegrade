@@ -256,6 +256,24 @@ def test_decorated_titles_bind_to_the_evidenced_place():
     assert "Fort Fremont" in text and "Entering" not in text
 
 
+def test_chapter_window_cites_route_places_not_regions():
+    # Waypost reads a chapter's segment_places as retained-route places; a
+    # region id there refuses the LF (route_place_unknown).
+    meta = _attach(
+        _chapters(
+            ("0:00", "Start - Longwood, Beaufort County, South Carolina"),
+            ("2:00", "Entering Fort Fremont, Beaufort County"),
+            ("4:00", "Finish - Lands End, South Carolina"),
+        )
+    )
+    route_ids = {p["evidence_id"] for p in _ROUTE["record"]["places"]}
+    windows = [
+        e["segment_places"] for e in meta["final_text_description"] if e.get("kind") == "chapter"
+    ]
+    assert len(windows) == 3
+    assert all(w and set(w) <= route_ids for w in windows), windows
+
+
 def test_unevidenced_chapter_is_dropped_not_refused():
     from gomoveshift.pipeline.drive_text_adapter import evidence_index, lf_drive_facts
 
@@ -316,3 +334,68 @@ def test_reattach_with_real_titles_does_not_refuse():
     reattach_with_chapters(_ROUTE, meta, chapters)
     assert "drive_text_refusal" not in meta
     assert meta["final_text_description"]
+
+
+def test_reattach_replaces_chapters_already_attached():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text, reattach_with_chapters
+
+    meta = attach_drive_text(_ROUTE, {}, "Longwood", final_seconds=600.0)
+    chapters = [{"timestamp": f"{i}:00", "title": t} for i, t in enumerate(_REAL_TITLES)]
+    reattach_with_chapters(_ROUTE, meta, chapters)
+    reattach_with_chapters(_ROUTE, meta, chapters[:3])
+    assert meta["drive_text_inputs"]["chapters"] == chapters[:3]
+
+
+# --- the place the description names holds every retained second ----------
+
+# 300 s in the town of Ashby (Ashby County), then 100 s in Ostry (Brell County),
+# all in Westmark. The label "Ashby County, Westmark" says the town "Ashby" as a
+# whole word, but only "Westmark" holds the Ostry footage.
+_BINNED = {
+    "record": {
+        "retained_seconds": 400.0,
+        "places": [
+            {
+                "name": "Ashby",
+                "county": "Ashby County",
+                "state": "Westmark",
+                "retained_seconds": 300.0,
+                "evidence_id": "ev-ashby",
+            },
+            {
+                "name": "Ostry",
+                "county": "Brell County",
+                "state": "Westmark",
+                "retained_seconds": 100.0,
+                "evidence_id": "ev-ostry",
+            },
+        ],
+        "bins": [
+            {"seconds": 300.0, "county": "Ashby County", "state": "Westmark", "town": "Ashby"},
+            {"seconds": 100.0, "county": "Brell County", "state": "Westmark", "town": "Ostry"},
+        ],
+    },
+    "region_claims": [
+        {"level": "county", "name": "Ashby County"},
+        {"level": "state", "name": "Westmark"},
+    ],
+}
+
+
+def test_description_names_the_label_place_that_holds_the_whole_route():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text
+    from gomoveshift.pipeline.route_claims import recheck_place_text
+
+    meta = attach_drive_text(_BINNED, {}, "Ashby County, Westmark", final_seconds=400.0)
+    assert "drive_text_refusal" not in meta
+    text = compose_description(meta["final_text_description"])
+    assert "Location: Westmark" in text
+    assert recheck_place_text(_BINNED["record"], text) == []
+
+
+def test_description_no_label_place_covers_is_refused_before_upload():
+    from gomoveshift.pipeline.drive_text_adapter import attach_drive_text
+
+    meta = attach_drive_text(_BINNED, {}, "Ashby", final_seconds=400.0)
+    assert meta["final_text_description"] == []
+    assert meta["drive_text_refusal"] == ["place_outside_text"]

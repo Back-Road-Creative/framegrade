@@ -222,6 +222,9 @@ def _maybe_auto_publish_journal(args, orchestrator, config) -> None:
     """
     if getattr(args, "no_auto_publish_journal", False):
         return
+    # A discovery run renders and uploads nothing, even with --youtube-upload on.
+    if any(getattr(args, f, False) for f in _DISCOVERY_FLAGS):
+        return
     if not resolve_youtube_upload(args):
         logger.info(
             "auto-publish-journal: YouTube upload was off for this run; nothing to merge "
@@ -976,6 +979,14 @@ def _cmd_drive_impl(args, config):
             superlong_enabled=getattr(args, "superlong_enabled", None),
             superlong_publish_day=getattr(args, "superlong_publish_day", None),
             gps_captions=getattr(args, "gps_captions", None),
+            map_inset=getattr(args, "map_inset", None),
+            map_inset_bundle=getattr(args, "map_inset_bundle", None),
+            map_inset_trim_start_m=getattr(args, "map_inset_trim_start_m", None),
+            map_inset_trim_end_m=getattr(args, "map_inset_trim_end_m", None),
+            map_inset_privacy_zones=getattr(args, "map_inset_privacy_zones", None),
+            short_reframe=getattr(args, "short_reframe", None),
+            output_cadence=getattr(args, "output_cadence", None),
+            insert_still_motion=getattr(args, "insert_still_motion", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The

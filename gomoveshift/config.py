@@ -2060,6 +2060,21 @@ class DriveConfig(BaseModel):
     # per supported town event of the LF's own chapters. Own timing knobs, so the
     # superlong values above never move.
     gps_captions: str = "off"
+    # Opt-in route-only map inset on REGULAR long-form videos (``--map-inset``):
+    # "off" is today's path; "route" composites an inset rendered from an offline
+    # bundle and refuses before any encode when the bundle, trim or GPS is missing.
+    # Zones are "LAT,LON,RADIUS_M" strings so the value stays JSON-safe in state.
+    map_inset: str = "off"
+    map_inset_bundle: Optional[str] = None
+    map_inset_trim_start_m: float = 0.0
+    map_inset_trim_end_m: float = 0.0
+    map_inset_privacy_zones: list[str] = Field(default_factory=list)
+    # Opt-in media-quality options (``--short-reframe`` / ``--output-cadence`` /
+    # ``--insert-still-motion``). The defaults are today's behaviour: a fixed centre
+    # crop, the frozen 29.97 publish rate, and a static insert still card.
+    short_reframe: str = "center"
+    output_cadence: str = "fixed"
+    insert_still_motion: str = "none"
     regular_lf_lower_third_duration_sec: float = 8.0
     regular_lf_lower_third_min_gap_sec: float = 45.0
     # Superlong per-part publish DAY. Saturday is a placeholder default chosen because it
@@ -2309,8 +2324,28 @@ class DriveConfig(BaseModel):
             raise ValueError(
                 f"superlong_split_grace must be in [0, 0.5], got {self.superlong_split_grace}"
             )
+        for _field, _allowed in (
+            ("short_reframe", ("center", "tracked")),
+            ("output_cadence", ("fixed", "source")),
+            ("insert_still_motion", ("none", "push_in")),
+        ):
+            if getattr(self, _field) not in _allowed:
+                raise ValueError(
+                    f"{_field} must be one of {_allowed}, got {getattr(self, _field)!r}"
+                )
         if self.gps_captions not in ("off", "events"):
             raise ValueError(f"gps_captions must be 'off' or 'events', got {self.gps_captions!r}")
+        if self.map_inset not in ("off", "route", "roads"):
+            raise ValueError(f"map_inset must be 'off', 'route' or 'roads', got {self.map_inset!r}")
+        if self.map_inset_trim_start_m < 0 or self.map_inset_trim_end_m < 0:
+            raise ValueError("map_inset trim distances must be >= 0")
+        for zone in self.map_inset_privacy_zones:
+            try:
+                from gomoveshift.pipeline.route_claims import parse_privacy_zone
+
+                parse_privacy_zone(zone)
+            except ValueError as exc:
+                raise ValueError(f"map_inset privacy zone {zone!r}: {exc}") from exc
         if self.regular_lf_lower_third_duration_sec <= 0:
             raise ValueError("regular_lf_lower_third_duration_sec must be > 0")
         if self.regular_lf_lower_third_min_gap_sec < 0:

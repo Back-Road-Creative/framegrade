@@ -549,6 +549,18 @@ class PipelineState:
     # config.drive.gps_captions by flag_registry.py so a resume without the flag
     # keeps the burned captions (and the LF fingerprint) of the first run.
     gps_captions: Optional[str] = None
+    # ``--map-inset*`` sentinels, mirrored onto config.drive.map_inset* by
+    # flag_registry.py so a resume without the flags keeps the first run's inset.
+    map_inset: Optional[str] = None
+    map_inset_bundle: Optional[str] = None
+    map_inset_trim_start_m: Optional[float] = None
+    map_inset_trim_end_m: Optional[float] = None
+    map_inset_privacy_zones: Optional[list] = None
+    # ``--short-reframe`` / ``--output-cadence`` / ``--insert-still-motion`` sentinels,
+    # mirrored onto the same-named config.drive fields by flag_registry.py.
+    short_reframe: Optional[str] = None
+    output_cadence: Optional[str] = None
+    insert_still_motion: Optional[str] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks
@@ -590,6 +602,9 @@ class PipelineState:
     # [{"label", "time_sec"}], "lower_thirds_suppressed": [{"label", "time_sec",
     # "reason"}]}}}`` -- the reviewable cards burned onto each regular LF.
     regular_lf_captions: Optional[dict] = None
+    # Opt-in ``--map-inset route``: ``{date: {str(lf_index): <inset receipt dict>}}``
+    # -- the reviewable receipt of the inset composited onto each regular LF.
+    regular_lf_map_inset: Optional[dict] = None
 
     # ── Resume-time backstop observability ────
     # ``{field_name: [lf_index, ...]}`` populated by

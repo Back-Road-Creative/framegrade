@@ -43,12 +43,16 @@ from .encoding_constants import (
 from .ffmpeg_filters import (
     DEFAULT_CRF,
     DEFAULT_LUFS,
+    DEFAULT_OUTPUT_HEIGHT,
+    DEFAULT_OUTPUT_WIDTH,
     DEFAULT_PRESET,
+    _crop_size,
     build_crop_filter,
     build_ost_filter,
     get_video_dimensions,
     shorten_ost_for_shorts,
 )
+from .reframe import plan_tracked_crop
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +73,11 @@ def _detect_nvenc_cached() -> bool:
 
 
 def _short_ost_fingerprint(
-    location: str, subscribe_text: str, start_time: float, end_time: float
+    location: str,
+    subscribe_text: str,
+    start_time: float,
+    end_time: float,
+    reframe: str = "center",
 ) -> str:
     """Stable hash of the material render inputs for one short.
 
@@ -83,11 +91,17 @@ def _short_ost_fingerprint(
     The clip's WINDOW (``start_time``/``end_time``) is part of the hash so a
     re-planned short at the SAME rank/index but a DIFFERENT (possibly parked)
     window re-renders instead of reusing the old render of the prior window.
+
+    A non-default ``reframe`` is appended so a resume with a changed
+    ``--short-reframe`` re-renders; ``"center"`` adds nothing, so the default
+    hash is byte-identical to the one older runs wrote.
     """
     raw = (
         f"{location or ''}\x00{subscribe_text or ''}"
         f"\x00{float(start_time):.4f}:{float(end_time):.4f}"
     )
+    if reframe != "center":
+        raw += f"\x00reframe={reframe}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -215,6 +229,15 @@ def _probe_video_stream_duration(path: Path) -> float:
         return 0.0
 
 
+def reframe_kwargs(config) -> dict:
+    """``{"reframe": "tracked"}`` when ``--short-reframe tracked`` is on, else ``{}``.
+
+    Empty by default so every short render call receives exactly what it did before.
+    """
+    mode = getattr(getattr(config, "drive", None), "short_reframe", "center")
+    return {"reframe": mode} if isinstance(mode, str) and mode != "center" else {}
+
+
 def render_short_ffmpeg(
     source_video: Path,
     output_path: Path,
@@ -230,6 +253,7 @@ def render_short_ffmpeg(
     skip_audio_norm: bool = False,
     skip_audio: bool = False,
     use_nvenc: Optional[bool] = None,
+    reframe: str = "center",
 ) -> bool:
     """
     Render a single short with center crop, OST, and optional audio normalization.
@@ -252,6 +276,9 @@ def render_short_ffmpeg(
         skip_audio_norm: Skip loudnorm filter (default False — always normalize
             since source audio is not always pre-normalized)
         use_nvenc: Use NVENC GPU encoding. None = auto-detect.
+        reframe: "center" (default, fixed centre crop) or "tracked" (opt-in:
+            the crop follows the road with a dead zone and a pan-speed cap;
+            see ``reframe.py``). Crop size and scaler are the same either way.
 
     Returns:
         True if rendering succeeded
@@ -268,8 +295,31 @@ def render_short_ffmpeg(
     if src_width is None or src_height is None:
         src_width, src_height = get_video_dimensions(source_video)
 
+    if reframe not in ("center", "tracked"):
+        raise ValueError(f"reframe must be 'center' or 'tracked', got {reframe!r}")
+    track = None
+    if reframe == "tracked":
+        try:
+            track = plan_tracked_crop(
+                source_video,
+                start_time,
+                duration,
+                src_width,
+                src_height,
+                _crop_size(src_width, src_height, DEFAULT_OUTPUT_WIDTH, DEFAULT_OUTPUT_HEIGHT)[0],
+            )
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            logger.warning(
+                "tracked reframe unavailable for %s (%s) — using the centre crop",
+                output_path.name,
+                e,
+            )
+
     # Build filter chain: crop → OST
-    crop_filter = build_crop_filter(src_width, src_height)
+    if track is None:
+        crop_filter = build_crop_filter(src_width, src_height)
+    else:
+        crop_filter = build_crop_filter(src_width, src_height, track=track)
     ost_filter = build_ost_filter(location, subscribe_text, duration)
 
     video_filter = f"{crop_filter},{ost_filter}"
@@ -535,6 +585,7 @@ def render_shorts_batched(
     max_workers: int = 3,
     batch_size: int = DEFAULT_BATCH_SIZE,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    reframe: str = "center",
 ) -> dict[int, bool]:
     """
     Batch-render shorts using a two-phase approach to reduce source reads.
@@ -565,6 +616,7 @@ def render_shorts_batched(
         max_workers: Parallel encode workers
         batch_size: Not used in current impl (kept for API compatibility)
         progress_callback: Optional callback(completed_count, total_count)
+        reframe: 9:16 crop placement forwarded to ``render_short_ffmpeg``
 
     Returns:
         Dict mapping short index -> success (True/False)
@@ -685,6 +737,7 @@ def render_shorts_batched(
             src_height=src_height,
             use_nvenc=use_nvenc,
             skip_audio=skip_audio,
+            **({} if reframe == "center" else {"reframe": reframe}),
         )
         return idx, success
 
@@ -1048,7 +1101,11 @@ class PipelineShortsExtractor:
                 and fp_path.is_file()
                 and fp_path.read_text().strip()
                 == _short_ost_fingerprint(
-                    short_location, subscribe_text, short.start_time, short.end_time
+                    short_location,
+                    subscribe_text,
+                    short.start_time,
+                    short.end_time,
+                    **reframe_kwargs(self.config),
                 )
             ):
                 logger.info(f"  Short #{short.index} — already rendered (OST unchanged), skipping")
@@ -1127,6 +1184,7 @@ class PipelineShortsExtractor:
                     skip_audio=self.config.drive.skip_audio,
                     max_workers=effective_workers,
                     progress_callback=_batch_progress,
+                    **reframe_kwargs(self.config),
                 )
             except Exception as e:
                 logger.warning(f"Batched rendering failed ({e}), falling back to individual")
@@ -1148,6 +1206,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                     rendered_shorts.append(
@@ -1194,6 +1253,7 @@ class PipelineShortsExtractor:
                     src_height=src_height,
                     use_nvenc=use_nvenc,
                     skip_audio=self.config.drive.skip_audio,
+                    **reframe_kwargs(self.config),
                 )
                 if success:
                     # Persist the burned-OST fingerprint (see batched path).
@@ -1203,6 +1263,7 @@ class PipelineShortsExtractor:
                             spec["subscribe_text"],
                             spec["start_time"],
                             spec["end_time"],
+                            **reframe_kwargs(self.config),
                         )
                     )
                 return short, output_path, success

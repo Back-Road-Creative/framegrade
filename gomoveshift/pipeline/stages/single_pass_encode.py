@@ -3,6 +3,7 @@
 import logging
 
 from .. import blur_gate
+from ..color_filters import cadence_kwargs
 from ..context import PipelineContext
 from ..ffmpeg_runner import check_disk_space
 from ..stage_protocol import BaseStage, StageResult
@@ -143,6 +144,7 @@ class SinglePassEncodeStage(BaseStage):
                 # The blur stage sets this only when blur ran and produced a frame-aligned
                 # mask; None (the default) keeps the legacy no-blur -vf path.
                 blur_mask_path=ctx.blur_mask_path,
+                **cadence_kwargs(ctx.config),
             )
 
             if sp_result.success:

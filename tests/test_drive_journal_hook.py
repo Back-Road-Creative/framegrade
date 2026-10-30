@@ -11,6 +11,8 @@ import json
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from gomoveshift.cli.handlers.drive import _effective_region, _maybe_auto_publish_journal
 
 _RPJ = "gomoveshift.cli.handlers.publish_journal.run_publish_journal"
@@ -388,3 +390,25 @@ def test_upload_run_still_publishes(monkeypatch, tmp_path):
         _cfg(),
     )
     assert called.get("journey_slug") == "x"
+
+
+# --- discovery runs (--dry-run/--list-lfs/--label-dry-run) upload nothing ---
+
+
+@pytest.mark.parametrize("flag", ["dry_run", "list_lfs", "label_dry_run"])
+def test_discovery_run_skips_journal_hook(monkeypatch, tmp_path, flag):
+    # A --youtube-upload --dry-run plan render must neither spawn
+    # publish-journal nor create a draft journey on the site.
+    stages = tmp_path / "stages"
+    _state_with_date(stages, "usa", "2026-05-01")
+    site = _site_with_journeys(tmp_path, ("journey-a-2026", "2026-03-04", "2026-03-05"))
+    called = []
+    monkeypatch.setattr(_RPJ, lambda **k: called.append(k) or 0)
+    orch = _FakeOrch(tmp_path / "proj", stages)
+    _maybe_auto_publish_journal(
+        _args(youtube_upload=True, region="usa", site_path=site, publish="fri", **{flag: True}),
+        orch,
+        _cfg({}),
+    )
+    assert called == []
+    assert list((site / "content" / "journeys").glob("usa-*.md")) == []
