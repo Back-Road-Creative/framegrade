@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -402,6 +403,30 @@ def usable_fix_times(gps_points: Optional[Sequence]) -> list[float]:
         for t, la, lo in _in_window_coords(gps_points, float("-inf"), float("inf"))
         if _valid_fix(la, lo)
     )
+
+
+def usable_fix_rows(gps_points: Optional[Sequence]) -> list[list[float]]:
+    """``[[t, lat, lon], ...]`` (floats, time-sorted) for the usable fixes: the rows
+    ``review-set scan --gps`` reads. Tuple and dict points both normalise here."""
+    return [
+        [t, la, lo]
+        for t, la, lo in sorted(_in_window_coords(gps_points, float("-inf"), float("inf")))
+        if _valid_fix(la, lo)
+    ]
+
+
+def write_gps_points(gps_points: Optional[Sequence], path) -> bool:
+    """Write the usable fixes to ``path`` as a JSON list of ``[t, lat, lon]``.
+
+    Returns ``False`` and writes nothing when there is no usable fix.
+    """
+    rows = usable_fix_rows(gps_points)
+    if not rows:
+        return False
+    from ._atomic_write import atomic_write_json
+
+    atomic_write_json(Path(path), rows)
+    return True
 
 
 def window_median_speed_mps(gps_points, w0: float, w1: float) -> Optional[float]:

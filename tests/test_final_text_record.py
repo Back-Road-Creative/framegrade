@@ -374,7 +374,7 @@ class TestPhaseD:
                 drive_plan=SimpleNamespace(regular_lfs=[lf]),
                 regular_lf_paths=["/v/lf.mp4"],
                 state=state,
-                location="Harrow",
+                location="Harrow, Westmark",  # Westmark holds the Pellmere half
                 publish_day_full="Wednesday",
                 project_base="p",
                 output_base=tmp_path,

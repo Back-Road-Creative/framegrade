@@ -34,6 +34,7 @@ from .handlers.pub_status import cmd_publishing_status
 from .handlers.publish_journal import cmd_publish_journal
 from .handlers.queue_recover import cmd_queue
 from .handlers.reconcile_playlists import cmd_reconcile_playlists
+from .handlers.review_set import cmd_review_set
 from .handlers.route_story_film import cmd_route_story_film
 from .handlers.route_story_prepare import cmd_route_story_prepare
 from .handlers.route_story_proof import cmd_route_story_proof
@@ -70,6 +71,7 @@ __all__ = [
     "cmd_process",
     "cmd_dispatch_queue",
     "cmd_queue",
+    "cmd_review_set",
     "cmd_enqueue_asset",
     "cmd_enqueue_plan",
     "cmd_catalog_classify",
@@ -114,6 +116,7 @@ _COMMAND_MAP = {
     "publish-journal": cmd_publish_journal,
     "dispatch-queue": cmd_dispatch_queue,
     "queue": cmd_queue,
+    "review-set": cmd_review_set,
     "enqueue-plan": cmd_enqueue_plan,
     "enqueue-asset": cmd_enqueue_asset,
     "publishing-status": cmd_publishing_status,
