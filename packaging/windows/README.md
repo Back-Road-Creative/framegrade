@@ -17,10 +17,13 @@ GitHub-hosted `windows-2025` runners. It needs no secrets and no GPU.
 
 1. Cut the version as usual (`README.md`, Releasing): `tools/release.py`, the
    `chore(release)` PR, then tag the merge commit `vX.Y.Z` and push the tag.
-2. Wait for main's `ci` run on that commit to pass. The workflow's `gate` job
-   (`release_gate.py gate`) refuses the tag unless the commit is on `main`, the tag
-   equals the `pyproject.toml` version and `ci.yml` has a successful run for that
-   exact commit. If CI had not finished, re-run the workflow once it has.
+2. The workflow's `gate` job (`release_gate.py gate`) refuses the tag unless the
+   commit is on `main`, the tag equals the `pyproject.toml` version and `ci.yml`
+   has a successful run for that exact commit. If main's `ci` run on the commit is
+   still going, the gate waits for it (up to 30 minutes) rather than refusing, so
+   the tag can be pushed straight after the merge. If CI failed or the wait ran
+   out, re-run the failed tag run (`gh run rerun <id> --failed`) once CI has
+   passed: a `workflow_dispatch` run is a dry run and never creates the release.
 3. `build` stages the bundle, compiles the installer (Inno Setup 6.7.1 is on the
    image; the job installs that version if an image update drops it), size-gates
    every asset against GitHub's 2 GiB limit and writes `SHA256SUMS`
