@@ -386,7 +386,8 @@ def _pull_channel_daily(collector: MetricsCollector, brand: str) -> int:
         return 0
 
 
-#: Days of Facebook history the detector needs before it can classify.
+#: Days of Facebook history the detector needs strictly BEFORE a day it classifies,
+#: so a series this long or shorter has no classifiable day yet.
 _FACEBOOK_WARMUP_DAYS = 28
 
 
@@ -398,9 +399,9 @@ def _facebook_reel_series() -> Dict[str, float]:
 
 def _suppression_line(platform: str, day_states: dict) -> str:
     """One cron-log line: the latest day's status, ``WARMUP`` while Facebook's
-    series is shorter than the detector's 28-day baseline."""
+    series has not outgrown the detector's 28-day baseline."""
     status = day_states[max(day_states)]
-    if platform == "facebook" and len(day_states) < _FACEBOOK_WARMUP_DAYS:
+    if platform == "facebook" and len(day_states) <= _FACEBOOK_WARMUP_DAYS:
         status = "WARMUP"
     return f"SUPPRESSION {platform}={status} days={len(day_states)}"
 

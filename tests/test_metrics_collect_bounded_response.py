@@ -227,6 +227,25 @@ def test_apply_bounded_response_facebook_only_warmup(tmp_path, capsys):
     assert "SUPPRESSION youtube" not in out
 
 
+def test_facebook_warmup_covers_the_28th_day(tmp_path, capsys):
+    """The detector compares a day against the 28 days strictly before it,
+    so a 28-day series has no classifiable day yet: still WARMUP, never a
+    HEALTHY that was only the detector's default."""
+    config = _config(tmp_path)
+    open_queue_db(tmp_path).close()
+
+    with (
+        patch.object(metrics_handler, "load_channel_daily_rows", return_value=[]),
+        patch.object(metrics_handler, "_facebook_reel_series", return_value=_fb_series(28)),
+        patch.object(
+            metrics_handler, "load_brand_policy", return_value=SimpleNamespace(daily_ladder=None)
+        ),
+    ):
+        metrics_handler._apply_bounded_response(config, "gomoveshift", "shadow")
+
+    assert "SUPPRESSION facebook=WARMUP days=28" in capsys.readouterr().out
+
+
 def test_facebook_series_failure_does_not_block_youtube(tmp_path, capsys):
     config = _config(tmp_path)
     open_queue_db(tmp_path).close()
