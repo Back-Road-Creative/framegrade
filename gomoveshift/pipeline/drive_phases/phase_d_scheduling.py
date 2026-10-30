@@ -881,6 +881,7 @@ def _build_social_posts_per_lf(
     titles_file: Path | None = None,
     short_global_index: dict | None = None,
     require_verified_places: bool = False,
+    per_lf_overrides: dict | None = None,
 ) -> dict:
     """Generate the per-LF ``SocialPost`` list, write ``social_posts.json``.
 
@@ -932,8 +933,17 @@ def _build_social_posts_per_lf(
     surfaces (social caption + shorts YouTube description) anchor the
     destination POI (when one was resolved) consistently with the burned
     OST / title. ``None`` / missing entry preserves the legacy label text.
+
+    ``per_lf_overrides`` is ``state.per_lf_overrides`` — the operator's
+    ``--per-lf-location`` corrections. A short whose sidecar ``place_source`` is
+    ``"lf_label"`` (its burned text was INHERITED from the parent LF) takes the
+    override for its LF in place of the sidecar text, so a correction made on a
+    Phase-D-only resume (which never re-derives the sidecar) still reaches it.
+    Keys may be int or str. A short with any other source keeps its sidecar text.
+    ``None`` / empty leaves every label untouched.
     """
     per_lf_resolved = per_lf_resolved or {}
+    overrides_by_idx = {int(k): v for k, v in (per_lf_overrides or {}).items() if v}
     social_posts_per_lf: dict[int, list] = {}
     global_index_offset = 0
     for lf in drive_plan.regular_lfs:
@@ -942,6 +952,12 @@ def _build_social_posts_per_lf(
         project_name = f"{project_base}_lf{lf.index:02d}"
         lf_location = per_lf_locations_override[lf.index]
         sidecar = _per_short_sidecar_labels(lf_shorts)
+        lf_override = overrides_by_idx.get(lf.index)
+        if lf_override:
+            sidecar = [
+                (lf_override, regs, src) if lab and src == "lf_label" else (lab, regs, src)
+                for lab, regs, src in sidecar
+            ]
         # Publish run: EVERY short in lf_shorts is posted (generate_all builds one
         # post per entry, whether or not short_global_index knows it), so each
         # names ONLY its own sidecar label; one without a verified place raises,
