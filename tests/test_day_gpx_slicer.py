@@ -77,6 +77,36 @@ def test_each_sidecar_holds_only_its_padded_window(src, day):
     assert tb[-1] == B_START + timedelta(seconds=900 + 120)
 
 
+def test_chapter_starts_where_the_previous_chapter_ends(tmp_path, day):
+    # Insta360 splits one recording into chapters that share the recording's
+    # HHMMSS; only the sequence number moves. Chapter 2 starts after chapter 1.
+    d = tmp_path / "chap"
+    d.mkdir()
+    c1, c2 = "VID_20240101_080000_00_030.mp4", "VID_20240101_080000_00_031.mp4"
+    for name in (c1, c2):
+        (d / name).write_bytes(b"x")
+    durs = {c1: 1800.0, c2: 900.0}
+    with patch.object(dgs, "get_clip_duration", side_effect=lambda p: durs[p.name]):
+        results = slice_day_gpx(day, d, utc_offset_hours=-4)
+    starts = {r.sidecar.name: r.start_utc for r in results}
+    assert starts[Path(c1).stem + ".gpx"] == A_START
+    assert starts[Path(c2).stem + ".gpx"] == A_START + timedelta(seconds=1800)
+    t2 = _times(d / (Path(c2).stem + ".gpx"))
+    assert t2[0] == A_START + timedelta(seconds=1800 - 15)
+    assert t2[-1] == A_START + timedelta(seconds=1800 + 900 + 120)
+
+
+def test_chapter_with_a_missing_predecessor_refused(tmp_path, day):
+    d = tmp_path / "chap"
+    d.mkdir()
+    for name in ("VID_20240101_080000_00_030.mp4", "VID_20240101_080000_00_032.mp4"):
+        (d / name).write_bytes(b"x")
+    with patch.object(dgs, "get_clip_duration", return_value=600.0):
+        with pytest.raises(DayGpxSliceError, match="chapter"):
+            slice_day_gpx(day, d, utc_offset_hours=-4)
+    assert not list(d.glob("*.gpx*"))
+
+
 def test_wrong_offset_refused_when_no_points(src, day):
     # +10 puts the clips at 22:00Z the previous day, outside the 4 h day GPX (10:00-14:00Z).
     with pytest.raises(DayGpxSliceError, match="no trackpoints"):
