@@ -188,8 +188,17 @@ def _assert_metricool_rows_have_no_grammar_issues(rows: "List[Dict[str, str]]") 
     failures: "List[str]" = []
     for i, row in enumerate(rows):
         for col in _GRAMMAR_GATE_COLUMNS:
-            for msg in find_grammar_issues(row.get(col, "")):
-                failures.append(f"row {i} {col}={row.get(col)!r}: {msg}")
+            cell = row.get(col, "")
+            if col == "YouTube Video Tags":
+                # A comma-joined tag list, not prose: check each tag, so a
+                # leading-preposition tag is caught anywhere in the cell and
+                # not only when it happens to be first.
+                candidates = [t.strip() for t in (cell or "").split(",") if t.strip()]
+            else:
+                candidates = [cell]
+            for text in candidates:
+                for msg in find_grammar_issues(text):
+                    failures.append(f"row {i} {col}={cell!r}: {msg}")
     if failures:
         raise ValueError(
             f"METRICOOL-CSV-GRAMMAR: {len(failures)} grammar issue(s) in the "
