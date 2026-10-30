@@ -50,6 +50,11 @@ from ...pipeline.pending_journal import (
     save_pending,
     split_by_readiness,
 )
+from ...pipeline.site_sync.journey_by_date import (
+    AmbiguousJourneyError,
+    extend_adjacent_journey,
+    resolve_journey_by_date,
+)
 from ...pipeline.site_sync.videos_yaml import VideoLibrary
 from ...pipeline.youtube_sidecar import load_superlong_sidecar
 
@@ -58,6 +63,23 @@ logger = logging.getLogger(__name__)
 
 def _resolve_journey_path(site_path: Path, slug: str) -> Path:
     return site_path / "content" / "journeys" / f"{slug}.md"
+
+
+def _journey_for_day(
+    site_path: Path, day: str, extend: bool, failures: list[str]
+) -> Optional[Path]:
+    """The existing journey that holds ``day``, as the drive hook picks it: the
+    trip whose range contains the day, else (``extend`` only, since it writes)
+    the trip that ended the day before, extended by one day. ``None`` when no
+    single journey fits; an ambiguous day is reported, never guessed."""
+    try:
+        slug = resolve_journey_by_date(site_path, day)
+        if not slug and extend:
+            slug = extend_adjacent_journey(site_path, day)
+    except AmbiguousJourneyError as exc:
+        failures.append(f"{day}: {exc} Entries kept pending.")
+        return None
+    return _resolve_journey_path(site_path, slug) if slug else None
 
 
 def _deferrals_to_pending(deferrals: list[VideoEntry], journey_path: Path) -> list[PendingEntry]:
@@ -347,6 +369,21 @@ def run_replay_pending(
                 (pending_path, entry)
             )
 
+    # A ready entry whose journey file is gone (a stray draft set aside, a
+    # renamed slug) could never flush and would sit pending forever. Send it to
+    # the journey that holds its day instead. The entry keeps its stored
+    # journey_path, which is also what consumes it from the sidecar below.
+    for journey_path in [p for p in pending_by_journey if not p.is_file()]:
+        stranded = []
+        for pair in pending_by_journey.pop(journey_path):
+            target = _journey_for_day(journey_path.parents[2], pair[1].day_date, apply, failures)
+            if target is None or target == journey_path:
+                stranded.append(pair)
+            else:
+                pending_by_journey.setdefault(target, []).append(pair)
+        if stranded:
+            pending_by_journey[journey_path] = stranded
+
     # Dirty-WT pre-check when auto-commit is on: any journey whose enclosing
     # git repo is dirty is dropped from this run BEFORE its sidecar entries
     # get consumed. Honors "skip and log, never auto-stash" — see
@@ -476,6 +513,7 @@ def run_replay_pending(
             # written (insert) or already present (skip). Safe to consume.
             for _src, entry in entry_pairs:
                 flushed_keys.add((str(journey_path), entry.youtube_id))
+                flushed_keys.add((str(Path(entry.journey_path)), entry.youtube_id))
 
         total_ready += len(plan.inserts)
 
