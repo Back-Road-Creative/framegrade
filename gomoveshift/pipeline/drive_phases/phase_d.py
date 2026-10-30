@@ -1420,6 +1420,9 @@ class PhaseD:
             # None on a legacy pre-upgrade checkpoint — the builder falls back
             # to the old recompute per LF with a logged warning.
             short_global_index=state.short_global_index,
+            # A --per-lf-location correction on a Phase-D-only resume reaches
+            # shorts whose burned label was inherited from the parent LF.
+            per_lf_overrides=state.per_lf_overrides,
         )
         # Prefix check on the REAL titles (a titles.yaml override is the only
         # thing that can collide -- composed stamps are unique by construction),
