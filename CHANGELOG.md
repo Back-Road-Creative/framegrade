@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-10-31
+
+### Added
+
+- `metrics collect` pulls Facebook Page daily insights (`page_media_view`, `page_total_media_view_unique`, `page_video_views`, `page_impressions_unique`) into `channel_daily` under `facebook:<metric>`, labelled by the Pacific day, backfilling from 2026-06-01 on the first run. A metric Graph refuses is reported unavailable, never stored as zero; the run prints `FB_PAGE_DAILY <metric>=<rows|unavailable> ...`.
+- Facebook Reel observations record `reach` and the metric that answered (`reach_metric`); reach stays unknown when no candidate answers.
+
+### Fixed
+
+- `sync-site` no longer dies on one transient network failure. The four read-only YouTube Data API listing calls behind the channel manifest (`channels.list`, `playlistItems.list`, `videos.list`) now retry up to 4 times with exponential backoff on a read timeout, connection reset, SSL error or HTTP 5xx, then raise the last error. A 4xx still fails at once. The 2026-10-31 daily run was lost to a single `TimeoutError: The read operation timed out`.
+
 ## [0.3.18] - 2026-10-30
 
 ### Fixed
@@ -331,7 +342,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...HEAD
+[0.3.19]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...v0.3.19
 [0.3.18]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...v0.3.18
 [0.3.17]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...v0.3.17
 [0.3.16]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.15...v0.3.16
