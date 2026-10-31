@@ -87,7 +87,7 @@ policy:
       arms:                      # equal split; add `weight: <int >= 1>` to bias
         A: {hashtag_mode: none}      # composed caption, no generic hashtags
         B: {hashtag_mode: location}  # composed caption + 2 location hashtags
-        C: {hashtag_mode: june}      # June-style 5 hashtags including #ScenicDrive
+        C: {hashtag_mode: june}      # June-style: 3 fixed generics + place + region
 ```
 
 Validation is loud (`policy.experiments[i].<key>` in the error): non-empty unique `name`,
@@ -103,9 +103,10 @@ Validation is loud (`policy.experiments[i].<key>` in the error): non-empty uniqu
   the tag is written at generation, not at `enqueue-plan`. `deliveries` has no column for it and
   adding one would need a queue migration; consumers join through the sidecar.
 - **Arm modes** (`SocialGenerator._platform_hashtags`): `none` = no hashtags; `location` = the
-  place and region tags (first two location tags); `june` = `JUNE_STYLE_HASHTAGS`. `none` and
-  `june` omit the region hashtag, so the Facebook `_assert_region_present` check is skipped for
-  them; the caption text still names the place.
+  place and region tags (first two location tags); `june` = `JUNE_STYLE_HASHTAGS`
+  (`#POVDriving #ScenicDrive #RoadTrip`, the June 2026 posts' fixed tags) then those two location
+  tags. Only `none` omits the region hashtag, so the Facebook `_assert_region_present` check is
+  skipped for it; the caption text still names the place.
 - **Report**: `metrics collect` prints one line per arm after the bounded-response step:
   `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_reach=<value|unknown>`. A short
   counts toward `n` only with a measured `PlatformMetrics.reach` and a settled day-7 window

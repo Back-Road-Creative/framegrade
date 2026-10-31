@@ -715,8 +715,10 @@ GENERIC_HASHTAGS = [
 GENERIC_HASHTAGS_PER_POST = 2
 
 #: The ``june`` experiment hashtag mode (``publishing/experiments.py``): the
-#: five-tag shape the June 2026 Facebook posts carried, fixed rather than rotated.
-JUNE_STYLE_HASHTAGS = ["#POVDriving", "#ScenicDrive", "#RoadTrip", "#DriveWithMe", "#OpenRoad"]
+#: June 2026 Facebook posts carried these three generics, then the place and
+#: region tags (upstream plan Appendix A, e.g. "#POVDriving #ScenicDrive
+#: #RoadTrip #StradballytoTralee #CountyKerry").
+JUNE_STYLE_HASHTAGS = ["#POVDriving", "#ScenicDrive", "#RoadTrip"]
 
 # The place-withheld filler for an ``interactive`` short's captions —
 # never a real place, so the interactive family can't leak one through a
@@ -1155,17 +1157,17 @@ class SocialGenerator:
         ``hashtag_mode`` (a caption-experiment arm, ``publishing/experiments.py``)
         replaces all of that: ``none`` is no hashtags, ``location`` the first two
         location tags (none when ``interactive`` withholds the place), ``june``
-        ``JUNE_STYLE_HASHTAGS``. ``limit`` does not apply to an arm.
+        ``JUNE_STYLE_HASHTAGS`` then those location tags. ``limit`` does not
+        apply to an arm.
         """
         if hashtag_mode == "none":
             return []
-        if hashtag_mode == "june":
-            return list(JUNE_STYLE_HASHTAGS)
-        if hashtag_mode == "location":
+        if hashtag_mode in ("location", "june"):
+            generics = list(JUNE_STYLE_HASHTAGS) if hashtag_mode == "june" else []
             if interactive:
-                return []
+                return generics
             ordered = self._mandatory_location_tags() + self.location_hashtags
-            return list(dict.fromkeys(ordered))[:2]
+            return generics + list(dict.fromkeys(ordered))[:2]
         rng = random.Random(self._project_seed(f"captions:{platform}:tags:{short_index}"))
         tags = rng.sample(GENERIC_HASHTAGS, GENERIC_HASHTAGS_PER_POST)
         terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
@@ -1260,9 +1262,9 @@ class SocialGenerator:
         """Compose one distinct caption per platform.
 
         ``experiment_arms`` (``{experiment: arm}``) swaps the Facebook hashtag
-        treatment for the arm's ``hashtag_mode``; the arm modes that drop the
-        location tags (``none``, ``june``) are exempt from the Facebook
-        region-tag check below, since the caption text still names the place.
+        treatment for the arm's ``hashtag_mode``; the ``none`` arm drops the
+        location tags, so it is exempt from the Facebook region-tag check
+        below (the caption text still names the place).
 
         Each composed (non-hand) caption carries the mandatory place fact
         slot (``self.social_location``) — except when ``interactive`` is
@@ -1361,7 +1363,7 @@ class SocialGenerator:
 
         if not interactive:
             for platform in ("facebook", "instagram", "tiktok"):
-                if platform == "facebook" and fb_mode in ("none", "june"):
+                if platform == "facebook" and fb_mode == "none":
                     continue
                 self._assert_region_present(short_index, f"{platform} caption", captions[platform])
 

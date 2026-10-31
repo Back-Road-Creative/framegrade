@@ -6,7 +6,7 @@ a ``hashtag_mode`` the caption generator honours on the experiment's platforms:
 
 * ``none``     -- the composed caption, no hashtags;
 * ``location`` -- the composed caption plus 2 location hashtags;
-* ``june``     -- five fixed generic hashtags including ``#ScenicDrive``.
+* ``june``     -- June 2026 shape: ``#POVDriving #ScenicDrive #RoadTrip`` + the two location tags.
 
 Assignment is a stable hash of ``experiment name + project + short index``,
 never random at runtime, and stops for good ``stop_after_days`` after

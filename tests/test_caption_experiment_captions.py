@@ -73,11 +73,16 @@ def test_arm_b_has_two_location_hashtags():
 
 
 def test_arm_c_has_five_june_style_hashtags():
+    # June 2026 posts (upstream plan Appendix A): "#POVDriving #ScenicDrive
+    # #RoadTrip #<place> #<region>" -- three fixed generics, then the two
+    # location tags arm B carries.
     by = _posts_by_arm()
     assert by["C"]
+    loc = {tuple(_tags(p.captions["facebook"])) for p in by["B"]}
     for p in by["C"]:
         tags = _tags(p.captions["facebook"])
-        assert len(tags) == 5 and "#ScenicDrive" in tags
+        assert tags[:3] == ["#POVDriving", "#ScenicDrive", "#RoadTrip"]
+        assert len(tags) == 5 and tuple(tags[3:]) in loc
 
 
 def test_other_platforms_unchanged_by_arm():
