@@ -30,7 +30,11 @@ Thresholds:
     ``response_policy.daily_cap_for`` climbs its ladder one rung per 7
     healthy days while RECOVERING.
   * Facebook low-reach trigger: 7-day median reel views <0.3x the 28-day
-    median.
+    median. The 28-day median that triggered it is frozen as the baseline;
+    recovery is judged against that baseline (a live median would decay
+    toward the suppressed level and fake a recovery): 7-day median >=0.5x
+    -> RECOVERING, <0.3x -> back to SUPPRESSED, 7 consecutive days >=0.7x
+    -> HEALTHY (baseline cleared).
 
 The YouTube trigger fires on the first day whose share breaches either
 threshold, not after two consecutive low days: a single-day collapse that
@@ -67,6 +71,14 @@ _MEDIAN_WINDOW_DAYS = 28
 FACEBOOK_LOW_REACH_REL_OF_MEDIAN = 0.3
 FACEBOOK_ROLLING_WINDOW_DAYS = 7
 _FACEBOOK_MEDIAN_WINDOW_DAYS = 28
+#: SUPPRESSED -> RECOVERING once the 7-day median reaches this share of the frozen baseline.
+FACEBOOK_RECOVERING_REL_OF_BASELINE = 0.5
+#: RECOVERING -> SUPPRESSED again if the 7-day median falls under this share of the frozen baseline.
+FACEBOOK_RELAPSE_REL_OF_BASELINE = 0.3
+#: A day counts toward the HEALTHY streak at or above this share of the frozen baseline.
+FACEBOOK_HEALTHY_REL_OF_BASELINE = 0.7
+#: Consecutive days at the healthy share before RECOVERING becomes HEALTHY.
+FACEBOOK_HEALTHY_STREAK_DAYS = 7
 
 
 def _daily_traffic_totals(rows: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -154,11 +166,19 @@ def classify_facebook_reel_reach(daily_reel_views: Dict[str, float]) -> Dict[str
     below 0.3x the trailing 28-day median -- both windows
     computed over days strictly before the day being classified, so a
     day's own value never inflates the baseline it is compared against.
+
+    The 28-day median at the moment of the SUPPRESSED flip is frozen as the
+    baseline. While SUPPRESSED/RECOVERING the 7-day median is compared with
+    that frozen baseline, never the live 28-day median: 7-day median >=0.5x
+    -> RECOVERING; <0.3x -> SUPPRESSED; ``FACEBOOK_HEALTHY_STREAK_DAYS``
+    consecutive days >=0.7x -> HEALTHY, which clears the baseline.
     """
     days = sorted(daily_reel_views)
     values = [daily_reel_views[d] for d in days]
     status: Dict[str, Status] = {}
     state: Status = "HEALTHY"
+    baseline: Optional[float] = None
+    healthy_streak = 0
 
     for i, day in enumerate(days):
         window7 = values[max(0, i - FACEBOOK_ROLLING_WINDOW_DAYS) : i]
@@ -169,8 +189,23 @@ def classify_facebook_reel_reach(daily_reel_views: Dict[str, float]) -> Dict[str
         ):
             median7 = statistics.median(window7)
             median28 = statistics.median(window28)
-            if median28 and median7 < FACEBOOK_LOW_REACH_REL_OF_MEDIAN * median28:
-                state = "SUPPRESSED"
+            if baseline is None:
+                if median28 and median7 < FACEBOOK_LOW_REACH_REL_OF_MEDIAN * median28:
+                    state = "SUPPRESSED"
+                    baseline = median28
+                    healthy_streak = 0
+            else:
+                if median7 >= FACEBOOK_HEALTHY_REL_OF_BASELINE * baseline:
+                    healthy_streak += 1
+                else:
+                    healthy_streak = 0
+                if median7 < FACEBOOK_RELAPSE_REL_OF_BASELINE * baseline:
+                    state = "SUPPRESSED"
+                elif healthy_streak >= FACEBOOK_HEALTHY_STREAK_DAYS:
+                    state = "HEALTHY"
+                    baseline = None
+                elif median7 >= FACEBOOK_RECOVERING_REL_OF_BASELINE * baseline:
+                    state = "RECOVERING"
         status[day] = state
 
     return status

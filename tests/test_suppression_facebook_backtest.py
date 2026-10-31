@@ -5,10 +5,8 @@ about 414/day for June, ~350 for July (filled so the series is continuous),
 249/day Aug 1-13, 30.5/day Aug 14-26, 33/day September, 36/day October, with
 small deterministic jitter.
 
-Known gap: ``classify_facebook_reel_reach`` has no recovery branch, so once
-SUPPRESSED the series never returns to HEALTHY or RECOVERING even though
-October is flat at a low level. This test pins that behavior; it does not add
-recovery logic.
+Recovery is judged against the baseline frozen when the collapse was flagged
+(~249/day), so October's flat ~36/day (well under 0.5x) never leaves SUPPRESSED.
 """
 
 from __future__ import annotations
