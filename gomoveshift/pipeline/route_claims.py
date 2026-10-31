@@ -660,16 +660,47 @@ def _same_stateless_county(a, b) -> bool:
     )
 
 
-def _bridge(windows, line) -> None:
+def _edge_bins(windows, geocoder) -> dict:
+    """``{window index: (before, after)}`` — the nearest source fix outside each
+    cut, geocoded as a zero-second ``_Bin`` (``None`` when the file has none on
+    that side or it does not resolve to a county). They count no retained time
+    and cast no place vote; ``_bridge`` reads them only for a gap that runs to
+    the very first or very last retained second."""
+    out: dict = {}
+    for wi, w in enumerate(windows):
+        sides = []
+        for fix, edge in ((w.prev_fix, "head"), (w.next_fix, "tail")):
+            item = None
+            if fix is not None and _valid(fix[1], fix[2]):
+                geo = _geocode(geocoder, fix[1], fix[2])
+                county = _slot(geo.get("county"))
+                if county:
+                    item = _Bin(
+                        0.0,
+                        county,
+                        _slot(geo.get("state")),
+                        None,
+                        f"{w.segment_id} {edge} fix @{fix[0]:.0f} s",
+                        _slot(geo.get("country")),
+                    )
+            sides.append(item)
+        out[wi] = (sides[0], sides[1])
+    return out
+
+
+def _bridge(windows, line, edges=None, notes=None) -> None:
     """Same-county inference, in retained order (the order ``windows`` are given).
 
     Only stateless counties in one country bridge (``_same_stateless_county``).
     A county-less bin whose nearest county-bearing bins before and after name
     one county takes that county (``inferred``). A gap takes ``county`` only
     when the bins immediately on both sides carry a measured county and they
-    agree; a gap beside a county-less bin is never bridged. Fails closed (no
-    bridging at all) when two windows of one segment overlap or are out of order,
-    since the retained order is then ambiguous."""
+    agree; a gap beside a county-less bin is never bridged. A gap that reaches
+    the first or last retained second has no bin on that side; there the
+    nearest source fix outside the cut (``edges``, see :func:`_edge_bins`)
+    stands in, because the cut, not the receiver, ended the fixes. Fails closed
+    (no bridging at all) when two windows of one segment overlap or are out of
+    order, since the retained order is then ambiguous."""
     last: dict = {}
     for w in windows:
         prev = last.get(w.segment_id)
@@ -678,6 +709,7 @@ def _bridge(windows, line) -> None:
         last[w.segment_id] = w.end_s
     line.sort(key=lambda r: r[:3])
     items = [r[3] for r in line]
+    owner = [r[0] for r in line]
     measured = [isinstance(i, _Bin) and bool(i.county) for i in items]
     for k, item in enumerate(items):
         if isinstance(item, _Bin):
@@ -698,8 +730,20 @@ def _bridge(windows, line) -> None:
                 j = next((j for j in rng if isinstance(items[j], _Bin)), None)
                 adj.append(items[j] if j is not None and measured[j] else None)
             before, after = adj
+            edge = (edges or {}).get(owner[k], (None, None))
+            used = []
+            if before is None and not any(isinstance(i, _Bin) for i in items[:k]):
+                before, used = edge[0], [*used, "head"]
+            if after is None and not any(isinstance(i, _Bin) for i in items[k + 1 :]):
+                after, used = edge[1], [*used, "tail"]
             if before and after and _same_stateless_county(before, after):
                 item.county = before.county
+                if used and notes is not None:
+                    notes.append(
+                        f"{item.segment_id} {item.source} gap at {item.start_s:.0f} s "
+                        f"bridged {before.county} from the {' and '.join(used)} "
+                        "source fix outside the cut"
+                    )
 
 
 def measure_route(
@@ -749,7 +793,7 @@ def measure_route(
                     seconds[key] = seconds.get(key, 0.0) + span
                     first.setdefault(key, w.segment_id)
             a = b
-    _bridge(windows, line)
+    _bridge(windows, line, _edge_bins(windows, geocoder), notes)
     places = [
         RoutePlace(
             name=town,
