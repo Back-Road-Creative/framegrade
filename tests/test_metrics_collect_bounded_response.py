@@ -200,7 +200,7 @@ def test_apply_bounded_response_classifies_facebook_and_prints_suppression_lines
 
     out = capsys.readouterr().out
     assert "SUPPRESSION youtube=HEALTHY days=1" in out
-    assert "SUPPRESSION facebook=SUPPRESSED days=45" in out
+    assert "SUPPRESSION facebook=SUPPRESSED days=45 source=reel_plays" in out
     assert "Bounded response (shadow): facebook state=SUPPRESSED" in out
     conn = open_queue_db(tmp_path)
     try:
@@ -223,7 +223,7 @@ def test_apply_bounded_response_facebook_only_warmup(tmp_path, capsys):
         metrics_handler._apply_bounded_response(config, "gomoveshift", "shadow")
 
     out = capsys.readouterr().out
-    assert "SUPPRESSION facebook=WARMUP days=10" in out
+    assert "SUPPRESSION facebook=WARMUP days=10 source=reel_plays" in out
     assert "SUPPRESSION youtube" not in out
 
 
@@ -243,7 +243,7 @@ def test_facebook_warmup_covers_the_28th_day(tmp_path, capsys):
     ):
         metrics_handler._apply_bounded_response(config, "gomoveshift", "shadow")
 
-    assert "SUPPRESSION facebook=WARMUP days=28" in capsys.readouterr().out
+    assert "SUPPRESSION facebook=WARMUP days=28 source=reel_plays" in capsys.readouterr().out
 
 
 def test_facebook_series_failure_does_not_block_youtube(tmp_path, capsys):
@@ -262,3 +262,51 @@ def test_facebook_series_failure_does_not_block_youtube(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "SUPPRESSION youtube=HEALTHY" in out
     assert "facebook" not in out
+
+
+def _fb_rows(metric, n_days, *, low_from=None):
+    dimension = f"facebook:{metric}"
+    return [
+        {"day": day, "dimension": dimension, "value": "page", "views": int(v)}
+        for day, v in _fb_series(n_days, low_from=low_from).items()
+    ]
+
+
+def test_detector_prefers_unique_viewers_page_series(tmp_path, capsys):
+    config = _config(tmp_path)
+    open_queue_db(tmp_path).close()
+    rows = _fb_rows("page_total_media_view_unique", 45, low_from=34) + _fb_rows(
+        "page_media_view", 45
+    )
+
+    with (
+        patch.object(metrics_handler, "load_channel_daily_rows", return_value=rows),
+        patch.object(metrics_handler, "_facebook_reel_series", return_value=_fb_series(10)),
+        patch.object(
+            metrics_handler, "load_brand_policy", return_value=SimpleNamespace(daily_ladder=None)
+        ),
+    ):
+        metrics_handler._apply_bounded_response(config, "gomoveshift", "shadow")
+
+    out = capsys.readouterr().out
+    assert "SUPPRESSION facebook=SUPPRESSED days=45 source=page_total_media_view_unique" in out
+
+
+def test_detector_falls_back_to_reel_plays_when_page_series_too_short(tmp_path, capsys):
+    config = _config(tmp_path)
+    open_queue_db(tmp_path).close()
+
+    with (
+        patch.object(
+            metrics_handler,
+            "load_channel_daily_rows",
+            return_value=_fb_rows("page_media_view", 28),
+        ),
+        patch.object(metrics_handler, "_facebook_reel_series", return_value=_fb_series(10)),
+        patch.object(
+            metrics_handler, "load_brand_policy", return_value=SimpleNamespace(daily_ladder=None)
+        ),
+    ):
+        metrics_handler._apply_bounded_response(config, "gomoveshift", "shadow")
+
+    assert "SUPPRESSION facebook=WARMUP days=10 source=reel_plays" in capsys.readouterr().out

@@ -56,15 +56,16 @@ the shadow log fills without anyone running anything by hand.
 
 - **YouTube and Facebook.** YouTube is classified via `tracking.suppression.classify_youtube_shorts_feed`
   over every stored `channel_daily` row for the brand. Facebook is classified via
-  `classify_facebook_reel_reach` over an interim daily reel-plays series that
+  `classify_facebook_reel_reach` over the first Page series stored in `channel_daily`
+  (`facebook:<metric>`, tried in `channel_daily.FACEBOOK_DETECTOR_PREFERENCE` order, unique viewers first)
+  that has more than 28 days; with none, over an interim daily reel-plays series that
   `tracking.facebook_series.facebook_reel_plays_series` builds from the nightly cumulative
-  observation log (`short.observation_log["facebook"]`; the Page daily series now stored in `channel_daily` under
-  `facebook:<metric>` is not read by the detector yet): the per-fetch delta of `reel_total_plays` between consecutive MEASURED entries
+  observation log (`short.observation_log["facebook"]`): the per-fetch delta of `reel_total_plays` between consecutive MEASURED entries
   of a post, attributed to the New York day of the later fetch and summed over shorts; a counter
   that moved backwards is skipped, and a post's first observation counts in full only when it was
   fetched within a day of posting. Days with no observation are absent, so gaps shorten the
   detector's windows. Each classified platform prints `SUPPRESSION <platform>=<status> days=<n>`
-  to the cron log; Facebook prints `WARMUP` until 28 days of series exist. Facebook has no
+  to the cron log (Facebook appends `source=<metric name|reel_plays>`); Facebook prints `WARMUP` until 28 days of series exist. Facebook has no
   recovery branch: once SUPPRESSED it stays so (known gap).
 - **Shadow by default, always.** `--response-mode {shadow,live}` on `metrics collect` (default
   `shadow`) is the only switch; the scheduled line that runs `metrics collect` is operator-only to edit, so

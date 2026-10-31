@@ -41,6 +41,7 @@ from ...tracking import (
 )
 from ...tracking.channel_daily import (
     FACEBOOK_PAGE_METRICS,
+    facebook_detector_series,
     pull_channel_daily,
     pull_facebook_page_daily,
     shorts_feed_share,
@@ -422,13 +423,15 @@ def _facebook_reel_series() -> Dict[str, float]:
     return facebook_reel_plays_series(TrackingStore().load_all_records())
 
 
-def _suppression_line(platform: str, day_states: dict) -> str:
+def _suppression_line(platform: str, day_states: dict, source: str = "") -> str:
     """One cron-log line: the latest day's status, ``WARMUP`` while Facebook's
-    series has not outgrown the detector's 28-day baseline."""
+    series has not outgrown the detector's 28-day baseline; ``source`` (the
+    series the platform was read from) is appended when given."""
     status = day_states[max(day_states)]
     if platform == "facebook" and len(day_states) <= _FACEBOOK_WARMUP_DAYS:
         status = "WARMUP"
-    return f"SUPPRESSION {platform}={status} days={len(day_states)}"
+    line = f"SUPPRESSION {platform}={status} days={len(day_states)}"
+    return f"{line} source={source}" if source else line
 
 
 def _apply_bounded_response(config, brand: str, mode: str) -> None:
@@ -440,11 +443,12 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
     Classifies YouTube's Shorts-feed share history via `tracking.
     suppression.classify_youtube_shorts_feed` over every stored
     `channel_daily` row for `brand`, and Facebook's reel plays via
-    `classify_facebook_reel_reach` over the interim daily series built from
-    the nightly observation log (`_facebook_reel_series`; `channel_daily`
-    holds no Facebook rows). Facebook has no recovery branch: once
+    `classify_facebook_reel_reach` over the first preferred Page series in
+    `channel_daily` with more than 28 days (`facebook_detector_series`), else
+    the interim series built from the nightly observation log
+    (`_facebook_reel_series`, source ``reel_plays``). Facebook has no recovery branch: once
     SUPPRESSED it stays so. A platform with no series is left out of
-    `states`; one `SUPPRESSION <platform>=<status> days=<n>` line per
+    `states`; one `SUPPRESSION <platform>=<status> days=<n>` line (Facebook adds `source=<series>`) per
     classified platform goes to the cron log.
 
     `mode` defaults to ``"shadow"`` (``args.response_mode``, itself
@@ -462,8 +466,10 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
     try:
         rows = load_channel_daily_rows(brand)
         day_states = classify_youtube_shorts_feed(rows) if rows else {}
+        fb_source, fb_series = facebook_detector_series(rows, _FACEBOOK_WARMUP_DAYS)
         try:
-            fb_series = _facebook_reel_series()
+            if not fb_series:
+                fb_source, fb_series = "reel_plays", _facebook_reel_series()
         except Exception as exc:  # noqa: BLE001 - a Facebook series failure must not block YouTube
             logger.warning("facebook series skipped: %s", exc)
             fb_series = {}
@@ -478,7 +484,11 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
         if fb_states:
             states["facebook"] = fb_states
         for platform, platform_states in states.items():
-            print(_suppression_line(platform, platform_states))
+            print(
+                _suppression_line(
+                    platform, platform_states, fb_source if platform == "facebook" else ""
+                )
+            )
         today = max(max(v) for v in states.values())
         ladder = load_brand_policy(brand).daily_ladder
         storage_path = Path(config.seo.storage_path)

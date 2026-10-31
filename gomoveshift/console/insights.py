@@ -378,8 +378,9 @@ def _suppression_rows(brand: str) -> List[Dict[str, Any]]:
     above.
 
     Facebook is not translated here: `channel_daily` now stores the Page
-    daily series (``facebook:<metric>`` rows), but `classify_facebook_reel_reach`
-    is not yet switched onto it (see `docs/facebook-metrics.md`).
+    daily series (``facebook:<metric>`` rows), and `classify_facebook_reel_reach`
+    reads it once long enough (see `docs/facebook-metrics.md`), but the
+    console view carries no Facebook translation.
     """
     rows = load_channel_daily_rows(brand)
     if not rows:
