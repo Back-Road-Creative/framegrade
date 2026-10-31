@@ -17,6 +17,7 @@ Each key is validated on load; the table names its reader where one exists:
 | `region_weight` | non-empty mapping of non-empty lowercase string -> number > 0, stored as an immutable `types.MappingProxyType` | per-region scheduling weight |
 | `blackout` | sequence of ISO dates (`YYYY-MM-DD`), stored as a tuple of `datetime.date`, or omitted = no blackout | `dispatch._select_due` |
 | `quiet_after_alert_hours` | int >= 0, or omitted = no quiet period | `dispatch._select_due` |
+| `experiments` | list of caption experiments (below), or omitted = none; stored as a tuple of `publishing.experiments.Experiment` | `SocialGenerator`; the nightly report in `cli/handlers/metrics.py` |
 
 An unknown key under `policy:` raises `ValueError` naming it -- a typo in a policy key must not
 silently do nothing.
@@ -38,7 +39,7 @@ policy:
 `console/settings.brand_disabled_tabs()` only ever reads the `disabled_tabs` key via `.get()`, so
 the `policy:` block does not change console nav/tab behaviour for any brand.
 
-No `brand.yaml` ships in this repository; a brand without a `policy:` block has every key fall back
+The shipped `brand.yaml` is an example seed with no `policy:` block; a brand without a `policy:` block has every key fall back
 to `None`.
 
 ### `blackout`
@@ -69,3 +70,48 @@ the existing cap ladder governs again. `quiet_after_alert_hours` omitted/`None` 
 no `response_log` query at all; `0` means a zero-length window, so it never holds. The console
 Publishing tab shows `held: quiet` the same way it shows `held: blackout`
 (`console/pubqueue.py: enrich_rows_with_sidecar`) -- blackout wins when both apply, checked first.
+
+### `experiments`
+
+A caption experiment chooses WHICH hashtag treatment a short's Facebook caption gets. It never
+changes how many shorts post or when -- cadence and volume stay Waypost's.
+
+```yaml
+policy:
+  experiments:
+    - name: fb_hashtags
+      platforms: [facebook]
+      start: 2026-11-02          # first day an arm is assigned
+      stop_after_days: 45        # no new arm from start + 45 days on
+      min_n: 20                  # settled, measured shorts each arm needs before a median is reported
+      arms:                      # equal split; add `weight: <int >= 1>` to bias
+        A: {hashtag_mode: none}      # composed caption, no generic hashtags
+        B: {hashtag_mode: location}  # composed caption + 2 location hashtags
+        C: {hashtag_mode: june}      # June-style 5 hashtags including #ScenicDrive
+```
+
+Validation is loud (`policy.experiments[i].<key>` in the error): non-empty unique `name`,
+`platforms` a non-empty subset of `[facebook]` (reach is the only outcome measured), ISO `start`,
+`min_n` and `stop_after_days` ints >= 1, at least two arms, each `hashtag_mode` one of
+`none`/`location`/`june`, `weight` an int >= 1, no unknown keys.
+
+- **Assignment** (`experiments.assign_arm`) is a weighted sha256 of `name:project:short_index`,
+  so it is reproducible and never random at runtime. `SocialGenerator` assigns when it generates
+  a post and writes the `{experiment: arm}` map to `SocialPost.experiment_arms`, then
+  `PublishRecord.experiment_arms` in the publish-plan sidecar (omitted from the file when empty, so
+  plans outside an experiment keep their Gate C/D bytes). The sidecar is hashed at Gate C/D, so
+  the tag is written at generation, not at `enqueue-plan`. `deliveries` has no column for it and
+  adding one would need a queue migration; consumers join through the sidecar.
+- **Arm modes** (`SocialGenerator._platform_hashtags`): `none` = no hashtags; `location` = the
+  place and region tags (first two location tags); `june` = `JUNE_STYLE_HASHTAGS`. `none` and
+  `june` omit the region hashtag, so the Facebook `_assert_region_present` check is skipped for
+  them; the caption text still names the place.
+- **Report**: `metrics collect` prints one line per arm after the bounded-response step:
+  `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_reach=<value|unknown>`. A short
+  counts toward `n` only with a measured `PlatformMetrics.reach` and a settled day-7 window
+  (`tracking.day7.window_settled`; Facebook keeps no daily series, so `has_settled_series` does not
+  apply). The median stays `unknown` until EVERY arm holds `min_n`; unmeasured reach is never 0.
+  `experiments.arm_results` returns the same data for a caller that wants the numbers.
+- **Where the real policy lives**: `console/brands/gomoveshift/brand.yaml` here is the public
+  example seed, and `GMS_BRANDS_DIR/<slug>` replaces it wholesale on the host, so the live
+  experiment block goes in the host's `brand.yaml`, not this repository.
