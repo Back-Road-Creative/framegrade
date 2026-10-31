@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-10-31
+
+### Fixed
+
+- The before-ingest raw-footage floor (`full_drive_part_min_sec`) now applies only when the resolved long-form mode is `full_drive`. An operator-chosen `--lf-mode best_moments` shadows the part bounds, so a short day in that mode is no longer refused for a planner that never runs.
+
 ## [0.3.20] - 2026-10-31
 
 ### Changed
@@ -353,7 +359,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...HEAD
+[0.3.21]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...v0.3.21
 [0.3.20]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...v0.3.20
 [0.3.19]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...v0.3.19
 [0.3.18]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...v0.3.18
