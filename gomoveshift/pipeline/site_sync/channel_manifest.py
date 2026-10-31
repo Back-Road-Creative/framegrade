@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 # unions the three splits into it.
 UPLOADS_SPLIT_PREFIXES = ("UUSH", "UULF", "UULV")
 
+# Every call here is a read-only list. googleapiclient's ``execute(num_retries=N)``
+# re-sends on a socket/read timeout, connection reset, SSL error or HTTP 5xx with
+# randomized exponential backoff, and raises the last error once N retries are
+# spent; a 4xx ``HttpError`` is never retried. One transient read timeout must not
+# kill the daily ``sync-site`` run (the next attempt is a day away).
+_API_RETRIES = 4
+
 # Classification thresholds (seconds).
 SHORT_MAX_SECONDS = 90  # <= this is a Short.
 STREAM_MIN_SECONDS = 21600  # > this (6h) is a livestream/raw, not a real LF.
@@ -97,7 +104,7 @@ def _list_playlist(service, playlist_id: str) -> dict[str, dict]:
         response = (
             service.playlistItems()
             .list(part="snippet", playlistId=playlist_id, maxResults=50, pageToken=page_token)
-            .execute()
+            .execute(num_retries=_API_RETRIES)
         )
         for item in response.get("items", []):
             snippet = item.get("snippet", {})
@@ -145,7 +152,9 @@ def _recover_known_ids(
     recovered = 0
     for start in range(0, len(wanted), 50):
         response = (
-            service.videos().list(part="snippet", id=",".join(wanted[start : start + 50])).execute()
+            service.videos()
+            .list(part="snippet", id=",".join(wanted[start : start + 50]))
+            .execute(num_retries=_API_RETRIES)
         )
         for item in response.get("items", []):
             snippet = item.get("snippet", {})
@@ -174,7 +183,11 @@ def enumerate_uploads(service, *, known_ids: Iterable[str] = ()) -> dict[str, di
     ``ceil(n/50)`` ``playlistItems.list`` units per playlist and
     ``ceil(missing/50)`` ``videos.list`` units (none without ``known_ids``).
     """
-    channels_response = service.channels().list(part="id,contentDetails", mine=True).execute()
+    channels_response = (
+        service.channels()
+        .list(part="id,contentDetails", mine=True)
+        .execute(num_retries=_API_RETRIES)
+    )
     items = channels_response.get("items") or []
     if not items:
         return {}
@@ -228,7 +241,7 @@ def build_channel_manifest(
         response = (
             service.videos()
             .list(part="contentDetails,status,snippet", id=",".join(batch))
-            .execute()
+            .execute(num_retries=_API_RETRIES)
         )
         for video in response.get("items", []):
             entry = by_id.get(video.get("id"))

@@ -33,7 +33,7 @@ class _Req:
     def __init__(self, payload):
         self._payload = payload
 
-    def execute(self):
+    def execute(self, **_kwargs):
         return self._payload
 
 
