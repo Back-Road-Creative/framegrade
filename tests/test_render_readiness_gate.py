@@ -94,6 +94,10 @@ class TestRefusalBeforeGpuWork:
         cfg = Config()
         cfg.drive.full_drive_part_min_sec = 3600
         cfg.drive.full_drive_part_max_sec = 5400
+        # Config() resolved the LF policy before the bounds existed; re-resolve so
+        # the operator's bounds select full_drive, where the floor is active.
+        cfg.drive.lf_selection_mode = None
+        cfg.drive._resolve_lf_policy()
         res, calls = _run(
             tmp_path,
             monkeypatch,
