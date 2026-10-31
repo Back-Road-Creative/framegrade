@@ -9,7 +9,8 @@ under ``policy:`` raises -- a typo must not silently do nothing.
 Keys: ``per_location_cap``, ``weekly_ceiling``, ``daily_ladder``,
 ``stagger_hours``, ``region_weight``, ``blackout`` (read by
 ``dispatch._select_due``) and ``quiet_after_alert_hours`` (read by
-``dispatch._exclude_quiet_window``).
+``dispatch._exclude_quiet_window``), and ``experiments`` (caption A/B arms,
+``publishing/experiments.py``, read by ``SocialGenerator``).
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
 import yaml
+
+from .experiments import Experiment, parse_experiments
 
 _CONSOLE_ROOT = Path(__file__).resolve().parent.parent / "console"
 _SHIPPED_BRANDS_DIR = _CONSOLE_ROOT / "brands"
@@ -56,6 +59,7 @@ _KNOWN_POLICY_KEYS = frozenset(
         "region_weight",
         "blackout",
         "quiet_after_alert_hours",
+        "experiments",
     }
 )
 
@@ -83,6 +87,8 @@ class BrandPolicy:
     #: Hours to hold delivery after a suppression alert. ``None`` means no
     #: quiet period.
     quiet_after_alert_hours: Optional[int] = None
+    #: Caption experiments (``publishing/experiments.py``). Empty = none run.
+    experiments: Tuple[Experiment, ...] = ()
 
 
 def _load_raw_policy_block(slug: str) -> dict:
@@ -205,6 +211,7 @@ def load_brand_policy(slug: str) -> BrandPolicy:
         region_weight=region_weight,
         blackout=blackout,
         quiet_after_alert_hours=quiet_after_alert_hours,
+        experiments=parse_experiments(block.get("experiments")),
     )
 
 

@@ -795,6 +795,10 @@ def _serialize_publish_plan(plan) -> str:
     payload = asdict(plan)
     for record in payload.get("shorts", []):
         record.pop("generated_at", None)
+        # An untagged record omits the key, so a plan outside every experiment
+        # keeps the bytes (and Gate C/D hash) it had before experiments existed.
+        if not record.get("experiment_arms"):
+            record.pop("experiment_arms", None)
     return json.dumps(payload, sort_keys=True, indent=2, default=_json_datetime_default) + "\n"
 
 
@@ -957,6 +961,8 @@ def _emit_publish_preview_sidecar(
         payload = asdict(plan)
         for record in payload.get("shorts", []):
             record.pop("generated_at", None)
+            if not record.get("experiment_arms"):
+                record.pop("experiment_arms", None)
             record["placeholders"] = placeholders.get(record["short_index"], [])
         payload = {"kind": "publish_preview", "not_for_publish": True, **payload}
         preview_path = output_base / f"{project_base}_publish_preview.json"
