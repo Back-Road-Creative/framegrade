@@ -125,3 +125,36 @@ def test_mixed_states_give_no_counties_claim(states):
          _Bin(30.0, "Brell County", states[1], country="X")],
     )  # fmt: skip
     assert ev.region_claim("counties") is None
+
+
+def _cork(t):
+    return 51.0
+
+
+def test_tail_gap_bridges_from_the_next_source_fix_in_the_same_county():
+    # The cut ends 10 s after the last retained fix; the next fix of the same
+    # file sits just past the cut and is also in County Cork.
+    w = _window(600, _cork, drop=[(590, 600)])
+    w.next_fix_s, w.next_fix = 605.0, (605.0, 51.0, 9.0)
+    ev = measure_route([w], _Geo(), bin_s=10.0)
+    assert [g.county for g in ev.gaps] == ["County Cork"]
+    assert ev.coverage_excluding({"County Cork"}) == 1.0
+    assert any("tail" in n and "County Cork" in n for n in ev.boundary_notes)
+
+
+def test_head_gap_bridges_from_the_previous_source_fix_in_the_same_county():
+    w = _window(600, _cork, drop=[(0, 10)])
+    w.prev_fix_s, w.prev_fix = -4.0, (-4.0, 51.0, 9.0)
+    ev = measure_route([w], _Geo(), bin_s=10.0)
+    assert [g.county for g in ev.gaps] == ["County Cork"]
+
+
+@pytest.mark.parametrize("outside", [None, (605.0, 52.0, 9.0), (605.0, 51.5, 9.0)])
+def test_tail_gap_stays_a_gap_without_a_same_county_fix_past_the_cut(outside):
+    w = _window(600, _cork, drop=[(590, 600)])
+    if outside:
+        w.next_fix_s, w.next_fix = outside[0], outside
+    ev = measure_route([w], _Geo(), bin_s=10.0)
+    assert [g.county for g in ev.gaps] == [None]
+    with pytest.raises(RouteClaimRefusedError):
+        select_supported_label("County Cork, Ireland", ev)

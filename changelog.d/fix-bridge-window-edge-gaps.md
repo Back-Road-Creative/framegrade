@@ -1,0 +1,3 @@
+### Fixed
+
+- A GPS gap that runs to the first or last retained second of a cut is bridged to the county of the nearest source fix just outside the cut when the bin on its other side agrees, so a best-moments cut that ends inside a logger pause no longer refuses a county label it otherwise proves; the bridge is recorded in boundary_notes.
