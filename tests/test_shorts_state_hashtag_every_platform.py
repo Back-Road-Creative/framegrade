@@ -125,7 +125,9 @@ def test_interactive_still_withholds_place_and_its_tags(tmp_path):
 def test_gate_raises_when_a_caption_lacks_the_region(monkeypatch):
     gen = _gen("Unicoi, Tennessee")
     monkeypatch.setattr(
-        SocialGenerator, "_platform_hashtags", lambda self, p, i, inter, limit: ["#Unicoi"]
+        SocialGenerator,
+        "_platform_hashtags",
+        lambda self, p, i, inter, limit, hashtag_mode=None: ["#Unicoi"],
     )
     with pytest.raises(ValueError, match="region"):
         gen.generate_post(short_index=1)

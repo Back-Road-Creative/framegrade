@@ -214,6 +214,10 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: without a second record type: a short/photo/long-form record's single
     #: item is ``media`` itself, and __post_init__ refuses any other shape.
     additional_media: "tuple[MediaFingerprint, ...]" = ()
+    #: ``{experiment name: arm id}`` the caption generator assigned this
+    #: record (``publishing/experiments.py``); ``{}`` = in no experiment. Rides
+    #: the sidecar only -- ``deliveries`` has no column for it.
+    experiment_arms: dict = field(default_factory=dict, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.format is not None and self.format not in KNOWN_FORMATS:

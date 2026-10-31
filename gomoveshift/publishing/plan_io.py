@@ -139,6 +139,17 @@ def _format(raw: Dict[str, Any], path: Path, ctx: str) -> Optional[str]:
     return value
 
 
+def _experiment_arms(raw: Dict[str, Any], path: Path, ctx: str) -> Dict[str, str]:
+    """``experiment_arms``, absent-tolerant: sidecars written before caption
+    experiments existed carry none."""
+    value = raw.get("experiment_arms") or {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise _fail(path, f"'experiment_arms' must map experiment names to arm ids ({ctx})")
+    return dict(value)
+
+
 def _payloads(raw: Dict[str, Any], path: Path, ctx: str) -> PlatformPayloads:
     """Absent OR null means 'this platform has no payload' — ``asdict``
     writes ``None`` for an unset payload, so both shapes reach us."""
@@ -241,6 +252,7 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
             # default applies. See the module docstring.
             format=_format(raw, path, ctx),
             additional_media=_additional_media(raw, path, ctx),
+            experiment_arms=_experiment_arms(raw, path, ctx),
         )
     except KeyError as exc:
         raise _fail(path, f"missing required field {exc} ({ctx})") from exc
