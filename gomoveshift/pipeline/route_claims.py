@@ -266,6 +266,9 @@ class RouteGap:
     fix_after_s: float
     start_s: float
     end_s: float
+    #: Set at measure time when the nearest county-bearing bins on both sides
+    #: resolve to this one county (see ``_bridge``); ``None`` = not bridged.
+    county: Optional[str] = None
 
     @property
     def interval_s(self) -> float:
@@ -297,6 +300,9 @@ class _Bin:
     state: Optional[str]
     town: Optional[str] = None
     where: str = ""
+    country: Optional[str] = None
+    #: True when the county was inferred from the same county on both sides.
+    inferred: bool = False
 
 
 def retained_windows_key(windows) -> str:
@@ -337,6 +343,7 @@ class RouteEvidence:
                 g["fix_after_s"],
                 g["media_start_s"],
                 g["media_start_s"] + g["length_s"],
+                g.get("county"),
             )
             for g in record.get("gaps") or []
         ]
@@ -352,7 +359,14 @@ class RouteEvidence:
             for p in record.get("places") or []
         ]
         bins = [
-            _Bin(b["seconds"], b.get("county"), b.get("state"), b.get("town"))
+            _Bin(
+                b["seconds"],
+                b.get("county"),
+                b.get("state"),
+                b.get("town"),
+                country=b.get("country"),
+                inferred=bool(b.get("inferred")),
+            )
             for b in record.get("bins") or []
         ]
         return cls(
@@ -371,9 +385,21 @@ class RouteEvidence:
 
     @property
     def coverage(self) -> float:
+        """Physical coverage: every gap counts, bridged or not. A county claim
+        uses :meth:`coverage_excluding` for its own, bridge-aware figure."""
+        return self.coverage_excluding(())
+
+    def coverage_excluding(self, counties) -> float:
+        """Coverage with gaps bridged to one of ``counties`` not counted."""
         if self.retained_seconds <= 0:
             return 0.0
-        return max(0.0, 1.0 - self.gap_seconds / self.retained_seconds)
+        lost = sum(g.seconds for g in self.gaps if g.county not in counties)
+        return max(0.0, 1.0 - lost / self.retained_seconds)
+
+    @property
+    def uncountied_seconds(self) -> float:
+        """Retained seconds in bins still without a county (inferred ones count as having one)."""
+        return sum(b.seconds for b in self.bins if not b.county)
 
     @property
     def required(self) -> list:
@@ -406,6 +432,7 @@ class RouteEvidence:
                     "fix_before_s": round(g.fix_before_s, 3),
                     "fix_after_s": round(g.fix_after_s, 3),
                     "interval_s": round(g.interval_s, 3),
+                    "county": g.county,
                 }
                 for g in self.gaps
             ],
@@ -436,23 +463,37 @@ class RouteEvidence:
         """Retained seconds per resolved (town, county, state), names and seconds only."""
         totals: dict = {}
         for b in self.bins:
-            key = (b.town, b.county, b.state)
+            key = (b.town, b.county, b.state, b.country, b.inferred)
             totals[key] = totals.get(key, 0.0) + b.seconds
         return [
-            {"town": t, "county": c, "state": st, "seconds": round(sec, 3)}
-            for (t, c, st), sec in totals.items()
+            {
+                "town": t,
+                "county": c,
+                "state": st,
+                "country": co,
+                "inferred": inf,
+                "seconds": round(sec, 3),
+            }
+            for (t, c, st, co, inf), sec in totals.items()
         ]
 
     def _county_pair(self) -> Optional[list]:
-        """The two counties the retained bins resolve to, most time first, when
-        both are counties ("... County") of one state; else ``None``."""
+        """The two counties the retained bins resolve to, most time first: both
+        "... County" of one state, or (stateless, e.g. Irish "County Cork") two
+        counties whose bins all lack a state and share one country; else ``None``."""
         votes = Counter()
         for b in self.bins:
             if b.county:
                 votes[b.county] += b.seconds
         pair = [name for name, _sec in votes.most_common()]
-        states = {b.state for b in self.bins if b.county in pair}
-        if len(pair) != 2 or len(states) != 1 or None in states:
+        if len(pair) != 2:
+            return None
+        inside = [b for b in self.bins if b.county in pair]
+        states = {b.state for b in inside}
+        if states == {None}:
+            countries = {b.country for b in inside}
+            return pair if len(countries) == 1 and None not in countries else None
+        if len(states) != 1 or None in states:
             return None
         return pair if all(c.endswith(" County") for c in pair) else None
 
@@ -464,7 +505,10 @@ class RouteEvidence:
             pair = self._county_pair()
             if pair is None:
                 return None
-            name = " & ".join(c.removesuffix(" County") for c in pair) + " Counties"
+            if all(b.state is None for b in self.bins if b.county in pair):
+                name = " & ".join(pair)  # stateless: each county keeps its own name
+            else:
+                name = " & ".join(c.removesuffix(" County") for c in pair) + " Counties"
 
             def of(item):
                 return name if item.county in pair else item.county
@@ -496,12 +540,15 @@ class RouteEvidence:
         # whose lookup resolved nothing are proven inside; without one they
         # stay "outside" (nothing shows they are not).
         outside = other if proved else other + unresolved
+        # A gap bridged to a county this claim names is inside it, not a gap.
+        held = [] if level == "state" else (pair if level == "counties" else [name])
+        open_gaps = [g for g in self.gaps if g.county not in held]
         claim = {
             "level": level,
             "name": name,
             "required_place_ids": [p.evidence_id for p in self.required if of(p) == name],
-            "coverage": self.coverage,
-            "gaps": [g.describe() for g in self.gaps],
+            "coverage": self.coverage_excluding(held),
+            "gaps": [g.describe() for g in open_gaps],
             "samples_inside": inside,
             "samples_outside": outside,
             "samples_other": other,
@@ -516,6 +563,8 @@ class RouteEvidence:
         if level == "counties":
             claim["counties"] = pair
             claim["state"] = next(b.state for b in self.bins if b.county in pair)
+            if claim["state"] is None:
+                claim["country"] = next(b.country for b in self.bins if b.county in pair)
         if proved:
             claim["boundary_proof"] = proof
         return claim
@@ -597,6 +646,62 @@ def _slot(value) -> Optional[str]:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _same_stateless_county(a, b) -> bool:
+    """Both bins sit in one county that carries no state, in one known country.
+    Bridging is limited to that case: US (state-bearing) routes keep zero tolerance."""
+    return bool(
+        a
+        and b
+        and a.county == b.county
+        and a.state is None
+        and b.state is None
+        and a.country
+        and a.country == b.country
+    )
+
+
+def _bridge(windows, line) -> None:
+    """Same-county inference, in retained order (the order ``windows`` are given).
+
+    Only stateless counties in one country bridge (``_same_stateless_county``).
+    A county-less bin whose nearest county-bearing bins before and after name
+    one county takes that county (``inferred``). A gap takes ``county`` only
+    when the bins immediately on both sides carry a measured county and they
+    agree; a gap beside a county-less bin is never bridged. Fails closed (no
+    bridging at all) when two windows of one segment overlap or are out of order,
+    since the retained order is then ambiguous."""
+    last: dict = {}
+    for w in windows:
+        prev = last.get(w.segment_id)
+        if prev is not None and w.start_s < prev:
+            return
+        last[w.segment_id] = w.end_s
+    line.sort(key=lambda r: r[:3])
+    items = [r[3] for r in line]
+    measured = [isinstance(i, _Bin) and bool(i.county) for i in items]
+    for k, item in enumerate(items):
+        if isinstance(item, _Bin):
+            if item.county:
+                continue
+            side = []
+            for rng in (range(k - 1, -1, -1), range(k + 1, len(items))):
+                side.append(next((items[j] for j in rng if measured[j]), None))
+            before, after = side
+            if before and after and _same_stateless_county(before, after):
+                item.county, item.inferred = before.county, True
+                item.state = before.state if before.state == after.state else None
+                item.country = before.country if before.country == after.country else None
+        else:
+            # the bins adjacent to the gap (stepping over other gaps) must be measured
+            adj = []
+            for rng in (range(k - 1, -1, -1), range(k + 1, len(items))):
+                j = next((j for j in rng if isinstance(items[j], _Bin)), None)
+                adj.append(items[j] if j is not None and measured[j] else None)
+            before, after = adj
+            if before and after and _same_stateless_county(before, after):
+                item.county = before.county
+
+
 def measure_route(
     windows,
     geocoder,
@@ -616,10 +721,12 @@ def measure_route(
     seconds: dict = {}
     first: dict = {}
     unresolved = 0.0
-    for w, (fixes, _inv, _dup) in zip(windows, cleaned):
+    line: list = []  # (window index, time, 0 gap / 1 bin, item): retained order
+    for wi, (w, (fixes, _inv, _dup)) in enumerate(zip(windows, cleaned)):
         retained += max(0.0, w.end_s - w.start_s)
         wgaps = _window_gaps(w, fixes, gap_s, tick_s, notes)
         gaps.extend(wgaps)
+        line.extend((wi, g.start_s, 0, g) for g in wgaps)
         a = w.start_s
         i = 0
         while a < w.end_s:
@@ -632,7 +739,9 @@ def measure_route(
                 geo = _geocode(geocoder, rep[1], rep[2]) if rep else {}
                 town = next((v for v in map(_slot, map(geo.get, _SETTLEMENT_KEYS)) if v), None)
                 county, state = _slot(geo.get("county")), _slot(geo.get("state"))
-                bins.append(_Bin(span, county, state, town, f"{w.segment_id} @{a:.0f} s"))
+                country = _slot(geo.get("country"))
+                bins.append(_Bin(span, county, state, town, f"{w.segment_id} @{a:.0f} s", country))
+                line.append((wi, a, 1, bins[-1]))
                 if town is None:
                     unresolved += span
                 else:
@@ -640,6 +749,7 @@ def measure_route(
                     seconds[key] = seconds.get(key, 0.0) + span
                     first.setdefault(key, w.segment_id)
             a = b
+    _bridge(windows, line)
     places = [
         RoutePlace(
             name=town,
@@ -817,10 +927,14 @@ def place_text_issues(text: str, ev: RouteEvidence) -> list:
         f"text names ({names})"
         for key, (sec, where) in outside.items()
     ]
-    if ev.gap_seconds > _EPS and not proof_covers:
+    open_gaps = [
+        g for g in ev.gaps if g.county not in c_named
+    ]  # bridged to a named county: inside it
+    open_s = sum(g.seconds for g in open_gaps)
+    if open_s > _EPS and not proof_covers:
         issues.append(
-            f"{ev.gap_seconds:.0f} s of retained footage is a GPS gap "
-            f"({'; '.join(g.describe() for g in ev.gaps)}) and no pinned boundary proof "
+            f"{open_s:.0f} s of retained footage is a GPS gap "
+            f"({'; '.join(g.describe() for g in open_gaps)}) and no pinned boundary proof "
             f"of a place the text names ({names}) covers it"
         )
     return issues
@@ -841,6 +955,8 @@ def region_label(claim: dict) -> str:
     if claim["level"] == "state":
         return name
     state = claim.get("state")  # county or counties
+    if not state and claim.get("country"):
+        return f"{name}, {claim['country']}"  # stateless pair: "County Cork & ..., Ireland"
     return f"{name}, {US_STATE_ABBREVS.get(state, state)}" if state else name
 
 
@@ -872,12 +988,18 @@ def label_issues(
     ]
     issues += _state_suffix_issues(label, ev)
     issues += place_text_issues(label, ev)
-    unknown = ev.gap_seconds + ev.unsettled_seconds
+    named = {b.county for b in ev.bins if b.county and _names(label or "", b.county)}
+    if named and not any(_names(label or "", p.name) for p in ev.places):
+        # A county-level label: a gap bridged to a named county, and a bin with a
+        # (possibly inferred) county, are inside it; only the rest is unknown.
+        gap_s = sum(g.seconds for g in ev.gaps if g.county not in named)
+        unknown = gap_s + ev.uncountied_seconds
+        detail = f"gap_seconds {gap_s:.1f}, uncountied_seconds {ev.uncountied_seconds:.1f}"
+    else:
+        unknown = ev.gap_seconds + ev.unsettled_seconds
+        detail = f"gap_seconds {ev.gap_seconds:.1f}, unsettled_seconds {ev.unsettled_seconds:.1f}"
     if unknown >= unknown_floor_s and unknown > _EPS:
-        issues.append(
-            f"{unknown:.0f} s of retained footage has no resolved place (gap_seconds "
-            f"{ev.gap_seconds:.1f}, unsettled_seconds {ev.unsettled_seconds:.1f})"
-        )
+        issues.append(f"{unknown:.0f} s of retained footage has no resolved place ({detail})")
     issues += [
         f"asserts containment ({w!r}); the evidence is sampled"
         for w in containment_wording_issues(label)
