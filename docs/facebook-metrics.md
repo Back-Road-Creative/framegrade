@@ -83,9 +83,13 @@ cannot reject the others: `page_media_view`, `page_total_media_view_unique`,
   `FB_PAGE_DAILY page_media_view=<rows|unavailable> ...` for every candidate,
   which is how the answering names are confirmed.
 
-`classify_facebook_reel_reach` still reads the interim reel-plays series
-(`docs/pipeline/141-bounded-response.md`); switching it onto a Page series is
-a separate change.
+**Detector source.** `classify_facebook_reel_reach` reads the first of
+`page_total_media_view_unique`, `page_media_view`, `page_video_views`,
+`page_impressions_unique` (`FACEBOOK_DETECTOR_PREFERENCE`) whose stored series
+has more than 28 days, so no one picks the metric by hand. With none that long
+it falls back to the interim reel-plays series
+(`docs/pipeline/141-bounded-response.md`). The cron line
+`SUPPRESSION facebook=<status> days=<n> source=<metric|reel_plays>` names which.
 
 The credential's Graph version is preserved. Meta retired v20 on September
 24, 2026: review a credential pinned to that version separately, including its

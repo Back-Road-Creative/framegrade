@@ -29,7 +29,7 @@ import logging
 from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..paths import gms_output_dir
 
@@ -50,6 +50,14 @@ _DIMENSIONS = (TRAFFIC_SOURCE_DIMENSION, CONTENT_TYPE_DIMENSION)
 FACEBOOK_PAGE_METRICS = (
     "page_media_view",
     "page_total_media_view_unique",
+    "page_video_views",
+    "page_impressions_unique",
+)
+#: Order the suppression detector tries the Page metrics in: unique viewers is
+#: closest to reach, so it leads; the rest follow by how directly they count views.
+FACEBOOK_DETECTOR_PREFERENCE = (
+    "page_total_media_view_unique",
+    "page_media_view",
     "page_video_views",
     "page_impressions_unique",
 )
@@ -249,3 +257,15 @@ def facebook_page_series(rows: List[Dict[str, Any]], metric: str) -> Dict[str, i
         for r in rows
         if r.get("dimension") == dimension and r.get("day") and isinstance(r.get("views"), int)
     }
+
+
+def facebook_detector_series(
+    rows: List[Dict[str, Any]], min_days: int
+) -> Tuple[str, Dict[str, int]]:
+    """``(metric, series)`` for the first `FACEBOOK_DETECTOR_PREFERENCE` metric
+    whose stored series has MORE than ``min_days`` days, else ``("", {})``."""
+    for metric in FACEBOOK_DETECTOR_PREFERENCE:
+        series = facebook_page_series(rows, metric)
+        if len(series) > min_days:
+            return metric, series
+    return "", {}
