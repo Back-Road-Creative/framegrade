@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.23] - 2026-10-31
+
+### Fixed
+
+- A GPS gap that runs to the first or last retained second of a cut is bridged to the county of the nearest source fix just outside the cut when the bin on its other side agrees, so a best-moments cut that ends inside a logger pause no longer refuses a county label it otherwise proves; the bridge is recorded in boundary_notes.
+
 ## [0.3.22] - 2026-10-31
 
 ### Added
@@ -370,7 +376,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...HEAD
+[0.3.23]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...v0.3.23
 [0.3.22]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...v0.3.22
 [0.3.21]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...v0.3.21
 [0.3.20]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...v0.3.20
