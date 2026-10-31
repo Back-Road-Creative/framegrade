@@ -25,6 +25,16 @@ can breach the 50% threshold on its own and raise a false alarm inside an otherw
 `SUPPRESSED` when the trailing 7-day median falls below 0.3x the trailing 28-day median — both
 windows computed over days strictly before the day being classified, never including it.
 
+*Recovery.* When the day flips to `SUPPRESSED`, the 28-day median that triggered it is frozen as the
+baseline. Recovery is judged against that frozen baseline, never the live 28-day median, which decays
+toward the suppressed level during a long suppression and would fake a recovery. While `SUPPRESSED`, a
+day whose trailing 7-day median is ≥ 0.5× the baseline is `RECOVERING`. While `RECOVERING`, a 7-day
+median < 0.3× the baseline returns to `SUPPRESSED` (same baseline); 7 consecutive days with a 7-day
+median ≥ 0.7× the baseline (counted from the first such day, including the day it entered `RECOVERING`)
+return to `HEALTHY` and clear the baseline, so the normal 0.3× live-median trigger applies again.
+Constants: `FACEBOOK_RECOVERING_REL_OF_BASELINE`, `FACEBOOK_RELAPSE_REL_OF_BASELINE`,
+`FACEBOOK_HEALTHY_REL_OF_BASELINE`, `FACEBOOK_HEALTHY_STREAK_DAYS`.
+
 **Tests.** `tests/test_synthetic_suppression.py` replays constructed Shorts-share series (invented
 daily view counts, not measured analytics) and asserts that a stable history raises no false alarm, that a low share inside the
 28-day warm-up is never flagged, and that a single-day collapse after the warm-up is flagged on

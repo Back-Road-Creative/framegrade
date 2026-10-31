@@ -23,7 +23,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from string import Formatter
 from typing import Iterable, List, Mapping, Optional, Sequence
@@ -31,6 +31,7 @@ from typing import Iterable, List, Mapping, Optional, Sequence
 import yaml
 
 from ..models import ResolvedLocation
+from ..publishing.experiments import Experiment, assign_arms, hashtag_mode_for
 from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
 from .final_text_record import reviewable_short_tags
@@ -408,6 +409,9 @@ class SocialPost:
     # The publish plan refuses a YouTube title that is not its
     # ``chosen_title``. None for an older sidecar round-trip.
     title_decision: Optional[dict] = None
+    #: ``{experiment name: arm id}`` for the caption experiments active when
+    #: this post was generated (``publishing/experiments.py``); ``{}`` = none.
+    experiment_arms: "dict[str, str]" = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -423,6 +427,7 @@ class SocialPost:
             "first_comment": self.first_comment,
             "interactive": self.interactive,
             "title_decision": self.title_decision,
+            "experiment_arms": dict(self.experiment_arms),
         }
 
 
@@ -709,6 +714,12 @@ GENERIC_HASHTAGS = [
 ]
 GENERIC_HASHTAGS_PER_POST = 2
 
+#: The ``june`` experiment hashtag mode (``publishing/experiments.py``): the
+#: June 2026 Facebook posts carried these three generics, then the place and
+#: region tags (upstream plan Appendix A, e.g. "#POVDriving #ScenicDrive
+#: #RoadTrip #StradballytoTralee #CountyKerry").
+JUNE_STYLE_HASHTAGS = ["#POVDriving", "#ScenicDrive", "#RoadTrip"]
+
 # The place-withheld filler for an ``interactive`` short's captions —
 # never a real place, so the interactive family can't leak one through a
 # platform caption while the title/OST correctly hide it.
@@ -750,6 +761,8 @@ class SocialGenerator:
         resolved_location: Optional[ResolvedLocation] = None,
         titles_file: Optional[Path] = None,
         moment_kinds: "Optional[Mapping[int, str]]" = None,
+        experiments: "Optional[Sequence[Experiment]]" = None,
+        experiment_today: Optional[date] = None,
     ):
         """
         Args:
@@ -780,7 +793,19 @@ class SocialGenerator:
                 map (``short_planner.ShortRange.moment_kind``) composition may
                 use as an extra title fact slot. Absent index or absent
                 mapping simply leaves that slot unavailable — never raises.
+            experiments: Caption experiments (``publishing/experiments.py``).
+                ``None`` (default) reads the current brand's
+                ``policy.experiments``; ``()`` runs none.
+            experiment_today: The date experiment windows are judged against
+                (default: today); fixed for tests and reruns.
         """
+        if experiments is None:
+            from ..console.settings import current_brand
+            from ..publishing.brand_policy import load_brand_policy
+
+            experiments = load_brand_policy(current_brand()).experiments
+        self.experiments = tuple(experiments)
+        self.experiment_today = experiment_today or date.today()
         self.location = location
         self._parent_place_tokens: "list[str]" = []
         self.titles_file = titles_file
@@ -1111,7 +1136,12 @@ class SocialGenerator:
         return f"{opener} {tail}"
 
     def _platform_hashtags(
-        self, platform: str, short_index: int, interactive: bool, limit: int
+        self,
+        platform: str,
+        short_index: int,
+        interactive: bool,
+        limit: int,
+        hashtag_mode: Optional[str] = None,
     ) -> "list[str]":
         """This platform's hashtags for ``short_index``, capped to ``limit``.
 
@@ -1123,7 +1153,21 @@ class SocialGenerator:
         ``GENERIC_HASHTAGS`` with a seed keyed on ``short_index``, so no two
         posts need carry the same fixed pair; order is shuffled by the same
         per-short seed. The place and region tags are never part of that draw.
+
+        ``hashtag_mode`` (a caption-experiment arm, ``publishing/experiments.py``)
+        replaces all of that: ``none`` is no hashtags, ``location`` the first two
+        location tags (none when ``interactive`` withholds the place), ``june``
+        ``JUNE_STYLE_HASHTAGS`` then those location tags. ``limit`` does not
+        apply to an arm.
         """
+        if hashtag_mode == "none":
+            return []
+        if hashtag_mode in ("location", "june"):
+            generics = list(JUNE_STYLE_HASHTAGS) if hashtag_mode == "june" else []
+            if interactive:
+                return generics
+            ordered = self._mandatory_location_tags() + self.location_hashtags
+            return generics + list(dict.fromkeys(ordered))[:2]
         rng = random.Random(self._project_seed(f"captions:{platform}:tags:{short_index}"))
         tags = rng.sample(GENERIC_HASHTAGS, GENERIC_HASHTAGS_PER_POST)
         terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
@@ -1213,8 +1257,14 @@ class SocialGenerator:
         short_index: int,
         interactive: bool = False,
         hand_caption: Optional[str] = None,
+        experiment_arms: Optional["dict[str, str]"] = None,
     ) -> "dict[str, str]":
         """Compose one distinct caption per platform.
+
+        ``experiment_arms`` (``{experiment: arm}``) swaps the Facebook hashtag
+        treatment for the arm's ``hashtag_mode``; the ``none`` arm drops the
+        location tags, so it is exempt from the Facebook region-tag check
+        below (the caption text still names the place).
 
         Each composed (non-hand) caption carries the mandatory place fact
         slot (``self.social_location``) — except when ``interactive`` is
@@ -1267,8 +1317,12 @@ class SocialGenerator:
             "facebook", short_index, fmap, interactive
         )
         mandatory = [] if interactive else self._mandatory_location_tags()
+        fb_mode = hashtag_mode_for(self.experiments, experiment_arms or {}, "facebook")
         captions["facebook"] = self._append_hashtags(
-            fb_base, self._platform_hashtags("facebook", short_index, interactive, limit=2)
+            fb_base,
+            self._platform_hashtags(
+                "facebook", short_index, interactive, limit=2, hashtag_mode=fb_mode
+            ),
         )
 
         # Instagram — short line + recording date + up to 8 tags. This is
@@ -1309,6 +1363,8 @@ class SocialGenerator:
 
         if not interactive:
             for platform in ("facebook", "instagram", "tiktok"):
+                if platform == "facebook" and fb_mode == "none":
+                    continue
                 self._assert_region_present(short_index, f"{platform} caption", captions[platform])
 
         seen: "dict[str, str]" = {}
@@ -1773,6 +1829,7 @@ class SocialGenerator:
             logger.info("pool titles: %s absent/incomplete", self.titles_file)
             self._pool_fallback_logged = True
 
+        arms = assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
         for attempt in range(max_attempts):
             # Vary the seed on retries so we pick different hooks/titles
             rng = self._get_rng(short_index + attempt * 1000)
@@ -1790,6 +1847,7 @@ class SocialGenerator:
                 short_index,
                 interactive=interactive,
                 hand_caption=(hand.caption if hand is not None else None),
+                experiment_arms=arms,
             )
             tags = self._build_tags(weather, short_index, interactive=interactive)
             first_comment = self._build_first_comment(weather, short_index, interactive=interactive)
@@ -1817,6 +1875,7 @@ class SocialGenerator:
                 )
             decision = decide_title("short", baseline, None, suffix="", facts=place_facts)
             post = SocialPost(
+                experiment_arms=arms,
                 short_index=short_index,
                 caption=captions["instagram"],
                 captions=captions,
@@ -1912,6 +1971,8 @@ class SocialGenerator:
             roads=None,
             titles_file=self.titles_file,
             moment_kinds=self.moment_kinds,
+            experiments=self.experiments,
+            experiment_today=self.experiment_today,
         )
         clone.recording_date = self.recording_date
         clone.resolved_location = self.resolved_location

@@ -23,6 +23,10 @@ def _cfg(lo, hi):
     cfg = Config()
     cfg.drive.full_drive_part_min_sec = lo
     cfg.drive.full_drive_part_max_sec = hi
+    # Re-resolve the LF mode as construction from YAML would (both bounds set
+    # -> full_drive); ``Config()`` resolved it before the bounds were assigned.
+    cfg.drive.lf_selection_mode = None
+    cfg.drive._resolve_lf_policy()
     return cfg
 
 
@@ -82,3 +86,15 @@ def test_adjacent_day_clock_skew_is_not_refused(tmp_path, monkeypatch):
     eps = [_ep("2026-03-04", 2000.0), _ep("2026-03-05", 2000.0)]
     res, _pf, _cal = _run(tmp_path, monkeypatch, eps, _cfg(3600, 5400))
     assert res is None
+
+
+def test_gate_inactive_when_operator_chose_best_moments(tmp_path, monkeypatch):
+    # ``--lf-mode best_moments`` shadows the part bounds: ``plan_full_drive_parts``
+    # never runs, so a short day is not "certain to be refused" and must pass
+    # (2026-10-31: 2866 s of Irish footage was refused in best_moments mode).
+    cfg = _cfg(3600, 5400)
+    cfg.drive.set_lf_mode("best_moments", "cli")
+    eps = [_ep("2026-03-04", 1433.0), _ep("2026-03-04", 1433.0)]
+    res, pf, _cal = _run(tmp_path, monkeypatch, eps, cfg)
+    assert res is None
+    pf.assert_called_once()

@@ -11,6 +11,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..config import resolve_lf_mode
 from ..models import DrivePipelineResult
 from .day_grouper import group_episodes_by_day
 from .ingest import create_ingest_plan
@@ -199,7 +200,8 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
     certain to be refused by ``plan_full_drive_parts`` -- after the whole of
     Phase A has run. ``create_ingest_plan`` is a no-file-ops scan (durations
     and container ``creation_time`` only), so the refusal is knowable here.
-    Inactive unless both part bounds are set. The planner's stop-masked check
+    Inactive unless both part bounds are set and the resolved LF mode is
+    ``full_drive``. The planner's stop-masked check
     is unchanged. Returns the refusal message, or ``None``.
 
     Before ingest there is no GPX, so days key on ``creation_time`` (the
@@ -211,6 +213,11 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
     drive = getattr(config, "drive", None)
     part_min = getattr(drive, "full_drive_part_min_sec", None)
     if part_min is None or getattr(drive, "full_drive_part_max_sec", None) is None:
+        return None
+    if resolve_lf_mode(drive) != "full_drive":
+        # An operator-chosen best_moments shadows the part bounds (see
+        # ``DriveConfig.warn_lf_policy_override``): ``plan_full_drive_parts``
+        # never runs, so the day is not certain to be refused.
         return None
     source_dir = Path(source_dir)
     if not source_dir.is_dir():

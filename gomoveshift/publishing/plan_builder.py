@@ -252,6 +252,7 @@ def build_publish_plan(
                     sampled_regions=tuple(getattr(post, "sampled_regions", None) or ()),
                     sampled_roads=tuple(getattr(post, "sampled_roads", None) or ()),
                     route_record=getattr(post, "route_record", None) or None,
+                    experiment_arms=dict(getattr(post, "experiment_arms", None) or {}),
                     parent_lf_video_id=parent_id,
                     parent_lf_publish_at=parent_publish_at,
                     payloads=payloads,

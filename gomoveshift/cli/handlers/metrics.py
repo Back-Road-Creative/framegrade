@@ -27,6 +27,8 @@ from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
 # Imported at module scope (not lazily) so tests can ``patch.object`` them.
 from ...publishing.brand_policy import load_brand_policy
 from ...publishing.dispatch import apply_suppression_response
+from ...publishing.experiments import arm_observations, arm_report_lines, arm_results
+from ...publishing.plan_io import load_publish_plan
 from ...publishing.queue import (
     open_queue_db,
     recorded_publish_time,
@@ -214,7 +216,38 @@ def _cmd_metrics_collect(args, config) -> int:
     _pull_facebook_history(collector, brand)
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
+    _report_caption_experiments(config, brand)
     return 0
+
+
+def _report_caption_experiments(config, brand: str) -> None:
+    """Print one ``EXPERIMENT ...`` line per arm of each caption experiment the
+    brand's policy runs (``publishing/experiments.py``). Reporting only: a
+    failure is logged and swallowed, never failing the collection."""
+    try:
+        experiments = load_brand_policy(brand).experiments
+        if not experiments:
+            return
+        storage_path = Path(config.seo.storage_path)
+        conn = open_queue_db(storage_path)
+        try:
+            lookup = _sidecar_lookup(conn, storage_path)
+
+            def arms_for_project(project):
+                path = lookup(project)
+                if path is None:
+                    return None
+                return {s.short_index: s.experiment_arms for s in load_publish_plan(path).shorts}
+
+            records = TrackingStore().load_all_records()
+            for experiment in experiments:
+                rows = arm_observations(experiment, records, arms_for_project)
+                for line in arm_report_lines(arm_results(experiment, rows, date.today())):
+                    print(line)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
+        logger.warning("caption experiment report skipped: %s", exc)
 
 
 def _report_observations(record) -> None:
