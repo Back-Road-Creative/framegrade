@@ -71,7 +71,7 @@ class _Resp:
     def __init__(self, result):
         self._result = result
 
-    def execute(self):
+    def execute(self, **_kwargs):
         return self._result
 
 
@@ -465,3 +465,55 @@ def test_manifest_explicit_known_ids_replace_the_seed(monkeypatch):
     build_channel_manifest(service, now=datetime(2026, 10, 5, tzinfo=timezone.utc), known_ids=[])
 
     assert all("p" not in kw["id"].split(",") for kw in service.video_calls)
+
+
+# --- transient network failures on the read-only calls ---------------------
+
+
+class _FlakyHttp:
+    """httplib2-style transport: raises ``errors`` (one per call) before answering.
+
+    Drives a REAL googleapiclient service, so the test covers the library's own
+    ``execute(num_retries=...)`` path, not a fake that bypasses it.
+    """
+
+    def __init__(self, errors):
+        self.errors = list(errors)
+        self.calls = 0
+
+    def request(self, uri, method="GET", *args, **kwargs):
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return httplib2.Response(
+            {"status": 200, "content-type": "application/json"}
+        ), b'{"items": []}'
+
+
+def _real_service(http):
+    from googleapiclient.discovery import build
+
+    return build("youtube", "v3", http=http, static_discovery=True)
+
+
+@pytest.fixture
+def _no_retry_sleep(monkeypatch):
+    monkeypatch.setattr("googleapiclient.http.time.sleep", lambda _s: None)
+
+
+def test_one_read_timeout_does_not_kill_the_manifest(_no_retry_sleep):
+    http = _FlakyHttp([TimeoutError("The read operation timed out")])
+    manifest = build_channel_manifest(
+        _real_service(http), now=datetime(2026, 10, 31, tzinfo=timezone.utc), known_ids=[]
+    )
+    assert manifest["videos"] == []
+    assert http.calls == 2  # one timeout, then the retried channels.list answers
+
+
+def test_persistent_read_timeouts_still_raise_after_the_bound(_no_retry_sleep):
+    http = _FlakyHttp([TimeoutError("The read operation timed out")] * 50)
+    with pytest.raises(TimeoutError):
+        build_channel_manifest(
+            _real_service(http), now=datetime(2026, 10, 31, tzinfo=timezone.utc), known_ids=[]
+        )
+    assert 1 < http.calls <= 10  # bounded, not infinite
