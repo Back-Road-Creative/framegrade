@@ -1371,6 +1371,39 @@ class FacebookCollector:
                 points.append((day.isoformat(), int(value)))
         return points
 
+    def list_page_reels(self, since: str, until: str) -> Optional[List[Dict[str, Any]]]:
+        """The Page's Reels created in ``[since, until)`` as raw Graph entries
+        (``id``, ``created_time``, ``description``), following ``paging.next``
+        up to :data:`_FB_MAX_INSIGHT_PAGES` (here paging IS the same listing,
+        not another date window). ``None`` when creds are missing or ANY page
+        was refused -- a half listing must not read as complete; ``[]`` for a
+        successful empty answer."""
+        self._last_failure = None
+        if not self.is_available():
+            return None
+        creds = self._creds()
+        url: Optional[str] = (
+            f"https://graph.facebook.com/{self._graph_version()}/{creds.get('page_id')}/video_reels"
+        )
+        params: Optional[Dict[str, Any]] = {
+            "fields": "id,created_time,description",
+            "since": since,
+            "until": until,
+            "limit": 100,
+            "access_token": creds.get("page_access_token"),
+        }
+        reels: List[Dict[str, Any]] = []
+        for _ in range(_FB_MAX_INSIGHT_PAGES):
+            body = self._get(url, params) if url else None
+            if body is None:
+                return None
+            reels.extend(body.get("data") or [])
+            params = None  # the cursor URL already carries token + fields
+            url = (body.get("paging") or {}).get("next")
+            if not url:
+                break
+        return reels
+
     def collect_observation(
         self, video_id: str, published_at: Optional[str] = None
     ) -> MetricObservation:

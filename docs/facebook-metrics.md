@@ -109,3 +109,27 @@ References checked October 25, 2026:
 
 - [Meta Video insights](https://developers.facebook.com/docs/graph-api/reference/video/video_insights/)
 - [Meta v25 changes and deprecations](https://developers.facebook.com/blog/post/2026/02/18/introducing-graph-api-v25-and-marketing-api-v25/)
+
+## History ledger
+
+First-party Facebook publishing began 2026-09-10; every earlier Reel went out
+through Metricool, so the tracking store has no record of them.
+`metrics collect` therefore lists the Page's Reels (`GET /{page_id}/video_reels`)
+from 2026-06-01 to 2026-09-10 and writes
+`<root>/<brand>/tracking/facebook_history.json`: per Reel its id,
+`created_time` (UTC as Graph returned it), Pacific day, caption, `source` and
+lifetime metrics (read once through `collect_short_metrics`; unknown stays
+null).
+
+- `source` is `metricool` when the Pacific day of `created_time` is before
+  2026-09-10, else `first_party`. A Reel created 2026-09-10T05:00Z is still
+  Sept 9 in Pacific, so it counts as Metricool.
+- The backfill runs only while no successful listing is recorded
+  (`listing.completed_at`), prints `FB_HISTORY listed=<n|unavailable> stored=<n>`
+  and never fails the run. A refused listing writes nothing and retries next
+  night. Stored entries are never deleted, re-fetched or rewritten.
+- The 18 Reels whose captions were edited by hand on 2026-10-02 are listed in
+  `gomoveshift/tracking/data/facebook_caption_edits.json`; their entries carry
+  `caption_edited_on: "2026-10-02"`, and `in_matched_cohort(entry)` is False
+  for them so matched-cohort audits can exclude them. `caption_edited_on(reel_id)` answers
+  for any record by id, since edited Reels also include first-party ones outside the ledger.

@@ -52,6 +52,8 @@ from ...tracking.channel_daily import load_rows as load_channel_daily_rows
 from ...tracking.channel_enrol import enrol_channel
 from ...tracking.collector import YouTubeCollector
 from ...tracking.evidence_export import build_evidence_bundle
+from ...tracking.facebook_history import backfill_facebook_history
+from ...tracking.facebook_history import is_complete as facebook_history_complete
 from ...tracking.facebook_series import facebook_reel_plays_series
 from ...tracking.interval import latest_interval
 from ...tracking.observation import ObservationStatus
@@ -211,6 +213,7 @@ def _cmd_metrics_collect(args, config) -> int:
     pulled = _pull_channel_daily(collector, brand)
     print(f"Pulled {pulled} channel-daily row(s) for {brand}")
     _pull_facebook_page_daily(collector, brand)
+    _pull_facebook_history(collector, brand)
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     _report_caption_experiments(config, brand)
@@ -443,6 +446,22 @@ def _pull_facebook_page_daily(collector: MetricsCollector, brand: str) -> None:
         for m in FACEBOOK_PAGE_METRICS
     )
     print(f"FB_PAGE_DAILY {fields}")
+
+
+def _pull_facebook_history(collector: MetricsCollector, brand: str) -> None:
+    """Best-effort Metricool-era Facebook Reel ledger
+    (`tracking.facebook_history`): runs only while no listing has been
+    recorded, prints one ``FB_HISTORY`` line; a failure is logged and
+    swallowed like `_pull_facebook_page_daily`.
+    """
+    try:
+        if facebook_history_complete(brand):
+            return
+        listed, stored = backfill_facebook_history(collector.facebook, brand)
+    except Exception as exc:  # noqa: BLE001 - never fail collect on a history backfill error
+        logger.warning("facebook history backfill skipped: %s", exc)
+        return
+    print(f"FB_HISTORY listed={'unavailable' if listed is None else listed} stored={stored}")
 
 
 #: Days of Facebook history the detector needs strictly BEFORE a day it classifies,
