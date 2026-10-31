@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-10-31
+
+### Changed
+
+- The Facebook suppression detector reads the Page daily series from `channel_daily` once one has more than 28 days, trying `page_total_media_view_unique`, `page_media_view`, `page_video_views`, `page_impressions_unique` in that order; otherwise it keeps the reel-plays series. The cron line gains a trailing `source=<metric name|reel_plays>`.
+
+### Fixed
+
+- A route through two counties that carry no state (such as Irish counties) now labels itself "County A & County B, <country>" from the GPS already retained, instead of being refused before encode.
+- On such stateless-county routes, a GPS gap or an unresolved bin with the same county on both sides is counted inside that county. A gap or bin next to an unresolved neighbour, or between two different counties, still refuses.
+
 ## [0.3.19] - 2026-10-31
 
 ### Added
@@ -342,7 +353,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...HEAD
+[0.3.20]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...v0.3.20
 [0.3.19]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...v0.3.19
 [0.3.18]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.17...v0.3.18
 [0.3.17]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.16...v0.3.17
