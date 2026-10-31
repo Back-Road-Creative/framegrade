@@ -101,9 +101,20 @@ def _caption_edits() -> Tuple[str, set]:
         return "", set()
 
 
+def caption_edited_on(reel_id: str) -> Optional[str]:
+    """The hand-edit day for ``reel_id``, else ``None`` -- works for any
+    record, not only ledger entries (edited Reels span the cutover)."""
+    edited_on, edited_ids = _caption_edits()
+    return edited_on if str(reel_id) in edited_ids else None
+
+
 def in_matched_cohort(entry: Dict[str, Any]) -> bool:
-    """False for a Reel whose caption was hand-edited (not like-for-like)."""
-    return not entry.get("caption_edited_on")
+    """False for a Reel whose caption was hand-edited (not like-for-like):
+    a ledger entry's mark, or its ``id``/``video_id`` on the edit list."""
+    if entry.get("caption_edited_on"):
+        return False
+    rid = entry.get("id") or entry.get("video_id")
+    return not (rid and caption_edited_on(rid))
 
 
 def backfill_facebook_history(

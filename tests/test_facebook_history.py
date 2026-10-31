@@ -224,3 +224,14 @@ def test_handler_swallows_failures(capsys, caplog):
         metrics_handler._pull_facebook_history(SimpleNamespace(facebook=object()), "g")
     assert "FB_HISTORY" not in capsys.readouterr().out
     assert "facebook history backfill skipped" in caplog.text
+
+
+def test_an_edited_id_leaves_the_cohort_even_outside_the_ledger():
+    # A first-party tracking record (posted after the cutover, so never in the
+    # ledger) carries only its id; the edit list still excludes it.
+    edited = "1841588706835941"
+    assert fh.caption_edited_on(edited) == "2026-10-02"
+    assert fh.caption_edited_on("not-edited") is None
+    assert fh.in_matched_cohort({"id": edited}) is False
+    assert fh.in_matched_cohort({"video_id": edited}) is False
+    assert fh.in_matched_cohort({"id": "not-edited"}) is True

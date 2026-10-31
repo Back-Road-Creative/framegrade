@@ -131,4 +131,5 @@ null).
 - The 18 Reels whose captions were edited by hand on 2026-10-02 are listed in
   `gomoveshift/tracking/data/facebook_caption_edits.json`; their entries carry
   `caption_edited_on: "2026-10-02"`, and `in_matched_cohort(entry)` is False
-  for them so matched-cohort audits can exclude them.
+  for them so matched-cohort audits can exclude them. `caption_edited_on(reel_id)` answers
+  for any record by id, since edited Reels also include first-party ones outside the ledger.
