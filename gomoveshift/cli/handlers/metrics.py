@@ -446,10 +446,11 @@ def _apply_bounded_response(config, brand: str, mode: str) -> None:
     `classify_facebook_reel_reach` over the first preferred Page series in
     `channel_daily` with more than 28 days (`facebook_detector_series`), else
     the interim series built from the nightly observation log
-    (`_facebook_reel_series`, source ``reel_plays``). Facebook has no recovery branch: once
-    SUPPRESSED it stays so. A platform with no series is left out of
-    `states`; one `SUPPRESSION <platform>=<status> days=<n>` line (Facebook adds `source=<series>`) per
-    classified platform goes to the cron log.
+    (`_facebook_reel_series`, source ``reel_plays``); the recovery rule is
+    `classify_facebook_reel_reach`'s own (docs/pipeline/140). A platform with
+    no series is left out of `states`; one `SUPPRESSION <platform>=<status>
+    days=<n>` line (Facebook adds `source=<series>`) per classified platform
+    goes to the cron log.
 
     `mode` defaults to ``"shadow"`` (``args.response_mode``, itself
     defaulting to ``"shadow"`` in the CLI parser) -- this call never

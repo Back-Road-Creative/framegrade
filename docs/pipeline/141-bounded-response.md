@@ -65,8 +65,8 @@ the shadow log fills without anyone running anything by hand.
   that moved backwards is skipped, and a post's first observation counts in full only when it was
   fetched within a day of posting. Days with no observation are absent, so gaps shorten the
   detector's windows. Each classified platform prints `SUPPRESSION <platform>=<status> days=<n>`
-  to the cron log (Facebook appends `source=<metric name|reel_plays>`); Facebook prints `WARMUP` until 28 days of series exist. Facebook has no
-  recovery branch: once SUPPRESSED it stays so (known gap).
+  to the cron log (Facebook appends `source=<metric name|reel_plays>`); Facebook prints `WARMUP` until 28 days of series exist. Facebook's
+  recovery rule is the classifier's own (`140-suppression-detector.md`).
 - **Shadow by default, always.** `--response-mode {shadow,live}` on `metrics collect` (default
   `shadow`) is the only switch; the scheduled line that runs `metrics collect` is operator-only to edit, so
   going live for real is a human editing that line, not a code change in this repo. A missing/no
