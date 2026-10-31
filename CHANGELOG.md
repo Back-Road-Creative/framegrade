@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-10-31
+
+### Added
+
+- A brand policy can declare caption experiments (`policy.experiments`): arms with a `hashtag_mode` (`none`, `location`, `june`) are assigned by a stable hash, stop `stop_after_days` after `start`, and are tagged in the publish-plan sidecar (`experiment_arms`). `metrics collect` prints `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_reach=<value|unknown>` per arm; the median waits until every arm has `min_n` settled, measured shorts.
+- `metrics collect` builds a one-time ledger of Page Reels posted before first-party publishing (2026-09-10) at `<brand>/tracking/facebook_history.json`, tagged `source=metricool` with lifetime metrics, and prints `FB_HISTORY listed=<n|unavailable> stored=<n>`. Reels whose captions were hand-edited on 2026-10-02 carry `caption_edited_on`, and `in_matched_cohort` excludes them.
+
+### Changed
+
+- The Facebook suppression detector now leaves `SUPPRESSED`: a 7-day median back to 0.5x the baseline frozen at the flip is `RECOVERING`, 7 straight days at 0.7x is `HEALTHY`, and a fall under 0.3x relapses to `SUPPRESSED`. Same function signature and return shape.
+
 ## [0.3.21] - 2026-10-31
 
 ### Fixed
@@ -359,7 +370,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...HEAD
+[0.3.22]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...v0.3.22
 [0.3.21]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...v0.3.21
 [0.3.20]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.19...v0.3.20
 [0.3.19]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.18...v0.3.19
