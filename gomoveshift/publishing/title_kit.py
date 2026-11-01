@@ -67,9 +67,9 @@ def _unique_titles(*args, **kwargs):
 
 
 def _published_titles():
-    from ..pipeline.longform_metadata import load_published_titles
+    from ..pipeline.longform_metadata import known_channel_titles
 
-    return load_published_titles()
+    return known_channel_titles()
 
 
 def _refresh_title_ledger():

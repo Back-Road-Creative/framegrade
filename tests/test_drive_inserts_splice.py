@@ -529,3 +529,43 @@ def test_inserts_reach_the_chapters_and_the_description_in_phase_d(tmp_path):
             )
     assert "1:35 \U0001f4f8 Photo stop" in meta[1]["chapter_text"]
     assert any(c["timestamp"] == "1:35" for c in meta[1]["chapters"])
+
+
+def test_phase_d_title_dedupe_sees_catalog_only_titles(tmp_path, monkeypatch):
+    """Phase D hands ``ensure_unique_titles`` the ledger UNION the live catalog."""
+    import gomoveshift.pipeline.longform_metadata as lm
+    from _state_helpers import make_state
+    from gomoveshift.cli.handlers.pub_status import live_catalog_snapshot_path
+    from gomoveshift.pipeline.drive_phases import phase_d_metadata
+
+    snap = live_catalog_snapshot_path(lm.DEFAULT_SEO_STORAGE)
+    snap.parent.mkdir(parents=True, exist_ok=True)
+    snap.write_text(
+        json.dumps({"videos": {"v1": {"title": "Catalog Only, VA in 4K"}}}), encoding="utf-8"
+    )
+    captured = {}
+
+    def _fake_unique(titles, published_titles=None):
+        captured["published"] = set(published_titles or ())
+        return {k: v for k, v in titles.items()}
+
+    monkeypatch.setattr(phase_d_metadata, "ensure_unique_titles", _fake_unique)
+    state = make_state(per_lf_ost_text={1: "Foo, PA"})
+    lf = SimpleNamespace(index=1, total_duration=300.0, segments=[])
+    gen = MagicMock()
+    gen.generate.side_effect = lambda **kw: {"title": "t", "description": "d"}
+    with patch(
+        "gomoveshift.pipeline.validation.content_gates.check_description_redundancy",
+        return_value=SimpleNamespace(passed=True, message=""),
+    ):
+        phase_d_metadata._build_metadata_per_lf(
+            meta_gen=gen,
+            drive_plan=SimpleNamespace(regular_lfs=[lf]),
+            regular_lf_paths=["/v/lf.mp4"],
+            state=state,
+            location="x",
+            publish_day_full="Wed",
+            project_base="p",
+            output_base=tmp_path,
+        )
+    assert "Catalog Only, VA in 4K" in captured["published"]

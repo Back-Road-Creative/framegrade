@@ -367,17 +367,11 @@ def load_published_titles() -> set[str]:
     return titles
 
 
-def live_catalog_title_ids() -> dict[str, str]:
-    """``{normalized_title: video_id}`` from the local live-catalog snapshot
-    that ``catalog-fetch --known-ids-from-queue`` writes beside the queue DB
-    (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``).
-
-    Names the live video behind a duplicate-title refusal when the run's
-    channel refresh gave no id (degraded run, or a site that never had one)
-    and the on-disk ledger, which carries titles only, cannot. Any age is
-    fine — this names a video, it does not gate one. Never fetches; a
-    missing or unreadable snapshot is ``{}``.
-    """
+def _live_catalog_videos() -> dict:
+    """The ``videos`` map of the local live-catalog snapshot that
+    ``catalog-fetch --known-ids-from-queue`` writes beside the queue DB
+    (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``). Never fetches; a
+    missing or unreadable snapshot is ``{}``."""
     from ..cli.handlers.pub_status import live_catalog_snapshot_path
 
     try:
@@ -387,12 +381,41 @@ def live_catalog_title_ids() -> dict[str, str]:
         videos = catalog.get("videos") or {}
     except (OSError, ValueError, AttributeError):
         return {}
-    ids: dict[str, str] = {}
-    for video_id, video in videos.items() if isinstance(videos, dict) else ():
+    return videos if isinstance(videos, dict) else {}
+
+
+def _live_catalog_titles() -> list[tuple[str, str]]:
+    """``[(video_id, stripped_title)]`` for every non-blank catalog title."""
+    out: list[tuple[str, str]] = []
+    for video_id, video in _live_catalog_videos().items():
         title = video.get("title") if isinstance(video, dict) else None
         if title and title.strip():
-            ids.setdefault(title.strip().lower(), video_id)
+            out.append((video_id, title.strip()))
+    return out
+
+
+def live_catalog_title_ids() -> dict[str, str]:
+    """``{normalized_title: video_id}`` from the local live-catalog snapshot.
+
+    Names the live video behind a duplicate-title refusal when the run's
+    channel refresh gave no id (degraded run, or a site that never had one)
+    and the on-disk ledger, which carries titles only, cannot. Any age is
+    fine — this names a video, it does not gate one. Never fetches; a
+    missing or unreadable snapshot is ``{}``.
+    """
+    ids: dict[str, str] = {}
+    for video_id, title in _live_catalog_titles():
+        ids.setdefault(title.lower(), video_id)
     return ids
+
+
+def known_channel_titles() -> set[str]:
+    """Every title either source knows is live: the analytics ledger
+    (:func:`load_published_titles`) unioned with the live-catalog snapshot
+    (original case, stripped). The duplicate-title gates read this so a title
+    only one source has seen still fails. A missing source contributes nothing.
+    """
+    return load_published_titles() | {title for _vid, title in _live_catalog_titles()}
 
 
 def refresh_channel_title_ledger(credentials_dir: Optional[Path] = None) -> dict[str, str]:

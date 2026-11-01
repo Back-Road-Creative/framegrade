@@ -306,7 +306,7 @@ def _build_metadata_per_lf(
     per_lf_ost_text_state = state.per_lf_ost_text or {}
     pre_render_decisions = getattr(state, "per_lf_pre_render_title_decisions", None) or {}
     if per_lf_ost_text_state:
-        from ..longform_metadata import load_published_titles
+        from ..longform_metadata import known_channel_titles
 
         # A split full_drive day's parts share a label by design and are told
         # apart by the deliberate ``— Part k of K`` suffix applied below; the
@@ -320,7 +320,7 @@ def _build_metadata_per_lf(
             if int(k) not in _split_idx and int(k) not in pre_render_decisions
         }
         per_lf_titles_override = ensure_unique_titles(
-            _title_map_input, published_titles=load_published_titles()
+            _title_map_input, published_titles=known_channel_titles()
         )
         per_lf_titles_override.update(
             {int(k): v for k, v in per_lf_ost_text_state.items() if int(k) in _split_idx}
