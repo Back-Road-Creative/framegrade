@@ -123,3 +123,35 @@ def test_test_word_boundary_keeps_testament_creek():
     assert "Blue Ridge Parkway, NC in 4K" in titles
     assert "Test Drive" not in titles
     assert "TEST upload" not in titles
+
+
+def _write_catalog(titles):
+    from gomoveshift.cli.handlers.pub_status import live_catalog_snapshot_path
+
+    path = live_catalog_snapshot_path(lm.DEFAULT_SEO_STORAGE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    videos = {f"vid{i}": {"title": t} for i, t in enumerate(titles)}
+    path.write_text(json.dumps({"videos": videos}), encoding="utf-8")
+
+
+def test_known_channel_titles_unions_ledger_and_catalog():
+    _write_ledger([{"data": {"title": "Ledger Only, PA in 4K"}}])
+    _write_catalog(["Catalog Only, VA in 4K"])
+    assert lm.known_channel_titles() == {"Ledger Only, PA in 4K", "Catalog Only, VA in 4K"}
+
+
+def test_known_channel_titles_without_catalog_equals_ledger():
+    _write_ledger([{"data": {"title": "Ledger Only, PA in 4K"}}])
+    assert lm.known_channel_titles() == lm.load_published_titles()
+    assert lm.known_channel_titles() == {"Ledger Only, PA in 4K"}
+
+
+def test_known_channel_titles_skips_blank_catalog_titles():
+    _write_catalog(["  ", "", "Real Title, NC in 4K  "])
+    assert lm.known_channel_titles() == {"Real Title, NC in 4K"}
+
+
+def test_known_channel_titles_missing_ledger_still_returns_catalog():
+    assert not _ledger_path().exists()
+    _write_catalog(["Catalog Only, VA in 4K"])
+    assert lm.known_channel_titles() == {"Catalog Only, VA in 4K"}

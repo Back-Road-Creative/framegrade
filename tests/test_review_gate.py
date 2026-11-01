@@ -702,6 +702,39 @@ class TestPreRenderTitleUniquenessGate:
                 output_dir=tmp_path,
             )
 
+    def _write_catalog(self, titles):
+        import gomoveshift.pipeline.longform_metadata as lm
+        from gomoveshift.cli.handlers.pub_status import live_catalog_snapshot_path
+
+        path = live_catalog_snapshot_path(lm.DEFAULT_SEO_STORAGE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"videos": {f"v{i}": {"title": t} for i, t in enumerate(titles)}}),
+            encoding="utf-8",
+        )
+
+    def test_catalog_only_dupe_hard_fails(self, tmp_path, monkeypatch):
+        # Absent from the analytics ledger, present in the live catalog.
+        self._patch_published(monkeypatch, set())
+        self._write_catalog(["Blue Ridge Parkway, NC in 4K"])
+        gate = ReviewGate(interactive=False)
+        with pytest.raises(ReviewFailedError, match="exactly duplicates"):
+            gate.gate_pre_render(
+                lf_index=1,
+                ost_text="Blue Ridge Parkway, NC",
+                output_dir=tmp_path,
+            )
+
+    def test_title_in_neither_source_passes(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, set())
+        self._write_catalog(["Some Other Road, OH in 4K"])
+        gate = ReviewGate(interactive=False)
+        gate.gate_pre_render(
+            lf_index=1,
+            ost_text="Blue Ridge Parkway, NC",
+            output_dir=tmp_path,
+        )
+
     def test_no_published_titles_passes_clean(self, tmp_path, monkeypatch):
         self._patch_published(monkeypatch, set())
         gate = ReviewGate(interactive=False)

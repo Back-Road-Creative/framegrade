@@ -852,8 +852,9 @@ class ReviewGate:
     def _check_past_title_collisions(self, text: str, *, exact: bool = False) -> list[str]:
         """Return past published YouTube titles that collide with ``text``.
 
-        Titles come from :func:`longform_metadata.load_published_titles`,
-        which reads the analytics event ledger the YouTube sync populates.
+        Titles come from :func:`longform_metadata.known_channel_titles`: the
+        analytics event ledger the YouTube sync populates, unioned with the
+        nightly live-catalog snapshot, so a title either source knows counts.
         The previous implementation read a bare ``SEOConfig()`` default path
         (``./data/seo``) that never matched the configured store, so the
         check silently found nothing in production.
@@ -866,13 +867,13 @@ class ReviewGate:
         burn.
         """
         from gomoveshift.pipeline.longform_metadata import (  # noqa: PLC0415
-            load_published_titles,
+            known_channel_titles,
         )
 
         needle = text.lower().strip()
         if not needle:
             return []
-        published = load_published_titles()
+        published = known_channel_titles()
         if exact:
             hits = {t for t in published if t.lower().strip() == needle}
         else:
