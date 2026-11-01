@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
 from gomoveshift.models import ResolvedLocation
 from gomoveshift.pipeline.drive_state_model import PipelineState
+from gomoveshift.pipeline.ingest.gopro_parser import (
+    Episode,
+    GoProChapter,
+    GoProRecording,
+    IngestPlan,
+)
 from gomoveshift.pipeline.lf_provenance_sidecar import (
     LF_PROVENANCE_FILENAME,
     PROVENANCE_SCHEMA_VERSION,
@@ -78,7 +85,7 @@ def test_missing_inputs_become_null_with_reasons_not_crashes() -> None:
     # LF present only by title — no GPX, no resolved location.
     lf = build_lf_provenance_payload(make_state(per_lf_titles={3: "Somewhere"}))["lfs"][0]
     assert lf["lf_index"] == 3
-    assert lf["source"] == {"gpx_path": None, "episode_paths": None}
+    assert lf["source"] == {"gpx_path": None, "episode_paths": None, "clips": []}
     assert lf["footage_window"] == {"start_sec": None, "end_sec": None}
     assert lf["endpoints"] == {"start": None, "end": None}
     assert lf["fix_density_pct"] is None and lf["road_vote"] is None
@@ -323,3 +330,110 @@ def test_fix_density_state_field_reaches_no_surface_but_the_sidecar() -> None:
         if "per_lf_gps_coverage_pct" in p.read_text(encoding="utf-8")
     }
     assert readers <= allowed, sorted(readers - allowed)
+
+
+# --- source clips: which camera files each LF was cut from -------------------
+
+
+def _chapter(path: Path, num: int, duration: float) -> GoProChapter:
+    return GoProChapter(path=path, chapter_num=num, recording_num=1, duration=duration)
+
+
+def _clip_state(tmp_path: Path, *, as_dict: bool = False, ranges=None):
+    """Two episodes: ep1 = chapters A(0-100) + B(100-250), ep2 = chapter C(0-80)."""
+    a, b, c = (tmp_path / n for n in ("VID_A.mp4", "VID_B.mp4", "VID_C.mp4"))
+    a.write_bytes(b"x" * 10)
+    b.write_bytes(b"x" * 20)
+    # C is deliberately never created on disk.
+    ep1 = Episode(
+        index=1,
+        recordings=[GoProRecording(1, [_chapter(b, 2, 150.0), _chapter(a, 1, 100.0)])],
+        concat_path=tmp_path / "episode_01.mp4",
+    )
+    ep2 = Episode(
+        index=2,
+        recordings=[GoProRecording(2, [_chapter(c, 1, 80.0)])],
+        concat_path=tmp_path / "episode_02.mp4",
+    )
+    plan = IngestPlan(source_dir=tmp_path, episodes=[ep1, ep2])
+    if as_dict:
+        plan = json.loads(json.dumps(dataclasses.asdict(plan), default=str))
+    return make_state(
+        per_lf_gpx_episode_paths={0: ranges or {"g1.gpx": [[10.0, 120.0]]}},
+        gpx_files=[Path("g1.gpx"), Path("g2.gpx")],
+        episode_files=[tmp_path / "episode_01.mp4", tmp_path / "episode_02.mp4"],
+        ingest_plan=plan,
+    )
+
+
+def _clips(state) -> list[dict]:
+    return build_lf_provenance_payload(state)["lfs"][0]["source"]["clips"]
+
+
+def test_range_spanning_two_chapters_yields_both_in_order(tmp_path) -> None:
+    clips = _clips(_clip_state(tmp_path))
+    assert [(c["name"], c["offset_s"], c["duration_s"]) for c in clips] == [
+        ("VID_A.mp4", 0.0, 100.0),
+        ("VID_B.mp4", 100.0, 150.0),
+    ]
+    assert all(c["episode_index"] == 1 for c in clips)
+    assert clips[0]["path"] == str(tmp_path / "VID_A.mp4")
+    assert clips[0]["size_bytes"] == 10 and clips[1]["size_bytes"] == 20
+
+
+def test_range_inside_second_chapter_yields_only_that_clip(tmp_path) -> None:
+    state = _clip_state(tmp_path, ranges={"g1.gpx": [[120.0, 200.0]]})
+    assert [c["name"] for c in _clips(state)] == ["VID_B.mp4"]
+
+
+def test_lf_spanning_two_episodes_has_clips_from_both(tmp_path) -> None:
+    state = _clip_state(tmp_path, ranges={"g1.gpx": [[110.0, 140.0]], "g2.gpx": [[0.0, 50.0]]})
+    clips = _clips(state)
+    assert [(c["name"], c["episode_index"]) for c in clips] == [
+        ("VID_B.mp4", 1),
+        ("VID_C.mp4", 2),
+    ]
+
+
+def test_missing_file_on_disk_has_null_size_and_no_exception(tmp_path) -> None:
+    state = _clip_state(tmp_path, ranges={"g2.gpx": [[0.0, 50.0]]})
+    (clip,) = _clips(state)
+    assert clip["name"] == "VID_C.mp4" and clip["size_bytes"] is None
+
+
+def test_no_ingest_plan_gives_empty_clips_with_reason_and_still_writes(tmp_path) -> None:
+    state = _clip_state(tmp_path)
+    state.ingest_plan = None
+    lf = build_lf_provenance_payload(state)["lfs"][0]
+    assert lf["source"]["clips"] == []
+    assert lf["null_reasons"].get("clips")
+    state.output_base = tmp_path
+    assert write_lf_provenance_sidecar(tmp_path, state) is not None
+
+
+def test_unmatched_gpx_and_chapterless_episode_record_reasons(tmp_path) -> None:
+    state = _clip_state(tmp_path, ranges={"nope.gpx": [[0.0, 5.0]]})
+    lf = build_lf_provenance_payload(state)["lfs"][0]
+    assert lf["source"]["clips"] == [] and lf["null_reasons"].get("clips")
+    # Slice-derived sub-episode: no recordings, so no chapters to name.
+    state = _clip_state(tmp_path)
+    state.ingest_plan.episodes[0].recordings = []
+    lf = build_lf_provenance_payload(state)["lfs"][0]
+    assert lf["source"]["clips"] == [] and lf["null_reasons"].get("clips")
+
+
+def test_ingest_plan_as_reloaded_dict_matches_the_instance(tmp_path) -> None:
+    ranges = {"g1.gpx": [[10.0, 120.0]], "g2.gpx": [[0.0, 5.0]]}
+    inst = _clips(_clip_state(tmp_path, ranges=ranges))
+    # The JSON-reload shape: episodes/recordings/chapters are plain dicts and
+    # PipelineState.from_dict leaves them that way.
+    as_dict = _clips(_clip_state(tmp_path, as_dict=True, ranges=ranges))
+    assert as_dict == inst and len(inst) == 3
+
+
+def test_top_level_source_clips_is_the_sorted_union(tmp_path) -> None:
+    state = _clip_state(tmp_path, ranges={"g1.gpx": [[110.0, 140.0]], "g2.gpx": [[0.0, 50.0]]})
+    state.per_lf_gpx_episode_paths[1] = {"g1.gpx": [[0.0, 10.0]]}
+    payload = build_lf_provenance_payload(state)
+    assert payload["source_clips"] == ["VID_A.mp4", "VID_B.mp4", "VID_C.mp4"]
+    assert payload["source_clips"] == sorted(set(payload["source_clips"]))

@@ -8,14 +8,18 @@ read from state earlier stages populated; anything unavailable at write time is
 changes label/route logic.
 
 Schema of ``lf_provenance.json`` (``PROVENANCE_SCHEMA_VERSION``); top level
-``{schema_version, generated_at, code_sha, lfs: [<lf>...]}`` (``code_sha`` is
+``{schema_version, generated_at, code_sha, source_clips, lfs: [<lf>...]}``
+(``source_clips`` is the sorted unique camera-file names across every LF's
+``source.clips``; ``code_sha`` is
 the git revision of the code that wrote the file, ``null`` with a top-level
 ``null_reasons.code_sha`` when no git metadata is reachable), each ``<lf>``::
 
     lf_index          int
     burned_ost_text   str|null     # canonical per_lf_ost_text — what was BURNED
     source            {gpx_path: <abs>|null,          # single-rep GPX
-                       episode_paths: [<abs>...]|null} # every episode spanned
+                       episode_paths: [<abs>...]|null, # every episode spanned
+                       clips: [{name, path, size_bytes|null, episode_index,
+                                offset_s, duration_s}...]}  # camera files cut from
     footage_window    {start_sec: float|null, end_sec: float|null}  # in-video s
     fix_density_pct   float|null   # 0-100 locked-GPS share, from the pre-encode ladder award
     endpoints         {start: {lat,lon,label}|null, end: {lat,lon,label}|null}
@@ -58,6 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -118,7 +123,7 @@ def build_lf_provenance_payload(state) -> dict:
             {
                 "lf_index": idx,
                 "burned_ost_text": _build_burned_ost_text(ost_text, idx, reasons),
-                "source": _build_source(gpx_path, episode_paths, idx, reasons),
+                "source": _build_source(state, gpx_path, episode_paths, idx, reasons),
                 "footage_window": _build_window(episode_paths, idx, reasons),
                 "fix_density_pct": coverage_pct,
                 "endpoints": _build_endpoints(resolved, idx, reasons),
@@ -149,6 +154,7 @@ def build_lf_provenance_payload(state) -> dict:
     return {
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "source_clips": sorted({c["name"] for lf in lfs for c in lf["source"]["clips"]}),
         "lfs": lfs,
     }
 
@@ -406,14 +412,93 @@ def _build_road_vote(loc, reasons: dict) -> Optional[dict]:
     return None
 
 
-def _build_source(gpx_path: dict, episode_paths: dict, idx: int, reasons: dict) -> dict:
+def _build_source(state, gpx_path: dict, episode_paths: dict, idx: int, reasons: dict) -> dict:
     single = _lookup(gpx_path, idx)
     single = str(single) if single else None
     ep_map = _lookup(episode_paths, idx)
     eps = sorted(str(p) for p in ep_map) if isinstance(ep_map, dict) and ep_map else None
     if single is None and eps is None:
         reasons["source"] = "no per-LF GPX recorded for this LF"
-    return {"gpx_path": single, "episode_paths": eps}
+    return {
+        "gpx_path": single,
+        "episode_paths": eps,
+        "clips": _build_clips(state, idx, reasons),
+    }
+
+
+def _build_clips(state, idx: int, reasons: dict) -> list[dict]:
+    """Camera files (chapters) whose span overlaps this LF's episode ranges.
+
+    Chapter offsets inside an episode file are the cumulative ``duration`` of
+    the chapters before it, in ``Episode.chapter_files()`` order (the order
+    the concatenator joins them). ``ingest_plan`` is an ``IngestPlan`` or, after
+    a JSON resume, a tree of plain dicts; both are read through ``_attr``.
+    A gap is a reason under ``reasons["clips"]``, never an exception.
+    """
+    ep_map = _lookup(state.per_lf_gpx_episode_paths or {}, idx)
+    if not isinstance(ep_map, dict) or not ep_map:
+        return []
+    plan = getattr(state, "ingest_plan", None)
+    plan_eps = _attr(plan, "episodes") if plan is not None else None
+    if not plan_eps:
+        reasons["clips"] = "no ingest_plan episodes recorded; source recordings unknown"
+        return []
+    gpx_files = [str(g) for g in (getattr(state, "gpx_files", None) or [])]
+    episode_files = [str(e) for e in (getattr(state, "episode_files", None) or [])]
+    problems: list[str] = []
+    clips: dict[str, dict] = {}
+    for gpx, ranges in ep_map.items():
+        gpx = str(gpx)
+        try:
+            concat = episode_files[gpx_files.index(gpx)]
+        except (ValueError, IndexError):
+            problems.append(f"no episode paired with gpx {gpx}")
+            continue
+        episode = next((e for e in plan_eps if str(_attr(e, "concat_path")) == concat), None)
+        if episode is None:
+            problems.append(f"no ingest_plan episode for {concat}")
+            continue
+        chapters = [
+            ch
+            for rec in _attr(episode, "recordings") or ()
+            for ch in sorted(_attr(rec, "chapters") or (), key=lambda c: _attr(c, "chapter_num"))
+        ]
+        if not chapters:
+            problems.append(f"episode {concat} has no chapters (slice-derived)")
+            continue
+        spans = []
+        for rng in ranges or ():
+            try:
+                spans.append((float(rng[0]), float(rng[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        offset = 0.0
+        for ch in chapters:
+            dur = float(_attr(ch, "duration") or 0.0)
+            if any(offset < end and offset + dur > start for start, end in spans):
+                path = str(_attr(ch, "path"))
+                clips.setdefault(
+                    path,
+                    {
+                        "name": os.path.basename(path),
+                        "path": path,
+                        "size_bytes": _file_size(path),
+                        "episode_index": _attr(episode, "index"),
+                        "offset_s": offset,
+                        "duration_s": dur,
+                    },
+                )
+            offset += dur
+    if problems:
+        reasons["clips"] = "; ".join(problems)
+    return sorted(clips.values(), key=lambda c: (c["episode_index"], c["offset_s"]))
+
+
+def _file_size(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
 
 
 def _build_window(episode_paths: dict, idx: int, reasons: dict) -> dict:
