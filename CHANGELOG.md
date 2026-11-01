@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.25] - 2026-11-01
+
+### Added
+
+- Phase A now refuses a drive whose camera files another project already published, before the concat/encode. Claims are recorded in `clip_claims.jsonl` beside the SEO events ledger when a long-form gets its YouTube id; `GMS_ALLOW_CLIP_REUSE=1` overrides with a warning.
+- `lf_provenance.json` now names the camera recordings each long-form was cut from: `source.clips` per LF (name, path, size, episode, offset, duration) and a top-level sorted `source_clips` list, so footage reuse across projects can be checked.
+
+### Fixed
+
+- The duplicate-title gate (review gate's exact-duplicate check, Phase D title dedupe and the title kit) now reads the live-catalog snapshot as well as the analytics ledger, so a title only the catalog knows no longer slips through.
+
 ## [0.3.24] - 2026-11-01
 
 ### Added
@@ -382,7 +393,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.25...HEAD
+[0.3.25]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...v0.3.25
 [0.3.24]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...v0.3.24
 [0.3.23]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...v0.3.23
 [0.3.22]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...v0.3.22
