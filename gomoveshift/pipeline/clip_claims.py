@@ -76,9 +76,27 @@ def record_claims(output_base: Path, uploads: dict) -> int:
 
 
 def _record_claims(output_base: Path, uploads: dict) -> int:
+    rows = pending_claims(output_base, uploads)
+    if not rows:
+        return 0
+    path = claims_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    return len(rows)
+
+
+def pending_claims(output_base: Path, uploads: dict) -> list[dict]:
+    """Rows :func:`record_claims` would append now; writes nothing, may raise.
+
+    A claim needs both the LF's ``lf_provenance.json`` clips and a ``video_id``
+    in ``uploads`` (the ``youtube_uploads.json`` mapping); rows already in the
+    registry for (project, lf_index, clip_name) are left out.
+    """
+    output_base = Path(output_base)
     sidecar = output_base / LF_PROVENANCE_FILENAME
     if not sidecar.exists():
-        return 0
+        return []
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     by_index = {}
     for key, rec in (uploads or {}).items():
@@ -98,39 +116,30 @@ def _record_claims(output_base: Path, uploads: dict) -> int:
             if clip.get("name"):
                 wanted.append((idx, video_id, clip))
     if not wanted:
-        return 0
+        return []
     existing = load_claims()
     seen = {
         (r.get("project"), r.get("lf_index"), name) for name, rows in existing.items() for r in rows
     }
     now = datetime.now(tz=timezone.utc).isoformat()
-    lines = []
+    rows = []
     for idx, video_id, clip in wanted:
         key = (project, idx, clip["name"])
         if key in seen:
             continue
         seen.add(key)
-        lines.append(
-            json.dumps(
-                {
-                    "claimed_at": now,
-                    "project": project,
-                    "lf_index": idx,
-                    "video_id": video_id,
-                    "clip_name": clip["name"],
-                    "clip_size_bytes": clip.get("size_bytes"),
-                    "clip_path": clip.get("path"),
-                },
-                sort_keys=True,
-            )
+        rows.append(
+            {
+                "claimed_at": now,
+                "project": project,
+                "lf_index": idx,
+                "video_id": video_id,
+                "clip_name": clip["name"],
+                "clip_size_bytes": clip.get("size_bytes"),
+                "clip_path": clip.get("path"),
+            }
         )
-    if not lines:
-        return 0
-    path = claims_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    return len(lines)
+    return rows
 
 
 def find_reused_clips(plan, project: str) -> list[dict]:
