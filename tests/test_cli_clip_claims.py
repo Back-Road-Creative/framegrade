@@ -75,7 +75,7 @@ def test_unpublished_and_no_provenance_folders_are_skipped_with_reason(tmp_path,
     _project(root, "legacy", uploads={"1": {"video_id": "yt9"}}, provenance=False)
     rc, out, _ = _run(root, apply=True)
     assert rc == 0
-    assert "skip" in out and "legacy: no lf_provenance.json" in out
+    assert "skip" in out and "legacy: no lf_provenance.json and no camera clips" in out
     assert "unpub: nothing new" in out
     assert not registry.exists()
 
@@ -103,3 +103,77 @@ def test_subparser_is_registered():
     assert args.roots == [Path("/a"), Path("/b")]
     assert args.apply is False
     assert _build_parser().parse_args(["clip-claims", "backfill", "/a", "--apply"]).apply is True
+
+
+def _drive_log(base: Path, *names):
+    lines = [f"19:14:07 [INFO]   Extracted GoPro GPS: {n}_gopro.gpx" for n in names]
+    (base / "drive.log").write_text("\n".join(lines) + "\nVID_20250915_091226_00_030 again\n")
+
+
+def test_old_provenance_without_clips_falls_back_to_drive_log(tmp_path, registry):
+    root = tmp_path / "out"
+    base = root / "old"
+    base.mkdir(parents=True)
+    (base / "lf_provenance.json").write_text(
+        json.dumps({"lfs": [{"lf_index": 1, "source": {"episode_paths": ["/cache/e.mp4"]}}]})
+    )
+    (base / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "yt1"}}))
+    _drive_log(base, "GX010064", "GX020064")
+    rc, out, _ = _run(root, apply=True)
+    assert rc == 0
+    assert "old lf1 GX010064 yt1 (drive_log_project)" in out
+    rows = load_claims()
+    assert sorted(rows) == ["GX010064", "GX020064", "VID_20250915_091226_00_030"]
+    assert rows["GX010064"][0]["basis"] == "drive_log_project"
+    assert rows["GX010064"][0]["clip_size_bytes"] is None
+    before = registry.read_text()
+    _run(root, apply=True)
+    assert registry.read_text() == before
+
+
+def test_no_provenance_claims_project_clips_for_every_upload(tmp_path, registry):
+    root = tmp_path / "out"
+    base = _project(
+        root, "umbrella", uploads={"1": {"video_id": "a"}, "2": {"video_id": "b"}}, provenance=False
+    )
+    _drive_log(base, "GX010060")
+    rc, out, _ = _run(root, apply=True)
+    assert rc == 0
+    assert {(r["lf_index"], r["video_id"]) for r in load_claims()["GX010060"]} == {
+        (1, "a"),
+        (2, "b"),
+    }
+
+
+def test_provenance_rows_are_tagged_and_win_over_drive_log(tmp_path, registry):
+    root = tmp_path / "out"
+    base = _project(root, "pub", uploads={"1": {"video_id": "yt1"}})
+    _drive_log(base, "GX999999")
+    _run(root, apply=True)
+    claims = load_claims()
+    assert "GX999999" not in claims
+    assert claims["VID_1.mp4"][0]["basis"] == "lf_provenance"
+
+
+def test_gate_matches_extensionless_claim_case_insensitively(tmp_path, registry):
+    from gomoveshift.pipeline.clip_claims import find_reused_clips
+
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "project": "old",
+                "lf_index": 1,
+                "video_id": "yt1",
+                "clip_name": "GX010064",
+                "clip_size_bytes": None,
+                "basis": "drive_log_project",
+            }
+        )
+        + "\n"
+    )
+    plan = {"episodes": [{"recordings": [{"chapters": [{"path": "/x/GX010064.MP4"}]}]}]}
+    found = find_reused_clips(plan, "new")
+    assert [c["claimed_by"] for c in found] == ["old"]
+    assert found[0]["basis"] == "drive_log_project"
+    assert find_reused_clips(plan, "old") == []

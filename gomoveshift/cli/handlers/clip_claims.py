@@ -5,13 +5,17 @@ outputs, which predate it. Each project folder directly under a scanned root (or
 the root itself) is one project. Its source clips come from ``lf_provenance.json``
 and the "published" rule is the live one: an LF counts only when
 ``youtube_uploads.json`` (``youtube_sidecar.load_sidecar``) gives it a
-``video_id``. A folder with no ``lf_provenance.json`` is reported skipped, never
-guessed. Dry-run by default; ``--apply`` appends via ``record_claims``, which is
+``video_id``. Outputs from before ``source.clips`` existed (no provenance file, or
+LFs without clips) fall back to the camera files their ``drive.log`` names: no log
+line ties a clip to one LF, so every uploaded LF claims the whole project's clips,
+tagged ``basis: drive_log_project`` (coarse). A folder with neither is reported
+skipped, never guessed. Dry-run by default; ``--apply`` appends via ``record_claims``, which is
 idempotent, so a re-run adds nothing.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +27,18 @@ from ...pipeline.clip_claims import (
 )
 from ...pipeline.lf_provenance_sidecar import LF_PROVENANCE_FILENAME
 from ...pipeline.youtube_sidecar import load_sidecar
+
+#: Camera files a drive.log names: Insta360 ``VID_<date>_<time>_<n>_<n>`` and GoPro
+#: ``GX``/``GH`` chapters (the log shows stems, e.g. ``GX010064_gopro.gpx``).
+_CLIP_RE = re.compile(r"(?<![A-Za-z0-9])(VID_\d{8}_\d{6}_\d+_\d+|G[XH]\d{6})(?![0-9])")
+
+
+def _drive_log_clips(base: Path) -> tuple[str, ...]:
+    try:
+        text = (base / "drive.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ()
+    return tuple(sorted(set(_CLIP_RE.findall(text))))
 
 
 def _project_dirs(root: Path) -> list[Path]:
@@ -46,13 +62,18 @@ def run_clip_claims_backfill(*, roots, apply: bool, out=None, err=None) -> int:
     try:
         for root in roots:
             for base in _project_dirs(root):
-                if not (base / LF_PROVENANCE_FILENAME).exists():
-                    print(f"skip {base}: no {LF_PROVENANCE_FILENAME}", file=out)
+                has_prov = (base / LF_PROVENANCE_FILENAME).exists()
+                log_clips = _drive_log_clips(base)
+                if not has_prov and not log_clips:
+                    print(
+                        f"skip {base}: no {LF_PROVENANCE_FILENAME} and no camera clips in drive.log",
+                        file=out,
+                    )
                     skipped += 1
                     continue
                 uploads = load_sidecar(base)
                 try:
-                    rows = pending_claims(base, uploads)
+                    rows = pending_claims(base, uploads, log_clips)
                 except (OSError, ValueError) as exc:
                     print(f"skip {base}: unreadable {LF_PROVENANCE_FILENAME} ({exc})", file=out)
                     skipped += 1
@@ -64,10 +85,10 @@ def run_clip_claims_backfill(*, roots, apply: bool, out=None, err=None) -> int:
                 for r in rows:
                     print(
                         f"{'add' if apply else 'would add'} {base.name} lf{r['lf_index']} "
-                        f"{r['clip_name']} {r['video_id']}",
+                        f"{r['clip_name']} {r['video_id']} ({r['basis']})",
                         file=out,
                     )
-                added += len(rows) if not apply else record_claims(base, uploads)
+                added += len(rows) if not apply else record_claims(base, uploads, log_clips)
     except ClipClaimsUnreadable as exc:
         print(f"error: {exc}", file=err)
         return 2
