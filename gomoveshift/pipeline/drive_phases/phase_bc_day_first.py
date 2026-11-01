@@ -1994,9 +1994,7 @@ def _approve_waypost_titles_before_encode(
                     f"LF {lf_idx} has retained GPS but no route evidence for title approval"
                 )
             continue  # GPS-less titles keep their existing Phase D path.
-        assert_gps_density_backs_title(
-            lf_idx, (state.per_lf_gps_coverage_pct or {}).get(lf_idx)
-        )
+        assert_gps_density_backs_title(lf_idx, (state.per_lf_gps_coverage_pct or {}).get(lf_idx))
         lf = plans_by_index[lf_idx]
         part = (
             (lf.part_index, lf.part_count) if (getattr(lf, "part_count", None) or 1) > 1 else None
