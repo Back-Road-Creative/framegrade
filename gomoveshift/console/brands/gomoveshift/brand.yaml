@@ -29,3 +29,18 @@ seo:
         day_times:
           fri: "15:00"
         shorts_times: ["10:00", "14:00", "16:00", "18:00"]
+
+# Facebook caption A/B (docs/pipeline/136-brand-policy.md). Arms are assigned
+# at generation and tagged in the publish-plan sidecar; `metrics collect`
+# prints one `EXPERIMENT fb_hashtags ...` line per arm.
+policy:
+  experiments:
+    - name: fb_hashtags
+      platforms: [facebook]
+      start: 2026-11-02
+      stop_after_days: 45
+      min_n: 20
+      arms:
+        A: {hashtag_mode: none}
+        B: {hashtag_mode: location}
+        C: {hashtag_mode: june}
