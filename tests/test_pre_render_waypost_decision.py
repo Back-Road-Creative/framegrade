@@ -22,6 +22,7 @@ from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
 from gomoveshift.pipeline.drive_state_model import PipelineState
 from gomoveshift.pipeline.route_claims import RouteWindow, measure_route
 from gomoveshift.pipeline.title_decision import (
+    ALLOW_UNPROVEN_TITLE_ENV,
     PreRenderTitleError,
     approve_retained_title,
 )
@@ -176,3 +177,55 @@ def test_phase_bc_refuses_retained_gps_without_route_review():
             _Geo(),
             {},
         )
+
+
+def test_facts_unavailable_stops_before_the_ost_burn(monkeypatch):
+    monkeypatch.delenv(ALLOW_UNPROVEN_TITLE_ENV, raising=False)
+    with patch("gomoveshift.pipeline.title_decision._region_only_title_facts", return_value=None):
+        with pytest.raises(PreRenderTitleError, match="facts_unavailable") as exc:
+            approve_retained_title("Ash County, VA", _route(), None)
+    assert ALLOW_UNPROVEN_TITLE_ENV in str(exc.value)
+
+
+def test_facts_unavailable_override_keeps_the_baseline(monkeypatch):
+    monkeypatch.setenv(ALLOW_UNPROVEN_TITLE_ENV, "1")
+    with patch("gomoveshift.pipeline.title_decision._region_only_title_facts", return_value=None):
+        decision = approve_retained_title("Ash County, VA", _route(), None)
+    assert decision["reason"] == "facts_unavailable"
+
+
+def _approve_with_density(density_pct):
+    state = PipelineState()
+    state.per_lf_titles = {1: "Ash County, VA"}
+    state.per_lf_gps_coverage_pct = {1: density_pct} if density_pct is not None else None
+    points = [
+        {"time": float(t), "lat": 9.0 if t < 120 else 10.0 if t < 240 else 11.0, "lon": -81.0}
+        for t in range(360)
+    ]
+    _approve_waypost_titles_before_encode(
+        state,
+        {1: "Ash County, VA"},
+        [SimpleNamespace(index=1, part_count=1)],
+        {1: points},
+        _Geo(),
+        {1: _route()},
+    )
+    return state
+
+
+def test_sparse_gps_stops_before_the_ost_burn(monkeypatch):
+    monkeypatch.delenv(ALLOW_UNPROVEN_TITLE_ENV, raising=False)
+    with pytest.raises(PreRenderTitleError, match=r"40\.8") as exc:
+        _approve_with_density(40.8)  # the density a real run recorded in lf_provenance.json
+    assert ALLOW_UNPROVEN_TITLE_ENV in str(exc.value)
+
+
+def test_sparse_gps_override_proceeds(monkeypatch):
+    monkeypatch.setenv(ALLOW_UNPROVEN_TITLE_ENV, "1")
+    assert _approve_with_density(40.8).per_lf_pre_render_title_decisions[1]
+
+
+@pytest.mark.parametrize("density", [60.0, 87.4, None])
+def test_dense_or_unrecorded_gps_is_not_stopped(monkeypatch, density):
+    monkeypatch.delenv(ALLOW_UNPROVEN_TITLE_ENV, raising=False)
+    assert _approve_with_density(density).per_lf_pre_render_title_decisions[1]

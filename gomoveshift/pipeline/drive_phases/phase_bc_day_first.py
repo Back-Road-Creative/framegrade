@@ -1975,7 +1975,11 @@ def _approve_waypost_titles_before_encode(
     state, ost_text, lf_plans, gps_points_by_lf, geocoder, route_claims_by_lf
 ) -> None:
     """Persist Waypost decisions for retained GPS routes before any encode."""
-    from ..title_decision import PreRenderTitleError, approve_retained_title
+    from ..title_decision import (
+        PreRenderTitleError,
+        approve_retained_title,
+        assert_gps_density_backs_title,
+    )
 
     location_evidence = _build_location_evidence_per_lf(lf_plans, gps_points_by_lf, geocoder)
     state.per_lf_location_evidence = location_evidence or None
@@ -1990,6 +1994,9 @@ def _approve_waypost_titles_before_encode(
                     f"LF {lf_idx} has retained GPS but no route evidence for title approval"
                 )
             continue  # GPS-less titles keep their existing Phase D path.
+        assert_gps_density_backs_title(
+            lf_idx, (state.per_lf_gps_coverage_pct or {}).get(lf_idx)
+        )
         lf = plans_by_index[lf_idx]
         part = (
             (lf.part_index, lf.part_count) if (getattr(lf, "part_count", None) or 1) > 1 else None
