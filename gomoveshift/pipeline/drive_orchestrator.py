@@ -23,6 +23,7 @@ from ..models import DrivePipelineResult
 from ..publishing.title_kit import build_title_kit
 from ._drive_state import load_drive_state, save_drive_state
 from .auto_enqueue import auto_enqueue_shorts
+from .clip_claims import record_claims
 from .color_filters import source_cadence_conflicts
 from .drive_phases.phase_a import PhaseA
 from .drive_phases.phase_b_preview import PhaseBPreview
@@ -677,6 +678,11 @@ class DrivePipelineOrchestrator:
                 state.youtube_uploads_sha = sha_hex
             except OSError as e:
                 logger.warning("Failed to write youtube_uploads.json sidecar: %s", e)
+            else:
+                try:
+                    record_claims(Path(output_base), uploads)
+                except Exception as e:  # noqa: BLE001 -- a registry write never fails the save
+                    logger.warning("clip claims not recorded: %s", e)
 
     def _load_state(self, state_file: Path) -> Optional[PipelineState]:
         return load_drive_state(state_file)

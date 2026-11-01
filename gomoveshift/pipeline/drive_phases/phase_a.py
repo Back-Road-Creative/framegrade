@@ -1,6 +1,7 @@
 """Phase A: Ingest & Analyze — scan GoPro files, score episodes, derive OST."""
 
 import logging
+import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,6 +20,7 @@ from ...analysis.unified_scorer import (
 from ...config import Config, resolve_lf_mode
 from ...video_types import VideoType, classify_video, suggest_action
 from .._drive_helpers import _extract_episode_ost_meta, differentiate_duplicate_ost
+from ..clip_claims import ALLOW_CLIP_REUSE_ENV, find_reused_clips
 from ..gopro_gps import (
     assert_gpx_video_correspondence,
     assert_slice_gpx_correspondence,
@@ -211,6 +213,26 @@ class PhaseA:
             mode=self.config.drive.ingest_mode,
             extensions=self.config.drive.video_extensions,
         )
+        # Footage-reuse gate: before the irreversible concat/encode, refuse camera
+        # files another project already published (an unreadable registry raises).
+        conflicts = find_reused_clips(plan, Path(output_base).name)
+        if conflicts:
+            lines = [
+                f"{c['clip_name']} -> {c['claimed_by']} lf{c['lf_index']} {c['video_id']}"
+                for c in conflicts
+            ]
+            if os.environ.get(ALLOW_CLIP_REUSE_ENV) != "1":
+                more = f" (+{len(lines) - 5} more)" if len(lines) > 5 else ""
+                raise RuntimeError(
+                    f"{len(lines)} source clip(s) already published by another project: "
+                    + "; ".join(lines[:5])
+                    + more
+                    + f". Set {ALLOW_CLIP_REUSE_ENV}=1 to allow reuse."
+                )
+            for line in lines:
+                logger.warning(
+                    "Reusing already-published source clip (%s=1): %s", ALLOW_CLIP_REUSE_ENV, line
+                )
         plan = execute_ingest(plan, stages_dir, derive_locations=False)
         state.ingest_plan = plan
 
