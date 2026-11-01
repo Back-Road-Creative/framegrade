@@ -95,6 +95,10 @@ Validation is loud (`policy.experiments[i].<key>` in the error): non-empty uniqu
 `min_n` and `stop_after_days` ints >= 1, at least two arms, each `hashtag_mode` one of
 `none`/`location`/`june`, `weight` an int >= 1, no unknown keys.
 
+The shipped GoMoveShift template (`console/brands/gomoveshift/brand.yaml`) carries exactly the
+block above. A `GMS_BRANDS_DIR/gomoveshift/` overlay replaces the whole template, so it must
+carry the block itself to keep the experiment running.
+
 - **Assignment** (`experiments.assign_arm`) is a weighted sha256 of `name:project:short_index`,
   so it is reproducible and never random at runtime. `SocialGenerator` assigns when it generates
   a post and writes the `{experiment: arm}` map to `SocialPost.experiment_arms`, then

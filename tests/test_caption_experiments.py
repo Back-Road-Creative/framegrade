@@ -163,3 +163,17 @@ def test_arm_observations_join_sidecar_tags_to_facebook_reach():
     rows = arm_observations(exp, records, lambda project: tags)
     assert rows == [("A", "2026-11-10T12:00:00", 5), ("B", "2026-11-10T12:00:00", None)]
     assert arm_observations(exp, records, lambda project: None) == []
+
+
+def test_shipped_gomoveshift_brand_runs_the_fb_hashtag_experiment(monkeypatch):
+    monkeypatch.delenv("GMS_BRANDS_DIR", raising=False)
+    (exp,) = load_brand_policy("gomoveshift").experiments
+    assert exp.name == "fb_hashtags"
+    assert exp.platforms == ("facebook",)
+    assert exp.start == date(2026, 11, 2)
+    assert (exp.min_n, exp.stop_after_days) == (20, 45)
+    assert [(a.id, a.hashtag_mode) for a in exp.arms] == [
+        ("A", "none"),
+        ("B", "location"),
+        ("C", "june"),
+    ]
