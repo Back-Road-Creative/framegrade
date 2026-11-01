@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 SIDECAR = "run_origin.json"
 ORIGIN_ENV = "GMS_RUN_ORIGIN"
 ORIGINS = ("cli", "cron", "console")
+#: Set by ``health backlog`` on the drive it starts; ``drive`` refuses a real render without it.
+LAUNCHED_BY_ENV = "GMS_LAUNCHED_BY"
+BACKLOG_LAUNCHER = "health-backlog"
 
 
 def _command(argv: Optional[list]) -> list:
