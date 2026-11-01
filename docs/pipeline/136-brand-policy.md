@@ -39,8 +39,8 @@ policy:
 `console/settings.brand_disabled_tabs()` only ever reads the `disabled_tabs` key via `.get()`, so
 the `policy:` block does not change console nav/tab behaviour for any brand.
 
-The shipped `brand.yaml` is an example seed with no `policy:` block; a brand without a `policy:` block has every key fall back
-to `None`.
+The shipped GoMoveShift `brand.yaml` carries only an `experiments` key (below); a brand without a
+`policy:` block, or a key it omits, falls back to `None`.
 
 ### `blackout`
 
@@ -117,6 +117,5 @@ carry the block itself to keep the experiment running.
   (`tracking.day7.window_settled`; Facebook keeps no daily series, so `has_settled_series` does not
   apply). The median stays `unknown` until EVERY arm holds `min_n`; unmeasured reach is never 0.
   `experiments.arm_results` returns the same data for a caller that wants the numbers.
-- **Where the real policy lives**: `console/brands/gomoveshift/brand.yaml` here is the public
-  example seed, and `GMS_BRANDS_DIR/<slug>` replaces it wholesale on the host, so the live
-  experiment block goes in the host's `brand.yaml`, not this repository.
+- **Where the real policy lives**: the host has no `GMS_BRANDS_DIR/gomoveshift/` overlay, so the
+  shipped template's block is the live one. Adding an overlay later means copying the block into it.
