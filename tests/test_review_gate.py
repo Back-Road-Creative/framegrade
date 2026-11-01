@@ -782,3 +782,60 @@ class TestPreRenderLedgerReadability:
             ost_text="Newfound Gap Road, NC",
             output_dir=tmp_path,
         )
+
+
+_CORK_LIVE_TITLES = {
+    "West Cork in 4K",
+    "Goleen, County Cork in 4K",
+    "To Mizen Head, County Cork in 4K",
+    "Goleen to Crookhaven, County Cork in 4K",
+    "To Clonakilty, County Cork in 4K",
+}
+
+
+class TestPreRenderBareRegionTitleGate:
+    """A bare county/region title ("County Cork in 4K") is a near-duplicate
+    when the channel already uses that county/region; a title naming a town or
+    route inside it is still allowed."""
+
+    def _patch_published(self, monkeypatch, titles):
+        import gomoveshift.pipeline.longform_metadata as lm
+
+        monkeypatch.setattr(lm, "load_published_titles", lambda: set(titles))
+
+    def test_bare_county_title_refused(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, _CORK_LIVE_TITLES)
+        gate = ReviewGate(interactive=False)
+        with pytest.raises(ReviewFailedError, match="bare region"):
+            gate.gate_pre_render(lf_index=1, ost_text="County Cork", output_dir=tmp_path)
+
+    def test_bare_county_with_state_refused(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, {"Beaufort, SC in 4K"})
+        gate = ReviewGate(interactive=False)
+        with pytest.raises(ReviewFailedError, match="bare region"):
+            gate.gate_pre_render(lf_index=1, ost_text="Beaufort County, SC", output_dir=tmp_path)
+
+    def test_town_in_county_allowed(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, _CORK_LIVE_TITLES)
+        gate = ReviewGate(interactive=False)
+        gate.gate_pre_render(lf_index=1, ost_text="Baltimore, County Cork", output_dir=tmp_path)
+
+    def test_route_in_county_allowed(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, _CORK_LIVE_TITLES)
+        gate = ReviewGate(interactive=False)
+        gate.gate_pre_render(
+            lf_index=1, ost_text="Schull to Barleycove, County Cork", output_dir=tmp_path
+        )
+
+    def test_bare_county_new_to_channel_allowed(self, tmp_path, monkeypatch):
+        self._patch_published(monkeypatch, _CORK_LIVE_TITLES)
+        gate = ReviewGate(interactive=False)
+        gate.gate_pre_render(lf_index=1, ost_text="County Kerry", output_dir=tmp_path)
+
+    def test_helper_returns_the_conflicting_titles(self):
+        gate = ReviewGate(interactive=False)
+        import gomoveshift.pipeline.longform_metadata as lm
+
+        with patch.object(lm, "known_channel_titles", return_value=set(_CORK_LIVE_TITLES)):
+            hits = gate._check_past_title_collisions("County Cork in 4K", bare_region=True)
+        assert hits == sorted(_CORK_LIVE_TITLES)

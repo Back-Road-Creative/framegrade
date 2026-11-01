@@ -10,12 +10,40 @@ import csv
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from .validation.content_gates import _label_quality_diagnosis
+
+_BARE_REGION_SUFFIX_RE = re.compile(r"\s+in\s+4k\s*$", re.IGNORECASE)
+_BARE_REGION_STATE_RE = re.compile(r",\s*[a-z]{2}\s*$", re.IGNORECASE)
+_BARE_REGION_ROUTE_RE = re.compile(
+    r"\b(?:to|via|from|and|toward|towards)\b|[,&/|:\u2192-]", re.IGNORECASE
+)
+_BARE_REGION_SHAPE_RE = re.compile(
+    r"^(?:county\s+(?P<a>[a-z' ]+)|(?P<b>[a-z' ]+?)\s+county"
+    r"|(?:north|south|east|west|central|mid|upper|lower)\s+(?P<c>[a-z' ]+))$"
+)
+
+
+def _bare_region_key(title: str) -> str:
+    """The county/region name of a bare region title, else ``""``.
+
+    Bare = "<County X | X County | West X> in 4K" with an optional trailing
+    ", ST", and no town, route word ("to", "via") or comma-separated place.
+    "County Cork in 4K" -> "cork"; "Goleen, County Cork in 4K" -> "".
+    """
+    base = _BARE_REGION_SUFFIX_RE.sub("", title.strip())
+    base = _BARE_REGION_STATE_RE.sub("", base).strip().lower()
+    if not base or _BARE_REGION_ROUTE_RE.search(base):
+        return ""
+    m = _BARE_REGION_SHAPE_RE.match(base)
+    if not m:
+        return ""
+    return (m.group("a") or m.group("b") or m.group("c")).strip()
 
 
 class ReviewFailedError(RuntimeError):
@@ -560,6 +588,13 @@ class ReviewGate:
                 f"title (dedup vs channel failed upstream): {exact_dupes[:3]}"
             )
 
+        region_dupes = self._check_past_title_collisions(final_title, bare_region=True)
+        if region_dupes:
+            self._fail(
+                "FINAL title is a bare region title and the channel already "
+                f"uses that county/region (name a town or route): {region_dupes[:3]}"
+            )
+
         # Advisory (non-blocking): OST location text echoes a past title.
         collisions = self._check_past_title_collisions(ost_text)
         if collisions:
@@ -849,7 +884,9 @@ class ReviewGate:
         except Exception:
             return 0
 
-    def _check_past_title_collisions(self, text: str, *, exact: bool = False) -> list[str]:
+    def _check_past_title_collisions(
+        self, text: str, *, exact: bool = False, bare_region: bool = False
+    ) -> list[str]:
         """Return past published YouTube titles that collide with ``text``.
 
         Titles come from :func:`longform_metadata.known_channel_titles`: the
@@ -864,7 +901,10 @@ class ReviewGate:
         echoes a live title. ``exact=True``: the past title *equals* ``text``
         case-insensitively (trimmed) — a genuine duplicate of a live video,
         used as a hard gate on the FINAL title before the irreversible OST
-        burn.
+        burn. ``bare_region=True``: ``text`` is a bare county/region title
+        ("County Cork in 4K": no town, no route) and the hits are the past
+        titles that already name that county/region as a whole word; a title
+        naming a town or a route returns ``[]`` (see :func:`_bare_region_key`).
         """
         from gomoveshift.pipeline.longform_metadata import (  # noqa: PLC0415
             known_channel_titles,
@@ -874,6 +914,12 @@ class ReviewGate:
         if not needle:
             return []
         published = known_channel_titles()
+        if bare_region:
+            key = _bare_region_key(text)
+            if not key:
+                return []
+            pattern = re.compile(rf"\b{re.escape(key)}\b")
+            return sorted(t for t in published if pattern.search(t.lower()))
         if exact:
             hits = {t for t in published if t.lower().strip() == needle}
         else:
