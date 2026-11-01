@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.24] - 2026-11-01
+
+### Added
+
+- The shipped GoMoveShift brand runs the `fb_hashtags` Facebook caption experiment from 2026-11-02 for 45 days: arm A composed caption with no generic hashtags, B adds 2 location hashtags, C the June-style set. Each arm reports a median reach once it has 20 settled, measured shorts.
+
 ## [0.3.23] - 2026-10-31
 
 ### Fixed
@@ -376,7 +382,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...HEAD
+[0.3.24]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...v0.3.24
 [0.3.23]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...v0.3.23
 [0.3.22]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.21...v0.3.22
 [0.3.21]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.20...v0.3.21
