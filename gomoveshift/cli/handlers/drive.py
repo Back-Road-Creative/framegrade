@@ -23,7 +23,8 @@ def _launch_origin_refusal(args) -> str | None:
     render no long-form and are exempt. ``GMS_ALLOW_MANUAL_DRIVE=1`` overrides, logged."""
     if any(getattr(args, flag, False) is True for flag in _RENDER_EXEMPT_FLAGS):
         return None
-    if os.environ.get(run_origin.LAUNCHED_BY_ENV) == run_origin.BACKLOG_LAUNCHER:
+    launcher = os.environ.get(run_origin.LAUNCHED_BY_ENV, "")
+    if launcher in run_origin.LAUNCHERS:
         return None
     if os.environ.get(ALLOW_MANUAL_DRIVE_ENV) == "1":
         logger.warning(
@@ -31,9 +32,11 @@ def _launch_origin_refusal(args) -> str | None:
             "gates did not run.", ALLOW_MANUAL_DRIVE_ENV,
         )  # fmt: skip
         return None
+    seen = f" (got {run_origin.LAUNCHED_BY_ENV}={launcher!r})" if launcher else ""
     return (
-        "drive renders start only from `gomoveshift health backlog` (it sets "
-        f"{run_origin.LAUNCHED_BY_ENV}={run_origin.BACKLOG_LAUNCHER}, on the latest pin). "
+        "drive renders start only from a tracked launcher -- `gomoveshift health backlog`, a "
+        f"heal resume, the console or the host worker -- which set {run_origin.LAUNCHED_BY_ENV} "
+        f"to one of {', '.join(run_origin.LAUNCHERS)}{seen}. "
         f"Operator override, logged: {ALLOW_MANUAL_DRIVE_ENV}=1."
     )
 

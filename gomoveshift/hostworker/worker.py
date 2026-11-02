@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from gomoveshift import run_origin
 from gomoveshift._process_group import kill_group, popen_kwargs, terminate_group
 from gomoveshift.console.jobs import ALLOWED_SUBCOMMANDS
 from gomoveshift.console.settings import load_registry
@@ -235,8 +236,11 @@ class HostWorker:
             except (GpuLockBusyError, OSError) as exc:
                 self._write_status(job_id, "failed", error=f"GPU lock unavailable: {exc}")
                 return
+        env = _request_env(req.get("env"))
+        if argv[3] == "drive":  # set here, never taken from the request: the spool is untrusted
+            env[run_origin.LAUNCHED_BY_ENV] = "hostworker"
         try:
-            self._run_child(job_id, argv, _request_env(req.get("env")))
+            self._run_child(job_id, argv, env)
         finally:
             release_gpu_lock(fd, lock)
 

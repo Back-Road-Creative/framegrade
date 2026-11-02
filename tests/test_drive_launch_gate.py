@@ -32,9 +32,20 @@ def test_the_backlog_marker_lets_a_render_start(monkeypatch):
     assert drive_handler._launch_origin_refusal(_args()) is None
 
 
-def test_another_marker_value_is_not_the_backlog(monkeypatch):
-    monkeypatch.setenv(run_origin.LAUNCHED_BY_ENV, "console")
-    assert drive_handler._launch_origin_refusal(_args())
+def test_an_unknown_marker_value_is_refused_and_named(monkeypatch):
+    monkeypatch.setenv(run_origin.LAUNCHED_BY_ENV, "my-script")
+    why = drive_handler._launch_origin_refusal(_args())
+    assert why and "my-script" in why
+
+
+@pytest.mark.parametrize("launcher", run_origin.LAUNCHERS)
+def test_every_tracked_launcher_value_lets_a_render_start(monkeypatch, launcher):
+    monkeypatch.setenv(run_origin.LAUNCHED_BY_ENV, launcher)
+    assert drive_handler._launch_origin_refusal(_args()) is None
+
+
+def test_the_launcher_set_names_the_tracked_launchers():
+    assert set(run_origin.LAUNCHERS) == {"health-backlog", "health-heal", "console", "hostworker"}
 
 
 @pytest.mark.parametrize("flag", ["dry_run", "list_lfs", "label_dry_run", "preview"])
