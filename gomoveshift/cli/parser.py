@@ -722,7 +722,8 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="PATH",
         help="Whole-day GPX to slice into one <stem>.gpx sidecar per VID_*.mp4 "
         "in the source dir before ingest (generic mode, no-GPMF cameras). "
-        "Requires --camera-utc-offset-hours. Strict filename contract: only "
+        "The camera clock offset is measured from creation_time unless "
+        "--camera-utc-offset-hours is given. Strict filename contract: only "
         "VID_YYYYMMDD_HHMMSS_NN_NNN.mp4 names are sliced (the clock comes "
         "from the name); LRV_* proxies are skipped, any other .mp4 is "
         "refused. Not written under --dry-run. Sidecars it wrote are "
@@ -734,7 +735,9 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         metavar="N",
         help="Camera clock UTC offset (local = UTC + N; US Eastern DST is -4). "
-        "REQUIRED with --day-gpx and never guessed.",
+        "Optional with --day-gpx: omitted, it is measured per clip from ffprobe "
+        "creation_time and refused when it is inconsistent; given, it must agree "
+        "with creation_time.",
     )
     p.add_argument(
         "--force-no-rebase",

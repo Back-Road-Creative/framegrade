@@ -569,3 +569,15 @@ def test_latest_release_is_the_highest_version_tag(tags, want):
 def test_no_version_tags_is_an_error():
     with pytest.raises(ValueError):
         launch.latest_release_from_tags("a\trefs/tags/nightly\n")
+
+
+def test_a_day_gpx_row_without_an_offset_omits_the_flag_rather_than_passing_none(tmp_path):
+    rig = Rig(tmp_path)
+    gpx = tmp_path / "day12.gpx"
+    gpx.write_text("<gpx/>")
+    row = rig.rows[0]
+    rig.rows[0] = BacklogRow(row.project, row.region, row.sources, "generic", row.lf_mode, day_gpx=str(gpx))  # fmt: skip
+    assert rig.run()["action"] == "launched"
+    drive_args = rig.launches[0][0]
+    assert "--day-gpx" in drive_args and "--camera-utc-offset-hours" not in drive_args
+    assert "None" not in drive_args
