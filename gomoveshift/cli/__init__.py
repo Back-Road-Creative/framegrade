@@ -15,6 +15,7 @@ from .handlers.catalog_classify import cmd_catalog_classify
 from .handlers.catalog_fetch import cmd_catalog_fetch
 from .handlers.catalog_inventory import cmd_catalog_inventory
 from .handlers.cleanup import cmd_cleanup
+from .handlers.clip_claims import cmd_clip_claims
 from .handlers.comments import cmd_comments
 from .handlers.console import cmd_console
 from .handlers.dispatch_queue import cmd_dispatch_queue
@@ -79,6 +80,7 @@ __all__ = [
     "cmd_catalog_fetch",
     "cmd_publishing_status",
     "cmd_publish_journal",
+    "cmd_clip_claims",
     "cmd_reconcile_playlists",
     "cmd_route_story_prepare",
     "cmd_route_story_proof",
@@ -127,6 +129,7 @@ _COMMAND_MAP = {
     "platform-decline": cmd_platform_decline,
     "post-anomaly": cmd_post_anomaly,
     "reconcile-playlists": cmd_reconcile_playlists,
+    "clip-claims": cmd_clip_claims,
     "route-story-prepare": cmd_route_story_prepare,
     "route-story-proof": cmd_route_story_proof,
     "route-story-verify": cmd_route_story_verify,

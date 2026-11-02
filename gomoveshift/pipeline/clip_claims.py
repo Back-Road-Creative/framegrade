@@ -24,6 +24,8 @@ from .lf_provenance_sidecar import LF_PROVENANCE_FILENAME
 logger = logging.getLogger(__name__)
 
 ALLOW_CLIP_REUSE_ENV = "GMS_ALLOW_CLIP_REUSE"
+BASIS_PROVENANCE = "lf_provenance"
+BASIS_DRIVE_LOG = "drive_log_project"
 
 
 class ClipClaimsUnreadable(RuntimeError):  # noqa: N818 -- name fixed by spec
@@ -62,24 +64,47 @@ def load_claims() -> dict[str, list[dict]]:
     return claims
 
 
-def record_claims(output_base: Path, uploads: dict) -> int:
+def record_claims(output_base: Path, uploads: dict, drive_log_clips: tuple[str, ...] = ()) -> int:
     """Append a claim per source clip of every LF that has a ``video_id``.
 
     Idempotent on (project, lf_index, clip_name). Returns the rows written;
     never raises.
     """
     try:
-        return _record_claims(Path(output_base), uploads)
+        return _record_claims(Path(output_base), uploads, drive_log_clips)
     except Exception as exc:  # noqa: BLE001 -- runs inside a state save; must not fail it
         logger.warning("clip_claims: could not record claims for %s: %s", output_base, exc)
         return 0
 
 
-def _record_claims(output_base: Path, uploads: dict) -> int:
-    sidecar = output_base / LF_PROVENANCE_FILENAME
-    if not sidecar.exists():
+def _record_claims(output_base: Path, uploads: dict, drive_log_clips: tuple[str, ...]) -> int:
+    rows = pending_claims(output_base, uploads, drive_log_clips)
+    if not rows:
         return 0
-    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    path = claims_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(json.dumps(r, sort_keys=True) for r in rows) + "\n")
+    return len(rows)
+
+
+def pending_claims(
+    output_base: Path, uploads: dict, drive_log_clips: tuple[str, ...] = ()
+) -> list[dict]:
+    """Rows :func:`record_claims` would append now; writes nothing, may raise.
+
+    A claim needs both the LF's ``lf_provenance.json`` clips and a ``video_id``
+    in ``uploads`` (the ``youtube_uploads.json`` mapping); rows already in the
+    registry for (project, lf_index, clip_name) are left out.
+    """
+    output_base = Path(output_base)
+    sidecar = output_base / LF_PROVENANCE_FILENAME
+    if sidecar.exists():
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    elif drive_log_clips:
+        payload = {}
+    else:
+        return []
     by_index = {}
     for key, rec in (uploads or {}).items():
         try:
@@ -88,6 +113,7 @@ def _record_claims(output_base: Path, uploads: dict) -> int:
             continue
     project = output_base.name
     wanted = []
+    provenance_lfs = set()
     for lf in payload.get("lfs") or ():
         idx = lf.get("lf_index")
         rec = by_index.get(idx)
@@ -96,41 +122,41 @@ def _record_claims(output_base: Path, uploads: dict) -> int:
             continue
         for clip in (lf.get("source") or {}).get("clips") or ():
             if clip.get("name"):
-                wanted.append((idx, video_id, clip))
+                wanted.append((idx, video_id, clip, BASIS_PROVENANCE))
+                provenance_lfs.add(idx)
+    # Pre-#166 outputs name no clips per LF: claim the project's drive.log clips
+    # for each uploaded LF instead (coarse, and tagged so the gate can say so).
+    for idx in sorted(by_index):
+        rec = by_index[idx]
+        video_id = rec.get("video_id") if isinstance(rec, dict) else None
+        if video_id and idx not in provenance_lfs:
+            wanted.extend((idx, video_id, {"name": n}, BASIS_DRIVE_LOG) for n in drive_log_clips)
     if not wanted:
-        return 0
+        return []
     existing = load_claims()
     seen = {
         (r.get("project"), r.get("lf_index"), name) for name, rows in existing.items() for r in rows
     }
     now = datetime.now(tz=timezone.utc).isoformat()
-    lines = []
-    for idx, video_id, clip in wanted:
+    rows = []
+    for idx, video_id, clip, basis in wanted:
         key = (project, idx, clip["name"])
         if key in seen:
             continue
         seen.add(key)
-        lines.append(
-            json.dumps(
-                {
-                    "claimed_at": now,
-                    "project": project,
-                    "lf_index": idx,
-                    "video_id": video_id,
-                    "clip_name": clip["name"],
-                    "clip_size_bytes": clip.get("size_bytes"),
-                    "clip_path": clip.get("path"),
-                },
-                sort_keys=True,
-            )
+        rows.append(
+            {
+                "claimed_at": now,
+                "project": project,
+                "lf_index": idx,
+                "video_id": video_id,
+                "clip_name": clip["name"],
+                "clip_size_bytes": clip.get("size_bytes"),
+                "clip_path": clip.get("path"),
+                "basis": basis,
+            }
         )
-    if not lines:
-        return 0
-    path = claims_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    return len(lines)
+    return rows
 
 
 def find_reused_clips(plan, project: str) -> list[dict]:
@@ -140,9 +166,13 @@ def find_reused_clips(plan, project: str) -> list[dict]:
     same name with a different size is a different file. ``filtered_clips`` are
     not in the drive and are ignored.
     """
-    claims = load_claims()
-    if not claims:
+    raw = load_claims()
+    if not raw:
         return []
+    claims: dict[str, list[dict]] = {}
+    for rows in raw.values():
+        for row in rows:
+            claims.setdefault(clip_key(row["clip_name"]), []).append(row)
     found: dict[str, dict] = {}
     for ep in _attr(plan, "episodes") or ():
         for rec in _attr(ep, "recordings") or ():
@@ -151,7 +181,7 @@ def find_reused_clips(plan, project: str) -> list[dict]:
                 if not path:
                     continue
                 name = os.path.basename(str(path))
-                rows = claims.get(name)
+                rows = claims.get(clip_key(name))
                 if not rows:
                     continue
                 size = _size(path)
@@ -167,10 +197,16 @@ def find_reused_clips(plan, project: str) -> list[dict]:
                                 "claimed_by": row.get("project"),
                                 "lf_index": row.get("lf_index"),
                                 "video_id": row.get("video_id"),
+                                **({"basis": row["basis"]} if row.get("basis") else {}),
                             },
                         )
                         break
     return [found[k] for k in sorted(found)]
+
+
+def clip_key(name: str) -> str:
+    """Case-folded stem: a drive.log names ``GX010064``, the drive holds ``GX010064.MP4``."""
+    return os.path.splitext(os.path.basename(str(name)))[0].lower()
 
 
 def _size(path) -> int | None:

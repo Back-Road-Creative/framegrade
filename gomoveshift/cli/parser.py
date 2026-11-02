@@ -2032,6 +2032,32 @@ def _add_route_story_film_parser(subparsers: argparse._SubParsersAction) -> None
     )
 
 
+def _add_clip_claims_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "clip-claims",
+        help="Footage-reuse registry tools (backfill from past lf_provenance.json outputs)",
+    )
+    actions = p.add_subparsers(dest="clip_claims_action", metavar="<action>", required=True)
+    b = actions.add_parser(
+        "backfill",
+        help="Rebuild claims for already-published long-forms from lf_provenance.json + "
+        "youtube_uploads.json (dry-run by default; idempotent)",
+    )
+    b.add_argument(
+        "roots",
+        nargs="+",
+        type=Path,
+        metavar="OUTPUT_ROOT",
+        help="Output root(s) whose project folders to scan (e.g. /mnt/d/GMSVidOutput)",
+    )
+    b.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Append the missing claims to the registry. Without it, print what would be added.",
+    )
+
+
 def _add_reconcile_playlists_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "reconcile-playlists",
@@ -3613,7 +3639,8 @@ command groups (run `gomoveshift <command> --help` for any of them):
   analyze a video    analyze, process, scan, review-set
   route story        route-story-prepare, route-story-proof, route-story-verify, route-story-film
   publishing queue   enqueue-plan, enqueue-asset, dispatch-queue, queue, publishing-status,
-                     publish-journal, schedule, sync-site, reconcile-playlists, youtube-auth
+                     publish-journal, schedule, sync-site, reconcile-playlists, clip-claims,
+                     youtube-auth
   catalog            catalog-inventory, catalog-classify, catalog-fetch
   metrics            metrics, platform-decline, post-anomaly, comments
   photos             photos
@@ -3704,6 +3731,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_health_parser(subparsers)
     _add_sync_site_parser(subparsers)
     _add_reconcile_playlists_parser(subparsers)
+    _add_clip_claims_parser(subparsers)
     _add_route_story_prepare_parser(subparsers)
     _add_route_story_proof_parser(subparsers)
     _add_route_story_verify_parser(subparsers)

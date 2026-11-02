@@ -219,6 +219,11 @@ class PhaseA:
         if conflicts:
             lines = [
                 f"{c['clip_name']} -> {c['claimed_by']} lf{c['lf_index']} {c['video_id']}"
+                + (
+                    " (coarse: whole-project claim)"
+                    if c.get("basis") == "drive_log_project"
+                    else ""
+                )
                 for c in conflicts
             ]
             if os.environ.get(ALLOW_CLIP_REUSE_ENV) != "1":
