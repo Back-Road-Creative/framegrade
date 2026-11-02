@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `health backlog` asks the drive's raw-duration gate before it supersedes, launches or books
+  anything: a `full_drive` row whose day of raw footage is under `full_drive_part_min_sec` is
+  `refused` (`render gate: …`), in a dry run too. Before, the launch went through (and a
+  `--supersede` moved the old run aside) and the drive refused the day only after it started,
+  leaving an `auditing` store row for a render that could never happen.
+
 ## [0.3.28] - 2026-11-02
 
 ### Fixed

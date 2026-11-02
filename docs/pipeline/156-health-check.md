@@ -135,6 +135,12 @@ the row's own sources before the job starts, under the code root's drive interpr
 `python -c`, cwd the service dir) so tool checks such as gopro-overlay test the venv that will
 render; its blockers are `refused`, and a crashed child is an error, never a pass.
 
+**Render gate.** Before anything is moved, launched or registered, and in a dry run too, the row
+is checked against the drive's own pre-ingest refusal (`day_under_part_min_message`) under the
+row's `ingest_mode` and `lf_mode`: a `full_drive` day whose raw footage (with its neighbouring
+calendar days) is under `full_drive_part_min_sec` is `refused` with `render gate: <message>`. A
+dry run, which has no subset dir yet, scans a throwaway dir of links to the row's sources.
+
 **Launch.** Under the `gms-backlog-launch` lease (the script named by `$GMS_LEASE_SCRIPT`, default `bin/lease.sh`; held → `noop`, released in a
 `finally`), it writes the row's chapters as a symlink dir `<sources root>/<project>` (reused when
 identical, `refused` on any mismatch, never rewritten), then runs
