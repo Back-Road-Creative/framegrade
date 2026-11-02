@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `health backlog` no longer refuses to relaunch a `day_gpx` row whose earlier drive got as far as
+  slicing the day GPX: the slicer's own `<stem>.gpx` sidecars beside the chapters in
+  `<sources root>/<project>` match the row. Any other extra file, or a `.gpx` the slicer did not
+  write, is still a mismatch.
+
 ## [0.3.29] - 2026-11-02
 
 ### Fixed
