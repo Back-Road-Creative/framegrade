@@ -147,3 +147,16 @@ in the store. A row with a `day_gpx` (footage with no GPS of its own) adds `--da
 --camera-utc-offset-hours <N>` from the row; Waypost refuses a row that sets one without the
 other. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
 `--dry-run` takes no lease, writes nothing and prints the exact argv, env and storage table.
+
+**Supersede.** `--supersede <project> --reason <text>` replaces that row's own earlier run, for
+example a render made on an older release: without it the row is skipped as already staged, and a
+relaunch would resume the stale stages instead of rendering fresh. The project must be the
+region's next eligible row once its own stage root is set aside; a row in the store or the content
+ledger, a row staged by another project's run, or an output whose `youtube_uploads.json` holds
+records (or is unreadable) is `refused`, and so is an empty reason. `<stages root>/<project>` and
+`<output root>/<project>` are renamed (one device, no copy) to `<root>/_superseded/<project>-<UTC
+stamp>/`, each with a `superseded.json` (`backlog-supersede/1`: project, reason, time, moves, the
+old recipe's `sha`/`started_at`/`phase_reached`/`argv`, and whether a `no-auto-resume` hold sat
+under it). A hold under the row's own root does not block the supersede; it moves with the run.
+Nothing moves until every check up to the release-pin check has passed, so a refusal leaves the
+old run in place; `--dry-run` prints the planned moves. `_superseded/` is never read as staging.

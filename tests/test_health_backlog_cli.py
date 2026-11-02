@@ -86,3 +86,25 @@ def test_absent_store_is_created_only_by_register(tmp_path):
         path, lambda p: ScheduleStore(p, ZoneInfo("America/New_York"), ["usa"])
     )
     assert [(d.project, d.status) for d in drives] == [("sc-a", "auditing")]
+
+
+def test_supersede_needs_a_reason_at_the_parser(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        health.cmd_health(_args(tmp_path, "--supersede", "ire-a"), SimpleNamespace())
+
+
+def test_supersede_and_reason_reach_run_backlog(tmp_path, capsys, wired):
+    wired["_result"] = {
+        "action": "launched", "reason": "ire-a for slot", "skipped": [],
+        "supersede": {"reason": "old render", "moves": [{"from": "/s/ire-a", "to": "/s/_x"}]},
+    }  # fmt: skip
+    args = _args(tmp_path, "--supersede", "ire-a", "--reason", "old render")
+    assert health.cmd_health(args, SimpleNamespace()) == 0
+    assert wired["supersede"] == ("ire-a", "old render")
+    assert "superseded /s/ire-a -> /s/_x" in capsys.readouterr().out
+
+
+def test_no_supersede_passes_none(tmp_path, wired):
+    wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
+    health.cmd_health(_args(tmp_path), SimpleNamespace())
+    assert wired["supersede"] is None
