@@ -220,10 +220,22 @@ def _uploaded(output_dir: Optional[str]) -> bool:
 
 
 def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[str]:
-    """Refusal text, or ``None`` once ``subset`` holds exactly one symlink per source."""
+    """Refusal text, or ``None`` once ``subset`` holds exactly one symlink per source.
+
+    The day-GPX slicer's own ``<stem>.gpx`` beside a source is not a mismatch: a drive with
+    ``--day-gpx`` writes it there before ingest, and rewrites it on the next run."""
+    from ..pipeline.ingest.day_gpx_slicer import _is_own
+
     want = {Path(s).name: os.path.realpath(s) for s in sources}
+    stems = {Path(name).stem for name in want}
     if subset.exists():
-        have = {p.name: os.path.realpath(p) for p in subset.iterdir()}
+        have = {
+            p.name: os.path.realpath(p)
+            for p in subset.iterdir()
+            if not (
+                p.suffix.lower() == ".gpx" and p.stem in stems and p.name not in want and _is_own(p)
+            )
+        }
         if have != want:
             extra = sorted(set(have) - set(want)) or sorted(set(want) - set(have))
             return f"subset dir {subset} does not match the manifest row ({extra or 'targets'})"

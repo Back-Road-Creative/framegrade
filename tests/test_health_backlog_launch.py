@@ -473,6 +473,34 @@ def test_a_mismatched_subset_dir_is_refused_never_rewritten(tmp_path):
     assert (subset / "stray.MP4").exists() and not rig.launches
 
 
+def test_the_day_gpx_slicers_own_sidecars_do_not_mismatch_the_subset_dir(tmp_path):
+    # A drive with --day-gpx writes <stem>.gpx beside each video in the subset dir before
+    # ingest; a relaunch of that row (e.g. after the drive refused) must still match.
+    rig = Rig(tmp_path)
+    assert rig.run()["action"] == "launched"
+    subset = rig.sources / "day-a"
+    for video in [p for p in subset.iterdir() if p.suffix == ".MP4"]:
+        video.with_suffix(".gpx").write_text(
+            '<?xml version="1.0"?>\n<gpx creator="gms-day-gpx-slicer">\n</gpx>\n'
+        )
+    rig2 = Rig(tmp_path)
+    rig2.rows = rig.rows
+    assert rig2.run()["action"] == "launched"
+
+
+def test_a_sidecar_the_slicer_did_not_write_still_mismatches(tmp_path):
+    rig = Rig(tmp_path)
+    assert rig.run()["action"] == "launched"
+    subset = rig.sources / "day-a"
+    (subset / "day-a-GX00.gpx").write_text('<gpx creator="someone-else"></gpx>')
+    (subset / "day-z-GX00.gpx").write_text('<gpx creator="gms-day-gpx-slicer"></gpx>')
+    rig2 = Rig(tmp_path)
+    rig2.rows = rig.rows
+    res = rig2.run()
+    assert res["action"] == "refused"
+    assert "day-a-GX00.gpx" in res["reason"] and "day-z-GX00.gpx" in res["reason"]
+
+
 def test_no_service_interpreter_refuses(tmp_path):
     rig = Rig(tmp_path)
     (tmp_path / ".venv" / "bin" / "python").unlink()

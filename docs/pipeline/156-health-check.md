@@ -143,7 +143,8 @@ dry run, which has no subset dir yet, scans a throwaway dir of links to the row'
 
 **Launch.** Under the `gms-backlog-launch` lease (the script named by `$GMS_LEASE_SCRIPT`, default `bin/lease.sh`; held → `noop`, released in a
 `finally`), it writes the row's chapters as a symlink dir `<sources root>/<project>` (reused when
-identical, `refused` on any mismatch, never rewritten), then runs
+identical, `refused` on any mismatch, never rewritten; the day-GPX slicer's own `<stem>.gpx`
+beside a chapter, which a `--day-gpx` drive writes there before ingest, is not a mismatch), then runs
 the job runner (`--name gms-backlog-<project> --heavy --detach --stall 86400 --expect
 'O/<project>/**/shorts/**/*.mp4' -- <code root venv
 python> -m gomoveshift drive <subset> --region R --publish D --lf-day D --ingest-mode --lf-mode
