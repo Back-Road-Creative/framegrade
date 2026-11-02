@@ -522,14 +522,6 @@ def _cmd_drive_impl(args, config):
             "discovery-only run."
         )
 
-    # --day-gpx slices a whole-day GPX using the camera clock offset; that
-    # offset is operator knowledge and is never defaulted.
-    if getattr(args, "day_gpx", None) and getattr(args, "camera_utc_offset_hours", None) is None:
-        raise SystemExit(
-            "error: --day-gpx requires --camera-utc-offset-hours N "
-            "(camera clock UTC offset; US Eastern DST is -4) — never guessed."
-        )
-
     # Interim guard: ``--skip-stop-verify`` is still a NO-OP on drive runs —
     # its only consumer is the single-video stop-removal stage, which the drive path
     # doesn't run (drive stop handling is the per-day stop mask). A no-op *safety*

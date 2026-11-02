@@ -149,20 +149,17 @@ def test_sliced_sidecar_passes_existing_gates_unchanged(src, day):
     assert_gpx_video_correspondence(gps, A_START, 600.0)
 
 
-def test_drive_requires_offset_with_day_gpx():
+def test_drive_no_longer_requires_an_offset_with_day_gpx(tmp_path):
     from gomoveshift.cli.handlers.drive import cmd_drive
 
-    args = argparse.Namespace(
-        day_gpx="/x/day.gpx",
-        camera_utc_offset_hours=None,
-        publish="sun",
-        lf_day=None,
-        list_lfs=False,
-        label_dry_run=False,
-        skip_stop_verify=False,
-    )
-    with pytest.raises(SystemExit, match="--camera-utc-offset-hours"):
+    args = _drive_args(camera_utc_offset_hours=None, output_dir=str(tmp_path / "out"))
+    with (
+        patch.object(dgs, "slice_day_gpx", return_value=[]) as sl,
+        patch("gomoveshift.cli.handlers.drive.configure_logging", side_effect=_ReachedError),
+        pytest.raises(_ReachedError),
+    ):
         cmd_drive(args, MagicMock())
+    sl.assert_called_once_with(Path("/x/day.gpx"), Path("/x/src"), None)
 
 
 def test_lrv_proxy_skipped_not_refused(src, day):
@@ -187,39 +184,98 @@ def test_only_lrv_proxies_is_refused(tmp_path, day):
         slice_day_gpx(day, d, utc_offset_hours=-4)
 
 
-def test_creation_time_disagreement_warns(src, day, caplog):
-    ct = A_START + timedelta(seconds=61)
-    with (
-        patch.object(
-            dgs, "_ffprobe_creation_time", side_effect=lambda p: ct if p.name == A else None
-        ),
-        caplog.at_level("WARNING", logger=dgs.logger.name),
-    ):
-        slice_day_gpx(day, src, utc_offset_hours=-4)
-    assert any("creation_time" in r.message and A in r.message for r in caplog.records)
+def _ct(**by_name):
+    return patch.object(dgs, "_ffprobe_creation_time", side_effect=lambda p: by_name.get(p.name))
 
 
-def test_creation_time_within_tolerance_silent(src, day, caplog):
-    ct = A_START + timedelta(seconds=60)
-    with (
-        patch.object(dgs, "_ffprobe_creation_time", return_value=ct),
-        caplog.at_level("WARNING", logger=dgs.logger.name),
-    ):
-        slice_day_gpx(day, src, utc_offset_hours=-4)
-    # B's filename start is about 1 h from ct, so only assert A did not warn.
-    assert not any(A in r.message and "creation_time" in r.message for r in caplog.records)
-
-
-def test_zero_duration_refused(src, day):
-    with patch.object(dgs, "get_clip_duration", return_value=0.0):
-        with pytest.raises(DayGpxSliceError, match="duration"):
+def test_operator_offset_disagreeing_with_creation_time_is_refused(src, day):
+    with _ct(**{A: A_START + timedelta(seconds=61)}):
+        with pytest.raises(DayGpxSliceError, match=rf"{A}.*measured -4"):
             slice_day_gpx(day, src, utc_offset_hours=-4)
-    assert not list(src.glob("*.gpx*"))
+    assert not list(src.glob("*.gpx"))
 
 
-def test_missing_day_gpx_refused(src, tmp_path):
-    with pytest.raises(DayGpxSliceError, match="day GPX not found"):
-        slice_day_gpx(tmp_path / "nope.gpx", src, utc_offset_hours=-4)
+def test_operator_offset_within_tolerance_is_accepted(src, day):
+    with _ct(**{A: A_START + timedelta(seconds=60)}):
+        assert slice_day_gpx(day, src, utc_offset_hours=-4)
+
+
+def test_offset_is_measured_from_creation_time_when_not_given(src, day, caplog):
+    with _ct(**{A: A_START, B: B_START}), caplog.at_level("INFO", logger=dgs.logger.name):
+        results = slice_day_gpx(day, src)
+    assert {r.start_utc for r in results} == {A_START, B_START}
+    assert any("measured camera UTC offset -4" in r.message for r in caplog.records)
+
+
+def test_measured_offset_tolerates_container_second_jitter(src, day):
+    with _ct(**{A: A_START + timedelta(seconds=30), B: B_START - timedelta(seconds=20)}):
+        assert slice_day_gpx(day, src)
+
+
+def test_chapters_after_the_first_are_not_measured(tmp_path, day):
+    d = tmp_path / "chap"
+    d.mkdir()
+    c1, c2 = "VID_20240101_080000_00_030.mp4", "VID_20240101_080000_00_031.mp4"
+    for name in (c1, c2):
+        (d / name).write_bytes(b"x")
+    durs = {c1: 1800.0, c2: 900.0}
+    with (
+        patch.object(dgs, "get_clip_duration", side_effect=lambda p: durs[p.name]),
+        _ct(**{c1: A_START, c2: A_START + timedelta(seconds=1800)}),
+    ):
+        assert len(slice_day_gpx(day, d)) == 2
+
+
+def test_no_offset_and_no_creation_time_is_refused_naming_the_clips(src, day):
+    with _ct():
+        with pytest.raises(DayGpxSliceError, match=rf"creation_time.*{A}"):
+            slice_day_gpx(day, src)
+    assert not list(src.glob("*.gpx"))
+
+
+def test_first_chapter_clips_that_disagree_are_refused_with_values(src, day):
+    with _ct(**{A: A_START, B: B_START + timedelta(hours=5)}):
+        with pytest.raises(DayGpxSliceError, match=r"disagree.*-4.*-9"):
+            slice_day_gpx(day, src)
+
+
+@pytest.mark.parametrize("skew", [timedelta(minutes=7), timedelta(minutes=-7)])
+def test_an_offset_off_the_15_minute_grid_is_refused(src, day, skew):
+    with _ct(**{A: A_START + skew, B: B_START + skew}):
+        with pytest.raises(DayGpxSliceError, match="15 min"):
+            slice_day_gpx(day, src)
+
+
+@pytest.mark.parametrize("hours", [-13, 15])
+def test_an_offset_outside_minus12_to_plus14_is_refused(src, day, hours):
+    # offset = local - creation_time, so creation_time = local - offset.
+    ct = {A: datetime(2024, 1, 1, 8, tzinfo=UTC) - timedelta(hours=hours),
+          B: datetime(2024, 1, 1, 9, tzinfo=UTC) - timedelta(hours=hours)}  # fmt: skip
+    with _ct(**ct):
+        with pytest.raises(DayGpxSliceError, match="-12"):
+            slice_day_gpx(day, src)
+
+
+def test_a_measured_offset_still_has_to_pass_the_gpx_gate(tmp_path, src):
+    # creation_time says -4, but the day GPX is another day: no trackpoints.
+    other = _day_gpx(tmp_path / "other.gpx", datetime(2024, 3, 1, 10, 0, 0, tzinfo=UTC))
+    with _ct(**{A: A_START, B: B_START}):
+        with pytest.raises(DayGpxSliceError, match="no trackpoints"):
+            slice_day_gpx(other, src)
+
+
+def test_a_zero_offset_names_the_local_as_z_possibility_when_the_gate_fails(src, day):
+    local_a, local_b = datetime(2024, 1, 1, 8, tzinfo=UTC), datetime(2024, 1, 1, 9, tzinfo=UTC)
+    with _ct(**{A: local_a, B: local_b}):
+        with pytest.raises(DayGpxSliceError, match="local-as-Z"):
+            slice_day_gpx(day, src)  # day GPX starts 10:00Z: 08:00Z has no points
+
+
+def test_a_zero_offset_is_allowed_when_the_gpx_gate_passes(tmp_path, src):
+    gpx = _day_gpx(tmp_path / "z.gpx", datetime(2024, 1, 1, 7, 0, 0, tzinfo=UTC))
+    local_a, local_b = datetime(2024, 1, 1, 8, tzinfo=UTC), datetime(2024, 1, 1, 9, tzinfo=UTC)
+    with _ct(**{A: local_a, B: local_b}):
+        assert slice_day_gpx(gpx, src)
 
 
 def _drive_args(**over):
