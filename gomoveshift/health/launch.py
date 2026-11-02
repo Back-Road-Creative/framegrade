@@ -334,7 +334,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         "--expect", str(out_dir / "**" / "shorts" / "**" / "*.mp4"),
         "--log-root", str(jobs_dir), "--", *drive_argv,
     ]  # fmt: skip
-    env = {"GMS_INTERMEDIATE_DIR": str(root), run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER}
+    env = {
+        "GMS_INTERMEDIATE_DIR": str(root),
+        run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER,
+    }
     res.update(argv=argv, env=env, stages_dir=str(stages_dir))
     if dry_run:
         return {**res, "action": "would_launch", "reason": f"{row.project} for {res['slot']}"}
