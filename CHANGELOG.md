@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.27] - 2026-11-02
+
+### Added
+
+- `health backlog --supersede <project> --reason <text>`: a row whose own earlier run is stale
+  (for example rendered on an older release) moves that run's stage root and output dir to
+  `_superseded/` with a `superseded.json` record and launches fresh, instead of being skipped as
+  already staged. Refused for a published or booked project, an output with upload records, or
+  any row but the region's next.
+
 ## [0.3.26] - 2026-11-02
 
 ### Added
@@ -411,7 +421,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.26...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.27...HEAD
+[0.3.27]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.26...v0.3.27
 [0.3.26]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.25...v0.3.26
 [0.3.25]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...v0.3.25
 [0.3.24]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...v0.3.24
