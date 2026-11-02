@@ -233,25 +233,37 @@ def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[s
     return None
 
 
-def _supersede_plan(project, stages_root, output_root, now) -> Tuple[List[Dict[str, str]], str]:
-    """``(moves, refusal)``: the renames that set ``project``'s stage root and output dir aside."""
-    out = Path(output_root) / project
+def _uploads_refusal(project, out: Path) -> str:
+    """Refusal text when ``out`` (``project``'s output dir) holds, or may hold, upload records."""
     uploads = out / "youtube_uploads.json"
     if uploads.exists():
         try:
             held = json.loads(uploads.read_text())
         except (OSError, ValueError) as exc:
-            return [], f"cannot supersede {project}: unreadable {uploads} ({exc})"
+            return f"cannot supersede {project}: unreadable {uploads} ({exc})"
         if held:
-            return [], f"cannot supersede {project}: {uploads} holds upload records"
+            return f"cannot supersede {project}: {uploads} holds upload records"
+    return ""
+
+
+def _supersede_plan(
+    project, stages_root, output_root, now, siblings: Sequence[str] = ()
+) -> Tuple[List[Dict[str, str]], str]:
+    """``(moves, refusal)``: the renames that set ``project``'s stage root and output dir aside,
+    then the same for each dead ``siblings`` project (an earlier run of the same footage)."""
     stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     moves = []
-    for src in (Path(stages_root) / project, out):
-        dst = src.parent / SUPERSEDED_DIR / f"{project}-{stamp}"
-        if dst.exists():
-            return [], f"cannot supersede {project}: {dst} already exists"
-        if src.exists():
-            moves.append({"from": str(src), "to": str(dst)})
+    for name in (project, *siblings):
+        out = Path(output_root) / name
+        why = _uploads_refusal(name, out)
+        if why:
+            return [], why
+        for src in (Path(stages_root) / name, out):
+            dst = src.parent / SUPERSEDED_DIR / f"{name}-{stamp}"
+            if dst.exists():
+                return [], f"cannot supersede {name}: {dst} already exists"
+            if src.exists():
+                moves.append({"from": str(src), "to": str(dst)})
     if not moves:
         return [], f"nothing to supersede: no {project} under the stages or output root"
     return moves, ""
@@ -259,10 +271,8 @@ def _supersede_plan(project, stages_root, output_root, now) -> Tuple[List[Dict[s
 
 def _supersede(project, reason, moves, now) -> None:
     """Rename each move and write the record into every moved dir."""
-    stage_root = Path(moves[0]["from"])
-    recipes = sorted(stage_root.glob("_stages/resume.json")) + sorted(
-        stage_root.glob("*/_stages/resume.json")
-    )
+    roots = [Path(m["from"]) for m in moves]
+    recipes = [r for root in roots for r in sorted(root.glob("_stages/resume.json")) + sorted(root.glob("*/_stages/resume.json"))]  # fmt: skip
     recipe: Dict[str, Any] = {}
     if recipes:
         try:
@@ -272,7 +282,7 @@ def _supersede(project, reason, moves, now) -> None:
     record = {
         "schema": "backlog-supersede/1", "project": project, "reason": reason,
         "at": now.isoformat(), "moves": moves,
-        "held": any(stage_root.glob(f"**/_stages/{HOLD_NAME}")),
+        "held": any(any(root.glob(f"**/_stages/{HOLD_NAME}")) for root in roots),
         "recipe": {k: recipe.get(k) for k in ("sha", "started_at", "phase_reached", "argv")},
     }  # fmt: skip
     for move in moves:
@@ -383,9 +393,20 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         return {**res, "action": "refused", "reason": f"--supersede {target} needs a --reason"}
     own_root = Path(stages_root) / str(target)
     row = None
+    siblings: List[str] = []
     for cand in (r for r in rows if r.region == region):
         own = cand.project == target
-        mine_staged = [s for s in staged if own_root not in s[0].parents] if own else staged
+        mine_staged = staged
+        if own:
+            footage = {os.path.realpath(p) for p in cand.sources}
+            # a dead sibling (same footage, another project name) is set aside with the row's own
+            # run; a held one stays in ``mine_staged`` so it still refuses
+            siblings = sorted({
+                st.relative_to(stages_root).parts[0] for st, srcs, held in staged
+                if not held and own_root not in st.parents and footage & srcs
+            })  # fmt: skip
+            gone = {Path(stages_root) / n for n in siblings} | {own_root}
+            mine_staged = [s for s in staged if not gone & set(s[0].parents)]
         why = _skip_reason(cand, status, known, mine_staged, stages_root, own_ok=own)
         if why is None:
             row = cand
@@ -399,7 +420,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if row is None:
         return {**res, "reason": f"no eligible backlog row for {region}"}
     if supersede:
-        moves, why = _supersede_plan(row.project, stages_root, output_root, now)
+        blocked = [n for n in siblings if n in status or n in known]
+        if blocked:
+            where = "the schedule store" if blocked[0] in status else "the content ledger"
+            why = f"cannot supersede {target}: sibling run {blocked[0]} is in {where}"
+            return {**res, "action": "refused", "project": row.project, "reason": why}
+        moves, why = _supersede_plan(row.project, stages_root, output_root, now, siblings)
         if why:
             return {**res, "action": "refused", "project": row.project, "reason": why}
         res["supersede"] = {"reason": supersede[1], "moves": moves}
