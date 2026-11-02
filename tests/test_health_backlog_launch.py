@@ -778,10 +778,10 @@ def test_supersede_with_nothing_staged_refuses(tmp_path):
     assert not rig.launches
 
 
-def test_supersede_still_skips_a_row_staged_by_another_projects_run(tmp_path):
+def test_supersede_still_skips_a_row_staged_by_a_held_sibling_run(tmp_path):
     rig = Rig(tmp_path)
     _stale(rig)
-    rig.stage("other-run", rig.rows[0].sources)
+    rig.stage("other-run", rig.rows[0].sources, hold=True)
     rig.supersede = ("day-a", "stale")
     res = rig.run()
     assert res["action"] == "refused" and "other-run" in res["reason"], res
@@ -807,3 +807,90 @@ def test_supersede_refuses_when_the_target_already_exists(tmp_path):
     res = rig.run()
     assert res["action"] == "refused" and "already exists" in res["reason"], res
     assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+# --supersede also sets aside a dead sibling: an earlier run of the same footage under another
+# project name, which would otherwise keep the row refused as "already staged".
+
+
+def _sibling(rig, name="old-name", *, uploads=None, hold=False):
+    stages = rig.stage(name, rig.rows[0].sources, hold=hold)
+    out = rig.out / name
+    out.mkdir(parents=True)
+    (out / "drive.log").write_text("phases=1/3")
+    if uploads is not None:
+        (out / "youtube_uploads.json").write_text(uploads)
+    return stages
+
+
+def test_supersede_sets_a_sibling_run_of_the_same_footage_aside(tmp_path):
+    rig = Rig(tmp_path)
+    _sibling(rig)
+    rig.supersede = ("day-a", "same footage, new name")
+    res = rig.run()
+    assert res["action"] == "launched", res
+    moves = {m["from"]: m["to"] for m in res["supersede"]["moves"]}
+    assert moves == {
+        str(rig.stages / "old-name"): str(rig.stages / launch.SUPERSEDED_DIR / f"old-name-{STAMP}"),
+        str(rig.out / "old-name"): str(rig.out / launch.SUPERSEDED_DIR / f"old-name-{STAMP}"),
+    }
+    assert not (rig.stages / "old-name").exists() and not (rig.out / "old-name").exists()
+    for dst in moves.values():
+        record = json.loads((Path(dst) / launch.SUPERSEDE_RECORD).read_text())
+        assert record["reason"] == "same footage, new name"
+        assert [m["from"] for m in record["moves"]] == list(moves)
+
+
+def test_supersede_dry_run_plans_the_sibling_moves_and_changes_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _sibling(rig)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run(dry_run=True)
+    assert [m["from"] for m in res["supersede"]["moves"]] == [
+        str(rig.stages / "old-name"),
+        str(rig.out / "old-name"),
+    ], res
+    assert (rig.stages / "old-name").is_dir() and (rig.out / "old-name").is_dir()
+    assert not (rig.stages / launch.SUPERSEDED_DIR).exists()
+
+
+def test_supersede_refuses_a_sibling_whose_output_has_upload_records(tmp_path):
+    rig = Rig(tmp_path)
+    _sibling(rig, uploads=json.dumps({"s01": {"video_id": "abc"}}))
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "old-name" in res["reason"], res
+    assert "upload records" in res["reason"]
+    assert (rig.stages / "old-name").is_dir() and not rig.launches
+
+
+def test_supersede_refuses_a_held_sibling(tmp_path):
+    rig = Rig(tmp_path)
+    _sibling(rig, hold=True)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "hold" in res["reason"], res
+    assert (rig.stages / "old-name").is_dir() and not rig.launches
+
+
+@pytest.mark.parametrize("where", ["store", "ledger"])
+def test_supersede_refuses_a_sibling_in_the_store_or_ledger(tmp_path, where):
+    rig = Rig(tmp_path)
+    _sibling(rig)
+    if where == "store":
+        rig.drives.append(drive("old-name", "complete"))
+    else:
+        rig.ledger = {"old-name"}
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "old-name" in res["reason"], res
+    assert (rig.stages / "old-name").is_dir() and not rig.launches
+
+
+def test_without_supersede_a_sibling_run_still_skips_the_row(tmp_path):
+    rig = Rig(tmp_path)
+    _sibling(rig)
+    res = rig.run()
+    assert res["project"] == "day-b"
+    assert "already staged by" in res["skipped"][0]["reason"]
+    assert (rig.stages / "old-name").is_dir()

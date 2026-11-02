@@ -152,11 +152,15 @@ other. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-outp
 example a render made on an older release: without it the row is skipped as already staged, and a
 relaunch would resume the stale stages instead of rendering fresh. The project must be the
 region's next eligible row once its own stage root is set aside; a row in the store or the content
-ledger, a row staged by another project's run, or an output whose `youtube_uploads.json` holds
+ledger, or an output whose `youtube_uploads.json` holds
 records (or is unreadable) is `refused`, and so is an empty reason. `<stages root>/<project>` and
 `<output root>/<project>` are renamed (one device, no copy) to `<root>/_superseded/<project>-<UTC
 stamp>/`, each with a `superseded.json` (`backlog-supersede/1`: project, reason, time, moves, the
 old recipe's `sha`/`started_at`/`phase_reached`/`argv`, and whether a `no-auto-resume` hold sat
 under it). A hold under the row's own root does not block the supersede; it moves with the run.
+A dead sibling (an earlier run of the same footage under another project name, found by
+overlapping recipe sources) is set aside the same way, under its own name, and listed in the same
+`moves`; a held sibling, one in the store or ledger, or one whose output holds upload records is
+`refused` naming it.
 Nothing moves until every check up to the release-pin check has passed, so a refusal leaves the
 old run in place; `--dry-run` prints the planned moves. `_superseded/` is never read as staging.
