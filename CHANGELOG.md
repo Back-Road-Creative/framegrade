@@ -5,6 +5,24 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.26] - 2026-11-02
+
+### Added
+
+- `gomoveshift clip-claims backfill OUTPUT_ROOT... [--apply]` rebuilds the clip-claims registry from past outputs: every project folder with an `lf_provenance.json` whose long-form has a `video_id` in `youtube_uploads.json` gets its source clips claimed, so the Phase A reuse gate also sees footage published before the registry shipped. Dry-run by default, idempotent, and a folder without `lf_provenance.json` is reported skipped, never guessed.
+- The pre-render review gate now refuses a bare county/region title (for example "County Cork in 4K") when the channel already has a title naming that county/region; a title naming a town or a from-to route is still allowed.
+
+### Changed
+
+- `clip-claims backfill` now also covers outputs written before `lf_provenance.json` named source clips: with no per-LF clips (or no provenance file) it claims the camera files named in the folder's `drive.log` for every uploaded long-form, tagged `basis: drive_log_project`. The reuse gate matches clip names by case-folded stem (a `GX010064` claim catches `GX010064.MP4`) and its refusal marks a whole-project claim as coarse.
+- `--day-gpx` no longer needs `--camera-utc-offset-hours`: the slicer measures the offset from each recording's first-chapter ffprobe `creation_time` (filename local time minus UTC). It refuses, naming the clips and values, when a clip has no `creation_time`, recordings disagree, the value is not a whole multiple of 15 min (within 60 s) or lies outside -12..+14 h, or the slice fails the Phase-A gate. A given offset that disagrees with `creation_time` is now refused instead of warned about. `health backlog` passes the flag only when the manifest row sets it.
+
+### Fixed
+
+- `drive` now refuses a real render unless `health backlog` started it (`GMS_LAUNCHED_BY=health-backlog`); `--dry-run`, `--list-lfs`, `--label-dry-run` and `--preview` are exempt, and `GMS_ALLOW_MANUAL_DRIVE=1` is the logged operator override. `health backlog` also refuses to launch when the render interpreter's framegrade is older than the newest `vX.Y.Z` release tag (`GMS_RELEASE_REMOTE` overrides the remote), or when either version cannot be read.
+- The same gate accepts every tracked launcher, not only the backlog: `GMS_LAUNCHED_BY` may be `health-backlog`, `health-heal` (a heal resume), `console` (the console job store) or `hostworker` (set by the worker itself on spooled drives, never taken from the request). An unknown value is refused and named.
+- A long-form whose Waypost title decision is `facts_unavailable`, or whose locked-GPS fix density is under the 60% tier-1 floor, now stops before the OST burn instead of falling back and burning an unproven place name. `GMS_ALLOW_UNPROVEN_TITLE=1` overrides.
+
 ## [0.3.25] - 2026-11-01
 
 ### Added
@@ -393,7 +411,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.25...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.26...HEAD
+[0.3.26]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.25...v0.3.26
 [0.3.25]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...v0.3.25
 [0.3.24]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.23...v0.3.24
 [0.3.23]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.22...v0.3.23
