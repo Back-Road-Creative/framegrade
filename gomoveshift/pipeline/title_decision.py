@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from typing import Optional, Union
 
@@ -36,6 +37,10 @@ from gomoveshift.pipeline.validation.content_gates import title_endpoints
 FACTS_UNAVAILABLE = "facts_unavailable"
 _ENTERED = ("in", "through")
 
+# Operator override for the pre-render stop below (same idiom as
+# ``GMS_ALLOW_CLIP_REUSE``): the run proceeds with a title no facts back.
+ALLOW_UNPROVEN_TITLE_ENV = "GMS_ALLOW_UNPROVEN_TITLE"
+
 
 class TitleDecisionMismatchError(RuntimeError):
     """The title about to ship is not the one Waypost's decision selected."""
@@ -47,6 +52,31 @@ class TitleDecisionMissingError(RuntimeError):
 
 class PreRenderTitleError(RuntimeError):
     """A Waypost title cannot be approved for the retained route before encode."""
+
+
+def _unproven_title_allowed() -> bool:
+    return os.environ.get(ALLOW_UNPROVEN_TITLE_ENV) == "1"
+
+
+def assert_gps_density_backs_title(lf_idx: int, density_pct: Optional[float]) -> None:
+    """Refuse, before the OST burn, an LF whose locked-GPS share of its footage
+    is below the tier-1 floor (``title_builder.LOCKED_COVERAGE_TIER1_MIN``): the
+    place name it would burn and title with is not proven by the fixes.
+
+    ``density_pct`` is the LF's recorded fix density (0-100, the sidecar's
+    ``fix_density_pct``); ``None`` means the ladder did not evaluate this LF
+    and is not a refusal here.
+    """
+    from .title_builder import LOCKED_COVERAGE_TIER1_MIN
+
+    floor_pct = LOCKED_COVERAGE_TIER1_MIN * 100
+    if density_pct is None or density_pct >= floor_pct or _unproven_title_allowed():
+        return
+    raise PreRenderTitleError(
+        f"LF {lf_idx} GPS fix density {density_pct:.1f}% is below the {floor_pct:.0f}% floor; "
+        f"its place name is unproven and would be burned into the OST. "
+        f"Set {ALLOW_UNPROVEN_TITLE_ENV}=1 to proceed."
+    )
 
 
 def route_fingerprint(record: dict) -> str:
@@ -314,6 +344,11 @@ def approve_retained_title(
         snapshot=snapshot,
         facts=facts,
     )
+    if decision["reason"] == FACTS_UNAVAILABLE and not _unproven_title_allowed():
+        raise PreRenderTitleError(
+            f"pre-render title {baseline!r} has no facts behind it ({FACTS_UNAVAILABLE}); "
+            f"refusing before the OST burn. Set {ALLOW_UNPROVEN_TITLE_ENV}=1 to proceed."
+        )
     decision["baseline_title"] = baseline
     decision["input_label"] = label
     decision["route_fingerprint"] = route_fingerprint(route_record(route_evidence))
