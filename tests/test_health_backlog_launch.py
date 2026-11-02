@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +52,8 @@ class Rig:
         self.installed = "0.3.25"
         self.latest = "0.3.25"
         self.supersede = None
+        self.gate_reason = None
+        self.gates: list = []
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -77,6 +80,10 @@ class Rig:
         if self.preflight_error:
             raise self.preflight_error
 
+    def render_gate(self, subset, row):
+        self.gates.append((subset, row.project))
+        return self.gate_reason
+
     def launcher(self, argv, cwd, env):
         self.launches.append((argv, cwd, env))
         return self.launch_ok, "" if self.launch_ok else "runner: boom"
@@ -90,7 +97,7 @@ class Rig:
             lease_acquire=self.lease_acquire,
             lease_release=lambda: self.leases.append("release"),
             drive_running=lambda: self.running, disk=self.disk, preflight=self.preflight,
-            launcher=self.launcher,
+            render_gate=self.render_gate, launcher=self.launcher,
             register=lambda **kw: self.registered.append(kw),
             installed_version=lambda python: self.installed,
             latest_version=lambda: self.latest,
@@ -485,7 +492,7 @@ def test_an_exception_mid_run_still_releases_the_lease(tmp_path):
             stages_root=rig.stages, output_root=rig.out, sources_root=rig.sources,
             code_root=rig.tmp, jobs_dir=rig.tmp, mirror_sha="x", now=NOW, dry_run=False,
             lease_acquire=rig.lease_acquire, lease_release=lambda: rig.leases.append("release"),
-            drive_running=boom, disk=rig.disk, preflight=rig.preflight, launcher=rig.launcher,
+            drive_running=boom, disk=rig.disk, preflight=rig.preflight, render_gate=rig.render_gate, launcher=rig.launcher,
             register=lambda **kw: None,
         )  # fmt: skip
     assert rig.leases == ["acquire", "release"]
@@ -894,3 +901,144 @@ def test_without_supersede_a_sibling_run_still_skips_the_row(tmp_path):
     assert res["project"] == "day-b"
     assert "already staged by" in res["skipped"][0]["reason"]
     assert (rig.stages / "old-name").is_dir()
+
+
+RAW_SHORT = (
+    "Day 2025-09-15: raw source footage 2866s is under full_drive_part_min_sec=3600s, so the "
+    "day can never fill a part."
+)
+
+
+def test_render_gate_refusal_launches_nothing_and_registers_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    rig.gate_reason = RAW_SHORT
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("refused", "day-a"), res
+    assert res["reason"] == f"render gate: {RAW_SHORT}"
+    assert rig.gates == [(rig.sources / "day-a", "day-a")]
+    assert rig.launches == [] and rig.registered == [] and rig.preflights == []
+
+
+def test_render_gate_refuses_a_dry_run_too(tmp_path):
+    # a would_launch must never name a row the drive will refuse
+    rig = Rig(tmp_path)
+    rig.gate_reason = RAW_SHORT
+    res = rig.run(dry_run=True)
+    assert res["action"] == "refused" and res["reason"].startswith("render gate: "), res
+
+
+def test_render_gate_refusal_leaves_the_superseded_run_in_place(tmp_path):
+    # 2026-11-02: the Ireland supersede moved the old renders aside, launched, and only then
+    # did the drive's own preflight refuse the row's 2866 s of raw footage
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.supersede = ("day-a", "0.3.23 render: wrong place labels")
+    rig.gate_reason = RAW_SHORT
+    res = rig.run()
+    assert res["action"] == "refused", res
+    assert (rig.stages / "day-a").is_dir() and (rig.out / "day-a" / "shorts").is_dir()
+    assert not (rig.stages / launch.SUPERSEDED_DIR).exists()
+    assert not (rig.out / launch.SUPERSEDED_DIR).exists()
+    assert rig.launches == [] and rig.registered == []
+
+
+def test_config_render_gate_applies_the_rows_modes_to_a_copy(tmp_path, monkeypatch):
+    from gomoveshift.config import DriveConfig
+    from gomoveshift.pipeline import orchestrator_preflight
+
+    seen = {}
+
+    def fake(config, source_dir):
+        seen.update(
+            ingest=config.drive.ingest_mode, mode=config.drive.lf_selection_mode, src=source_dir
+        )
+        return "short"
+
+    monkeypatch.setattr(orchestrator_preflight, "day_under_part_min_message", fake)
+    drive_cfg = DriveConfig(ingest_mode="gopro", lf_selection_mode="best_moments")
+    config = SimpleNamespace(drive=drive_cfg)
+    row = BacklogRow("day-a", "ireland", ("/x/a.mp4",), "generic", "full_drive")
+    assert launch.config_render_gate(config)(tmp_path, row) == "short"
+    assert seen == {"ingest": "generic", "mode": "full_drive", "src": tmp_path}
+    assert (config.drive.ingest_mode, config.drive.lf_selection_mode) == ("gopro", "best_moments")
+
+
+def test_config_render_gate_scans_the_rows_sources_before_the_subset_exists(tmp_path, monkeypatch):
+    # a dry run never creates the subset dir, and must not pass the gate for want of one
+    from gomoveshift.config import DriveConfig
+    from gomoveshift.pipeline import orchestrator_preflight
+
+    clips = [tmp_path / "GX010032.MP4", tmp_path / "GX010033.MP4"]
+    for c in clips:
+        c.write_bytes(b"")
+    seen = {}
+
+    def fake(config, source_dir):
+        seen["links"] = sorted((p.name, os.path.realpath(p)) for p in source_dir.iterdir())
+        return None
+
+    monkeypatch.setattr(orchestrator_preflight, "day_under_part_min_message", fake)
+    config = SimpleNamespace(drive=DriveConfig())
+    row = BacklogRow("day-a", "ireland", tuple(map(str, clips)), "generic", "full_drive")
+    assert launch.config_render_gate(config)(tmp_path / "missing", row) is None
+    assert seen["links"] == [(c.name, os.path.realpath(c)) for c in clips]
+    assert not (tmp_path / "missing").exists()
+
+
+# --supersede of a failed audit: the row's store entry is ``auditing`` and its newest job failed,
+# e.g. 2026-11-02 the Ireland row's drive refused its own day before ingest. Superseding it moves
+# that run aside and relaunches the row as it now reads (re-registering the same store row).
+
+
+def _failed(rig, project="day-a"):
+    _stale(rig, project)
+    rig.drives.append(drive(project, "auditing"))
+    job(rig, "e76bef98", project, "failed", 100.0)
+    rig.supersede = (project, "full_drive refused 2866 s; relaunch as best_moments")
+
+
+def test_supersede_relaunches_a_failed_audit(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert "e76bef98" in res["relaunch"]
+    assert len(rig.launches) == 1 and rig.registered[0]["project"] == "day-a"
+    assert (rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}").is_dir()
+    assert not (rig.stages / "day-a").exists()
+
+
+def test_supersede_of_a_failed_audit_dry_run_moves_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_launch" and "e76bef98" in res["relaunch"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_a_failed_audit_still_refuses_a_supersede_of_another_row(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    rig.supersede = ("day-b", "something else")
+    res = rig.run()
+    assert res["action"] == "refused" and "e76bef98" in res["reason"], res
+    assert not rig.launches
+
+
+def test_supersede_never_replaces_an_audit_that_is_running(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    job(rig, "again", "day-a", "running", 200.0)
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_supersede_still_refuses_a_ready_store_row(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.drives.append(drive("day-a", "ready"))
+    rig.slots = [(FRI, "fri"), (TUE, "tue"), (TUE + timedelta(days=1), "wed")]
+    rig.supersede = ("day-a", "re-render")
+    res = rig.run()
+    assert res["action"] == "refused" and "in the schedule store (ready)" in res["reason"], res

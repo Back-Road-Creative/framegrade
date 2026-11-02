@@ -18,11 +18,13 @@ holding upload records, and nothing moves until every check before the preflight
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -296,7 +298,7 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
     """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success.
 
     A failed audit still holds its slot, so without this every later call is a silent noop;
-    the operator relaunches (the drive resumes from its stages) or clears the row."""
+    the operator relaunches (the drive resumes from its stages) or supersedes it."""
     name = f"gms-backlog-{project}"
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
@@ -308,7 +310,8 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
         return None
     return (
         f"audit failed: {project} job {rec.get('run_id')} ended {state} "
-        f"(exit {result.get('exit_code')}); relaunch it (stages resume) or clear the row"
+        f"(exit {result.get('exit_code')}); relaunch it (stages resume), or --supersede {project} "
+        "to set the run aside and launch the row as it now reads"
     )
 
 
@@ -326,6 +329,30 @@ def report_slots(report: Dict[str, Any], region: str) -> List[Tuple[datetime, st
         if r.get("region") == region and (s := _aware(r.get("slot"))) and r.get("day"):
             out.append((s, r["day"]))
     return out
+
+
+def config_render_gate(config) -> Callable[[Path, Any], Optional[str]]:
+    """The drive's raw-duration refusal for a backlog row, under the row's own modes.
+
+    ``config`` is left untouched: each call scans with a copy carrying the row's
+    ``ingest_mode`` and ``lf_mode``. A dry run has no subset dir yet, so the scan
+    reads a throwaway dir of links to the row's sources.
+    """
+    from ..pipeline.orchestrator_preflight import day_under_part_min_message
+
+    def gate(subset: Path, row) -> Optional[str]:
+        cfg = copy.copy(config)
+        cfg.drive = copy.copy(config.drive)
+        cfg.drive.ingest_mode = row.ingest_mode
+        cfg.drive.set_lf_mode(row.lf_mode, "cli")  # the drive gets it as --lf-mode
+        if Path(subset).is_dir():
+            return day_under_part_min_message(cfg, Path(subset))
+        with tempfile.TemporaryDirectory(prefix="gms-render-gate-") as tmp:
+            for src in row.sources:
+                (Path(tmp) / Path(src).name).symlink_to(os.path.realpath(src))
+            return day_under_part_min_message(cfg, Path(tmp))
+
+    return gate
 
 
 def run_backlog(
@@ -347,6 +374,7 @@ def run_backlog(
     lease_release: Callable[[], None],
     drive_running: Callable[[], bool],
     preflight: Callable[..., Any],
+    render_gate: Callable[[Path, Any], Optional[str]],
     launcher: Callable[[List[str], str, Dict[str, str]], Tuple[bool, str]],
     register: Callable[..., None],
     disk: Disk = default_disk,
@@ -360,16 +388,16 @@ def run_backlog(
     try:
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    drive_running, preflight, launcher, register, disk, installed_version,
-                    latest_version, supersede)  # fmt: skip
+                    drive_running, preflight, render_gate, launcher, register, disk,
+                    installed_version, latest_version, supersede)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
 
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
-         code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, launcher,
-         register, disk, installed_version, latest_version, supersede):  # fmt: skip
+         code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
+         launcher, register, disk, installed_version, latest_version, supersede):  # fmt: skip
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
@@ -377,18 +405,24 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         res["published"] = published
     mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
+    target = supersede[0] if supersede else None
+    relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
-        if failed:
+        if not failed:
+            return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        if auditing[0] != target:
             return {**res, "action": "refused", "project": auditing[0], "reason": failed}
-        return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        # superseding the failed audit itself: its run is set aside and the row relaunches as
+        # it now reads, re-registering the same store row
+        relaunch, res["relaunch"] = target, failed
+        mine = [d for d in mine if d.project != relaunch]
     slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now)
     if slot is None:
         return {**res, "reason": f"covered: every free slot inside {COVERAGE_HORIZON_H} h has a ready drive"}  # fmt: skip
     res.update(slot=slot[0].isoformat(), lf_day=slot[1])
-    status = {d.project: d.status for d in drives}
+    status = {d.project: d.status for d in drives if d.project != relaunch}
     staged = staged_sources(stages_root)
-    target = supersede[0] if supersede else None
     if supersede and not supersede[1].strip():
         return {**res, "action": "refused", "reason": f"--supersede {target} needs a --reason"}
     own_root = Path(stages_root) / str(target)
@@ -445,6 +479,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     bad = _subset(subset, row.sources, create=not dry_run)
     if bad:
         return {**res, "action": "refused", "reason": bad}
+    # the drive's own pre-ingest refusals, asked before anything is moved, launched or booked
+    gate = render_gate(subset, row)
+    if gate:
+        return {**res, "action": "refused", "reason": f"render gate: {gate}"}
     day = res["lf_day"]
     drive_argv = [
         str(python), "-m", "gomoveshift", "drive", str(subset), "--region", region,
