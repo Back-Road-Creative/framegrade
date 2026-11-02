@@ -100,6 +100,9 @@ def _run_heal(args, config, root, jobs_dir, incidents_dir, only_key) -> int:
 def _cmd_backlog(args, config, root, jobs_dir) -> int:
     from datetime import datetime, timezone
 
+    if args.supersede and not args.reason:
+        raise SystemExit("health backlog: --supersede needs --reason")
+
     code_root = Path(args.code_root) if args.code_root else root
     now = datetime.now(timezone.utc)
     region, rows, drives, slots, known, register = launch.load_inputs(
@@ -114,12 +117,15 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         dry_run=args.dry_run, lease_acquire=acquire, lease_release=release,
         drive_running=lambda: default_drive_running(jobs_dir),
         preflight=launch.default_preflight, launcher=launch.default_launcher, register=register,
+        supersede=(args.supersede, args.reason) if args.supersede else None,
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
+        for move in result.get("supersede", {}).get("moves", []):
+            print(f"superseded {move['from']} -> {move['to']}")
         for row in result.get("storage", []):
             state = "ok" if row["ok"] else "SHORT"
             print(f"storage dev {row['device']}: {row['free_gb']:.1f} GB free, need "

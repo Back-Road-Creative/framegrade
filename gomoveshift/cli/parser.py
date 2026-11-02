@@ -1852,6 +1852,14 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
         ("--staging-sha", None, "Mirror HEAD to record (default: git rev-parse HEAD)."),
         ("--ledger-path", Path, "Content ledger JSON (default: the shared ledger)."),
+        (
+            "--supersede",
+            None,
+            "Project whose own stale staging and output (an earlier run of this row) move to "
+            "_superseded/ with a record, so the row launches fresh. Must be the region's next "
+            "eligible row; never a published or booked one. Needs --reason.",
+        ),
+        ("--reason", None, "Why --supersede replaces the earlier run (written to the record)."),
     ):
         b.add_argument(flag, type=kind, default=None, help=text)
     b.add_argument("--dry-run", action="store_true", help="Report the plan; change nothing.")

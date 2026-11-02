@@ -50,6 +50,7 @@ class Rig:
         self.registered: list = []
         self.installed = "0.3.25"
         self.latest = "0.3.25"
+        self.supersede = None
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -93,6 +94,7 @@ class Rig:
             register=lambda **kw: self.registered.append(kw),
             installed_version=lambda python: self.installed,
             latest_version=lambda: self.latest,
+            **({"supersede": self.supersede} if self.supersede else {}),
         )  # fmt: skip
 
     def run(self, *, dry_run=False, region="usa"):
@@ -581,3 +583,182 @@ def test_a_day_gpx_row_without_an_offset_omits_the_flag_rather_than_passing_none
     drive_args = rig.launches[0][0]
     assert "--day-gpx" in drive_args and "--camera-utc-offset-hours" not in drive_args
     assert "None" not in drive_args
+
+
+# --supersede: a row's own stale staging (an earlier run of the same project, e.g. a render on an
+# older release) is moved aside with a recorded reason, then the row launches fresh.
+
+STAMP = "20261021T000000Z"  # NOW in UTC
+
+
+def _stale(rig, project="day-a", *, uploads="{}", hold=False):
+    stages = rig.stage(project, rig.rows[0].sources, hold=hold)
+    recipe = json.loads((stages / "resume.json").read_text())
+    recipe.update(sha="8151c48", phase_reached="phase_d", started_at="2026-11-01T11:18:23Z")
+    (stages / "resume.json").write_text(json.dumps(recipe))
+    out = rig.out / project
+    (out / "shorts").mkdir(parents=True)
+    (out / "shorts" / "s01.mp4").write_text("old")
+    (out / "youtube_uploads.json").write_text(uploads)
+    return stages
+
+
+def test_without_supersede_the_rows_own_stale_stage_still_skips_it(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    res = rig.run()
+    assert res["project"] == "day-b"
+    assert "already staged" in res["skipped"][0]["reason"]
+
+
+def test_supersede_moves_the_rows_stage_and_output_aside_and_launches_it(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.supersede = ("day-a", "0.3.23 render: wrong place labels")
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    moved_stage = rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}"
+    moved_out = rig.out / launch.SUPERSEDED_DIR / f"day-a-{STAMP}"
+    assert not (rig.stages / "day-a").exists() and not (rig.out / "day-a" / "shorts").exists()
+    assert (moved_stage / "src" / "_stages" / "resume.json").is_file()
+    assert (moved_out / "shorts" / "s01.mp4").read_text() == "old"
+    for where in (moved_stage, moved_out):
+        record = json.loads((where / launch.SUPERSEDE_RECORD).read_text())
+        assert record["schema"] == "backlog-supersede/1"
+        assert record["project"] == "day-a"
+        assert record["reason"] == "0.3.23 render: wrong place labels"
+        assert record["at"] == NOW.isoformat()
+        assert record["held"] is False
+        assert record["recipe"]["sha"] == "8151c48"
+        assert record["recipe"]["phase_reached"] == "phase_d"
+        assert {m["to"] for m in record["moves"]} == {str(moved_stage), str(moved_out)}
+    assert res["supersede"]["moves"] == record["moves"]
+    assert rig.launches and rig.registered[0]["project"] == "day-a"
+    assert rig.launches[0][2]["GMS_INTERMEDIATE_DIR"] == str(rig.stages / "day-a")
+
+
+def test_a_superseded_stage_is_never_read_as_staged(tmp_path):
+    rig = Rig(tmp_path)
+    one_level = rig.stages / launch.SUPERSEDED_DIR / "old-run" / "_stages"
+    one_level.mkdir(parents=True)
+    argv = ["/py", "-m", "gomoveshift", "drive", str(rig.footage), "--region", "usa"]
+    (one_level / "resume.json").write_text(json.dumps({"argv": argv}))
+    assert launch.staged_sources(rig.stages) == []
+
+
+def test_supersede_dry_run_plans_the_moves_and_changes_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run(dry_run=True)
+    assert (res["action"], res["project"]) == ("would_launch", "day-a"), res
+    assert [m["from"] for m in res["supersede"]["moves"]] == [
+        str(rig.stages / "day-a"), str(rig.out / "day-a")]  # fmt: skip
+    assert (rig.stages / "day-a").is_dir() and (rig.out / "day-a" / "shorts").is_dir()
+    assert not (rig.stages / launch.SUPERSEDED_DIR).exists()
+
+
+def test_supersede_of_a_held_own_stage_launches_and_records_the_hold(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig, hold=True)
+    rig.supersede = ("day-a", "replace the held run")
+    res = rig.run()
+    assert res["action"] == "launched", res
+    moved = rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}"
+    assert json.loads((moved / launch.SUPERSEDE_RECORD).read_text())["held"] is True
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_supersede_needs_a_reason(tmp_path, reason):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.supersede = ("day-a", reason)
+    res = rig.run()
+    assert res["action"] == "refused" and "reason" in res["reason"]
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_supersede_of_a_row_that_is_not_next_refuses_and_moves_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    rig.stage("day-b", rig.rows[1].sources)
+    rig.supersede = ("day-b", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "day-a" in res["reason"], res
+    assert (rig.stages / "day-b").is_dir() and not rig.launches
+
+
+def test_supersede_of_an_unknown_project_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    rig.supersede = ("nope", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "nope" in res["reason"] and not rig.launches
+
+
+@pytest.mark.parametrize("where", ["ledger", "store"])
+def test_supersede_never_moves_a_published_or_booked_project(tmp_path, where):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    if where == "ledger":
+        rig.ledger = {"day-a"}
+    else:
+        rig.drives.append(drive("day-a", "complete"))
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused", res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_supersede_refuses_an_output_with_upload_records(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig, uploads=json.dumps({"lf01": "abcDEF12345"}))
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "youtube_uploads.json" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_supersede_refuses_an_unreadable_upload_record(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig, uploads="{not json")
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "youtube_uploads.json" in res["reason"], res
+
+
+def test_supersede_with_nothing_staged_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "nothing to supersede" in res["reason"], res
+    assert not rig.launches
+
+
+def test_supersede_still_skips_a_row_staged_by_another_projects_run(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.stage("other-run", rig.rows[0].sources)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "other-run" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir()
+
+
+def test_supersede_moves_nothing_when_a_later_check_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.installed, rig.latest = "0.3.24", "0.3.25"
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and not rig.launches
+    assert (rig.stages / "day-a").is_dir()
+    assert not (rig.stages / launch.SUPERSEDED_DIR).exists()
+
+
+def test_supersede_refuses_when_the_target_already_exists(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    (rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}").mkdir(parents=True)
+    rig.supersede = ("day-a", "stale")
+    res = rig.run()
+    assert res["action"] == "refused" and "already exists" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
