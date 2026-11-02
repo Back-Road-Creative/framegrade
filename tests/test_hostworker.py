@@ -623,3 +623,20 @@ def test_the_child_runs_under_the_workers_own_interpreter(tmp_path, subcommand, 
     _make(tmp_path, spawn=spawn).run_once()
     assert spawned == [[sys.executable, "-m", "gomoveshift", subcommand, argument, "--flag"]]
     assert _status(tmp_path)["state"] == "succeeded"
+
+
+_MARK = "import os; print('M=' + str(os.environ.get('GMS_LAUNCHED_BY')))"
+
+
+def test_the_worker_marks_a_drive_child_as_host_launched(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_LAUNCHED_BY", raising=False)
+    _submit(tmp_path)
+    _make(tmp_path, _MARK).run_once()
+    assert "M=hostworker" in _log(tmp_path)
+
+
+def test_a_marker_in_the_spool_request_cannot_choose_the_launcher(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_LAUNCHED_BY", raising=False)
+    _submit(tmp_path, env={"GMS_LAUNCHED_BY": "health-backlog"})
+    _make(tmp_path, _MARK).run_once()
+    assert "M=hostworker" in _log(tmp_path)

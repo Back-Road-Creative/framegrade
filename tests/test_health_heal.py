@@ -403,7 +403,7 @@ def test_job_runner_defaults_to_the_code_root_script_and_honours_the_env(tmp_pat
     rig = Rig(tmp_path)
     rig.run()
     argv, _cwd = rig.launches[0]
-    assert argv[:2] == ["python3", str(custom)]
+    assert argv[argv.index("python3") : argv.index("python3") + 2] == ["python3", str(custom)]
 
 
 def test_resume_keeps_the_recipes_staging_override(tmp_path):
@@ -415,12 +415,23 @@ def test_resume_keeps_the_recipes_staging_override(tmp_path):
     path.write_text(json.dumps(recipe))
     rig.run()
     argv, _cwd = rig.launches[0]
-    assert argv[:2] == ["env", f"GMS_INTERMEDIATE_DIR={stages}"]
-    assert argv[2] == "python3" and argv[3].endswith("bin/job-runner.py")
+    assert argv[:3] == ["env", f"GMS_INTERMEDIATE_DIR={stages}", "GMS_LAUNCHED_BY=health-heal"]
+    assert argv[3] == "python3" and argv[4].endswith("bin/job-runner.py")
 
 
-def test_resume_without_a_recorded_env_launches_the_job_runner_directly(tmp_path):
+def test_resume_without_a_recorded_env_still_carries_the_heal_launcher_marker(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     argv, _cwd = rig.launches[0]
-    assert argv[0] == "python3"
+    assert argv[:3] == ["env", "GMS_LAUNCHED_BY=health-heal", "python3"]
+
+
+def test_a_recorded_launcher_in_the_recipe_cannot_replace_the_heal_marker(tmp_path):
+    rig = Rig(tmp_path)
+    path = tmp_path / "stages" / "resume.json"
+    recipe = json.loads(path.read_text())
+    recipe["env"] = {"GMS_LAUNCHED_BY": "console"}
+    path.write_text(json.dumps(recipe))
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert "GMS_LAUNCHED_BY=health-heal" in argv and "GMS_LAUNCHED_BY=console" not in argv
