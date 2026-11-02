@@ -316,6 +316,8 @@ def launch(
     log_fh = log_path.open("ab")
     # The child records itself as console-launched, so its own run_origin.json agrees with the job row.
     child_env = {**(os.environ if env is None else env), run_origin.ORIGIN_ENV: "console"}
+    if name == "drive":  # the drive gate accepts only tracked launchers
+        child_env[run_origin.LAUNCHED_BY_ENV] = "console"
     proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, env=child_env)
     _track(store, job_id, proc)
     # ``getattr`` rather than ``proc.pid`` -- test doubles that fake a

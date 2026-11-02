@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .. import run_origin
 from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, job_runner
@@ -40,6 +42,63 @@ STORAGE_BOUND = (
 )
 
 Disk = Callable[[Path], Tuple[int, float]]
+
+#: Where released versions are read from: ``vX.Y.Z`` tags (``git ls-remote``). Overridable.
+RELEASE_REMOTE_ENV = "GMS_RELEASE_REMOTE"
+DEFAULT_RELEASE_REMOTE = "https://github.com/Back-Road-Creative/framegrade"
+_VERSION_TAG = re.compile(r"refs/tags/v(\d+(?:\.\d+)*)$")
+
+
+def _version_key(text: str) -> Tuple[int, ...]:
+    return tuple(int(p) for p in text.split("."))
+
+
+def latest_release_from_tags(ls_remote_output: str) -> str:
+    """Highest ``vX.Y.Z`` in ``git ls-remote --tags`` output; ``ValueError`` when there is none."""
+    found = [m.group(1) for line in ls_remote_output.splitlines() if (m := _VERSION_TAG.search(line.strip()))]  # fmt: skip
+    if not found:
+        raise ValueError("no vX.Y.Z release tags found")
+    return max(found, key=_version_key)
+
+
+def default_latest_version() -> str:
+    """The newest released version, from the release remote's tags. Raises when unreachable."""
+    remote = os.environ.get(RELEASE_REMOTE_ENV, "").strip() or DEFAULT_RELEASE_REMOTE
+    done = subprocess.run(  # noqa: S603,S607 -- fixed git argv, remote from config
+        ["git", "ls-remote", "--tags", "--refs", remote],
+        capture_output=True, text=True, timeout=30, check=False,
+    )  # fmt: skip
+    if done.returncode != 0:
+        raise OSError(f"git ls-remote {remote} exited {done.returncode}: {done.stderr.strip()[-200:]}")  # fmt: skip
+    return latest_release_from_tags(done.stdout)
+
+
+def default_installed_version(python: Path) -> Optional[str]:
+    """``gomoveshift.__version__`` of the interpreter that will render (its venv's pin)."""
+    try:
+        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed snippet
+            [str(python), "-c", "import gomoveshift; print(gomoveshift.__version__)"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.strip()
+    return out if done.returncode == 0 and re.fullmatch(r"\d+(\.\d+)*", out) else None
+
+
+def stale_pin_reason(python: Path, installed_version, latest_version) -> Optional[str]:
+    """Why the render interpreter may not launch (older than the newest release, or either
+    version unknown), else None. Unknown is a refusal, never a guess."""
+    try:
+        latest = latest_version()
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return f"cannot determine the latest framegrade release ({exc}); not launching on an unverified pin"  # fmt: skip
+    installed = installed_version(python)
+    if not installed:
+        return f"cannot read the framegrade version installed for {python}"
+    if _version_key(installed) < _version_key(latest):
+        return f"installed framegrade {installed} is older than the latest release {latest}; update the pin first"  # fmt: skip
+    return None
 
 
 def exit_code(result: Dict[str, Any]) -> int:
@@ -199,6 +258,8 @@ def run_backlog(
     launcher: Callable[[List[str], str, Dict[str, str]], Tuple[bool, str]],
     register: Callable[..., None],
     disk: Disk = default_disk,
+    installed_version: Callable[[Path], Optional[str]] = default_installed_version,
+    latest_version: Callable[[], str] = default_latest_version,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
@@ -206,7 +267,8 @@ def run_backlog(
     try:
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    drive_running, preflight, launcher, register, disk)  # fmt: skip
+                    drive_running, preflight, launcher, register, disk, installed_version,
+                    latest_version)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
@@ -214,7 +276,7 @@ def run_backlog(
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, launcher,
-         register, disk):  # fmt: skip
+         register, disk, installed_version, latest_version):  # fmt: skip
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     mine = [d for d in drives if d.region == region]
@@ -272,10 +334,16 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         "--expect", str(out_dir / "**" / "shorts" / "**" / "*.mp4"),
         "--log-root", str(jobs_dir), "--", *drive_argv,
     ]  # fmt: skip
-    env = {"GMS_INTERMEDIATE_DIR": str(root)}
+    env = {
+        "GMS_INTERMEDIATE_DIR": str(root),
+        run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER,
+    }
     res.update(argv=argv, env=env, stages_dir=str(stages_dir))
     if dry_run:
         return {**res, "action": "would_launch", "reason": f"{row.project} for {res['slot']}"}
+    stale = stale_pin_reason(python, installed_version, latest_version)
+    if stale:
+        return {**res, "action": "refused", "reason": stale}
     try:
         preflight(
             subset, out_dir, staging_dir=stages_dir, ingest_mode=row.ingest_mode, python=python

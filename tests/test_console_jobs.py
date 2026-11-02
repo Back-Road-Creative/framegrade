@@ -993,3 +993,19 @@ def test_jobs_page_with_a_job_does_not_say_no_jobs(tmp_path, monkeypatch):
     html = TestClient(create_app()).get("/jobs").text
     assert "dispatch-queue" in html
     assert "No jobs yet." not in html
+
+
+def test_a_console_drive_child_carries_the_console_launcher_marker(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, "_validate_argv", lambda argv: None)
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, argv, stdout=None, stderr=None, env=None):
+            captured["env"] = env
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", _FakePopen)
+    jobs.launch(_store(tmp_path), "drive", ["a"], tmp_path / "logs", env={}, executor="local")
+    assert captured["env"]["GMS_LAUNCHED_BY"] == "console"

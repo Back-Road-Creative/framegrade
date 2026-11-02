@@ -1492,3 +1492,10 @@ def orchestrator_run_defaults_to_force(monkeypatch):
         return original_run(self, *args, **kwargs)
 
     monkeypatch.setattr(DrivePipelineOrchestrator, "run", _run)
+
+
+@pytest.fixture(autouse=True)
+def _drive_started_by_backlog(monkeypatch):
+    """Existing drive tests exercise the pipeline, not the launch-origin gate
+    (``tests/test_drive_launch_gate.py`` owns that and removes this marker)."""
+    monkeypatch.setenv("GMS_LAUNCHED_BY", "health-backlog")
