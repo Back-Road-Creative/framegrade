@@ -115,8 +115,16 @@ class Rig:
         return stages
 
 
-def drive(project, status, region="usa"):
-    return SimpleNamespace(project=project, region=region, status=status)
+def drive(project, status, region="usa", output_dir=None):
+    return SimpleNamespace(project=project, region=region, status=status, output_dir=output_dir)
+
+
+def uploaded(tmp_path, name, records, sub=""):
+    """An output dir whose Phase D receipt (``youtube_uploads.json``) holds ``records``."""
+    out = tmp_path / name
+    (out / sub).mkdir(parents=True, exist_ok=True)
+    (out / sub / "youtube_uploads.json").write_text(records if isinstance(records, str) else json.dumps(records))  # fmt: skip
+    return str(out)
 
 
 def test_launches_first_eligible_row_for_the_first_uncovered_slot(tmp_path):
@@ -242,6 +250,43 @@ def test_ready_drives_cover_slots_in_order(tmp_path):
     rig2.drives += [drive("old", "ready"), drive("old2", "ready")]
     res2 = rig2.run()
     assert res2["action"] == "noop" and "covered" in res2["reason"]
+
+
+def test_an_uploaded_auditing_drive_does_not_hold_the_slot(tmp_path):
+    # 2026-11-02: sc-2026-02-21-ace-basin stayed ``auditing`` after Phase D uploaded both
+    # parts, and every backlog call answered "audit in progress" for the open usa slot.
+    rig = Rig(tmp_path)
+    out = uploaded(tmp_path, "ace", {"1": {"video_id": "ZPaIwzcE_kU"}})
+    rig.drives.append(drive("done", "auditing", output_dir=out))
+    res = rig.run()
+    assert (res["action"], res["lf_day"]) == ("launched", "fri"), res
+    assert res["published"] == ["done"]
+
+
+def test_an_uploaded_ready_drive_does_not_cover_a_slot(tmp_path):
+    # The receipt may sit one level down, under the render's project dir (F1 output ``src``).
+    rig = Rig(tmp_path)
+    out = uploaded(tmp_path, "f1", {"1": {"video_id": "XIT4Fa9aUUU"}}, sub="src")
+    rig.drives.append(drive("done", "ready", output_dir=out))
+    res = rig.run()
+    assert (res["action"], res["lf_day"]) == ("launched", "fri"), res
+
+
+@pytest.mark.parametrize("records", [{}, "{not json", {"1": {"video_id": None}}])
+def test_an_empty_or_unreadable_receipt_still_holds_the_slot(tmp_path, records):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-x", "auditing", output_dir=uploaded(tmp_path, "x", records)))
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress: day-x" in res["reason"]
+
+
+def test_an_uploaded_drive_still_skips_its_own_backlog_row(tmp_path):
+    rig = Rig(tmp_path)
+    out = uploaded(tmp_path, "a", {"1": {"video_id": "v1"}})
+    rig.drives.append(drive("day-a", "auditing", output_dir=out))
+    res = rig.run()
+    assert res["project"] == "day-b"
+    assert res["skipped"][0] == {"project": "day-a", "reason": "in the schedule store (auditing)"}
 
 
 def test_slots_past_the_horizon_or_before_now_do_not_count(tmp_path):

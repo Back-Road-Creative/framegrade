@@ -4,7 +4,8 @@ LF slot, audit only (``--skip-upload --no-youtube-upload``), through the job run
 Order, each a stop: the ``gms-backlog-launch`` lease (held = noop); a running drive (noop); a
 region row already ``auditing`` (noop: that audit owns the next slot, so a repeat call never
 launches a second drive); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
-drives (none left = covered); the first manifest row not in the store, not in the content ledger,
+drives (none left = covered). A drive whose output dir already holds Phase D upload records
+(``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
 (``storage_plan``); the subset dir of symlinks; ``run_preflight``; launch; ``register_ready``
 as ``auditing``. Publication stays the operator's: nothing here uploads or books.
@@ -199,6 +200,23 @@ def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) ->
     return None
 
 
+def _uploaded(output_dir: Optional[str]) -> bool:
+    """True when Phase D's receipt under ``output_dir`` (``youtube_uploads.json`` there or one
+    level down) names a video id: the drive is published, so it neither holds nor covers a slot
+    whatever its store status says. Unreadable or empty counts as not uploaded."""
+    if not output_dir:
+        return False
+    out = Path(output_dir)
+    for receipt in [out / "youtube_uploads.json", *sorted(out.glob("*/youtube_uploads.json"))]:
+        try:
+            held = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(held, dict) and any(isinstance(r, dict) and r.get("video_id") for r in held.values()):  # fmt: skip
+            return True
+    return False
+
+
 def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[str]:
     """Refusal text, or ``None`` once ``subset`` holds exactly one symlink per source."""
     want = {Path(s).name: os.path.realpath(s) for s in sources}
@@ -344,7 +362,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
          register, disk, installed_version, latest_version, supersede):  # fmt: skip
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
-    mine = [d for d in drives if d.region == region]
+    published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
+    if published:
+        res["published"] = published
+    mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
