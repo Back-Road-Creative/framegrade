@@ -21,12 +21,18 @@ from ...health.store import (
 
 def cmd_health(args, config) -> int:
     root = Path(args.data_root) if args.data_root else default_data_root()
-    incidents_dir = Path(args.incidents_dir) if args.incidents_dir else default_incidents_dir(root)
+    incidents_dir = (
+        Path(args.incidents_dir)
+        if getattr(args, "incidents_dir", None)
+        else default_incidents_dir(root)
+    )
     jobs_dir = Path(args.jobs_dir) if args.jobs_dir else root / "logs" / "jobs"
     if args.health_command == "heal":
         return _cmd_heal(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "backlog":
         return _cmd_backlog(args, config, root, jobs_dir)
+    if args.health_command == "publish":
+        return _cmd_publish(args, config, root, jobs_dir)
     result = run_check(
         config,
         incidents_dir=incidents_dir,
@@ -95,6 +101,33 @@ def _run_heal(args, config, root, jobs_dir, incidents_dir, only_key) -> int:
         for note in result["notes"]:
             print(f"note: {note}")
     return 0
+
+
+def _cmd_publish(args, config, root, jobs_dir) -> int:
+    from datetime import datetime, timezone
+
+    from ...health import publish
+
+    store, cadence = publish.open_schedule_store(config)
+    if store is None:
+        print("refused: schedule.sqlite3 does not exist; nothing to publish")
+        return 2
+    result = publish.run_publish(
+        project=args.project, region=args.region, store=store, cadence=cadence,
+        stages_root=args.stages_root, code_root=Path(args.code_root) if args.code_root else root,
+        jobs_dir=jobs_dir, now=datetime.now(timezone.utc), dry_run=args.dry_run,
+        drive_running=default_drive_running, lead_hours=args.lead_hours,
+        expect_sha=args.expect_sha,
+    )  # fmt: skip
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        for step in result["steps"]:
+            print(f"step: {step}")
+        if result.get("argv"):
+            print("argv: " + " ".join(result["argv"]))
+        print(f"{result['action']}: {result['reason']}")
+    return 2 if result["action"] == "refused" else 0
 
 
 def _cmd_backlog(args, config, root, jobs_dir) -> int:

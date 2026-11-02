@@ -160,3 +160,38 @@ old recipe's `sha`/`started_at`/`phase_reached`/`argv`, and whether a `no-auto-r
 under it). A hold under the row's own root does not block the supersede; it moves with the run.
 Nothing moves until every check up to the release-pin check has passed, so a refusal leaves the
 old run in place; `--dry-run` prints the planned moves. `_superseded/` is never read as staging.
+
+## `health publish`: one command to upload an audited drive
+
+`gomoveshift health publish <project> --region R --stages-root S [--jobs-dir J] [--code-root C]
+[--lead-hours N] [--expect-sha SHA] [--dry-run] [--json]` is the single operator approval for
+uploading a drive `health backlog` audited. It goes through Waypost's claim, so the schedule store
+never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasses it). Exit 2 on
+`refused`, else 0.
+
+1. **Checks, no writes.** The drive must be `auditing` in `schedule.sqlite3` (any other status is
+   `refused` with the status named), one long-form, with no upload receipt under its output dir;
+   no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
+   root's venv; and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
+   the oldest ready drive of the region, never a named one.
+2. **Approve.** `set_status(project, "ready")`.
+3. **Claim.** `claim_or_reason(...)`. A miss (`outside_lead_window`, a taken slot, a stale sha) puts
+   the drive back to `auditing`. If the claim names another drive (it became ready first), that
+   claim is failed (bookings released), the other drive is made `ready` again and this one
+   `auditing`.
+4. **Launch.** A detached `gms-publish-<project>` job (job runner under `--code-root`, record in
+   `--jobs-dir`) running the recipe's own drive args with `--skip-upload`, `--no-youtube-upload`
+   and the audit's `--publish`/`--lf-day` replaced by: `--publish D --lf-day D --lf-publish-date
+   <claimed slot's local date> --youtube-upload --force --no-tmux --phase D`, with the recipe's
+   `GMS_INTERMEDIATE_DIR` and `GMS_LAUNCHED_BY=health-publish`. A failed launch fails the claim and
+   returns the drive to `auditing`.
+5. **Close.** `health check` (the hourly tick) calls `publish.reconcile_publishes`: for each
+   `claimed` drive whose `gms-publish-<project>` job (started after the claim) has ended, it calls
+   `finish_claim` with `ok` = the output dir holds an upload receipt (`youtube_uploads.json` with a
+   `video_id`; a receipt wins over the exit code, so a live video keeps its slot). Otherwise the
+   drive is `failed` and its unconfirmed booking is released. A running job, or a claim with no
+   publish job, is left alone; a repeat pass is a no-op. The closed claims are
+   `publish_reconciled` in `run_check`'s result.
+
+`--dry-run` runs every check, then reports the four steps and Waypost's own dry-run answer
+(`next_claim`); it writes nothing and launches nothing.

@@ -45,7 +45,13 @@ def test_every_tracked_launcher_value_lets_a_render_start(monkeypatch, launcher)
 
 
 def test_the_launcher_set_names_the_tracked_launchers():
-    assert set(run_origin.LAUNCHERS) == {"health-backlog", "health-heal", "console", "hostworker"}
+    assert set(run_origin.LAUNCHERS) == {
+        "health-backlog",
+        "health-heal",
+        "health-publish",
+        "console",
+        "hostworker",
+    }
 
 
 @pytest.mark.parametrize("flag", ["dry_run", "list_lfs", "label_dry_run", "preview"])

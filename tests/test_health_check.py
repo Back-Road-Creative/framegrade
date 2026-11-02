@@ -311,3 +311,16 @@ def test_an_earlier_success_does_not_resolve_a_later_failure(tmp_path):
         (tmp_path / "jobs" / "r2" / "job.json").read_text().replace("2000.0", "500.0")
     )
     assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
+
+
+def test_check_closes_a_finished_publish_claim(tmp_path, monkeypatch):
+    from gomoveshift.health import check as check_mod
+
+    seen = []
+    monkeypatch.setattr(
+        check_mod, "_reconcile_publishes",
+        lambda config, jobs_dir, notes: seen.append(jobs_dir) or [{"project": "p", "status": "complete"}],
+    )  # fmt: skip
+    result = _run(tmp_path, lambda *a: True)
+    assert seen == [tmp_path / "jobs"]
+    assert result["publish_reconciled"] == [{"project": "p", "status": "complete"}]

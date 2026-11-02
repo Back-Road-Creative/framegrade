@@ -104,5 +104,6 @@ manifest's next row for that region (or saying none is left). `seo-manager sched
 backlog-next --manifest <path>` prints the same row. Nothing audits or renders a row on its
 own: an operator (or an agent session) runs `gomoveshift health backlog --region R` to launch
 the next eligible row as an audit-only drive (`docs/pipeline/156-health-check.md`); no cron
-calls it. The page reaches the operator only while the
+calls it. Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
+claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
