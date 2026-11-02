@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .. import run_origin
 from . import drives, resume
 from .store import code_sha, load_all, new_incident, safe_name, utc_iso, write_row
 
@@ -364,9 +365,10 @@ def run_heal(
                 att.update(action="refused", reason=cwd)
         if bound is not None:
             name = job_name(row["drive"], sha)
-            argv = launch_argv(
-                code_root, jobs_dir, name, bound, letter, env=resume.recipe_env(recipe)
-            )
+            # Always this launcher's own value: the recipe records only RECIPE_ENV_KEYS, never an
+            # origin, and a recipe file must not be able to name its own launcher.
+            env = {**resume.recipe_env(recipe), run_origin.LAUNCHED_BY_ENV: "health-heal"}
+            argv = launch_argv(code_root, jobs_dir, name, bound, letter, env=env)
             att["interpreter"] = bound[0]
             if dry_run:  # the exact launch, so the evidence is gradeable before it runs
                 att.update(argv=argv, cwd=cwd, job_name=name, reason="dry run: would launch")

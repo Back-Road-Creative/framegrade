@@ -121,7 +121,7 @@ FLAG_REGISTRY: tuple[FlagRule, ...] = (
     FlagRule("label_dry_run", None, Semantic.NOT_PERSISTED, "label verification harness"),
     FlagRule("skip_stop_verify", None, Semantic.NOT_PERSISTED, "stop-removal verification gate bypass (config.drive mirror set in the drive handler)"),
     FlagRule("day_gpx", None, Semantic.NOT_PERSISTED, "day-GPX slicer input: writes <stem>.gpx sidecars before ingest; the sidecars, not the flag, are the persisted contract"),
-    FlagRule("camera_utc_offset_hours", None, Semantic.NOT_PERSISTED, "day-GPX slicer camera clock offset; required with --day-gpx"),
+    FlagRule("camera_utc_offset_hours", None, Semantic.NOT_PERSISTED, "day-GPX slicer camera clock offset; optional with --day-gpx (measured from creation_time when omitted)"),
     FlagRule("skip_blur", None, Semantic.NOT_PERSISTED, "blur-detection stage bypass (config.drive mirror set in the drive handler)"),
     FlagRule("insert_photos", None, Semantic.NOT_PERSISTED, "photo inserts: config.drive.insert_photos mirror set in the drive handler; a resume must repeat them: state.insert_request records the flags the finished days were rendered with and a differing resume is refused (--fresh restarts)"),
     FlagRule("insert_clip", None, Semantic.NOT_PERSISTED, "clip inserts: config.drive.insert_clips mirror set in the drive handler"),

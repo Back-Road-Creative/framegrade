@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 SIDECAR = "run_origin.json"
 ORIGIN_ENV = "GMS_RUN_ORIGIN"
 ORIGINS = ("cli", "cron", "console")
+#: Set by ``health backlog`` on the drive it starts; ``drive`` refuses a real render without it.
+LAUNCHED_BY_ENV = "GMS_LAUNCHED_BY"
+BACKLOG_LAUNCHER = "health-backlog"
+#: Every tracked launcher that may start a render: the backlog, a heal resume, the console's job
+#: store and the host worker it spools to. A hand-typed CLI run carries none of them.
+LAUNCHERS = (BACKLOG_LAUNCHER, "health-heal", "console", "hostworker")
 
 
 def _command(argv: Optional[list]) -> list:

@@ -12,6 +12,34 @@ from ..tmux import is_in_tmux, launch_in_tmux, require_supervision, tmux_availab
 
 logger = logging.getLogger(__name__)
 
+#: Logged operator override for a render not started by ``health backlog``.
+ALLOW_MANUAL_DRIVE_ENV = "GMS_ALLOW_MANUAL_DRIVE"
+_RENDER_EXEMPT_FLAGS = ("dry_run", "list_lfs", "label_dry_run", "preview")
+
+
+def _launch_origin_refusal(args) -> str | None:
+    """Why this drive may not render, or None. A real render starts only from ``health backlog``
+    (``GMS_LAUNCHED_BY``), so its pin and gates apply; discovery, ``--dry-run`` and ``--preview``
+    render no long-form and are exempt. ``GMS_ALLOW_MANUAL_DRIVE=1`` overrides, logged."""
+    if any(getattr(args, flag, False) is True for flag in _RENDER_EXEMPT_FLAGS):
+        return None
+    launcher = os.environ.get(run_origin.LAUNCHED_BY_ENV, "")
+    if launcher in run_origin.LAUNCHERS:
+        return None
+    if os.environ.get(ALLOW_MANUAL_DRIVE_ENV) == "1":
+        logger.warning(
+            "Manual drive render (%s=1): not started by `health backlog`; its pin and launch "
+            "gates did not run.", ALLOW_MANUAL_DRIVE_ENV,
+        )  # fmt: skip
+        return None
+    seen = f" (got {run_origin.LAUNCHED_BY_ENV}={launcher!r})" if launcher else ""
+    return (
+        "drive renders start only from a tracked launcher -- `gomoveshift health backlog`, a "
+        f"heal resume, the console or the host worker -- which set {run_origin.LAUNCHED_BY_ENV} "
+        f"to one of {', '.join(run_origin.LAUNCHERS)}{seen}. "
+        f"Operator override, logged: {ALLOW_MANUAL_DRIVE_ENV}=1."
+    )
+
 
 def resolve_youtube_upload(args) -> bool:
     """Resolve effective YouTube-upload flag.
@@ -473,6 +501,11 @@ def _cmd_drive_impl(args, config):
         SidecarIntegrityError,
     )
 
+    refusal = _launch_origin_refusal(args)
+    if refusal:
+        print(f"error: {refusal}", file=sys.stderr)
+        return 2
+
     # A real drive run must not silently default/skip the publish schedule.
     # ``--publish`` stays optional at argparse level (no cross-flag
     # ``required``), so refuse here, before any Phase A work, when neither
@@ -487,14 +520,6 @@ def _cmd_drive_impl(args, config):
             "error: drive requires --publish or --lf-day (schedule-critical) "
             "— pass one explicitly, or use --list-lfs/--label-dry-run for a "
             "discovery-only run."
-        )
-
-    # --day-gpx slices a whole-day GPX using the camera clock offset; that
-    # offset is operator knowledge and is never defaulted.
-    if getattr(args, "day_gpx", None) and getattr(args, "camera_utc_offset_hours", None) is None:
-        raise SystemExit(
-            "error: --day-gpx requires --camera-utc-offset-hours N "
-            "(camera clock UTC offset; US Eastern DST is -4) — never guessed."
         )
 
     # Interim guard: ``--skip-stop-verify`` is still a NO-OP on drive runs —
@@ -549,6 +574,15 @@ def _cmd_drive_impl(args, config):
             # run skips the prompt; the operator reviews up front via
             # --dry-run / --label-dry-run. See preflight_plan.py.
             reexec_argv = list(sys.argv)
+            # tmux's server, not this process, supplies the pane's environment: carry the launch
+            # marker/override across so the pane's own gate sees what this one saw.
+            carried = [
+                f"{k}={os.environ[k]}"
+                for k in (run_origin.LAUNCHED_BY_ENV, ALLOW_MANUAL_DRIVE_ENV)
+                if k in os.environ
+            ]
+            if carried:
+                reexec_argv = ["env", *carried, *reexec_argv]
             if "--force" not in reexec_argv:
                 reexec_argv.append("--force")
             _FINAL_STATE["launcher_only"] = True

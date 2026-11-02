@@ -48,6 +48,8 @@ class Rig:
         self.launches: list = []
         self.launch_ok = True
         self.registered: list = []
+        self.installed = "0.3.25"
+        self.latest = "0.3.25"
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -78,8 +80,8 @@ class Rig:
         self.launches.append((argv, cwd, env))
         return self.launch_ok, "" if self.launch_ok else "runner: boom"
 
-    def run(self, *, dry_run=False, region="usa"):
-        return launch.run_backlog(
+    def kwargs(self, *, dry_run=False, region="usa"):
+        return dict(
             region=region, rows=self.rows, drives=self.drives, free_slots=self.slots,
             known_projects=self.ledger, stages_root=self.stages, output_root=self.out,
             sources_root=self.sources, code_root=self.tmp, jobs_dir=self.tmp / "jobs",
@@ -89,7 +91,12 @@ class Rig:
             drive_running=lambda: self.running, disk=self.disk, preflight=self.preflight,
             launcher=self.launcher,
             register=lambda **kw: self.registered.append(kw),
+            installed_version=lambda python: self.installed,
+            latest_version=lambda: self.latest,
         )  # fmt: skip
+
+    def run(self, *, dry_run=False, region="usa"):
+        return launch.run_backlog(**self.kwargs(dry_run=dry_run, region=region))
 
     def stage(self, run, source_files, *, hold=False):
         """A prior run's stage root: subset dir of symlinks + its resume recipe."""
@@ -499,3 +506,78 @@ def test_lease_script_defaults_to_the_code_root_and_honours_the_env(tmp_path, mo
     custom = tmp_path / "elsewhere" / "lease.sh"
     monkeypatch.setenv(launch.LEASE_SCRIPT_ENV, str(custom))
     assert launch.lease_script(tmp_path) == custom
+
+
+def test_the_launch_env_marks_the_child_as_backlog_started(tmp_path):
+    rig = Rig(tmp_path)
+    assert rig.run()["action"] == "launched"
+    assert rig.launches[0][2]["GMS_LAUNCHED_BY"] == "health-backlog"
+
+
+def test_an_installed_pin_older_than_the_newest_release_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed, rig.latest = "0.3.24", "0.3.25"
+    res = rig.run()
+    assert res["action"] == "refused" and not rig.launches
+    assert "0.3.24" in res["reason"] and "0.3.25" in res["reason"]
+
+
+def test_a_newer_install_than_the_latest_tag_launches(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed, rig.latest = "0.3.26", "0.3.25"
+    assert rig.run()["action"] == "launched"
+
+
+def test_an_unknown_latest_release_refuses_rather_than_guessing(tmp_path):
+    rig = Rig(tmp_path)
+
+    def offline():
+        raise OSError("network is unreachable")
+
+    res = launch.run_backlog(**{**rig.kwargs(), "latest_version": offline})
+    assert res["action"] == "refused" and not rig.launches
+    assert "latest" in res["reason"] and "network is unreachable" in res["reason"]
+
+
+def test_an_unreadable_installed_version_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    res = launch.run_backlog(**{**rig.kwargs(), "installed_version": lambda python: None})
+    assert res["action"] == "refused" and not rig.launches
+
+
+def test_a_dry_run_needs_no_release_lookup(tmp_path):
+    rig = Rig(tmp_path)
+
+    def boom():
+        raise AssertionError("dry run must not look up releases")
+
+    res = launch.run_backlog(**{**rig.kwargs(dry_run=True), "latest_version": boom})
+    assert res["action"] == "would_launch"
+
+
+@pytest.mark.parametrize(
+    "tags,want",
+    [
+        ("a\trefs/tags/v0.3.9\nb\trefs/tags/v0.3.25\nc\trefs/tags/v0.3.10\n", "0.3.25"),
+        ("a\trefs/tags/workspaces/release-1\nb\trefs/tags/v1.0.0\n", "1.0.0"),
+    ],
+)
+def test_latest_release_is_the_highest_version_tag(tags, want):
+    assert launch.latest_release_from_tags(tags) == want
+
+
+def test_no_version_tags_is_an_error():
+    with pytest.raises(ValueError):
+        launch.latest_release_from_tags("a\trefs/tags/nightly\n")
+
+
+def test_a_day_gpx_row_without_an_offset_omits_the_flag_rather_than_passing_none(tmp_path):
+    rig = Rig(tmp_path)
+    gpx = tmp_path / "day12.gpx"
+    gpx.write_text("<gpx/>")
+    row = rig.rows[0]
+    rig.rows[0] = BacklogRow(row.project, row.region, row.sources, "generic", row.lf_mode, day_gpx=str(gpx))  # fmt: skip
+    assert rig.run()["action"] == "launched"
+    drive_args = rig.launches[0][0]
+    assert "--day-gpx" in drive_args and "--camera-utc-offset-hours" not in drive_args
+    assert "None" not in drive_args
