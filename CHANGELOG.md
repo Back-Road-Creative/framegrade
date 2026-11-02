@@ -12,6 +12,9 @@ All notable changes to this project are recorded here. The format follows
   `refused` (`render gate: …`), in a dry run too. Before, the launch went through (and a
   `--supersede` moved the old run aside) and the drive refused the day only after it started,
   leaving an `auditing` store row for a render that could never happen.
+- `health backlog --supersede <project>` also replaces that row's failed audit (store row
+  `auditing`, newest job not succeeded): the run is set aside and the row relaunches as the
+  manifest now reads it. Before, a failed audit could only be resumed with its old arguments.
 
 ## [0.3.28] - 2026-11-02
 

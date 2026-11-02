@@ -983,3 +983,62 @@ def test_config_render_gate_scans_the_rows_sources_before_the_subset_exists(tmp_
     assert launch.config_render_gate(config)(tmp_path / "missing", row) is None
     assert seen["links"] == [(c.name, os.path.realpath(c)) for c in clips]
     assert not (tmp_path / "missing").exists()
+
+
+# --supersede of a failed audit: the row's store entry is ``auditing`` and its newest job failed,
+# e.g. 2026-11-02 the Ireland row's drive refused its own day before ingest. Superseding it moves
+# that run aside and relaunches the row as it now reads (re-registering the same store row).
+
+
+def _failed(rig, project="day-a"):
+    _stale(rig, project)
+    rig.drives.append(drive(project, "auditing"))
+    job(rig, "e76bef98", project, "failed", 100.0)
+    rig.supersede = (project, "full_drive refused 2866 s; relaunch as best_moments")
+
+
+def test_supersede_relaunches_a_failed_audit(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert "e76bef98" in res["relaunch"]
+    assert len(rig.launches) == 1 and rig.registered[0]["project"] == "day-a"
+    assert (rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}").is_dir()
+    assert not (rig.stages / "day-a").exists()
+
+
+def test_supersede_of_a_failed_audit_dry_run_moves_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_launch" and "e76bef98" in res["relaunch"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_a_failed_audit_still_refuses_a_supersede_of_another_row(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    rig.supersede = ("day-b", "something else")
+    res = rig.run()
+    assert res["action"] == "refused" and "e76bef98" in res["reason"], res
+    assert not rig.launches
+
+
+def test_supersede_never_replaces_an_audit_that_is_running(tmp_path):
+    rig = Rig(tmp_path)
+    _failed(rig)
+    job(rig, "again", "day-a", "running", 200.0)
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_supersede_still_refuses_a_ready_store_row(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.drives.append(drive("day-a", "ready"))
+    rig.slots = [(FRI, "fri"), (TUE, "tue"), (TUE + timedelta(days=1), "wed")]
+    rig.supersede = ("day-a", "re-render")
+    res = rig.run()
+    assert res["action"] == "refused" and "in the schedule store (ready)" in res["reason"], res

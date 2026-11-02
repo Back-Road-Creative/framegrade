@@ -298,7 +298,7 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
     """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success.
 
     A failed audit still holds its slot, so without this every later call is a silent noop;
-    the operator relaunches (the drive resumes from its stages) or clears the row."""
+    the operator relaunches (the drive resumes from its stages) or supersedes it."""
     name = f"gms-backlog-{project}"
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
@@ -310,7 +310,8 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
         return None
     return (
         f"audit failed: {project} job {rec.get('run_id')} ended {state} "
-        f"(exit {result.get('exit_code')}); relaunch it (stages resume) or clear the row"
+        f"(exit {result.get('exit_code')}); relaunch it (stages resume), or --supersede {project} "
+        "to set the run aside and launch the row as it now reads"
     )
 
 
@@ -404,18 +405,24 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         res["published"] = published
     mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
+    target = supersede[0] if supersede else None
+    relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
-        if failed:
+        if not failed:
+            return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        if auditing[0] != target:
             return {**res, "action": "refused", "project": auditing[0], "reason": failed}
-        return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        # superseding the failed audit itself: its run is set aside and the row relaunches as
+        # it now reads, re-registering the same store row
+        relaunch, res["relaunch"] = target, failed
+        mine = [d for d in mine if d.project != relaunch]
     slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now)
     if slot is None:
         return {**res, "reason": f"covered: every free slot inside {COVERAGE_HORIZON_H} h has a ready drive"}  # fmt: skip
     res.update(slot=slot[0].isoformat(), lf_day=slot[1])
-    status = {d.project: d.status for d in drives}
+    status = {d.project: d.status for d in drives if d.project != relaunch}
     staged = staged_sources(stages_root)
-    target = supersede[0] if supersede else None
     if supersede and not supersede[1].strip():
         return {**res, "action": "refused", "reason": f"--supersede {target} needs a --reason"}
     own_root = Path(stages_root) / str(target)
