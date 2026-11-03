@@ -547,6 +547,12 @@ def _coverage_failures(metadata_json: dict, resolved: dict, title: str, location
     ]
     if len(material) < 2:
         return []  # one material county: membership already covers it
+    # The route gate's state fallback (no county proven): a label that is the
+    # one state holding every material county names none of them wrongly.
+    states = {label.rpartition(",")[2].strip().lower() for label, _ in material if "," in label}
+    if len(states) == 1 and len(material) == sum("," in label for label, _ in material):
+        if (location or "").strip().lower() in states:
+            return []
     claim_text = " ".join(
         [title, location, *(text for _surface, text in _location_claim_surfaces(metadata_json))]
     ).lower()

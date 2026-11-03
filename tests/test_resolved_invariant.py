@@ -125,6 +125,43 @@ class TestCheckLocationInvariant:
         assert res.passed is False
         assert "Jasper County, South Carolina" in res.message
 
+    @staticmethod
+    def _split_nc(location, vote=None):
+        vote = vote or {
+            "Transylvania County, North Carolina": 0.40,
+            "Henderson County, North Carolina": 0.37,
+            "Buncombe County, North Carolina": 0.23,
+        }
+        return {
+            "location": location,
+            "resolved_location": {
+                "dominant_county": "Transylvania County",
+                "dominant_state": "North Carolina",
+                "regions": list(vote),
+                "vote": vote,
+            },
+        }
+
+    def test_state_label_holding_every_material_county_passes(self):
+        # The route gate's region fallback: no county is proven, so the label
+        # is the one state every material county sits in. It names no county,
+        # so none is misnamed; it contains everything on screen.
+        assert check_location_invariant(self._split_nc("North Carolina")).passed is True
+
+    def test_state_label_for_the_wrong_state_still_omits(self):
+        res = check_location_invariant(self._split_nc("South Carolina"))
+        assert res.passed is False
+        assert "Henderson County, North Carolina" in res.message
+
+    def test_state_label_with_material_county_across_the_line_still_omits(self):
+        vote = {
+            "Transylvania County, North Carolina": 0.55,
+            "Oconee County, South Carolina": 0.45,
+        }
+        res = check_location_invariant(self._split_nc("North Carolina", vote))
+        assert res.passed is False
+        assert "Oconee County, South Carolina" in res.message
+
     def test_town_form_desync_hard_fails_with_place_sequence(self):
         # With town-level truth present, a town-form label naming a town
         # the route never passed is no longer a silent no-op.
