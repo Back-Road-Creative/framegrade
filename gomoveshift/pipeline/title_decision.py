@@ -274,14 +274,23 @@ def _region_only_title_facts(label: str, baseline: str, route_evidence, suffix: 
     """Offer Waypost a region shape only for the route gate's exact award."""
     from .final_text_record import _region_id
     from .geo_constants import US_STATE_ABBREVS
-    from .route_claims import REGION_MIN_COVERAGE, _region_ok
+    from .route_claims import REGION_MIN_COVERAGE, _region_ok, region_label
 
     for level in ("county", "counties", "state"):
         claim = route_evidence.region_claim(level)
         if not claim or _region_ok(claim, route_evidence, REGION_MIN_COVERAGE):
             continue
         name = claim["name"]
-        if level != "state":
+        if level != "state" and claim.get("state") is None:
+            # A stateless country (Ireland): the county carries only its country,
+            # and the label is the route gate's own ``region_label`` award.
+            held = set(claim.get("counties") or (name,))
+            countries = {b.country for b in route_evidence.bins if b.county in held}
+            if len(countries) != 1 or None in countries:
+                continue
+            labels = {region_label(claim)}
+            evidence_name = name
+        elif level != "state":
             state_claim = route_evidence.region_claim("state")
             if not state_claim or _region_ok(state_claim, route_evidence, REGION_MIN_COVERAGE):
                 continue

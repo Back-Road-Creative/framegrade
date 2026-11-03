@@ -50,3 +50,33 @@ def test_waypost_region_variant_can_win_only_on_measured_title_lift():
 def test_wrong_county_still_refuses_before_waypost_decision():
     with pytest.raises(PreRenderTitleError, match="unsupported"):
         approve_retained_title("Other County, SC", _route(), None)
+
+
+class _CorkGeocoder:
+    """A stateless country: Irish counties carry no state, only the country."""
+
+    def reverse_geocode_detailed(self, lat, lon):
+        town = "Ballyvourney" if lat < 10.0 else "Kilgarvan"
+        return {"town": town, "county": "County Cork", "state": None, "country": "Ireland"}
+
+
+def _cork_route(geocoder=None):
+    fixes = [(float(t), 9.5 if t < 300 else 10.2, 20.0) for t in range(600)]
+    return measure_route([RouteWindow("lf1", 0, 600, fixes)], geocoder or _CorkGeocoder())
+
+
+def test_stateless_county_fallback_is_a_waypost_region_decision():
+    decision = approve_retained_title("County Cork", _cork_route(), None)
+    assert decision["chosen_title"] == "County Cork in 4K"
+    assert decision["reason"] == "insufficient_evidence"
+    assert decision["candidates"][0]["template_id"] == "region_only_lf"
+
+
+def test_stateless_county_with_no_known_country_has_no_region_facts(monkeypatch):
+    class NoCountry(_CorkGeocoder):
+        def reverse_geocode_detailed(self, lat, lon):
+            return {**super().reverse_geocode_detailed(lat, lon), "country": None}
+
+    monkeypatch.delenv("GMS_ALLOW_UNPROVEN_TITLE", raising=False)
+    with pytest.raises(PreRenderTitleError, match="facts_unavailable"):
+        approve_retained_title("County Cork", _cork_route(NoCountry()), None)
