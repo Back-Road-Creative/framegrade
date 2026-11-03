@@ -138,8 +138,10 @@ render; its blockers are `refused`, and a crashed child is an error, never a pas
 **Render gate.** Before anything is moved, launched or registered, and in a dry run too, the row
 is checked against the drive's own pre-ingest refusal (`day_under_part_min_message`) under the
 row's `ingest_mode` and `lf_mode`: a `full_drive` day whose raw footage (with its neighbouring
-calendar days) is under `full_drive_part_min_sec` is `refused` with `render gate: <message>`. A
-dry run, which has no subset dir yet, scans a throwaway dir of links to the row's sources.
+calendar days) is under `full_drive_part_min_sec` is skipped with `render gate: <message>`, and the
+next eligible row is tried, so one short day never stalls the region. When no row behind it is
+eligible, or the refused row is the `--supersede` target, the result is `refused` with that reason.
+The scan reads a throwaway dir of links to the row's sources until its subset dir exists.
 
 **Launch.** Under the `gms-backlog-launch` lease (the script named by `$GMS_LEASE_SCRIPT`, default `bin/lease.sh`; held → `noop`, released in a
 `finally`), it writes the row's chapters as a symlink dir `<sources root>/<project>` (reused when

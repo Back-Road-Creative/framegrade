@@ -82,6 +82,8 @@ class Rig:
 
     def render_gate(self, subset, row):
         self.gates.append((subset, row.project))
+        if isinstance(self.gate_reason, dict):  # per-row refusals
+            return self.gate_reason.get(row.project)
         return self.gate_reason
 
     def launcher(self, argv, cwd, env):
@@ -943,8 +945,28 @@ def test_render_gate_refusal_launches_nothing_and_registers_nothing(tmp_path):
     res = rig.run()
     assert (res["action"], res["project"]) == ("refused", "day-a"), res
     assert res["reason"] == f"render gate: {RAW_SHORT}"
-    assert rig.gates == [(rig.sources / "day-a", "day-a")]
+    assert rig.gates == [(rig.sources / "day-a", "day-a"), (rig.sources / "day-b", "day-b")]
+    assert [s["project"] for s in res["skipped"]] == ["day-a", "day-b"]
     assert rig.launches == [] and rig.registered == [] and rig.preflights == []
+    assert not rig.sources.exists()  # no subset dir written for a refused row
+
+
+def test_a_render_gate_refused_row_does_not_stall_the_region(tmp_path):
+    # 2026-11-03: sc-2026-02-22-ace-basin (1417 s of footage) was refused at the top of the
+    # usa backlog on every hourly tick, and no row behind it was ever launched
+    rig = Rig(tmp_path)
+    rig.gate_reason = {"day-a": RAW_SHORT}
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    assert res["skipped"] == [{"project": "day-a", "reason": f"render gate: {RAW_SHORT}"}]
+    assert len(rig.launches) == 1 and not (rig.sources / "day-a").exists()
+
+
+def test_a_dry_run_names_the_row_behind_a_render_gate_refusal(tmp_path):
+    rig = Rig(tmp_path)
+    rig.gate_reason = {"day-a": RAW_SHORT}
+    res = rig.run(dry_run=True)
+    assert (res["action"], res["project"]) == ("would_launch", "day-b"), res
 
 
 def test_render_gate_refuses_a_dry_run_too(tmp_path):
