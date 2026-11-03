@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.34] - 2026-11-03
+
+### Fixed
+
+- `health backlog --supersede --dry-run` now prints `would supersede <from> -> <to>`. It used to print `superseded`, though a dry run moves nothing.
+- The pre-encode location invariant now accepts a state label, such as `North Carolina`, when that one state holds every material county. That label is the route gate's own fallback when no county can be proven. The invariant used to refuse it as "omits Henderson County", so two gates contradicted each other and the drive stopped before encode.
+
 ## [0.3.33] - 2026-11-03
 
 ### Fixed
@@ -494,7 +501,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.33...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.34...HEAD
+[0.3.34]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.33...v0.3.34
 [0.3.33]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.32...v0.3.33
 [0.3.32]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.31...v0.3.32
 [0.3.31]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...v0.3.31
