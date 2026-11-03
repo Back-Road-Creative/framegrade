@@ -110,10 +110,17 @@ def build_lf_provenance_payload(state) -> dict:
         road_vote = _build_road_vote(loc, reasons)
         coverage_pct = _coerce_float(coverage, idx)
         if coverage_pct is None:
-            reasons["fix_density_pct"] = (
-                "no locked-GPS coverage recorded; the pre-encode "
-                "specificity-ladder pass did not evaluate this LF"
-            )
+            ev_rec = _lookup(tier_evidence, idx)
+            if isinstance(ev_rec, dict) and ev_rec.get("placeless"):
+                reasons["fix_density_pct"] = (
+                    "placeless operator label (--placeless-label): the burned text claims "
+                    "no place, so no locked-GPS coverage is measured (tier 5)"
+                )
+            else:
+                reasons["fix_density_pct"] = (
+                    "no locked-GPS coverage recorded; the pre-encode "
+                    "specificity-ladder pass did not evaluate this LF"
+                )
         awarded_tier = _lookup(tiers, idx)
         if awarded_tier is None:
             reasons["awarded_tier"] = (

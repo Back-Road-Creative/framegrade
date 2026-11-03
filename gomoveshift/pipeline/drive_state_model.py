@@ -561,6 +561,10 @@ class PipelineState:
     short_reframe: Optional[str] = None
     output_cadence: Optional[str] = None
     insert_still_motion: Optional[str] = None
+    # ``--placeless-label``: the on-screen label that names no place. Phase BC fans
+    # it out as the per-LF override of every LF and marks each LF's ladder
+    # evidence placeless (tier 5).
+    placeless_label: Optional[str] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks

@@ -1,0 +1,3 @@
+### Added
+
+- `drive --placeless-label TEXT` ships a drive with no GPS fix at all under an on-screen label that names no place (for example "Somewhere Between"). The label is held to a fixed vocabulary at parse time (letters, spaces and apostrophes, 1-40 chars, no place names, digits or "to"), is refused beside `--location`, `--per-lf-location` and `--day-gpx`, and every LF is awarded the ladder's tier 5 with the recorded reason `placeless_operator_label`. The specificity-ladder gate re-checks the vocabulary, so a place word fails even when the placeless flag is set; every label that does name a place is still checked against the trace.
