@@ -226,6 +226,10 @@ WEEKDAY_ALLOWLIST: dict[str, tuple[str, frozenset | None]] = {
         "evidence record of a past post's local weekday, not a slot decision",
         frozenset({"_slot"}),
     ),
+    "health/publish.py": (
+        "--lf-day label of the slot Waypost's claim already chose, not a slot decision",
+        frozenset({"run_publish"}),
+    ),
 }
 # Files whose slot decisions moved to seo_manager: must hold NO weekday arithmetic.
 WRAPPER_FILES = (

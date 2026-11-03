@@ -26,9 +26,11 @@ ORIGINS = ("cli", "cron", "console")
 #: Set by ``health backlog`` on the drive it starts; ``drive`` refuses a real render without it.
 LAUNCHED_BY_ENV = "GMS_LAUNCHED_BY"
 BACKLOG_LAUNCHER = "health-backlog"
-#: Every tracked launcher that may start a render: the backlog, a heal resume, the console's job
+#: Set by ``health publish`` on the Phase D upload it launches for a claimed Waypost slot.
+PUBLISH_LAUNCHER = "health-publish"
+#: Every tracked launcher that may start a render: the backlog, a heal resume, a publish, the console's job
 #: store and the host worker it spools to. A hand-typed CLI run carries none of them.
-LAUNCHERS = (BACKLOG_LAUNCHER, "health-heal", "console", "hostworker")
+LAUNCHERS = (BACKLOG_LAUNCHER, "health-heal", PUBLISH_LAUNCHER, "console", "hostworker")
 
 
 def _command(argv: Optional[list]) -> list:

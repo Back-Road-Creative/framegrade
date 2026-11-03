@@ -97,6 +97,20 @@ def _cadence_rows(
     return found
 
 
+def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[Dict[str, str]]:
+    """Close the Waypost claims of finished ``health publish`` jobs (idempotent)."""
+    if not Path(config.seo.storage_path).is_absolute():
+        return []
+    try:
+        from .publish import open_schedule_store, reconcile_publishes
+
+        store, _cad = open_schedule_store(config)
+        return reconcile_publishes(store, jobs_dir) if store else []
+    except Exception as exc:  # noqa: BLE001 -- a broken reconcile is reported, never fatal
+        notes.append(f"publish reconcile not run: {type(exc).__name__}: {exc}")
+        return []
+
+
 def run_check(
     config: Any,
     *,
@@ -109,7 +123,7 @@ def run_check(
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
 ) -> Dict[str, Any]:
     """Returns ``{"incidents": open rows, "new": keys written, "pushed": keys pushed,
-    "resolved": keys closed, "unreadable": int, "notes": [str]}``. Never raises on bad input."""
+    "resolved": keys closed, "unreadable": int, "publish_reconciled": [claims closed], "notes": [str]}``. Never raises on bad input."""
     if notify_fn is None:
         from ..console.notify import notify as notify_fn  # noqa: PLC0415
     now = now or datetime.now(timezone.utc)
@@ -120,6 +134,7 @@ def run_check(
     sha = staging_sha or code_sha(code_root)
 
     drive_rows, succeeded, bad_jobs = drives.detect(jobs_dir, sha, now_iso)
+    reconciled = _reconcile_publishes(config, jobs_dir, notes)
     found = {"drive_failed": drive_rows, **_cadence_rows(config, ledger_path, now, now_iso, notes)}
 
     resolved: List[str] = []
@@ -163,5 +178,6 @@ def run_check(
         "pushed": pushed,
         "resolved": resolved,
         "unreadable": bad_rows + bad_jobs,
+        "publish_reconciled": reconciled,
         "notes": notes,
     }

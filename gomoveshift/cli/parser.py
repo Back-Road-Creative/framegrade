@@ -1764,7 +1764,8 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "health",
         help="Pipeline health: `check` detects failed drives and stalled cadence and writes "
-        "incident rows (exit 1 while any incident is open); `heal` auto-resumes failed drives",
+        "incident rows (exit 1 while any incident is open); `heal` auto-resumes failed drives; "
+        "`publish` uploads an audited drive through Waypost",
     )
     sub = p.add_subparsers(dest="health_command", required=True)
     c = sub.add_parser("check", help="Run the detection rules once")
@@ -1864,6 +1865,30 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
         b.add_argument(flag, type=kind, default=None, help=text)
     b.add_argument("--dry-run", action="store_true", help="Report the plan; change nothing.")
     b.add_argument("--json", action="store_true", help="Print the result as JSON.")
+    u = sub.add_parser(
+        "publish",
+        help="Approve an auditing drive, claim its Waypost slot and launch the Phase D YouTube "
+        "upload as a detached job (`health check` closes the claim when the job ends)",
+    )
+    u.add_argument("project", help="The auditing drive's project name (as in the schedule store).")
+    u.add_argument("--region", required=True, help="Waypost region (e.g. usa).")
+    u.add_argument(
+        "--stages-root",
+        type=Path,
+        required=True,
+        help="Stage roots parent used by `health backlog`; the drive's resume.json is read from "
+        "<this>/<project>.",
+    )
+    for flag, kind, text in (
+        ("--data-root", Path, "Root directory the health state lives under (env GMS_DATA_ROOT)."),
+        ("--jobs-dir", Path, "Job records dir (default <data root>/logs/jobs)."),
+        ("--code-root", Path, "Checkout holding the job-runner script and the venv."),
+        ("--lead-hours", int, "Claim lead window (default: Waypost cadence lead_hours)."),
+        ("--expect-sha", None, "Refuse a drive registered at another mirror SHA."),
+    ):
+        u.add_argument(flag, type=kind, default=None, help=text)
+    u.add_argument("--dry-run", action="store_true", help="Report every step; change nothing.")
+    u.add_argument("--json", action="store_true", help="Print the result as JSON.")
 
 
 def _add_sync_site_parser(subparsers: argparse._SubParsersAction) -> None:
