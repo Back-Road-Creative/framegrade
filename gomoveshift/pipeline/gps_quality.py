@@ -290,6 +290,28 @@ def _point_ts_sec(point: Any) -> Optional[float]:
         return None
 
 
+# A gap this short between two consecutive fixes is still a known position
+# (≈280 m at 100 km/h, far under any town-level label), so its seconds count as
+# covered. A phone or enhanced GPX logs on movement every 1–9 s; counting only
+# seconds that hold a fix scored the fully-tracked Ireland day 11 drive at 41%
+# (2026-11-03). Longer gaps are dropouts and still count as dead.
+MAX_BRIDGED_GAP_SEC = 10.0
+
+
+def _covered_buckets(
+    times: list[float], origin: float, expected_hz: float, last: Optional[int]
+) -> set[int]:
+    """``expected_hz`` buckets holding a fix or lying inside a bridged gap."""
+    ts = sorted(times)
+    covered = {int((t - origin) * expected_hz) for t in ts}
+    for a, b in zip(ts, ts[1:]):
+        if b - a <= MAX_BRIDGED_GAP_SEC:
+            covered.update(range(int((a - origin) * expected_hz), int((b - origin) * expected_hz)))
+    if last is not None:
+        covered = {min(i, last) for i in covered}
+    return covered
+
+
 def locked_gps_coverage(
     gps_points: Optional[Sequence],
     window_start_sec: float,
@@ -304,8 +326,10 @@ def locked_gps_coverage(
     the GPX carries no fix channel — so "locked samples" is simply the count of
     supplied points whose timestamp falls inside ``[window_start_sec,
     window_end_sec]``. Coverage is bucketed at ``expected_hz`` (1 Hz = the GoPro
-    GPX step) so it is robust to an over-sampled trace (caps at 1.0) and reflects
-    dead/sparse stretches (missing buckets lower it). Points/time bases MUST be
+    GPX step) so it is robust to an over-sampled trace (caps at 1.0); a gap of
+    at most :data:`MAX_BRIDGED_GAP_SEC` between consecutive fixes counts as
+    covered, so a variable-rate phone log is not mistaken for a sparse one,
+    while longer dropouts still lower it. Points/time bases MUST be
     the same clock as the window (unix seconds for GPX ``GPSTrackpoint`` /
     ``{"time": ...}`` dicts; source seconds for ``(t, lat, lon)`` tuples).
 
@@ -319,14 +343,12 @@ def locked_gps_coverage(
         return 0.0
     span = window_end_sec - window_start_sec
     expected = max(1, round(span * expected_hz))
-    bucket_sec = 1.0 / expected_hz
-    covered: set[int] = set()
-    for p in gps_points or []:
-        t = _point_ts_sec(p)
-        if t is None or t < window_start_sec or t > window_end_sec:
-            continue
-        idx = int((t - window_start_sec) / bucket_sec)
-        covered.add(min(idx, expected - 1))
+    times = [
+        t
+        for t in (_point_ts_sec(p) for p in gps_points or [])
+        if t is not None and window_start_sec <= t <= window_end_sec
+    ]
+    covered = _covered_buckets(times, window_start_sec, expected_hz, expected - 1)
     return min(1.0, len(covered) / expected)
 
 
@@ -344,7 +366,8 @@ def locked_gps_duration_coverage(
     non-contiguous in either clock (a single hull window would count removed
     stops as dead GPS). Duration sidesteps both: covered buckets are the
     DISTINCT ``expected_hz`` buckets among the supplied points' own timestamps
-    (clock-irrelevant), and the denominator is the footage duration — so a
+    (clock-irrelevant) — short gaps bridged as in :func:`locked_gps_coverage`
+    — and the denominator is the footage duration — so a
     dead prefix/suffix or interior dropout lowers coverage while removed stops
     (whose fixes were never collected) can't. Callers supply only points that
     fall inside footage segments. Returns ``0.0`` on a non-positive duration.
@@ -354,10 +377,8 @@ def locked_gps_duration_coverage(
     if duration_sec <= 0:
         return 0.0
     expected = max(1, round(duration_sec * expected_hz))
-    covered = {
-        int(t * expected_hz) for t in (_point_ts_sec(p) for p in gps_points or []) if t is not None
-    }
-    return min(1.0, len(covered) / expected)
+    times = [t for t in (_point_ts_sec(p) for p in gps_points or []) if t is not None]
+    return min(1.0, len(_covered_buckets(times, 0.0, expected_hz, None)) / expected)
 
 
 # ── Specificity-ladder evidence accessors — point-shape handling in one

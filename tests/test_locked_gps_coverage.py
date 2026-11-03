@@ -9,7 +9,11 @@ specificity ladder demotes on, and the export imports.
 from types import SimpleNamespace
 
 from gomoveshift.analysis.shorts_models import GPSTrackpoint
-from gomoveshift.pipeline.gps_quality import locked_gps_coverage
+from gomoveshift.pipeline.gps_quality import (
+    MAX_BRIDGED_GAP_SEC,
+    locked_gps_coverage,
+    locked_gps_duration_coverage,
+)
 
 
 class TestLockedGpsCoverage:
@@ -46,3 +50,58 @@ class TestLockedGpsCoverage:
         assert locked_gps_coverage(one, 5.0, 5.0) == 0.0  # degenerate window
         assert locked_gps_coverage(one, 5.0, 4.0) == 0.0  # inverted window
         assert locked_gps_coverage([SimpleNamespace(lat=32.0, lon=-80.0)], 0.0, 10.0) == 0.0
+
+
+class TestShortGapsBridged:
+    """A gap of at most MAX_BRIDGED_GAP_SEC between consecutive fixes is covered.
+
+    A phone or enhanced GPX logs on movement, every 1–9 s. Counting only the
+    seconds that hold a fix scored the fully-tracked Ireland day 11 drive at
+    41% (2026-11-03), under the tier-1 bar. A known position every few seconds
+    is coverage; a dropout longer than the bridge still counts as dead, and a
+    1 Hz GoPro trace scores exactly as before.
+    """
+
+    def test_continuous_half_hz_trace_is_full(self):
+        pts = [{"lat": 52.0, "lon": -9.0, "time": float(t)} for t in range(0, 601, 2)]
+        assert locked_gps_coverage(pts, 0.0, 600.0) >= 0.95
+        assert locked_gps_duration_coverage(pts, 600.0) >= 0.95
+
+    def test_variable_rate_phone_log_is_full(self):
+        steps = [1, 1, 2, 3, 1, 4, 9, 1, 5, 2, 6, 1, 7, 3]
+        ts, t = [], 0.0
+        while t <= 600:
+            ts.append(t)
+            t += steps[len(ts) % len(steps)]
+        pts = [{"lat": 52.0, "lon": -9.0, "time": x} for x in ts]
+        assert locked_gps_coverage(pts, 0.0, 600.0) >= 0.95
+        assert locked_gps_duration_coverage(pts, 600.0) >= 0.95
+
+    def test_half_hz_trace_with_dead_half_is_half(self):
+        pts = [{"lat": 52.0, "lon": -9.0, "time": float(t)} for t in range(0, 301, 2)]
+        assert 0.45 <= locked_gps_coverage(pts, 0.0, 600.0) <= 0.55
+        assert 0.45 <= locked_gps_duration_coverage(pts, 600.0) <= 0.55
+
+    def test_one_hz_gopro_trace_unchanged(self):
+        full = [{"lat": 32.0, "lon": -80.0, "time": float(t)} for t in range(601)]
+        assert locked_gps_coverage(full, 0.0, 600.0) == 1.0
+        assert locked_gps_duration_coverage(full, 600.0) == 1.0
+        assert 0.49 <= locked_gps_coverage(full[:301], 0.0, 600.0) <= 0.51
+
+    def test_long_dropouts_stay_dead(self):
+        # 1 Hz with 150 s and 100 s dropouts: neither is bridged.
+        ts = [float(t) for t in range(600) if not (100 <= t < 250 or 400 <= t < 500)]
+        pts = [{"lat": 32.0, "lon": -80.0, "time": t} for t in ts]
+        assert 0.55 <= locked_gps_coverage(pts, 0.0, 600.0) <= 0.6
+        assert 0.55 <= locked_gps_duration_coverage(pts, 600.0) <= 0.6
+
+    def test_thin_trace_stays_thin(self):
+        # One fix per 20 s: every gap exceeds the bridge, so ~5% as before.
+        pts = [{"lat": 52.0, "lon": -9.0, "time": float(t)} for t in range(0, 601, 20)]
+        assert locked_gps_coverage(pts, 0.0, 600.0) <= 0.1
+        assert locked_gps_duration_coverage(pts, 600.0) <= 0.1
+
+    def test_bridge_boundary(self):
+        at = [{"lat": 52.0, "lon": -9.0, "time": t} for t in (0.0, MAX_BRIDGED_GAP_SEC)]
+        over = [{"lat": 52.0, "lon": -9.0, "time": t} for t in (0.0, MAX_BRIDGED_GAP_SEC + 1)]
+        assert locked_gps_coverage(at, 0.0, 20.0) > locked_gps_coverage(over, 0.0, 20.0)
