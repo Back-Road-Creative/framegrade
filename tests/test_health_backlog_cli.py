@@ -105,6 +105,18 @@ def test_supersede_and_reason_reach_run_backlog(tmp_path, capsys, wired):
     assert "superseded /s/ire-a -> /s/_x" in capsys.readouterr().out
 
 
+def test_dry_run_supersede_says_would_supersede(tmp_path, capsys, wired):
+    wired["_result"] = {
+        "action": "would_launch", "reason": "ire-a for slot", "skipped": [],
+        "supersede": {"reason": "old render", "moves": [{"from": "/s/ire-a", "to": "/s/_x"}]},
+    }  # fmt: skip
+    args = _args(tmp_path, "--supersede", "ire-a", "--reason", "old render", "--dry-run")
+    assert health.cmd_health(args, SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "would supersede /s/ire-a -> /s/_x" in out
+    assert "\nsuperseded " not in "\n" + out
+
+
 def test_no_supersede_passes_none(tmp_path, wired):
     wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
     health.cmd_health(_args(tmp_path), SimpleNamespace())

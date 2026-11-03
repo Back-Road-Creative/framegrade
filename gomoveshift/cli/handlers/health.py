@@ -158,8 +158,9 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
     else:
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
+        verb = "would supersede" if args.dry_run else "superseded"  # a dry run moves nothing
         for move in result.get("supersede", {}).get("moves", []):
-            print(f"superseded {move['from']} -> {move['to']}")
+            print(f"{verb} {move['from']} -> {move['to']}")
         for row in result.get("storage", []):
             state = "ok" if row["ok"] else "SHORT"
             print(f"storage dev {row['device']}: {row['free_gb']:.1f} GB free, need "
