@@ -5,6 +5,24 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.32] - 2026-11-03
+
+### Added
+
+- `drive --placeless-label TEXT` ships a drive with no GPS fix at all under an on-screen label that names no place (for example "Somewhere Between"). The label is held to a fixed vocabulary at parse time (letters, spaces and apostrophes, 1-40 chars, no place names, digits or "to"), is refused beside `--location`, `--per-lf-location` and `--day-gpx`, and every LF is awarded the ladder's tier 5 with the recorded reason `placeless_operator_label`. The specificity-ladder gate re-checks the vocabulary, so a place word fails even when the placeless flag is set; every label that does name a place is still checked against the trace.
+
+### Fixed
+
+- `health backlog` skips a row the render gate refuses (a `full_drive` day too short to fill a
+  part) and launches the next eligible row, instead of refusing the region on every tick. The
+  skip is listed with its `render gate:` reason; with no eligible row behind it the region is
+  still `refused`.
+- Locked-GPS coverage no longer scores a variable-rate phone or enhanced GPX as
+  sparse. A gap of up to 10 s between two consecutive fixes now counts as
+  covered; longer gaps still count as dead, and a 1 Hz GoPro trace scores as
+  before. The fully tracked Ireland day 11 drive went from 41% (below the 60%
+  tier-1 bar, so its place-name title was refused) to 88%.
+
 ## [0.3.31] - 2026-11-03
 
 ### Added
@@ -466,7 +484,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.31...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.32...HEAD
+[0.3.32]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.31...v0.3.32
 [0.3.31]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...v0.3.31
 [0.3.30]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...v0.3.30
 [0.3.29]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.28...v0.3.29
