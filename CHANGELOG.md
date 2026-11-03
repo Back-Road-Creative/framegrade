@@ -5,6 +5,8 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.30] - 2026-11-02
+
 ### Fixed
 
 - `health backlog` no longer refuses to relaunch a `day_gpx` row whose earlier drive got as far as
@@ -454,7 +456,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...HEAD
+[0.3.30]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...v0.3.30
 [0.3.29]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.28...v0.3.29
 [0.3.28]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.27...v0.3.28
 [0.3.27]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.26...v0.3.27
