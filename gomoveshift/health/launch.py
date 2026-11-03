@@ -18,11 +18,13 @@ holding upload records, and nothing moves until every check before the preflight
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -218,10 +220,22 @@ def _uploaded(output_dir: Optional[str]) -> bool:
 
 
 def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[str]:
-    """Refusal text, or ``None`` once ``subset`` holds exactly one symlink per source."""
+    """Refusal text, or ``None`` once ``subset`` holds exactly one symlink per source.
+
+    The day-GPX slicer's own ``<stem>.gpx`` beside a source is not a mismatch: a drive with
+    ``--day-gpx`` writes it there before ingest, and rewrites it on the next run."""
+    from ..pipeline.ingest.day_gpx_slicer import _is_own
+
     want = {Path(s).name: os.path.realpath(s) for s in sources}
+    stems = {Path(name).stem for name in want}
     if subset.exists():
-        have = {p.name: os.path.realpath(p) for p in subset.iterdir()}
+        have = {
+            p.name: os.path.realpath(p)
+            for p in subset.iterdir()
+            if not (
+                p.suffix.lower() == ".gpx" and p.stem in stems and p.name not in want and _is_own(p)
+            )
+        }
         if have != want:
             extra = sorted(set(have) - set(want)) or sorted(set(want) - set(have))
             return f"subset dir {subset} does not match the manifest row ({extra or 'targets'})"
@@ -233,25 +247,37 @@ def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[s
     return None
 
 
-def _supersede_plan(project, stages_root, output_root, now) -> Tuple[List[Dict[str, str]], str]:
-    """``(moves, refusal)``: the renames that set ``project``'s stage root and output dir aside."""
-    out = Path(output_root) / project
+def _uploads_refusal(project, out: Path) -> str:
+    """Refusal text when ``out`` (``project``'s output dir) holds, or may hold, upload records."""
     uploads = out / "youtube_uploads.json"
     if uploads.exists():
         try:
             held = json.loads(uploads.read_text())
         except (OSError, ValueError) as exc:
-            return [], f"cannot supersede {project}: unreadable {uploads} ({exc})"
+            return f"cannot supersede {project}: unreadable {uploads} ({exc})"
         if held:
-            return [], f"cannot supersede {project}: {uploads} holds upload records"
+            return f"cannot supersede {project}: {uploads} holds upload records"
+    return ""
+
+
+def _supersede_plan(
+    project, stages_root, output_root, now, siblings: Sequence[str] = ()
+) -> Tuple[List[Dict[str, str]], str]:
+    """``(moves, refusal)``: the renames that set ``project``'s stage root and output dir aside,
+    then the same for each dead ``siblings`` project (an earlier run of the same footage)."""
     stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     moves = []
-    for src in (Path(stages_root) / project, out):
-        dst = src.parent / SUPERSEDED_DIR / f"{project}-{stamp}"
-        if dst.exists():
-            return [], f"cannot supersede {project}: {dst} already exists"
-        if src.exists():
-            moves.append({"from": str(src), "to": str(dst)})
+    for name in (project, *siblings):
+        out = Path(output_root) / name
+        why = _uploads_refusal(name, out)
+        if why:
+            return [], why
+        for src in (Path(stages_root) / name, out):
+            dst = src.parent / SUPERSEDED_DIR / f"{name}-{stamp}"
+            if dst.exists():
+                return [], f"cannot supersede {name}: {dst} already exists"
+            if src.exists():
+                moves.append({"from": str(src), "to": str(dst)})
     if not moves:
         return [], f"nothing to supersede: no {project} under the stages or output root"
     return moves, ""
@@ -259,10 +285,8 @@ def _supersede_plan(project, stages_root, output_root, now) -> Tuple[List[Dict[s
 
 def _supersede(project, reason, moves, now) -> None:
     """Rename each move and write the record into every moved dir."""
-    stage_root = Path(moves[0]["from"])
-    recipes = sorted(stage_root.glob("_stages/resume.json")) + sorted(
-        stage_root.glob("*/_stages/resume.json")
-    )
+    roots = [Path(m["from"]) for m in moves]
+    recipes = [r for root in roots for r in sorted(root.glob("_stages/resume.json")) + sorted(root.glob("*/_stages/resume.json"))]  # fmt: skip
     recipe: Dict[str, Any] = {}
     if recipes:
         try:
@@ -272,7 +296,7 @@ def _supersede(project, reason, moves, now) -> None:
     record = {
         "schema": "backlog-supersede/1", "project": project, "reason": reason,
         "at": now.isoformat(), "moves": moves,
-        "held": any(stage_root.glob(f"**/_stages/{HOLD_NAME}")),
+        "held": any(any(root.glob(f"**/_stages/{HOLD_NAME}")) for root in roots),
         "recipe": {k: recipe.get(k) for k in ("sha", "started_at", "phase_reached", "argv")},
     }  # fmt: skip
     for move in moves:
@@ -286,7 +310,7 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
     """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success.
 
     A failed audit still holds its slot, so without this every later call is a silent noop;
-    the operator relaunches (the drive resumes from its stages) or clears the row."""
+    the operator relaunches (the drive resumes from its stages) or supersedes it."""
     name = f"gms-backlog-{project}"
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
@@ -298,7 +322,8 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
         return None
     return (
         f"audit failed: {project} job {rec.get('run_id')} ended {state} "
-        f"(exit {result.get('exit_code')}); relaunch it (stages resume) or clear the row"
+        f"(exit {result.get('exit_code')}); relaunch it (stages resume), or --supersede {project} "
+        "to set the run aside and launch the row as it now reads"
     )
 
 
@@ -316,6 +341,30 @@ def report_slots(report: Dict[str, Any], region: str) -> List[Tuple[datetime, st
         if r.get("region") == region and (s := _aware(r.get("slot"))) and r.get("day"):
             out.append((s, r["day"]))
     return out
+
+
+def config_render_gate(config) -> Callable[[Path, Any], Optional[str]]:
+    """The drive's raw-duration refusal for a backlog row, under the row's own modes.
+
+    ``config`` is left untouched: each call scans with a copy carrying the row's
+    ``ingest_mode`` and ``lf_mode``. A dry run has no subset dir yet, so the scan
+    reads a throwaway dir of links to the row's sources.
+    """
+    from ..pipeline.orchestrator_preflight import day_under_part_min_message
+
+    def gate(subset: Path, row) -> Optional[str]:
+        cfg = copy.copy(config)
+        cfg.drive = copy.copy(config.drive)
+        cfg.drive.ingest_mode = row.ingest_mode
+        cfg.drive.set_lf_mode(row.lf_mode, "cli")  # the drive gets it as --lf-mode
+        if Path(subset).is_dir():
+            return day_under_part_min_message(cfg, Path(subset))
+        with tempfile.TemporaryDirectory(prefix="gms-render-gate-") as tmp:
+            for src in row.sources:
+                (Path(tmp) / Path(src).name).symlink_to(os.path.realpath(src))
+            return day_under_part_min_message(cfg, Path(tmp))
+
+    return gate
 
 
 def run_backlog(
@@ -337,6 +386,7 @@ def run_backlog(
     lease_release: Callable[[], None],
     drive_running: Callable[[], bool],
     preflight: Callable[..., Any],
+    render_gate: Callable[[Path, Any], Optional[str]],
     launcher: Callable[[List[str], str, Dict[str, str]], Tuple[bool, str]],
     register: Callable[..., None],
     disk: Disk = default_disk,
@@ -350,16 +400,16 @@ def run_backlog(
     try:
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    drive_running, preflight, launcher, register, disk, installed_version,
-                    latest_version, supersede)  # fmt: skip
+                    drive_running, preflight, render_gate, launcher, register, disk,
+                    installed_version, latest_version, supersede)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
 
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
-         code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, launcher,
-         register, disk, installed_version, latest_version, supersede):  # fmt: skip
+         code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
+         launcher, register, disk, installed_version, latest_version, supersede):  # fmt: skip
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
@@ -367,25 +417,42 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         res["published"] = published
     mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
+    target = supersede[0] if supersede else None
+    relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
-        if failed:
+        if not failed:
+            return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        if auditing[0] != target:
             return {**res, "action": "refused", "project": auditing[0], "reason": failed}
-        return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
+        # superseding the failed audit itself: its run is set aside and the row relaunches as
+        # it now reads, re-registering the same store row
+        relaunch, res["relaunch"] = target, failed
+        mine = [d for d in mine if d.project != relaunch]
     slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now)
     if slot is None:
         return {**res, "reason": f"covered: every free slot inside {COVERAGE_HORIZON_H} h has a ready drive"}  # fmt: skip
     res.update(slot=slot[0].isoformat(), lf_day=slot[1])
-    status = {d.project: d.status for d in drives}
+    status = {d.project: d.status for d in drives if d.project != relaunch}
     staged = staged_sources(stages_root)
-    target = supersede[0] if supersede else None
     if supersede and not supersede[1].strip():
         return {**res, "action": "refused", "reason": f"--supersede {target} needs a --reason"}
     own_root = Path(stages_root) / str(target)
     row = None
+    siblings: List[str] = []
     for cand in (r for r in rows if r.region == region):
         own = cand.project == target
-        mine_staged = [s for s in staged if own_root not in s[0].parents] if own else staged
+        mine_staged = staged
+        if own:
+            footage = {os.path.realpath(p) for p in cand.sources}
+            # a dead sibling (same footage, another project name) is set aside with the row's own
+            # run; a held one stays in ``mine_staged`` so it still refuses
+            siblings = sorted({
+                st.relative_to(stages_root).parts[0] for st, srcs, held in staged
+                if not held and own_root not in st.parents and footage & srcs
+            })  # fmt: skip
+            gone = {Path(stages_root) / n for n in siblings} | {own_root}
+            mine_staged = [s for s in staged if not gone & set(s[0].parents)]
         why = _skip_reason(cand, status, known, mine_staged, stages_root, own_ok=own)
         if why is None:
             row = cand
@@ -399,7 +466,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if row is None:
         return {**res, "reason": f"no eligible backlog row for {region}"}
     if supersede:
-        moves, why = _supersede_plan(row.project, stages_root, output_root, now)
+        blocked = [n for n in siblings if n in status or n in known]
+        if blocked:
+            where = "the schedule store" if blocked[0] in status else "the content ledger"
+            why = f"cannot supersede {target}: sibling run {blocked[0]} is in {where}"
+            return {**res, "action": "refused", "project": row.project, "reason": why}
+        moves, why = _supersede_plan(row.project, stages_root, output_root, now, siblings)
         if why:
             return {**res, "action": "refused", "project": row.project, "reason": why}
         res["supersede"] = {"reason": supersede[1], "moves": moves}
@@ -419,6 +491,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     bad = _subset(subset, row.sources, create=not dry_run)
     if bad:
         return {**res, "action": "refused", "reason": bad}
+    # the drive's own pre-ingest refusals, asked before anything is moved, launched or booked
+    gate = render_gate(subset, row)
+    if gate:
+        return {**res, "action": "refused", "reason": f"render gate: {gate}"}
     day = res["lf_day"]
     drive_argv = [
         str(python), "-m", "gomoveshift", "drive", str(subset), "--region", region,

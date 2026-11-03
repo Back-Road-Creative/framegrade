@@ -5,6 +5,41 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.30] - 2026-11-02
+
+### Fixed
+
+- `health backlog` no longer refuses to relaunch a `day_gpx` row whose earlier drive got as far as
+  slicing the day GPX: the slicer's own `<stem>.gpx` sidecars beside the chapters in
+  `<sources root>/<project>` match the row. Any other extra file, or a `.gpx` the slicer did not
+  write, is still a mismatch.
+
+## [0.3.29] - 2026-11-02
+
+### Fixed
+
+- `health backlog` asks the drive's raw-duration gate before it supersedes, launches or books
+  anything: a `full_drive` row whose day of raw footage is under `full_drive_part_min_sec` is
+  `refused` (`render gate: …`), in a dry run too. Before, the launch went through (and a
+  `--supersede` moved the old run aside) and the drive refused the day only after it started,
+  leaving an `auditing` store row for a render that could never happen.
+- `health backlog --supersede <project>` also replaces that row's failed audit (store row
+  `auditing`, newest job not succeeded): the run is set aside and the row relaunches as the
+  manifest now reads it. Before, a failed audit could only be resumed with its old arguments.
+
+## [0.3.28] - 2026-11-02
+
+### Fixed
+
+- `health backlog` no longer counts a drive that is already uploaded (a `youtube_uploads.json`
+  with a video id at its output root or one level down) as holding or covering a long-form slot,
+  so a published drive whose Waypost store row went stale no longer blocks the next launch. The
+  result lists such drives under `published`. (#177)
+- `health backlog --supersede` also sets aside a dead sibling run: an earlier run of the same
+  footage under another project name. It still refuses a sibling with an operator hold, with upload
+  records, or in the schedule store or content ledger. Every move is recorded in each
+  `superseded.json`. (#178)
+
 ## [0.3.27] - 2026-11-02
 
 ### Added
@@ -421,7 +456,10 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.27...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...HEAD
+[0.3.30]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...v0.3.30
+[0.3.29]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.28...v0.3.29
+[0.3.28]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.27...v0.3.28
 [0.3.27]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.26...v0.3.27
 [0.3.26]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.25...v0.3.26
 [0.3.25]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.24...v0.3.25

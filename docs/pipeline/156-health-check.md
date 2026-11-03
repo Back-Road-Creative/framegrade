@@ -119,7 +119,7 @@ left over is the target. An `auditing` drive for the region, or a drive job alre
 An `auditing` drive whose newest `gms-backlog-<project>` job record ended in anything but
 `succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
 code: the failed audit still holds its slot, so the operator relaunches it (the drive resumes
-from its stages) or clears the row; a relaunched job that is running is a `noop` again.
+from its stages) or supersedes it (below); a relaunched job that is running is a `noop` again.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
 a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
@@ -135,9 +135,16 @@ the row's own sources before the job starts, under the code root's drive interpr
 `python -c`, cwd the service dir) so tool checks such as gopro-overlay test the venv that will
 render; its blockers are `refused`, and a crashed child is an error, never a pass.
 
+**Render gate.** Before anything is moved, launched or registered, and in a dry run too, the row
+is checked against the drive's own pre-ingest refusal (`day_under_part_min_message`) under the
+row's `ingest_mode` and `lf_mode`: a `full_drive` day whose raw footage (with its neighbouring
+calendar days) is under `full_drive_part_min_sec` is `refused` with `render gate: <message>`. A
+dry run, which has no subset dir yet, scans a throwaway dir of links to the row's sources.
+
 **Launch.** Under the `gms-backlog-launch` lease (the script named by `$GMS_LEASE_SCRIPT`, default `bin/lease.sh`; held → `noop`, released in a
 `finally`), it writes the row's chapters as a symlink dir `<sources root>/<project>` (reused when
-identical, `refused` on any mismatch, never rewritten), then runs
+identical, `refused` on any mismatch, never rewritten; the day-GPX slicer's own `<stem>.gpx`
+beside a chapter, which a `--day-gpx` drive writes there before ingest, is not a mismatch), then runs
 the job runner (`--name gms-backlog-<project> --heavy --detach --stall 86400 --expect
 'O/<project>/**/shorts/**/*.mp4' -- <code root venv
 python> -m gomoveshift drive <subset> --region R --publish D --lf-day D --ingest-mode --lf-mode
@@ -152,12 +159,21 @@ other. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-outp
 example a render made on an older release: without it the row is skipped as already staged, and a
 relaunch would resume the stale stages instead of rendering fresh. The project must be the
 region's next eligible row once its own stage root is set aside; a row in the store or the content
-ledger, a row staged by another project's run, or an output whose `youtube_uploads.json` holds
+ledger, or an output whose `youtube_uploads.json` holds
 records (or is unreadable) is `refused`, and so is an empty reason. `<stages root>/<project>` and
 `<output root>/<project>` are renamed (one device, no copy) to `<root>/_superseded/<project>-<UTC
 stamp>/`, each with a `superseded.json` (`backlog-supersede/1`: project, reason, time, moves, the
 old recipe's `sha`/`started_at`/`phase_reached`/`argv`, and whether a `no-auto-resume` hold sat
 under it). A hold under the row's own root does not block the supersede; it moves with the run.
+A failed audit (the row's store entry is `auditing` and its newest job did not succeed) can be
+superseded too: its run is set aside the same way and the row relaunches as the manifest now reads
+it (for example a changed `lf_mode`), re-registering the same store row; the result names the
+failed job under `relaunch`. An audit that is still running, a `ready` row, or a failed audit when
+`--supersede` names another row is never replaced.
+A dead sibling (an earlier run of the same footage under another project name, found by
+overlapping recipe sources) is set aside the same way, under its own name, and listed in the same
+`moves`; a held sibling, one in the store or ledger, or one whose output holds upload records is
+`refused` naming it.
 Nothing moves until every check up to the release-pin check has passed, so a refusal leaves the
 old run in place; `--dry-run` prints the planned moves. `_superseded/` is never read as staging.
 

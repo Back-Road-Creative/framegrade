@@ -50,6 +50,7 @@ def test_dry_run_passes_layout_and_prints_json(tmp_path, capsys, wired):
     assert wired["jobs_dir"] == tmp_path / "logs" / "jobs"
     assert wired["mirror_sha"] == "abc1234"
     assert json.loads(capsys.readouterr().out)["action"] == "would_launch"
+    assert callable(wired["render_gate"])
 
 
 def test_refusal_prints_storage_and_exits_2(tmp_path, capsys, wired):
