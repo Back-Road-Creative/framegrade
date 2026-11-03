@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.33] - 2026-11-03
+
+### Fixed
+
+- A region-only long-form title for a country with no states (an Irish county,
+  "County Cork in 4K") now carries Waypost title facts. Before, only a US
+  "County, ST" label could match, so every Irish region title was refused before
+  the OST burn as `facts_unavailable`. The county must still pass the route gate,
+  and its retained footage must resolve to exactly one known country.
+
 ## [0.3.32] - 2026-11-03
 
 ### Added
@@ -484,7 +494,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.32...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.33...HEAD
+[0.3.33]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.32...v0.3.33
 [0.3.32]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.31...v0.3.32
 [0.3.31]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...v0.3.31
 [0.3.30]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...v0.3.30
