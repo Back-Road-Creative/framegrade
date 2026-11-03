@@ -440,6 +440,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     own_root = Path(stages_root) / str(target)
     row = None
     siblings: List[str] = []
+    gated = None  # the first row the render gate refused, when no row behind it is eligible
     for cand in (r for r in rows if r.region == region):
         own = cand.project == target
         mine_staged = staged
@@ -455,14 +456,24 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             mine_staged = [s for s in staged if not gone & set(s[0].parents)]
         why = _skip_reason(cand, status, known, mine_staged, stages_root, own_ok=own)
         if why is None:
-            row = cand
-            break
+            # the drive's own pre-ingest refusal, asked before anything is moved, launched or
+            # booked; a refused row is skipped so it never stalls the rows behind it
+            gate = render_gate(Path(sources_root) / cand.project, cand)
+            if not gate:
+                row = cand
+                break
+            why = f"render gate: {gate}"
+            if own:
+                return {**res, "action": "refused", "project": cand.project, "reason": why}
+            gated = gated or (cand.project, why)
         res["skipped"].append({"project": cand.project, "reason": why})
         if own:
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: {why}"}
     if target and (row is None or row.project != target):
         nxt = f"the next eligible {region} row is {row.project}" if row else f"no {region} row {target} in the backlog"  # fmt: skip
         return {**res, "action": "refused", "reason": f"cannot supersede {target}: {nxt}"}
+    if row is None and gated:
+        return {**res, "action": "refused", "project": gated[0], "reason": gated[1]}
     if row is None:
         return {**res, "reason": f"no eligible backlog row for {region}"}
     if supersede:
@@ -491,10 +502,6 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     bad = _subset(subset, row.sources, create=not dry_run)
     if bad:
         return {**res, "action": "refused", "reason": bad}
-    # the drive's own pre-ingest refusals, asked before anything is moved, launched or booked
-    gate = render_gate(subset, row)
-    if gate:
-        return {**res, "action": "refused", "reason": f"render gate: {gate}"}
     day = res["lf_day"]
     drive_argv = [
         str(python), "-m", "gomoveshift", "drive", str(subset), "--region", region,
