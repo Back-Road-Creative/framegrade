@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.31] - 2026-11-03
+
+### Added
+
+- `health publish <project> --region R --stages-root S`: the single operator command that approves
+  an audited drive in Waypost, claims its long-form slot and launches the Phase D upload with that
+  slot's date. The hourly `health check` closes the claim when the job ends: complete when an upload
+  receipt exists, failed (booking released) otherwise. Refuses while an older ready drive sits ahead,
+  since Waypost claims a region's oldest ready drive. (#179)
+
 ## [0.3.30] - 2026-11-02
 
 ### Fixed
@@ -456,7 +466,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.31...HEAD
+[0.3.31]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.30...v0.3.31
 [0.3.30]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.29...v0.3.30
 [0.3.29]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.28...v0.3.29
 [0.3.28]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.27...v0.3.28
