@@ -531,6 +531,7 @@ class PhaseBCDayFirst:
                 lf_plans=_flat_lf_plans,
                 resolved_by_lf=state.per_lf_resolved_location or {},
                 geocode_fn=_ladder_forward_geocode,
+                placeless_label=getattr(state, "placeless_label", None),
             )
             # Re-render any below-tier-1 (but renderable) LF at its awarded
             # tier BEFORE the gate, so a demoted label reaches the gate no longer
@@ -1652,8 +1653,13 @@ def _build_ladder_evidence(
     lf_plans=None,
     resolved_by_lf=None,
     geocode_fn=None,
+    placeless_label=None,
 ) -> dict:
     """Per-LF evidence for the pre-encode specificity ladder.
+
+    ``placeless_label`` (``--placeless-label``): an LF whose burned text is exactly
+    that label gets ``placeless=True`` and ``tier_reason`` — the ladder awards it
+    tier 5 and the gate re-checks the vocabulary; every other LF is untouched.
 
     Wires, per LF: the raw trace (``gps_points``), the FOOTAGE DURATION from
     the LF plan's segments (sum of segment spans; the gate's fallback
@@ -1712,11 +1718,18 @@ def _build_ladder_evidence(
             ev["has_bracket_route"] = True
         if callable(geocode_fn):
             ev["geocode_fn"] = geocode_fn
+        if placeless_label and str(per_lf_ost_text[i]).strip() == placeless_label.strip():
+            ev["placeless"] = True
+            ev["tier_reason"] = PLACELESS_TIER_REASON
         out[idx] = ev
     return out
 
 
+PLACELESS_TIER_REASON = "placeless_operator_label"
+
 _TIER_EVIDENCE_SCALAR_KEYS = (
+    "placeless",
+    "tier_reason",
     "corroborations",
     "has_bracket_route",
     "duration",
@@ -1766,8 +1779,10 @@ def _degrade_labels_to_awarded_tier(
         idx = int(lf_idx)
         ev = (evidence_by_lf or {}).get(idx)
         rl = (resolved_by_lf or {}).get(idx)
-        if not ev or rl is None or ev.get("authoritative"):
+        if not ev or ev.get("authoritative"):
             continue
+        if rl is None and not ev.get("placeless"):
+            continue  # a GPS-dead placeless LF has no model by design; it is still awarded
         coverage, tier = award_tier_for_evidence(ev)
         if tier is not None:
             tier_by_lf[idx] = int(tier)

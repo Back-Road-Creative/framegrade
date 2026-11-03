@@ -102,6 +102,7 @@ _VALUE_SAMPLES = {  # non-bool sentinel rows: (cli_value, saved_value)
     "short_reframe": ("tracked", "center"),
     "output_cadence": ("source", "fixed"),
     "insert_still_motion": ("push_in", "none"),
+    "placeless_label": ("Somewhere Between", "Back Country Night"),
 }
 _VALUE_RULES = [r for r in _MERGED_RULES if r.state_field in _VALUE_SAMPLES]
 assert len(_BOOL_RULES) + len(_VALUE_RULES) == len(_MERGED_RULES)

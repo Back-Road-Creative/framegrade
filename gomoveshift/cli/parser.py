@@ -48,6 +48,21 @@ def _weekday(raw: str) -> str:
     return day
 
 
+def _placeless_label(raw: str) -> str:
+    """argparse ``type=`` for ``--placeless-label``.
+
+    Robust by construction: only words from ``PLACELESS_LABEL_WORDS`` (letters,
+    spaces, apostrophes; 1-40 chars) get past the parser, so the burned label
+    cannot name a place. The rejection names the offending word(s).
+    """
+    from ..pipeline.validation.content_gates import placeless_label_problem
+
+    problem = placeless_label_problem(raw)
+    if problem:
+        raise argparse.ArgumentTypeError(problem)
+    return raw.strip()
+
+
 def _per_lf_location_kv(raw: str) -> tuple[int, str]:
     """argparse ``type=`` for ``--per-lf-location KEY=VALUE``.
 
@@ -187,6 +202,23 @@ def _validate_per_lf_location_args(args: argparse.Namespace) -> None:
     post-discovery in PhaseBC, not here, because LF indices aren't known
     until clip discovery runs.
     """
+    if getattr(args, "placeless_label", None):
+        # A placeless drive names no place; a flag that does is a contradiction.
+        clash = [
+            flag
+            for flag, dest in (
+                ("--location", "location"),
+                ("--per-lf-location", "per_lf_locations"),
+                ("--day-gpx", "day_gpx"),
+            )
+            if getattr(args, dest, None)
+        ]
+        if clash:
+            raise argparse.ArgumentTypeError(
+                f"--placeless-label cannot be combined with {', '.join(clash)}: a drive "
+                "that names its places is checked against its trace; a placeless label "
+                "claims none."
+            )
     overrides = getattr(args, "per_lf_locations", None) or []
     if not overrides:
         return
@@ -433,6 +465,21 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "Required for GPS-less drives where centroid-derivation can't "
         "produce a route-specific label. Use --list-lfs to learn LF "
         "indices first.",
+    )
+    # A made-up label that names NO place, for a drive with no GPS at all. Not a
+    # bypass of the place gates: the vocabulary is closed (argparse + the ladder
+    # gate), the LF is awarded tier 5, and --location/--per-lf-location/--day-gpx
+    # are refused beside it.
+    p.add_argument(
+        "--placeless-label",
+        type=_placeless_label,
+        default=None,
+        metavar="TEXT",
+        help="On-screen label for a drive with no GPS fix at all, e.g. 'Somewhere "
+        "Between'. Letters, spaces and apostrophes only, 1-40 chars, every word from "
+        "the fixed placeless vocabulary (no place names, digits or 'to'). Burned on "
+        "every LF as a tier-5 'no location claim'; refused with --location, "
+        "--per-lf-location or --day-gpx.",
     )
     # Discovery-only mode. Runs Phase A + builds the drive plan,
     # prints the LF index → suggested-label table, exits 0 without

@@ -524,6 +524,15 @@ def _enrich_per_lf_gps(
 
     geocoder = _build_shared_geocoder(cache_dir=gps_cache_dir)
     per_lf_overrides: dict[int, str] = dict(getattr(state, "per_lf_overrides", None) or {})
+    _placeless = (getattr(state, "placeless_label", None) or "").strip()
+    if _placeless:
+        # ``--placeless-label``: the same operator-override path, one label for
+        # every LF. Mirrored onto state so the later fallbacks and Phase D read
+        # it exactly as they read a ``--per-lf-location`` label.
+        for _lfs in (lf_plans_by_date or {}).values():
+            for _lf in _lfs or []:
+                per_lf_overrides[int(getattr(_lf, "index", 0))] = _placeless
+        state.per_lf_overrides = dict(per_lf_overrides)
     _assert_per_lf_locations_resolvable(
         lf_plans_by_date or {},
         gps_points_by_lf=gps_points_by_lf or {},

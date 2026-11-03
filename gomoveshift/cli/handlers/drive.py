@@ -918,7 +918,8 @@ def _cmd_drive_impl(args, config):
             output_base=args.output_dir,
             region=args.region,
             publish_day=_publish_day,
-            location=args.location,
+            # A placeless drive's drive-wide fallback is its placeless label.
+            location=args.location or getattr(args, "placeless_label", None) or "",
             fresh=args.fresh,
             # Argparse-sentinel: ``None`` means the operator did NOT
             # supply the flag; ``True``/``False`` means EXPLICIT. The
@@ -1031,6 +1032,7 @@ def _cmd_drive_impl(args, config):
             short_reframe=getattr(args, "short_reframe", None),
             output_cadence=getattr(args, "output_cadence", None),
             insert_still_motion=getattr(args, "insert_still_motion", None),
+            placeless_label=getattr(args, "placeless_label", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The

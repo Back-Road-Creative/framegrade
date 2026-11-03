@@ -626,6 +626,48 @@ _GENERIC_LABEL_TOKENS = frozenset(
         "area",
     }
 )
+# ``--placeless-label``: the closed vocabulary of an on-screen label that names NO
+# place (the ladder's tier 5, "no location claim"). Words only — a proper noun,
+# a digit or "to" ("X to Y" reads as town endpoints, _TITLE_ENDPOINTS_RE) can
+# never be added without making the label a place claim. The parser and
+# check_specificity_ladder share this one home.
+PLACELESS_LABEL_WORDS = frozenset(
+    (_GENERIC_LABEL_TOKENS - {"via"})
+    | {
+        "somewhere", "nowhere", "between", "unknown", "unmarked", "unnamed", "untitled",
+        "mystery", "mysterious", "hidden", "lost", "quiet", "empty", "open", "long",
+        "miles", "mile", "back", "country", "backroad", "hills", "hill", "ridge",
+        "ridges", "valley", "valleys", "woods", "forest", "fields", "farmland", "night",
+        "morning", "afternoon", "evening", "rain", "fog", "snow", "winter", "spring",
+        "off", "map", "in", "of", "a", "on", "through", "out", "into",
+    }
+)  # fmt: skip
+PLACELESS_LABEL_MAX_CHARS = 40
+_PLACELESS_SHAPE_RE = re.compile(r"[A-Za-z' ]+")
+
+
+def placeless_label_problem(label: str) -> Optional[str]:
+    """Why ``label`` is not a placeless label, or ``None`` when it is one."""
+    text = (label or "").strip()
+    if not text:
+        return "placeless label is blank"
+    if len(text) > PLACELESS_LABEL_MAX_CHARS:
+        return f"placeless label is {len(text)} chars (max {PLACELESS_LABEL_MAX_CHARS})"
+    if not _PLACELESS_SHAPE_RE.fullmatch(text):
+        return (
+            "placeless label may hold only letters, spaces and apostrophes "
+            "(no digits, commas or hyphens)"
+        )
+    off = [w for w in dict.fromkeys(text.lower().split()) if w not in PLACELESS_LABEL_WORDS]
+    if off:
+        return (
+            "placeless label word(s) "
+            + ", ".join(repr(w) for w in off)
+            + " are outside the placeless vocabulary (a word that could name a place)"
+        )
+    return None
+
+
 _LOCATION_LINE_RE = re.compile(r"\U0001f4cd Location:\s*(.+)")
 # The above-the-fold SEO hook line is produced as "… 4K drive …" by
 # longform_metadata (_SEO_HOOK_* templates); "scenic" is not an accepted term.
@@ -1232,6 +1274,10 @@ def award_tier_for_evidence(
     from gomoveshift.pipeline import gps_quality as gq
     from gomoveshift.pipeline.title_builder import award_tier
 
+    if evidence.get("placeless"):
+        # No location claim (tier 5); no coverage is measured for a label that
+        # claims nothing a trace could back.
+        return None, 5
     gps_points = evidence.get("gps_points")
     if gps_points is None:
         return None, None
@@ -1282,6 +1328,23 @@ def check_specificity_ladder(metadata_json: dict, evidence: Optional[dict] = Non
             gate="specificity_ladder",
             passed=False,
             message=f"specificity ladder: no location evidence record for {label!r}",
+        )
+
+    if evidence.get("placeless"):
+        # Tier 5 by construction: a label that claims no place has nothing to
+        # reconcile with a trace. The flag alone proves nothing, so the label
+        # must still hold only placeless-vocabulary words.
+        problem = placeless_label_problem(label)
+        if problem:
+            return GateResult(
+                gate="specificity_ladder",
+                passed=False,
+                message=f"specificity ladder: {label!r} is flagged placeless but {problem}",
+            )
+        return GateResult(
+            gate="specificity_ladder",
+            passed=True,
+            message="specificity ladder: placeless label makes no location claim",
         )
 
     gps_points = evidence.get("gps_points")
