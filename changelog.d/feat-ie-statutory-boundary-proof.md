@@ -4,4 +4,4 @@
 
 ### Changed
 
-- Pinned Waypost (`seo-manager`) to v0.5.0 (Back-Road-Creative/waypost#106), whose final-text review accepts the Tailte Éireann proof.
+- Pinned Waypost (`seo-manager`) to v0.5.0 (`2ce9f47`, Back-Road-Creative/waypost#106, #107), whose final-text review accepts the Tailte Éireann proof.
