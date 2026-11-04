@@ -11,7 +11,7 @@ from seo_manager.analytics.title_selection import (
 
 
 def test_pinned_waypost_supports_bounded_region_and_region_only_title():
-    assert final_text_review.BOUNDARY_PROOF_VERSION == "tiger2026-bounded-v1"
+    assert final_text_review.BOUNDARY_PROOF_VERSION == "tiger2026-tailte2026-bounded-v2"
     facts = TitleFacts(
         format="longform",
         baseline_title="Beaufort County, SC in 4K",

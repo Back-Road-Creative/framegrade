@@ -275,9 +275,10 @@ def _maybe_drop_day_master(artifacts, state, stages_dir: Path) -> None:
 # persisted version differs from this constant — mirrors ``PHASE_D_CODE_VERSION``.
 # Also bumped when the persisted ``per_lf_route_record`` changes meaning: phase D
 # only reads it, so a stale record survives every phase-D re-run (2 = the
-# unresolved/outside sample split; 3 = the place gate's bins + windows_key; renders
-# are reused by their own fingerprints).
-PHASE_BC_CODE_VERSION = 3
+# unresolved/outside sample split; 3 = the place gate's bins + windows_key; 4 = a
+# boundary proof for every gapped claim, and Irish county claims proven on the
+# Tailte map; renders are reused by their own fingerprints).
+PHASE_BC_CODE_VERSION = 4
 
 # Fixes reverse-geocoded per LF for its title evidence. Every fix costs a
 # geocoder call, so the trace is sampled evenly (first and last fix kept).
