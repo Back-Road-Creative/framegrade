@@ -5,6 +5,23 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.39] - 2026-11-05
+
+### Fixed
+
+- `health heal --recipe` on a drive whose recipe row `health check` had already resolved did
+  nothing and said nothing. Registering the recipe now reopens that row (stamped `reopened_at`,
+  attempt history kept), so the heal runs.
+- An open `drive_failed` row filed before `health check` read a job's own `output.log` kept a null
+  `resume_recipe` forever, so `health heal` refused it ("no readable resume.json") on every pass.
+  `health check` now fills a missing `resume_recipe` or `log_path` from the current detection.
+- `health publish` approved and claimed a drive whose checkpoint the current code re-runs (Kenmare: `phase_bc_day_first` 3 → 4 after its audit), so Phase D refused its prerequisite after the slot was booked. It now refuses before any write, naming the stale phases, so the drive gets re-audited first.
+- A drive whose `health publish` job ended without uploading was left `failed` in the schedule
+  store, and `health publish` refused anything not `auditing`, so nothing could publish it again.
+  `health publish` now reopens a `failed` drive with no upload receipt to `auditing` and claims a
+  slot again; every other check still applies.
+- A `ready` drive already uploaded outside a claim (Beaufort: its receipt under the run dir, its booking under `src`) sat first in Waypost's claim line, so `health publish` refused every newer drive in the region. `health publish` and the hourly `health check` reconcile now retire such a drive from its receipts through Waypost's `retire_published` (booking adopted, drive `complete`); a receipt Waypost cannot book leaves it `ready`.
+
 ## [0.3.38] - 2026-11-05
 
 ### Fixed
@@ -531,7 +548,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...HEAD
+[0.3.39]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...v0.3.39
 [0.3.38]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...v0.3.38
 [0.3.37]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...v0.3.37
 [0.3.36]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.35...v0.3.36
