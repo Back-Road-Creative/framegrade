@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from gomoveshift.health import cadence, run_check
 from gomoveshift.health import check as check_mod
 from gomoveshift.health.drives import parse_log
-from gomoveshift.health.store import load_all
+from gomoveshift.health.store import load_all, write_row
 from gomoveshift.publishing.queue import open_queue_db
 
 NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
@@ -369,3 +369,23 @@ def test_later_success_sharing_the_stages_dir_in_the_own_log_resolves_it(tmp_pat
         argv=("gomoveshift", "drive", "/in/demo"), state="succeeded", rc=0, created=2000.0,
     )  # fmt: skip
     assert _run(tmp_path, lambda *a: True)["incidents"] == []
+
+
+def test_an_open_row_filed_without_its_recipe_gains_it_when_detection_finds_it(tmp_path):
+    # A row filed by an older reader (no own-log scan) keeps its pushed state and attempts,
+    # but takes the recipe and log the current detection finds, so heal can reach the drive.
+    lines = ["project_name=demo-drive-a", "running phase_a", "ERROR Drive pipeline failed: x"]
+    glob = "/mnt/d/GMSVidOutput/demo-drive-a/**/shorts/**/*.mp4"
+    _job_with_own_log(tmp_path, "r1", "gms-backlog-demo-drive-a", lines, expect=glob)
+    (row,) = _run(tmp_path, lambda *a: True)["incidents"]
+    assert row["resume_recipe"] is None and row["pushed"]
+    row.update(log_path=None, resume_attempts=[{"action": "refused"}])
+    write_row(tmp_path / "inc", row)
+    recipe = f"INFO resume recipe: {tmp_path}/stages/resume.json"
+    _log(tmp_path / "jobs" / "r1" / "output.log", lines[0], recipe, *lines[1:])
+    out = _run(tmp_path, lambda *a: True)
+    (row,) = load_all(tmp_path / "inc")[0]
+    assert row["resume_recipe"] == f"{tmp_path}/stages/resume.json"
+    assert row["log_path"] == str(tmp_path / "jobs" / "r1" / "output.log")
+    assert row["resume_attempts"] == [{"action": "refused"}] and row["pushed"]
+    assert out["new"] == [] and out["pushed"] == []

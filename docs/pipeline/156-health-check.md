@@ -34,6 +34,8 @@ A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve 
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
 the row unrecorded and the next pass retries it. A condition that clears sets `resolved_at`.
+An open row found again keeps its `pushed` state and `resume_attempts`; only a `resume_recipe` or
+`log_path` it was filed without is filled from the current detection (a row an older reader filed).
 
 ## Incident row, schema `health-incident/1`
 
