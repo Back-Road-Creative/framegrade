@@ -97,8 +97,9 @@ def bind_to_code_root(code_root: Path, recipe_argv: List[str]) -> Tuple[Optional
 def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> Optional[str]:
     """Register one drive's ``resume.json`` as a ``drive_failed`` row so ``run_heal`` can target
     it (``only_key``) -- for a drive no ``health check`` saw fail, e.g. an evidence run launched
-    outside the job runner. Re-registering keeps the row and its attempt history. ``None`` when the
-    recipe is unreadable."""
+    outside the job runner. Re-registering keeps the row and its attempt history, and reopens a
+    resolved row (``reopened_at``): an operator's ``--recipe`` is never a silent no-op. ``None``
+    when the recipe is unreadable."""
     recipe_path = Path(recipe_path).resolve()
     recipe = resume.read_recipe(recipe_path)
     if recipe is None:
@@ -106,7 +107,11 @@ def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> 
     drive = recipe_path.parent.parent.name  # <stages>/<drive>/_stages/resume.json
     key = f"drive_failed:{drive}:recipe"
     rows, _bad = load_all(incidents_dir)
-    if any(r.get("key") == key for r in rows):
+    prior = next((r for r in rows if r.get("key") == key), None)
+    if prior is not None:
+        if prior.get("resolved_at"):
+            prior.update(resolved_at=None, reopened_at=now_iso)
+            write_row(incidents_dir, prior)
         return key
     write_row(
         incidents_dir,

@@ -95,7 +95,8 @@ interpreter, is `refused` with the reason.
 
 **One drive.** `health heal --recipe <stages dir>/resume.json` heals that drive only: it registers
 the recipe as a `drive_failed` row keyed `drive_failed:<drive>:recipe` (reusing an existing row, so
-attempt history is kept), then runs the pass above restricted to that key. For a drive no
+attempt history is kept; a resolved row is reopened, stamped `reopened_at`, so an operator's
+`--recipe` is never a silent no-op), then runs the pass above restricted to that key. For a drive no
 `health check` saw fail, e.g. an evidence run. An unreadable recipe exits 2 and writes nothing;
 with `--dry-run` the row is registered in a scratch copy and the incidents dir is untouched.
 
