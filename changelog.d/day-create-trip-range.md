@@ -1,0 +1,3 @@
+### Fixed
+
+- `publish-journal --allow-day-create` left `trip.end_date` and `trip.duration_days` behind when it added a day after the trip's end, so the site's `journey-integrity` check failed with `day-count-mismatch`. It now moves `end_date` to the new day and recomputes `duration_days` (end - start + 1), the same rule `extend_adjacent_journey` uses (now one shared `set_trip_end`). A day created before `trip.start_date` is refused, since moving the start would renumber published days. Re-running the same `--apply` repairs a trip block already out of range with its days, even when every LF is already present; a dry run reports the repair without writing.

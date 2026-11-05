@@ -891,3 +891,125 @@ def test_replay_journey_write_lands_full_content_and_keeps_comments(tmp_path):
     assert "REPLAY_VID" in text and "EXISTING_VID_2" in text
     assert text.startswith("---\n")
     assert [p.name for p in (site / "content" / "journeys").iterdir()] == ["sample-trip.md"]
+
+
+# ---------------------------------------------------------------------------
+# --allow-day-create keeps the trip block in step with the days
+# ---------------------------------------------------------------------------
+
+_TRIP_JOURNEY = """---
+title: SC
+trip:
+  start_date: 2026-02-20
+  end_date: 2026-02-20
+  duration_days: 1
+days:
+- day_number: 1
+  date: '2026-02-20'
+  day_of_week: Friday
+  heading: ''
+  narrative: ''
+  videos: []
+---
+body
+"""
+
+
+def _trip_site(tmp_path: Path) -> tuple[Path, Path]:
+    site = tmp_path / "site"
+    (site / "content" / "journeys").mkdir(parents=True)
+    journey = site / "content" / "journeys" / "sc-2026.md"
+    journey.write_text(_TRIP_JOURNEY)
+    return site, journey
+
+
+def _day_create_run(tmp_path, site, *, apply):
+    state = make_state(
+        youtube_uploads={"1": {"video_id": "DAY2VID", "title": "Day two"}},
+        per_lf_recording_date={"1": "2026-02-21"},
+        regular_lf_paths={"1": "/tmp/lf_01.mp4"},
+    )
+    return run_publish_journal(
+        state_path=_write_state(tmp_path, state),
+        site_path=site,
+        journey_slug="sc-2026",
+        apply=apply,
+        allow_day_create=True,
+        ffprobe_duration=_fake_ffprobe,
+    )
+
+
+def _trip_of(journey: Path) -> tuple[dict, list]:
+    from gomoveshift.pipeline.journal_publisher import load_journey
+
+    doc, _ = load_journey(journey)
+    return doc["trip"], doc["days"]
+
+
+def test_day_create_apply_extends_trip_and_rerun_is_stable(tmp_path):
+    site, journey = _trip_site(tmp_path)
+    assert _day_create_run(tmp_path, site, apply=True) == 0
+    trip, days = _trip_of(journey)
+    assert str(trip["end_date"]) == "2026-02-21"
+    assert trip["duration_days"] == len(days) == 2
+    after = journey.read_text()
+    assert _day_create_run(tmp_path, site, apply=True) == 0
+    assert journey.read_text() == after
+
+
+def test_rerun_repairs_trip_block_left_stale_by_old_day_create(tmp_path, capsys):
+    site, journey = _trip_site(tmp_path)
+    assert _day_create_run(tmp_path, site, apply=True) == 0
+    # Recreate the pre-fix breakage: days are right, trip block is stale.
+    journey.write_text(
+        journey.read_text()
+        .replace("end_date: 2026-02-21", "end_date: 2026-02-20")
+        .replace("duration_days: 2", "duration_days: 1")
+    )
+    assert _trip_of(journey)[0]["duration_days"] == 1
+    capsys.readouterr()
+
+    assert _day_create_run(tmp_path, site, apply=True) == 0
+    trip, days = _trip_of(journey)
+    assert str(trip["end_date"]) == "2026-02-21"
+    assert trip["duration_days"] == len(days) == 2
+    assert "Wrote" in capsys.readouterr().out
+
+
+def test_dry_run_reports_trip_repair_without_writing(tmp_path, capsys):
+    site, journey = _trip_site(tmp_path)
+    assert _day_create_run(tmp_path, site, apply=True) == 0
+    journey.write_text(
+        journey.read_text()
+        .replace("end_date: 2026-02-21", "end_date: 2026-02-20")
+        .replace("duration_days: 2", "duration_days: 1")
+    )
+    before = journey.read_text()
+    capsys.readouterr()
+
+    assert _day_create_run(tmp_path, site, apply=False) == 0
+    out = capsys.readouterr().out
+    assert "end_date -> 2026-02-21" in out
+    assert "dry-run" in out
+    assert journey.read_text() == before
+
+
+def test_day_before_trip_start_refuses_and_does_not_write(tmp_path, capsys):
+    site, journey = _trip_site(tmp_path)
+    before = journey.read_text()
+    state = make_state(
+        youtube_uploads={"1": {"video_id": "EARLY", "title": "Early"}},
+        per_lf_recording_date={"1": "2026-02-19"},
+        regular_lf_paths={"1": "/tmp/lf_01.mp4"},
+    )
+    rc = run_publish_journal(
+        state_path=_write_state(tmp_path, state),
+        site_path=site,
+        journey_slug="sc-2026",
+        apply=True,
+        allow_day_create=True,
+        ffprobe_duration=_fake_ffprobe,
+    )
+    assert rc == 1
+    assert "before trip.start_date" in capsys.readouterr().err
+    assert journey.read_text() == before

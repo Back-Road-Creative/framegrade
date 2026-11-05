@@ -710,3 +710,97 @@ def test_preview_text_renders_deferrals():
     assert "Deferred until publish_at fires" in text
     assert "vid1" in text
     assert "2099-01-01T00:00:00Z" in text
+
+
+# ---------------------------------------------------------------------------
+# trip block stays consistent with the days (the site's journey-integrity CI)
+# ---------------------------------------------------------------------------
+
+
+def _trip_doc(end="2026-02-20", duration=1, with_video=False):
+    videos = [{"youtube_id": "OLD1", "title": "t", "duration": "1:00"}] if with_video else []
+    return {
+        "trip": {"start_date": "2026-02-20", "end_date": end, "duration_days": duration},
+        "days": [
+            {
+                "day_number": 1,
+                "date": "2026-02-20",
+                "day_of_week": "Friday",
+                "heading": "",
+                "narrative": "",
+                "videos": videos,
+            }
+        ],
+    }
+
+
+def _one_lf_state(video_id, rec_date):
+    return make_state(
+        youtube_uploads={1: {"video_id": video_id, "title": "T", "url": "u"}},
+        per_lf_recording_date={1: rec_date},
+        regular_lf_paths={1: "/tmp/lf_01.mp4"},
+    )
+
+
+def test_day_create_after_trip_end_extends_trip_and_duration():
+    doc = _trip_doc()
+    plan = plan_merge(
+        _one_lf_state("NEW1", "2026-02-21"),
+        doc,
+        ffprobe_duration=_fake_ffprobe({"/tmp/lf_01.mp4": 60.0}),
+        allow_day_create=True,
+    )
+    assert plan.errors == []
+    apply_merge(doc, plan, library=_dry_library())
+    assert doc["trip"]["end_date"] == "2026-02-21"
+    assert doc["trip"]["duration_days"] == 2
+    assert doc["trip"]["duration_days"] == len(doc["days"])
+
+
+def test_day_create_before_trip_start_is_refused():
+    doc = _trip_doc()
+    plan = plan_merge(
+        _one_lf_state("NEW0", "2026-02-19"),
+        doc,
+        ffprobe_duration=_fake_ffprobe({"/tmp/lf_01.mp4": 60.0}),
+        allow_day_create=True,
+    )
+    assert plan.has_errors
+    assert "before trip.start_date" in plan.errors[0]
+    assert plan.trip_end is None
+
+
+def test_all_skip_rerun_repairs_stale_trip_block():
+    # State left by the old day-create: day 2 exists, trip block never moved.
+    doc = _trip_doc(with_video=True)
+    doc["days"].append(
+        {
+            "day_number": 2,
+            "date": "2026-02-21",
+            "day_of_week": "Saturday",
+            "heading": "",
+            "narrative": "",
+            "videos": [{"youtube_id": "NEW1", "title": "T", "duration": "1:00"}],
+        }
+    )
+    plan = plan_merge(
+        _one_lf_state("NEW1", "2026-02-21"),
+        doc,
+        ffprobe_duration=_fake_ffprobe({}),
+        allow_day_create=True,
+    )
+    assert plan.inserts == [] and plan.days_to_create == []
+    assert plan.trip_end == "2026-02-21"
+    assert "end_date -> 2026-02-21" in plan.preview_text()
+    apply_merge(doc, plan, library=_dry_library())
+    assert doc["trip"]["end_date"] == "2026-02-21"
+    assert doc["trip"]["duration_days"] == 2
+
+
+def test_consistent_trip_block_plans_no_update():
+    plan = plan_merge(
+        _one_lf_state("OLD1", "2026-02-20"),
+        _trip_doc(with_video=True),
+        ffprobe_duration=_fake_ffprobe({}),
+    )
+    assert plan.trip_end is None

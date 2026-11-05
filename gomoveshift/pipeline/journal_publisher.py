@@ -24,6 +24,7 @@ import logging
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date as date_type
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -65,6 +66,9 @@ class MergePlan:
     # The CLI handler writes these to the pending sidecar; they are NOT
     # passed to ``apply_merge``.
     deferrals: list[VideoEntry] = field(default_factory=list)
+    # ISO date to move ``trip.end_date`` to so the trip block covers every day
+    # (set when a day sits past the trip's end, new or already present).
+    trip_end: Optional[str] = None
 
     @property
     def has_errors(self) -> bool:
@@ -83,6 +87,10 @@ class MergePlan:
             lines.append("Planned day stubs:")
             for d in self.days_to_create:
                 lines.append(f"  + new day stub: {d}")
+        if self.trip_end:
+            lines.append(
+                f"Planned trip update: end_date -> {self.trip_end} (duration_days follows)"
+            )
         if self.deferrals:
             lines.append("Deferred until publish_at fires:")
             for entry in self.deferrals:
@@ -371,6 +379,28 @@ def _all_existing_ids(doc: dict) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _as_date(value: object) -> Optional[date_type]:
+    if isinstance(value, date_type):
+        return value
+    if not value:
+        return None
+    try:
+        return date_type.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def set_trip_end(trip: dict, end: date_type) -> None:
+    """Move ``trip.end_date`` to ``end`` and recompute ``duration_days`` (when
+    the trip carries it) as end - start + 1. The one rule for extending a trip
+    forward, shared by the replay path (``extend_adjacent_journey``) and
+    day-create. Keeps the key's existing type (a YAML date stays a date)."""
+    trip["end_date"] = end if isinstance(trip.get("end_date"), date_type) else end.isoformat()
+    start = _as_date(trip.get("start_date"))
+    if "duration_days" in trip and start is not None:
+        trip["duration_days"] = (end - start).days + 1
+
+
 def plan_merge(
     state: dict,
     doc: dict,
@@ -512,13 +542,48 @@ def plan_merge(
         else:
             inserts.append(entry)
 
+    trip_end = _plan_trip_end(doc, existing_day_dates, days_to_create, errors)
+
     return MergePlan(
         inserts=inserts,
         skips=skips,
         errors=errors,
         days_to_create=days_to_create,
         deferrals=deferrals,
+        trip_end=trip_end,
     )
+
+
+def _plan_trip_end(
+    doc: dict, existing_dates: list[str], created: list[str], errors: list[str]
+) -> Optional[str]:
+    """New ``trip.end_date`` (ISO) when a day lies past the trip's end, else None.
+
+    Runs on every plan, so a re-run whose LFs are all already present still
+    repairs a trip block left stale by an earlier day-create. Forward only: a
+    day being CREATED before ``trip.start_date`` is an error, because moving the
+    start would renumber a published day 1.
+    """
+    trip = doc.get("trip")
+    if not isinstance(trip, dict):
+        return None
+    start = _as_date(trip.get("start_date"))
+    end = _as_date(trip.get("end_date"))
+    if start is None or end is None:
+        return None
+    for d in created:
+        parsed = _as_date(d)
+        if parsed is not None and parsed < start:
+            errors.append(
+                f"day {d} is before trip.start_date {start.isoformat()}; moving the "
+                "start would renumber published days. Refusing; fix trip.start_date "
+                "and day numbers manually."
+            )
+    dates = [x for x in (_as_date(d) for d in [*existing_dates, *created]) if x is not None]
+    latest = max(dates, default=None)
+    if latest is not None and latest > end:
+        return latest.isoformat()
+    return None
 
 
 def plan_superlong_merge(
@@ -727,6 +792,11 @@ def apply_merge(doc: dict, plan: MergePlan, *, library: VideoLibrary) -> None:
         )
 
     library.flush()
+
+    if plan.trip_end and isinstance(doc.get("trip"), dict):
+        new_end = _as_date(plan.trip_end)
+        if new_end is not None:
+            set_trip_end(doc["trip"], new_end)
 
     # Keep the top-level ``video_count`` in sync with the actual embedded
     # videos. The site repository's deploy CI hard-fails when
