@@ -513,6 +513,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         drive_argv += ["--day-gpx", row.day_gpx]
         if row.camera_utc_offset_hours is not None:  # unset: the slicer measures it
             drive_argv += ["--camera-utc-offset-hours", str(row.camera_utc_offset_hours)]
+    if getattr(row, "placeless_label", ""):  # a no-GPS drive's label; argparse checks the words
+        drive_argv += ["--placeless-label", row.placeless_label]
     argv = [
         "python3", str(job_runner(code_root)),
         "--name", f"gms-backlog-{row.project}", "--heavy", "--detach", "--stall", _STALL_S,
