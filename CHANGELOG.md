@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.37] - 2026-11-05
+
+### Fixed
+
+- `publish-journal --allow-day-create` left `trip.end_date` and `trip.duration_days` behind when it added a day after the trip's end, so the site's `journey-integrity` check failed with `day-count-mismatch`. It now moves `end_date` to the new day and recomputes `duration_days` (end - start + 1), the same rule `extend_adjacent_journey` uses (now one shared `set_trip_end`). A day created before `trip.start_date` is refused, since moving the start would renumber published days. Re-running the same `--apply` repairs a trip block already out of range with its days, even when every LF is already present; a dry run reports the repair without writing.
+- `health heal` no longer relaunches a failed drive with `--phase <letter>` (the drive CLI's single-phase mode). A drive that failed in phase A or B/C used to pass that one phase and then fail the DoD gate (`lf_count 0 < 1`) because the later phases never ran. Heal now runs the plain audit-only resume, which runs every phase the checkpoint does not hold, and no longer refuses a failure whose phase it cannot map.
+- A backlog drive job's `drive_failed` incident now gets its resume recipe, phase, gate and error line. The drive check reads the job's own `output.log` beside its `job.json` as well as the `expect` list, which for a backlog job is an artifact glob rather than a log, so heal no longer refuses "no readable resume.json for this incident".
+
 ## [0.3.36] - 2026-11-04
 
 ### Fixed
@@ -517,7 +525,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...HEAD
+[0.3.37]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...v0.3.37
 [0.3.36]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.35...v0.3.36
 [0.3.35]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.34...v0.3.35
 [0.3.34]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.33...v0.3.34
