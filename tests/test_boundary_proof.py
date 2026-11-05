@@ -334,3 +334,168 @@ def test_census_download_host_is_in_service_allowlist():
     ).read_text()
     assert host == "www2.census.gov"
     assert f"**{host}**" in allowlist
+
+
+# -- Ireland: Tailte Eireann's pinned 2026 statutory county map (ITM metres) --
+
+from gomoveshift.pipeline.boundary_proof import (  # noqa: E402
+    IE_MARGIN_M,
+    _IE_HOSTS,
+    _IE_SOURCE,
+    _HostRedirect,
+    itm,
+    pinned_boundary_proof,
+)
+
+_CORK_FIX = (51.93, -9.10)  # a stateless County Cork retained fix
+
+
+def test_itm_projection_matches_its_false_origin_and_scale():
+    x, y = itm(53.5, -8.0)
+    assert abs(x - 600000.0) < 0.001 and abs(y - 750000.0) < 0.001
+    east, west = itm(53.5, -7.0), itm(53.5, -9.0)
+    assert abs((east[0] - 600000.0) - (600000.0 - west[0])) < 0.001
+    assert abs(east[1] - west[1]) < 0.001
+    # One degree of meridian near 54 N is ~111,305 m, times k0 = 0.99982.
+    assert abs(itm(54.5, -8.0)[1] - y - 111_285) < 30
+
+
+def _tailte_geojson(name: str, half_m: float, centre=_CORK_FIX) -> bytes:
+    import json
+
+    cx, cy = itm(*centre)
+    ring = [
+        [cx - half_m, cy - half_m, -100000.0],
+        [cx + half_m, cy - half_m, -100000.0],
+        [cx + half_m, cy + half_m, -100000.0],
+        [cx - half_m, cy + half_m, -100000.0],
+        [cx - half_m, cy - half_m, -100000.0],
+    ]
+    return json.dumps(
+        {
+            "type": "FeatureCollection",
+            "crs": {"type": "name", "properties": {"name": "EPSG:2157"}},
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"ENG_NAME_VALUE": name, "BDY_TYPE_VALUE": "County Statutory"},
+                    "geometry": {"type": "Polygon", "coordinates": [ring]},
+                }
+            ],
+        }
+    ).encode()
+
+
+def _ie_prover(tmp_path, data: bytes) -> CensusBoundaryProver:
+    # The real file name with the fixture's own digest (the real map is ~92 MB).
+    (tmp_path / _IE_SOURCE[0]).write_bytes(data)
+    return CensusBoundaryProver(
+        cache_dir=tmp_path, ie_source=(_IE_SOURCE[0], hashlib.sha256(data).hexdigest())
+    )
+
+
+def _ie_window(gap: float = 1.0) -> RouteWindow:
+    lat, lon = _CORK_FIX
+    return RouteWindow("lf1", 0.0, 2 * gap, [(0.0, lat, lon), (gap, lat, lon)])
+
+
+_IE_CLAIM = {"level": "county", "name": "County Cork", "state": None, "country": "Ireland"}
+
+
+def test_irish_county_is_proven_on_the_tailte_map_with_an_inward_margin(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000))
+    proof = prover.prove([_ie_window(gap=17.0)], dict(_IE_CLAIM))
+    assert proof["verified"] is True, proof
+    assert proof["basis"] == "pinned_tailte_polygon_bounded_speed_error_and_margin"
+    assert proof["source"] == f"TAILTE2026/COUNTIES/{_IE_SOURCE[0]}"
+    assert proof["region"] == "County Cork" and proof["country"] == "IE"
+    assert proof["margin_m"] == IE_MARGIN_M == 250.0
+    assert proof["max_gap_s"] == 17.0
+
+
+def test_irish_proof_refuses_a_fix_inside_the_vintage_margin(tmp_path):
+    # 300 m inside: enough for the TIGER rule at 1 s (100 + 70 = 170 m), not
+    # once the 250 m vintage margin is added (420 m).
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300))
+    proof = prover.prove([_ie_window()], dict(_IE_CLAIM))
+    assert proof["verified"] is False and "boundary" in proof["reason"]
+
+
+def test_irish_proof_refuses_an_unknown_county_or_wrong_projection(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("KERRY", 5_000))
+    assert prover.prove([_ie_window()], dict(_IE_CLAIM))["verified"] is False
+    other = tmp_path / "other"
+    other.mkdir()
+    bad = _tailte_geojson("CORK", 5_000).replace(b"EPSG:2157", b"EPSG:4326")
+    assert _ie_prover(other, bad).prove([_ie_window()], dict(_IE_CLAIM))["verified"] is False
+
+
+def test_pinned_irish_proof_needs_its_source_margin_country_and_vintage(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000))
+    windows = [_ie_window()]
+    claim = {**_IE_CLAIM, "windows_key": retained_windows_key(windows)}
+    proof = prover.prove(windows, dict(claim))
+    proof["sha256"] = _IE_SOURCE[1]  # what the real pinned map carries
+    proof["recording_date"] = "2025-09-15"
+    assert pinned_boundary_proof(proof, claim)
+    for change in (
+        {"margin_m": 249.0},
+        {"country": None},
+        {"basis": "pinned_tiger_polygon_bounded_speed_and_error"},
+        {"recording_date": "2027-01-04"},
+        {"sha256": "0" * 64},
+    ):
+        assert not pinned_boundary_proof({**proof, **change}, claim), change
+    assert not pinned_boundary_proof(proof, {**claim, "country": "United Kingdom"})
+
+
+def test_tailte_download_redirects_only_to_its_https_hosts():
+    handler = _HostRedirect(_IE_HOSTS)
+    req = urllib.request.Request(
+        "https://data-osi.opendata.arcgis.com/api/download/v1/items/x/geojson"
+    )
+    for host in _IE_HOSTS:
+        assert handler.redirect_request(req, None, 302, "Found", {}, f"https://{host}/f")
+    assert (
+        handler.redirect_request(req, None, 302, "Found", {}, "https://elsewhere.invalid/f") is None
+    )
+    assert (
+        handler.redirect_request(req, None, 302, "Found", {}, f"http://{next(iter(_IE_HOSTS))}/f")
+        is None
+    )
+
+
+def test_tailte_hosts_are_in_service_allowlist():
+    allowlist = (
+        Path(__file__).parents[1] / "docs/pipeline/84-network-allowlist-credential-stores.md"
+    ).read_text()
+    for host in _IE_HOSTS:
+        assert f"**{host}**" in allowlist
+
+
+def test_gapped_irish_route_gets_a_proof_even_when_the_county_label_passes(tmp_path):
+    class Geo:
+        def reverse_geocode_detailed(self, lat, lon):
+            return {"town": "Ballyvourney", "county": "County Cork", "country": "Ireland"}
+
+    lat, lon = _CORK_FIX
+    window = RouteWindow(
+        "lf1", 0, 180, [(float(t), lat, lon) for t in range(180) if not 50 <= t < 62]
+    )
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000))
+    text = {"2025-09-15": {1: "County Cork"}}
+    measured = enforce_route_claims(
+        text,
+        {1: [window]},
+        Geo(),
+        boundary_prover=prover,
+        require_review_support=True,
+        review_support_available=True,
+    )
+    assert text["2025-09-15"][1] == "County Cork"
+    claim = measured[1].region_claim("county")
+    assert claim["country"] == "Ireland"
+    proof = claim["boundary_proof"]
+    assert proof["basis"] == "pinned_tailte_polygon_bounded_speed_error_and_margin"
+    assert proof["recording_date"] == "2025-09-15"
+    assert proof["max_gap_s"] >= 12.0

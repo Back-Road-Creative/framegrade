@@ -141,6 +141,12 @@ INVENTORY: dict[str, tuple[str, str, str, str]] = {
         "GET-only",
         "default",
     ),
+    "data-osi.opendata.arcgis.com": (
+        "Tailte Eireann 2026 statutory county GeoJSON download, SHA-256 verified before caching",
+        "Retained-route boundary proof (Ireland)",
+        "GET-only",
+        "default",
+    ),
     "drive.google.com": (
         "Drive share-link parsing and thumbnail/CSV link building",
         "Shorts/thumbnail hosting behind the Metricool CSV",
@@ -266,6 +272,18 @@ INVENTORY: dict[str, tuple[str, str, str, str]] = {
         "Meta (Facebook/Instagram) Reels publishing",
         "media/data out",
         "opt-in",
+    ),
+    "services-eu1.arcgis.com": (
+        "First redirect of the pinned Tailte county download (ArcGIS replica cache)",
+        "Retained-route boundary proof (Ireland)",
+        "GET-only",
+        "default",
+    ),
+    "stg-arcgisazurecdataprodeu1.az.arcgis.com": (
+        "Second redirect of the pinned Tailte county download (ArcGIS export CDN)",
+        "Retained-route boundary proof (Ireland)",
+        "GET-only",
+        "default",
     ),
     "studio.youtube.com": (
         "Endscreen setup hint text printed to the operator (not fetched)",

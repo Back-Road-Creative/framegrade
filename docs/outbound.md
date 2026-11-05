@@ -9,6 +9,7 @@ Every host `gomoveshift/**/*.py` names, and what it is for. See `docs/pipeline/8
 | `accounts.google.com` | OAuth2 consent page the operator's browser opens during `gomoveshift youtube-auth` (the client config built from the shared token names it as auth_uri) | YouTube upload/comment consent flow | media/data out | opt-in |
 | `console.cloud.google.com` | Setup hint text printed to the operator (not fetched by this service) | Drive/YouTube credential setup instructions | GET-only | default |
 | `copernicus-dem-30m.s3.amazonaws.com` | Copernicus GLO-30 DEM fallback bucket | Route Story offline map bundle | GET-only | default |
+| `data-osi.opendata.arcgis.com` | Tailte Eireann 2026 statutory county GeoJSON download, SHA-256 verified before caching | Retained-route boundary proof (Ireland) | GET-only | default |
 | `drive.google.com` | Drive share-link parsing and thumbnail/CSV link building | Shorts/thumbnail hosting behind the Metricool CSV | GET-only | default |
 | `elevation.nationalmap.gov` | USGS 3DEP elevation for the trip bounding box | Route Story offline map bundle | GET-only | default |
 | `gibs.earthdata.nasa.gov` | NASA GIBS imagery fallback | Route Story offline map bundle | GET-only | default |
@@ -29,6 +30,8 @@ Every host `gomoveshift/**/*.py` names, and what it is for. See `docs/pipeline/8
 | `prd-tnm.s3.amazonaws.com` | USGS GNIS Domestic Names zip, per state | Route Story place-name labels | GET-only | default |
 | `registry.npmjs.org` | Pinned MapLibre tarball, SHA512 SRI-verified | Route Story scene rendering | GET-only | default |
 | `rupload.facebook.com` | Meta Reels video-bytes upload target | Meta (Facebook/Instagram) Reels publishing | media/data out | opt-in |
+| `services-eu1.arcgis.com` | First redirect of the pinned Tailte county download (ArcGIS replica cache) | Retained-route boundary proof (Ireland) | GET-only | default |
+| `stg-arcgisazurecdataprodeu1.az.arcgis.com` | Second redirect of the pinned Tailte county download (ArcGIS export CDN) | Retained-route boundary proof (Ireland) | GET-only | default |
 | `studio.youtube.com` | Endscreen setup hint text printed to the operator (not fetched) | YouTube endscreen sidecar | GET-only | default |
 | `upload.us.tiktokapis.com` | TikTok Direct Post video upload target | TikTok publishing | media/data out | opt-in |
 | `www.facebook.com` | Web origin used to build a clickable permalink from Graph's relative `permalink_url` (not fetched) | Meta (Facebook/Instagram) Reels publishing | GET-only | opt-in |

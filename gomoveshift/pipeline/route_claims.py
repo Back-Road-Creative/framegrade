@@ -60,7 +60,7 @@ TIMESTAMP_SOURCE = (
     "(media seconds)"
 )
 CONTAINMENT_BASIS = "sampled_reverse_geocode"
-BOUNDARY_REVIEW_VERSION = "tiger2026-bounded-v1"
+BOUNDARY_REVIEW_VERSION = "tiger2026-tailte2026-bounded-v2"
 _CONTAINMENT_WORDS = re.compile(
     r"\bverified in\b|\bcontained\b|\bcontainment proven\b|\bproven (?:to be )?(?:in|within)\b",
     re.IGNORECASE,
@@ -560,6 +560,10 @@ class RouteEvidence:
         if level == "county":
             states = Counter(b.state for b in self.bins if b.county == name and b.state)
             claim["state"] = states.most_common(1)[0][0] if states else None
+            if claim["state"] is None:
+                # Which pinned map can prove it (Irish "County Cork"); not a label part.
+                countries = {b.country for b in self.bins if b.county == name}
+                claim["country"] = countries.pop() if len(countries) == 1 else None
         if level == "counties":
             claim["counties"] = pair
             claim["state"] = next(b.state for b in self.bins if b.county in pair)
@@ -999,7 +1003,7 @@ def region_label(claim: dict) -> str:
     if claim["level"] == "state":
         return name
     state = claim.get("state")  # county or counties
-    if not state and claim.get("country"):
+    if claim["level"] == "counties" and not state and claim.get("country"):
         return f"{name}, {claim['country']}"  # stateless pair: "County Cork & ..., Ireland"
     return f"{name}, {US_STATE_ABBREVS.get(state, state)}" if state else name
 
@@ -1300,18 +1304,22 @@ def enforce_route_claims(
                 continue
             ev = measure_route(windows, geocoder)
             measured[idx] = ev
-            needs_boundary = bool(boundary_prover and label_issues(label, ev))
+            # A GPS gap needs a proof even when the label passes: Waypost
+            # reviews every gap of a region claim, bridged or not.
+            needs_boundary = bool(boundary_prover and (ev.gaps or label_issues(label, ev)))
             recorded_on = (recording_dates or {}).get(idx, _date)
-            year_mismatch = needs_boundary and not str(recorded_on).startswith("2026-")
+            year_mismatch = False
             review_missing = (
-                needs_boundary
-                and not year_mismatch
-                and require_review_support
-                and not review_support_available
+                needs_boundary and require_review_support and not review_support_available
             )
-            if needs_boundary and not (year_mismatch or review_missing):
+            if needs_boundary and not review_missing:
+                from .boundary_proof import vintage_covers
+
                 for claim, _candidate in _region_candidates(ev):
-                    if _region_ok(claim, ev, REGION_MIN_COVERAGE):
+                    if ev.gaps or _region_ok(claim, ev, REGION_MIN_COVERAGE):
+                        if not vintage_covers(claim, recorded_on):
+                            year_mismatch = True
+                            continue
                         proof = boundary_prover.prove(windows, claim)
                         if proof.get("verified") is True:
                             proof["recording_date"] = str(recorded_on)
