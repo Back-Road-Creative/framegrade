@@ -324,3 +324,48 @@ def test_check_closes_a_finished_publish_claim(tmp_path, monkeypatch):
     result = _run(tmp_path, lambda *a: True)
     assert seen == [tmp_path / "jobs"]
     assert result["publish_reconciled"] == [{"project": "p", "status": "complete"}]
+
+
+def _job_with_own_log(tmp_path: Path, run_id: str, name: str, lines, *, expect, **kw):
+    """A backlog drive job: ``expect`` is an artifact glob, the log is the job dir's output.log."""
+    _job(tmp_path / "jobs", run_id, name, Path(expect), **kw)
+    _log(tmp_path / "jobs" / run_id / "output.log", *lines)
+
+
+def test_incident_reads_recipe_and_error_from_the_jobs_own_output_log(tmp_path):
+    _job_with_own_log(
+        tmp_path, "r1", "gms-backlog-demo-drive-a",
+        [
+            "project_name=demo-drive-a",
+            f"INFO resume recipe: {tmp_path}/stages/resume.json",
+            "running phase_a",
+            "ERROR Drive pipeline failed: lf_count 0 < 1",
+        ],
+        expect="/mnt/d/GMSVidOutput/demo-drive-a/**/shorts/**/*.mp4",
+    )  # fmt: skip
+    (row,) = _run(tmp_path, lambda *a: True)["incidents"]
+    assert row["resume_recipe"] == f"{tmp_path}/stages/resume.json"
+    assert row["phase"] == "phase_a" and row["drive"] == "demo-drive-a"
+    assert row["error"] == "Drive pipeline failed: lf_count 0 < 1"
+
+
+def test_a_launcher_job_is_detected_as_a_drive_from_its_own_output_log(tmp_path):
+    _job_with_own_log(
+        tmp_path, "r1", "backlog-x",
+        ["INFO gomoveshift.pipeline.drive_orchestrator start", "ERROR Drive pipeline failed: x"],
+        expect="/mnt/d/out/**/*.mp4", argv=("bash", "x.sh", "audit"),
+    )  # fmt: skip
+    assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
+
+
+def test_later_success_sharing_the_stages_dir_in_the_own_log_resolves_it(tmp_path):
+    rec = f"INFO resume recipe: {tmp_path}/stages/resume.json"
+    _job_with_own_log(
+        tmp_path, "r1", "gms-a", [rec, "ERROR Drive pipeline failed: x"],
+        expect="/mnt/d/a/**/*.mp4", created=1000.0,
+    )  # fmt: skip
+    _job_with_own_log(
+        tmp_path, "r2", "gms-b", [rec], expect="/mnt/d/b/**/*.mp4",
+        argv=("gomoveshift", "drive", "/in/demo"), state="succeeded", rc=0, created=2000.0,
+    )  # fmt: skip
+    assert _run(tmp_path, lambda *a: True)["incidents"] == []

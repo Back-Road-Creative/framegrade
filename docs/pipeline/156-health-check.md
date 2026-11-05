@@ -55,7 +55,7 @@ tracked): `argv` (`python -m gomoveshift` + the drive's own args, `--fresh` remo
 orchestrator's `_save_state` as phases complete). `env` records `GMS_INTERMEDIATE_DIR` when it was set: the staging
 override decides where the saved state lives, so `health heal` replays it as an `env K=V` prefix on
 the jobrun argv (shown in the dry run). No other variable is recorded or replayed. It also logs one stable line,
-`resume recipe: <path>`; `health check` parses that line from the drive log into the incident's
+`resume recipe: <path>`; `health check` parses that line from the drive log (a job's `expect` logs, and the job's own `output.log` beside its `job.json`, which is the only place a backlog drive job prints it) into the incident's
 `resume_recipe`, and uses its directory as the stages dir that links sibling runs. A
 single-`--phase` run logs the line but does not rewrite the file (so a heal run can't overwrite
 the full recipe it came from). A discovery-only run (`--dry-run`, `--list-lfs`,
@@ -64,15 +64,16 @@ saves never move `phase_reached`: an existing recipe stays byte-identical. Writi
 drive (warning only).
 
 **Heal.** `gomoveshift health heal [--dry-run] [--json]` takes open `drive_failed` rows and
-launches at most one resume per incident per mirror SHA: the recipe argv + `--phase <A|BC|D>`
-(from the failed phase) + `--skip-upload --no-youtube-upload`, via
+launches at most one resume per incident per mirror SHA: the recipe argv + `--skip-upload --no-youtube-upload`, via
 the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). It is an
-audit-only resume; publish is never launched here. When the checkpoint beside the recipe
-(`pipeline_state.json`) holds a phase whose stamped code version is no longer current (see
-`PHASE_CODE_VERSIONS`), `--phase` is dropped: the plain resume re-runs the stale phases and the
-phases built from them, reusing renders by fingerprint, because a lone `--phase D` would stop at
-its prerequisite check. That attempt records `stale_phases`. No readable recipe, or an
-unmappable phase on a current checkpoint, is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
+audit-only resume; publish is never launched here. It never passes `--phase`, the drive CLI's
+single-phase mode: `--phase A` would pass phase A and then fail the DoD gate (`lf_count 0 < 1`)
+because B-D never ran. The plain resume runs every phase the checkpoint does not hold, so a
+failure in any phase heals, and a failed phase that cannot be mapped no longer refuses. When the
+checkpoint beside the recipe (`pipeline_state.json`) holds a phase whose stamped code version is
+no longer current (see `PHASE_CODE_VERSIONS`), that plain resume re-runs the stale phases and the
+phases built from them, reusing renders by fingerprint. That attempt records `stale_phases`. No
+readable recipe is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
 `{at, mirror_sha, slot, action: launched|skipped|refused, reason, job_name}` (+ `outcome`,
 `outcome_at` once the heal job ends); an unchanged repeat skip is not re-recorded.
 

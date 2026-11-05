@@ -71,7 +71,7 @@ def test_launches_audit_only_resume_with_exact_argv_and_records_attempt(tmp_path
     assert out["launched"] == ["drive_failed:demo-drive-a:r1"]
     argv, cwd = rig.launches[0]
     tail = argv[argv.index("--") + 1 :]
-    assert tail[-4:] == ["--phase", "D", "--skip-upload", "--no-youtube-upload"]
+    assert tail[-2:] == ["--skip-upload", "--no-youtube-upload"] and "--phase" not in tail
     assert "--fresh" not in tail and tail[3:6] == ["drive", "/in/demo-drive-a", "--publish"]
     assert argv[argv.index("--name") + 1] == "gms-heal-demo-drive-a-abcdef1"
     assert "--heavy" in argv and "--detach" in argv and argv[argv.index("--stall") + 1] == "86400"
@@ -98,11 +98,23 @@ def test_refuses_without_a_readable_recipe_and_never_guesses(tmp_path):
     assert rig2.launches == [] and rig2.row()["resume_attempts"][0]["action"] == "refused"
 
 
-def test_refuses_a_phase_it_cannot_map(tmp_path):
+def test_an_unmappable_phase_still_resumes_every_remaining_phase(tmp_path):
     rig = Rig(tmp_path, phase=None)
     rig.run()
-    att = rig.row()["resume_attempts"][0]
-    assert rig.launches == [] and att["action"] == "refused" and "phase" in att["reason"]
+    argv, _cwd = rig.launches[0]
+    assert "--phase" not in argv[argv.index("--") + 1 :]
+    assert rig.row()["resume_attempts"][0]["action"] == "launched"
+
+
+def test_a_phase_a_or_bc_failure_resumes_every_phase_not_the_failed_one_alone(tmp_path):
+    # `--phase A` is the drive CLI's single-phase mode: phase A passes, then the DoD gate fails
+    # (lf_count 0) because B-D never ran. Heal must run the plain resume instead.
+    for i, phase in enumerate(["phase_a", "phase_bc_day_first", "Phase B", "phase_d"]):
+        rig = Rig(tmp_path / str(i), phase=phase)
+        rig.run()
+        argv, _cwd = rig.launches[0]
+        tail = argv[argv.index("--") + 1 :]
+        assert "--phase" not in tail and tail[-2:] == ["--skip-upload", "--no-youtube-upload"]
 
 
 def test_no_auto_resume_marker_refuses_on_every_mirror_sha(tmp_path):
@@ -329,7 +341,7 @@ def test_recipe_target_registers_one_row_and_heals_only_that_drive(tmp_path):
     assert out["launched"] == [key] and len(rig.launches) == 1
     argv, cwd = rig.launches[0]
     tail = argv[argv.index("--") + 1 :]
-    assert tail[3:5] == ["drive", "/in/demo-drive-b"] and tail[-4:-2] == ["--phase", "A"]
+    assert tail[3:5] == ["drive", "/in/demo-drive-b"] and "--phase" not in tail
     assert cwd == str(rig.svc)
     other = next(r for r in load_all(rig.inc)[0] if r["drive"] == "demo-drive-a")
     assert other["resume_attempts"] == []
@@ -390,7 +402,7 @@ def test_dry_run_reports_the_exact_launch_it_would_make(tmp_path):
     assert tail[:3] == [str(rig.python), "-m", "gomoveshift"]
     assert "--allow-cross-fs-source" not in att["argv"]
     assert not any(a.startswith("/old/worktree") for a in att["argv"])
-    assert tail[-4:] == ["--phase", "D", "--skip-upload", "--no-youtube-upload"]
+    assert tail[-2:] == ["--skip-upload", "--no-youtube-upload"] and "--phase" not in tail
     assert out["would_launch"] == ["drive_failed:demo-drive-a:r1"]
 
 
@@ -472,12 +484,12 @@ def test_a_version_stale_checkpoint_resumes_every_phase_not_one(tmp_path):
     assert "phase_bc_day_first" in att["reason"]
 
 
-def test_a_current_checkpoint_keeps_the_failed_phase(tmp_path):
+def test_a_current_checkpoint_resumes_plain_with_no_stale_phases(tmp_path):
     rig = Rig(tmp_path)
     _checkpoint(rig)
     rig.run()
     argv, _cwd = rig.launches[0]
-    assert argv[-4:] == ["--phase", "D", "--skip-upload", "--no-youtube-upload"]
+    assert argv[-2:] == ["--skip-upload", "--no-youtube-upload"] and "--phase" not in argv
     assert "stale_phases" not in rig.row()["resume_attempts"][0]
 
 
@@ -496,4 +508,4 @@ def test_an_unreadable_checkpoint_is_not_stale(tmp_path):
     (rig.tmp / "stages" / "pipeline_state.json").write_text("{not json", encoding="utf-8")
     rig.run()
     argv, _cwd = rig.launches[0]
-    assert argv[-4:-2] == ["--phase", "D"]
+    assert "--phase" not in argv[argv.index("--") + 1 :]

@@ -33,22 +33,8 @@ GENERATOR_PATHS: Tuple[str, ...] = (
 )
 _METADATA_GATE = re.compile(r"metadata", re.I)
 _STALL_S = "86400"
-_LETTER = {"phase_a": "A", "phase_d": "D"}
 
 Launcher = Callable[[List[str], str], Tuple[bool, str]]
-
-
-def phase_letter(phase: Optional[str]) -> Optional[str]:
-    """Map a logged phase to a ``--phase`` choice (A, BC, D); None when it can't be."""
-    text = (phase or "").strip().lower()
-    if text in _LETTER:
-        return _LETTER[text]
-    if text.startswith(("phase_b", "phase_c")):
-        return "BC"
-    m = re.fullmatch(r"phase ([a-f])", text)
-    if m:
-        return {"a": "A", "b": "BC", "c": "BC", "d": "D"}.get(m.group(1))
-    return None
 
 
 def stale_phases(recipe_path: Path) -> List[str]:
@@ -140,10 +126,11 @@ def launch_argv(
     jobs_dir: Path,
     name: str,
     recipe_argv: List[str],
-    letter: Optional[str],
     env: Optional[Dict[str, str]] = None,
 ):
-    """``letter`` None runs the plain resume: every phase the checkpoint does not hold."""
+    """The plain resume: every phase the checkpoint does not hold. Never ``--phase X``, the drive
+    CLI's single-phase mode: it runs X alone, so a phase-A failure would pass A and then fail the
+    DoD gate because B-D never ran."""
     # ``env K=V`` in the argv itself, so a dry run shows the staging the resume will use.
     prefix = ["env", *(f"{k}={v}" for k, v in sorted(env.items()))] if env else []
     return [
@@ -152,7 +139,7 @@ def launch_argv(
         "--name", name, "--heavy", "--detach", "--stall", _STALL_S,
         "--log-root", str(jobs_dir),
         "--",
-        *recipe_argv, *(["--phase", letter] if letter else []),
+        *recipe_argv,
         "--skip-upload", "--no-youtube-upload",
     ]  # fmt: skip
 
@@ -359,11 +346,8 @@ def run_heal(
         }  # fmt: skip
         recipe_path = row.get("resume_recipe")
         recipe = resume.read_recipe(Path(recipe_path)) if recipe_path else None
-        letter = phase_letter(row.get("phase"))
         stale = stale_phases(Path(recipe_path)) if recipe else []
         if stale:
-            # `--phase X` stops at its prerequisite check once a stale phase is dropped
-            letter = None
             att["stale_phases"] = stale
         slot = None
         if recipe is None:
@@ -372,8 +356,6 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif letter is None and not stale:
-            att.update(action="refused", reason=f"cannot map phase {row.get('phase')!r} to A/BC/D")
         elif any(a.get("mirror_sha") == sha and a.get("action") == "launched" for a in attempts):
             continue  # guard (a): once per mirror SHA; silent so a pass is not noise
         elif drive_running(jobs_dir):
@@ -401,7 +383,7 @@ def run_heal(
             # Always this launcher's own value: the recipe records only RECIPE_ENV_KEYS, never an
             # origin, and a recipe file must not be able to name its own launcher.
             env = {**resume.recipe_env(recipe), run_origin.LAUNCHED_BY_ENV: "health-heal"}
-            argv = launch_argv(code_root, jobs_dir, name, bound, letter, env=env)
+            argv = launch_argv(code_root, jobs_dir, name, bound, env=env)
             att["interpreter"] = bound[0]
             if dry_run:  # the exact launch, so the evidence is gradeable before it runs
                 att.update(argv=argv, cwd=cwd, job_name=name, reason="dry run: would launch")
