@@ -121,7 +121,7 @@ def test_race_claim_of_another_drive_is_undone(tmp_path, monkeypatch):
     assert rig.store.bookings() == [] and not rig.launches
 
 
-@pytest.mark.parametrize("status", ["ready", "claimed", "complete", "failed"])
+@pytest.mark.parametrize("status", ["ready", "claimed", "complete"])
 def test_only_an_auditing_drive_can_be_published(tmp_path, status):
     rig = Rig(tmp_path)
     rig.audit(status="ready")
@@ -316,4 +316,41 @@ def test_a_checkpoint_the_current_code_re_runs_is_refused_before_any_write(tmp_p
     res = rig.run()
     assert res["action"] == "refused" and "phase_bc_day_first" in res["reason"], res
     assert "re-audit" in res["reason"]
+    assert rig.snapshot() == before and not rig.launches
+
+
+def _failed_publish(rig):
+    rig.audit(status="ready")
+    rig.store.claim_drive("day-a", [datetime(2026, 10, 23, 9, tzinfo=ET)], "c1", now=NOW)
+    rig.store.finish_claim("c1", ok=False)
+    assert rig.store.drive("day-a").status == "failed" and rig.store.bookings() == []
+
+
+def test_a_failed_publish_with_no_upload_is_reopened_and_launched(tmp_path):
+    # A Phase D job that died before uploading leaves the drive failed; its audit still holds,
+    # so the next ``health publish`` reopens it (auditing) and claims a slot again.
+    rig = Rig(tmp_path)
+    _failed_publish(rig)
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert res["steps"][0].startswith("reopen: day-a failed -> auditing")
+    assert rig.store.drive("day-a").status == "claimed" and len(rig.launches) == 1
+
+
+def test_reopening_a_failed_drive_is_dry_run_safe(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig)
+    before = rig.snapshot()
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_publish" and res["steps"][0].startswith("reopen:")
+    assert rig.snapshot() == before and not rig.launches
+
+
+def test_a_failed_drive_with_an_upload_receipt_is_still_refused(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig)
+    _published(rig, "day-a")
+    before = rig.snapshot()
+    res = rig.run()
+    assert res["action"] == "refused" and "upload receipt" in res["reason"]
     assert rig.snapshot() == before and not rig.launches

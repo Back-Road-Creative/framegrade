@@ -2,7 +2,8 @@
 Waypost, and the hourly reconcile that closes its claim.
 
 Order, each a stop that leaves the store as it was: the drive must be ``auditing`` in
-``schedule.sqlite3`` with no upload receipt; no drive job running; its ``resume.json`` recipe must
+``schedule.sqlite3`` (or ``failed`` -- a publish job that died before uploading -- which is
+reopened to ``auditing`` at the first write) with no upload receipt; no drive job running; its ``resume.json`` recipe must
 rebind to the code root's venv and its checkpoint hold no phase the current code re-runs (Phase D
 refuses a missing prerequisite, after the slot is booked); and no older ``ready`` drive may sit ahead of it (Waypost claims the
 oldest ready drive of a region, never a named one), except one already uploaded outside a claim,
@@ -93,7 +94,8 @@ def run_publish(
         return _refuse(res, f"{project} is not in the schedule store")
     if d.region != region.strip().lower():
         return _refuse(res, f"{project} is a {d.region} drive, not {region}")
-    if d.status != "auditing":
+    reopen = d.status == "failed"
+    if d.status != "auditing" and not reopen:
         return _refuse(res, f"{project} is {d.status}; only an auditing drive can be approved")
     if d.lf_count != 1:
         return _refuse(res, f"{project} has {d.lf_count} long-forms; publish handles one")
@@ -122,7 +124,8 @@ def run_publish(
         **resume.recipe_env(recipe),
         run_origin.LAUNCHED_BY_ENV: run_origin.PUBLISH_LAUNCHER,
     }
-    steps = [*(f"retire: {p} (uploaded outside a claim: Waypost books its receipt, complete)" for p in published),
+    steps = [*([f"reopen: {project} failed -> auditing (no upload receipt)"] if reopen else []),
+             *(f"retire: {p} (uploaded outside a claim: Waypost books its receipt, complete)" for p in published),
              f"approve: {project} auditing -> ready",
              f"claim: Waypost {region} slot for {project}",
              f"launch: {JOB_PREFIX}{project} (Phase D, --youtube-upload)",
@@ -141,6 +144,8 @@ def run_publish(
             store.retire_published(p, upload_receipts(store.drive(p).output_dir), now=now)
         except (SlotTaken, ValueError, KeyError) as exc:
             return _refuse(res, f"{p} is ready, older and uploaded, but Waypost refused to retire it: {exc}")  # fmt: skip
+    if reopen:
+        _back_to_auditing(store, d)
     store.set_status(project, "ready")
     try:
         c = claim_or_reason(store, cadence, region, now=now, lead_hours=lead_hours,
