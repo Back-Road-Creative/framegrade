@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.38] - 2026-11-05
+
+### Fixed
+
+- The backlog launcher now passes a row's `placeless_label` to `drive` as `--placeless-label`. It used to drop the field, so a no-GPS row launched with no label and the place gates refused it.
+
 ## [0.3.37] - 2026-11-05
 
 ### Fixed
@@ -525,7 +531,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...HEAD
+[0.3.38]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...v0.3.38
 [0.3.37]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...v0.3.37
 [0.3.36]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.35...v0.3.36
 [0.3.35]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.34...v0.3.35
