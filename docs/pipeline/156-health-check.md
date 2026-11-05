@@ -195,8 +195,9 @@ uploading a drive `health backlog` audited. It goes through Waypost's claim, so 
 never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasses it). Exit 2 on
 `refused`, else 0.
 
-1. **Checks, no writes.** The drive must be `auditing` in `schedule.sqlite3` (any other status is
-   `refused` with the status named), one long-form, with no upload receipt under its output dir;
+1. **Checks, no writes.** The drive must be `auditing` in `schedule.sqlite3`, or `failed` (a publish
+   job that ended without uploading; it is reopened to `auditing` at the first write, step
+   `reopen:`); any other status is `refused` with the status named. One long-form, with no upload receipt under its output dir;
    no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
    root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
    version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing
