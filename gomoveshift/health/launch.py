@@ -202,6 +202,32 @@ def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) ->
     return None
 
 
+def upload_receipts(output_dir: Optional[str]) -> Dict[int, Tuple[str, datetime]]:
+    """``{lf_index: (video_id, publish_at)}`` from Phase D's receipts under ``output_dir`` (the
+    same files ``_uploaded`` reads), the shape Waypost's ``retire_published`` books. An entry with
+    no video id, no parseable ``publish_at`` or no digit in its key is left out."""
+    found: Dict[int, Tuple[str, datetime]] = {}
+    if not output_dir:
+        return found
+    out = Path(output_dir)
+    for receipt in [out / "youtube_uploads.json", *sorted(out.glob("*/youtube_uploads.json"))]:
+        try:
+            held = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            continue
+        for key, r in held.items() if isinstance(held, dict) else ():
+            digits = "".join(ch for ch in str(key) if ch.isdigit())
+            if not (isinstance(r, dict) and r.get("video_id") and digits):
+                continue
+            try:
+                found.setdefault(
+                    int(digits), (r["video_id"], datetime.fromisoformat(r["publish_at"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+    return found
+
+
 def _uploaded(output_dir: Optional[str]) -> bool:
     """True when Phase D's receipt under ``output_dir`` (``youtube_uploads.json`` there or one
     level down) names a video id: the drive is published, so it neither holds nor covers a slot

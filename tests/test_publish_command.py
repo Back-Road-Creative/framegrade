@@ -248,3 +248,72 @@ def test_cli_parses_and_refuses_with_exit_2_when_the_store_is_absent(tmp_path, c
     monkeypatch.setattr(seo_slots, "waypost_cadence", lambda cfg: CAD)
     assert health.cmd_health(args, config) == 2
     assert "does not exist" in capsys.readouterr().out
+
+
+# -- a ready drive already uploaded outside a claim (Beaufort, 2026-11-05) ----------------------
+
+
+def _uploaded_outside_a_claim(rig, project="beaufort"):
+    """A ``ready`` row whose upload pass ran outside any claim: the receipt sits one level down
+    (the run dir) and Waypost booked the video under that run dir's name, not the drive's."""
+    out = rig.audit(project, status="ready", recipe=False)
+    (out / "src").mkdir(parents=True)
+    at = "2026-10-27T20:00:00+00:00"
+    (out / "src" / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "XIT4", "publish_at": at}}))  # fmt: skip
+    rig.store.book("src", 1, "usa", datetime.fromisoformat(at), video_id="XIT4", booked_at=NOW)
+
+
+def test_publish_retires_an_older_ready_drive_that_is_already_uploaded(tmp_path):
+    rig = Rig(tmp_path)
+    _uploaded_outside_a_claim(rig)
+    rig.audit("day-a")
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert rig.store.drive("beaufort").status == "complete"
+    assert rig.store.drive("day-a").status == "claimed"
+    assert {b.project: b.video_id for b in rig.store.bookings()}["beaufort"] == "XIT4"
+    assert "src" not in {b.project for b in rig.store.bookings()}  # the stray booking is adopted
+
+
+def test_publish_dry_run_names_the_retirement_and_changes_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _uploaded_outside_a_claim(rig)
+    rig.audit("day-a")
+    before = rig.snapshot()
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_publish", res
+    assert any(s.startswith("retire: beaufort") for s in res["steps"])
+    assert rig.snapshot() == before
+
+
+def test_reconcile_retires_a_ready_drive_that_is_already_uploaded(tmp_path):
+    rig = Rig(tmp_path)
+    _uploaded_outside_a_claim(rig)
+    assert publish.reconcile_publishes(rig.store, rig.jobs) == [{"project": "beaufort", "status": "complete"}]  # fmt: skip
+    assert rig.store.drive("beaufort").status == "complete"
+    assert publish.reconcile_publishes(rig.store, rig.jobs) == []  # idempotent
+
+
+def test_a_receipt_without_publish_at_is_left_ready(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit("older", status="ready", recipe=False)
+    _published(rig, "older")  # video id but no publish_at: Waypost cannot book it
+    assert publish.reconcile_publishes(rig.store, rig.jobs) == []
+    assert rig.store.drive("older").status == "ready"
+
+
+def test_a_checkpoint_the_current_code_re_runs_is_refused_before_any_write(tmp_path):
+    """Kenmare, 2026-11-05: phase_bc_day_first went 3 -> 4 after the audit, so Phase D refused
+    its prerequisite after the claim was booked. The publish now refuses first: re-audit it."""
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    rig = Rig(tmp_path)
+    rig.audit()
+    stale = {"phase_a": PHASE_CODE_VERSIONS["phase_a"], "phase_bc_day_first": PHASE_CODE_VERSIONS["phase_bc_day_first"] - 1}  # fmt: skip
+    state = rig.stages / "day-a" / "day-a" / "_stages" / "pipeline_state.json"
+    state.write_text(json.dumps({"phases_completed": ["phase_a", "phase_bc_day_first"], "phase_code_versions": stale}))  # fmt: skip
+    before = rig.snapshot()
+    res = rig.run()
+    assert res["action"] == "refused" and "phase_bc_day_first" in res["reason"], res
+    assert "re-audit" in res["reason"]
+    assert rig.snapshot() == before and not rig.launches
