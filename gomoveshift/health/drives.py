@@ -15,6 +15,7 @@ MARKER = "Drive pipeline failed"
 # "drive" anywhere) is still recognized as a drive from its own log.
 DRIVE_LOGGER = "gomoveshift.pipeline.drive_orchestrator"
 _TAIL_BYTES = 2_000_000
+_DIR_KEY = "_job_dir"  # in-memory only: the directory a record was loaded from
 _DRIVE_NAME_RE = re.compile(r"\b(?:project|drive)[ _]name\s*[=:]\s*['\"]?([A-Za-z0-9._-]+)", re.I)
 _PHASE_RE = re.compile(r"\b(phase_[a-z0-9_]+|Phase [A-F])\b")
 _GATE_RE = re.compile(r"([A-Za-z][A-Za-z /_-]{2,60}?)\s+HARD FAIL|\bGATE[ _]([A-Z_]+)")
@@ -50,11 +51,22 @@ def _expect_logs(rec: Dict[str, Any]) -> List[Path]:
     return [Path(p) for p in rec.get("expect") or [] if isinstance(p, str)]
 
 
+def _scan_logs(rec: Dict[str, Any]) -> List[Path]:
+    """Logs worth reading for a job: its ``expect`` list (for a launcher job, the drive log), then
+    the job's own ``output.log`` beside its ``job.json``. A backlog drive job's ``expect`` is an
+    artifact glob, so the recipe line and the error only ever appear in the job's own log."""
+    logs = _expect_logs(rec)
+    here = rec.get(_DIR_KEY)
+    if isinstance(here, str) and here:
+        logs.append(Path(here) / "output.log")
+    return logs
+
+
 def _is_drive_job(rec: Dict[str, Any]) -> bool:
     argv = [str(a) for a in rec.get("argv") or []]
     if "drive" in argv or "drive" in str(rec.get("name") or ""):
         return True
-    for lp in _expect_logs(rec):
+    for lp in _scan_logs(rec):
         lines = _tail(lp)
         if lines and any(DRIVE_LOGGER in ln or MARKER in ln for ln in lines):
             return True
@@ -65,7 +77,7 @@ def _links(rec: Dict[str, Any]) -> Tuple[Set[str], Optional[str]]:
     """``(expect log paths, stages dir)`` of a job: what ties it to a sibling run of one drive."""
     logs = {str(p) for p in _expect_logs(rec)}
     stages: Optional[str] = None
-    for lp in _expect_logs(rec):
+    for lp in _scan_logs(rec):
         lines = _tail(lp)
         found = resume.parse_recipe_path(lines) if lines else None
         if found:
@@ -94,6 +106,7 @@ def detect(
             except (OSError, ValueError, TypeError):
                 unreadable += 1
                 continue
+            rec[_DIR_KEY] = str(path.parent)
             records.append(rec)
     for rec in sorted(records, key=lambda r: float(r.get("created_at") or 0)):
         if _is_drive_job(rec):
@@ -109,7 +122,7 @@ def detect(
         result = rec.get("result") or {}
         state = result.get("state")
         exit_code = result.get("exit_code")
-        logs = _expect_logs(rec)
+        logs = _scan_logs(rec)
         parsed: Dict[str, Optional[str]] = {}
         log_path: Optional[Path] = None
         marked = False
