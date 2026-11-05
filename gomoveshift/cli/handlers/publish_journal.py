@@ -268,13 +268,13 @@ def run_publish_journal(
             print("\n(dry-run; pass --apply to write)", file=out)
             return 0
 
-        if not plan.inserts and not plan.days_to_create and not plan.deferrals:
+        if not (plan.inserts or plan.days_to_create or plan.deferrals or plan.trip_end):
             print("\nNo changes to write.", file=out)
             return 0
 
         # Write the journey YAML first (only the immediate inserts). Atomic: a
         # crash mid-write must leave the published page intact, never truncated.
-        if plan.inserts or plan.days_to_create:
+        if plan.inserts or plan.days_to_create or plan.trip_end:
             apply_merge(doc, plan, library=VideoLibrary.for_site(site_path, writable=True))
             atomic_write_text(journey_path, serialize_journey(doc, body))
             print(f"\nWrote {journey_path}", file=out)

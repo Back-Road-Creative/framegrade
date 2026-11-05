@@ -19,6 +19,7 @@ from ..journal_publisher import (
     journey_lock,
     load_journey,
     serialize_journey,
+    set_trip_end,
 )
 
 
@@ -142,10 +143,7 @@ def extend_adjacent_journey(site_path: Path, run_date: str) -> str | None:
     with journey_lock(path):
         doc, body = load_journey(path)
         trip = doc["trip"]
-        trip["end_date"] = run_date
-        if "duration_days" in trip:
-            start = _parse_date(trip.get("start_date"))
-            trip["duration_days"] = (day - start).days + 1
+        set_trip_end(trip, day)
         days = doc.setdefault("days", [])
         if run_date not in {str(d.get("date")) for d in days}:
             days.append(
