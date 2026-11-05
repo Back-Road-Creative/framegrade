@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.36] - 2026-11-04
+
+### Fixed
+
+- `gomoveshift health heal` re-audits a drive whose checkpoint was stamped by an older phase code version (for example after `PHASE_BC_CODE_VERSION` moved to 4) as a full audit-only resume instead of `--phase D`, which stopped at the prerequisite check. Renders are reused by fingerprint; the attempt records `stale_phases`.
+
 ## [0.3.35] - 2026-11-04
 
 ### Added
@@ -511,7 +517,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.35...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...HEAD
+[0.3.36]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.35...v0.3.36
 [0.3.35]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.34...v0.3.35
 [0.3.34]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.33...v0.3.34
 [0.3.33]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.32...v0.3.33
