@@ -4,11 +4,13 @@ Waypost, and the hourly reconcile that closes its claim.
 Order, each a stop that leaves the store as it was: the drive must be ``auditing`` in
 ``schedule.sqlite3`` with no upload receipt; no drive job running; its ``resume.json`` recipe must
 rebind to the code root's venv; and no older ``ready`` drive may sit ahead of it (Waypost claims the
-oldest ready drive of a region, never a named one). Then ``set_status ready`` -> ``claim_or_reason``
+oldest ready drive of a region, never a named one), except one already uploaded outside a claim,
+which is retired from its receipts first (Waypost's ``retire_published``). Then ``set_status ready`` -> ``claim_or_reason``
 -> a detached Phase D job (``--lf-publish-date`` = the claimed slot's local date, ``--youtube-upload
 --phase D``, the recipe's own region/mode/GPX flags and ``GMS_INTERMEDIATE_DIR``). A claim of any
 other drive, or a launch that fails, is undone. ``reconcile_publishes`` (called by ``health check``)
-later calls ``finish_claim`` for each claimed drive whose ``gms-publish-<project>`` job has ended."""
+later calls ``finish_claim`` for each claimed drive whose ``gms-publish-<project>`` job has ended,
+and retires each ``ready`` drive that is already uploaded."""
 
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ from seo_manager.scheduling.store import SlotTaken, StaleDrive
 from .. import run_origin
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner
-from .launch import _uploaded, default_launcher
+from .launch import _uploaded, default_launcher, upload_receipts
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -106,6 +108,8 @@ def run_publish(
     if bound is None:
         return _refuse(res, why)
     older = [r for r in store.drives(region, "ready") if (r.created_at, r.project) < (d.created_at, d.project)]  # fmt: skip
+    published = [r.project for r in older if upload_receipts(r.output_dir)]
+    older = [r for r in older if r.project not in published]
     if older:
         return _refuse(res, f"{older[0].project} is ready and older: Waypost claims the oldest "
                        "ready drive first; publish or fail it, then retry")  # fmt: skip
@@ -113,7 +117,8 @@ def run_publish(
         **resume.recipe_env(recipe),
         run_origin.LAUNCHED_BY_ENV: run_origin.PUBLISH_LAUNCHER,
     }
-    steps = [f"approve: {project} auditing -> ready",
+    steps = [*(f"retire: {p} (uploaded outside a claim: Waypost books its receipt, complete)" for p in published),
+             f"approve: {project} auditing -> ready",
              f"claim: Waypost {region} slot for {project}",
              f"launch: {JOB_PREFIX}{project} (Phase D, --youtube-upload)",
              "close: health check completes or fails the claim when the job ends"]  # fmt: skip
@@ -126,6 +131,11 @@ def run_publish(
             if isinstance(peek, Claim) else {"reason": peek.reason}
         )  # fmt: skip
         return {**res, "action": "would_publish", "reason": f"{project} (dry run: nothing changed)"}
+    for p in published:
+        try:
+            store.retire_published(p, upload_receipts(store.drive(p).output_dir), now=now)
+        except (SlotTaken, ValueError, KeyError) as exc:
+            return _refuse(res, f"{p} is ready, older and uploaded, but Waypost refused to retire it: {exc}")  # fmt: skip
     store.set_status(project, "ready")
     try:
         c = claim_or_reason(store, cadence, region, now=now, lead_hours=lead_hours,
@@ -162,13 +172,31 @@ def run_publish(
     return {**res, "action": "launched", "reason": f"{project} for {slot.isoformat()}"}
 
 
+def retire_uploaded(store: Any, *, now: Optional[datetime] = None) -> List[Dict[str, str]]:
+    """Close each ``ready`` drive that was uploaded outside a claim, from its receipts: Waypost
+    books each LF at its ``publish_at``, adopts a booking of the same video under a stray name
+    (the run dir), and marks the drive ``complete``, so it no longer sits first in the claim line.
+    A receipt Waypost cannot book (no ``publish_at``, a clash) leaves the drive ``ready``."""
+    done: List[Dict[str, str]] = []
+    for d in store.all_drives():
+        held = upload_receipts(d.output_dir) if d.status == "ready" else {}
+        if not held:
+            continue
+        try:
+            done.append({"project": d.project, "status": store.retire_published(d.project, held, now=now)})  # fmt: skip
+        except (SlotTaken, ValueError, KeyError):
+            continue
+    return done
+
+
 def reconcile_publishes(
     store: Any, jobs_dir: Path, *, uploaded: Callable[[Optional[str]], bool] = _uploaded
 ) -> List[Dict[str, str]]:
     """Close each claimed drive whose newest ``gms-publish-<project>`` job (started after the
     claim) has ended: ``complete`` when its output holds an upload receipt (a receipt wins over
     the exit code, so a published video never loses its slot), else ``failed``, which frees the
-    unconfirmed booking. A running job, or a claim with no publish job, is left alone."""
+    unconfirmed booking. A running job, or a claim with no publish job, is left alone.
+    Then ``retire_uploaded``."""
     records = _job_records(Path(jobs_dir))
     done: List[Dict[str, str]] = []
     for d in store.all_drives():
@@ -183,7 +211,7 @@ def reconcile_publishes(
             continue
         ok = uploaded(d.output_dir)
         done.append({"project": d.project, "status": store.finish_claim(d.claim_id, ok=ok)})
-    return done
+    return done + retire_uploaded(store)
 
 
 def open_schedule_store(config: Any, *, create: bool = False):

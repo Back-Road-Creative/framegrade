@@ -196,7 +196,11 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    `refused` with the status named), one long-form, with no upload receipt under its output dir;
    no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
    root's venv; and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
-   the oldest ready drive of the region, never a named one.
+   the oldest ready drive of the region, never a named one. An older `ready` drive that already
+   holds an upload receipt with `publish_at` (uploaded outside a claim) does not block: it is
+   listed as a `retire:` step, and before the approve Waypost's `retire_published` books its
+   receipt (adopting a booking of the same video under its run dir's name) and marks it
+   `complete`. A retirement Waypost refuses is `refused`.
 2. **Approve.** `set_status(project, "ready")`.
 3. **Claim.** `claim_or_reason(...)`. A miss (`outside_lead_window`, a taken slot, a stale sha) puts
    the drive back to `auditing`. If the claim names another drive (it became ready first), that
@@ -213,8 +217,9 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    `finish_claim` with `ok` = the output dir holds an upload receipt (`youtube_uploads.json` with a
    `video_id`; a receipt wins over the exit code, so a live video keeps its slot). Otherwise the
    drive is `failed` and its unconfirmed booking is released. A running job, or a claim with no
-   publish job, is left alone; a repeat pass is a no-op. The closed claims are
-   `publish_reconciled` in `run_check`'s result.
+   publish job, is left alone; a repeat pass is a no-op. It then retires every `ready` drive
+   that already holds an upload receipt (`publish.retire_uploaded`, the same `retire_published`
+   call). The closed claims and retirements are `publish_reconciled` in `run_check`'s result.
 
 `--dry-run` runs every check, then reports the four steps and Waypost's own dry-run answer
 (`next_claim`); it writes nothing and launches nothing.
