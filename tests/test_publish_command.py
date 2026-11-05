@@ -300,3 +300,20 @@ def test_a_receipt_without_publish_at_is_left_ready(tmp_path):
     _published(rig, "older")  # video id but no publish_at: Waypost cannot book it
     assert publish.reconcile_publishes(rig.store, rig.jobs) == []
     assert rig.store.drive("older").status == "ready"
+
+
+def test_a_checkpoint_the_current_code_re_runs_is_refused_before_any_write(tmp_path):
+    """Kenmare, 2026-11-05: phase_bc_day_first went 3 -> 4 after the audit, so Phase D refused
+    its prerequisite after the claim was booked. The publish now refuses first: re-audit it."""
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    rig = Rig(tmp_path)
+    rig.audit()
+    stale = {"phase_a": PHASE_CODE_VERSIONS["phase_a"], "phase_bc_day_first": PHASE_CODE_VERSIONS["phase_bc_day_first"] - 1}  # fmt: skip
+    state = rig.stages / "day-a" / "day-a" / "_stages" / "pipeline_state.json"
+    state.write_text(json.dumps({"phases_completed": ["phase_a", "phase_bc_day_first"], "phase_code_versions": stale}))  # fmt: skip
+    before = rig.snapshot()
+    res = rig.run()
+    assert res["action"] == "refused" and "phase_bc_day_first" in res["reason"], res
+    assert "re-audit" in res["reason"]
+    assert rig.snapshot() == before and not rig.launches

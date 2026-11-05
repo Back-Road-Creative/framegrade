@@ -3,7 +3,8 @@ Waypost, and the hourly reconcile that closes its claim.
 
 Order, each a stop that leaves the store as it was: the drive must be ``auditing`` in
 ``schedule.sqlite3`` with no upload receipt; no drive job running; its ``resume.json`` recipe must
-rebind to the code root's venv; and no older ``ready`` drive may sit ahead of it (Waypost claims the
+rebind to the code root's venv and its checkpoint hold no phase the current code re-runs (Phase D
+refuses a missing prerequisite, after the slot is booked); and no older ``ready`` drive may sit ahead of it (Waypost claims the
 oldest ready drive of a region, never a named one), except one already uploaded outside a claim,
 which is retired from its receipts first (Waypost's ``retire_published``). Then ``set_status ready`` -> ``claim_or_reason``
 -> a detached Phase D job (``--lf-publish-date`` = the claimed slot's local date, ``--youtube-upload
@@ -23,7 +24,7 @@ from seo_manager.scheduling.store import SlotTaken, StaleDrive
 
 from .. import run_origin
 from . import resume
-from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner
+from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
 from .launch import _uploaded, default_launcher, upload_receipts
 
 JOB_PREFIX = "gms-publish-"
@@ -107,6 +108,10 @@ def run_publish(
     bound, why = bind_to_code_root(code_root, recipe["argv"])
     if bound is None:
         return _refuse(res, why)
+    stale = stale_phases(recipe_path)
+    if stale:
+        return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
+                       "re-run); re-audit it (health heal) before publishing")  # fmt: skip
     older = [r for r in store.drives(region, "ready") if (r.created_at, r.project) < (d.created_at, d.project)]  # fmt: skip
     published = [r.project for r in older if upload_receipts(r.output_dir)]
     older = [r for r in older if r.project not in published]

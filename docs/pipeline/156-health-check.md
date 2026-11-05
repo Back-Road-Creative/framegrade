@@ -195,7 +195,10 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
 1. **Checks, no writes.** The drive must be `auditing` in `schedule.sqlite3` (any other status is
    `refused` with the status named), one long-form, with no upload receipt under its output dir;
    no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
-   root's venv; and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
+   root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
+   version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing
+   prerequisite only after the slot is booked), else `refused` naming the phases: re-audit it;
+   and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
    the oldest ready drive of the region, never a named one. An older `ready` drive that already
    holds an upload receipt with `publish_at` (uploaded outside a claim) does not block: it is
    listed as a `retire:` step, and before the approve Waypost's `retire_published` books its
