@@ -34,6 +34,8 @@ A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve 
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
 the row unrecorded and the next pass retries it. A condition that clears sets `resolved_at`.
+An open row found again keeps its `pushed` state and `resume_attempts`; only a `resume_recipe` or
+`log_path` it was filed without is filled from the current detection (a row an older reader filed).
 
 ## Incident row, schema `health-incident/1`
 
@@ -95,7 +97,8 @@ interpreter, is `refused` with the reason.
 
 **One drive.** `health heal --recipe <stages dir>/resume.json` heals that drive only: it registers
 the recipe as a `drive_failed` row keyed `drive_failed:<drive>:recipe` (reusing an existing row, so
-attempt history is kept), then runs the pass above restricted to that key. For a drive no
+attempt history is kept; a resolved row is reopened, stamped `reopened_at`, so an operator's
+`--recipe` is never a silent no-op), then runs the pass above restricted to that key. For a drive no
 `health check` saw fail, e.g. an evidence run. An unreadable recipe exits 2 and writes nothing;
 with `--dry-run` the row is registered in a scratch copy and the incidents dir is untouched.
 

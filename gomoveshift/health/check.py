@@ -19,6 +19,8 @@ _EVENTS = {
     "queue_stalled": "health_queue_stalled",
 }
 
+_BACKFILL = ("resume_recipe", "log_path")
+
 
 def _line(row: Dict[str, Any]) -> str:
     if row["kind"] == "drive_failed":
@@ -155,7 +157,13 @@ def run_check(
         for row in rows:
             prior = by_key.get(row["key"])
             if prior is not None and not prior.get("resolved_at"):
-                continue  # already on file; keeps its pushed state and resume_attempts
+                # Already on file: keeps its pushed state and resume_attempts, but takes the
+                # recipe and log an older reader missed, so heal can reach the drive.
+                fill = {k: row[k] for k in _BACKFILL if row.get(k) and not prior.get(k)}
+                if fill:
+                    prior.update(fill)
+                    write_row(incidents_dir, prior)
+                continue
             write_row(incidents_dir, row)
             by_key[row["key"]] = row
             new.append(row["key"])

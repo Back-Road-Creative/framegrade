@@ -509,3 +509,20 @@ def test_an_unreadable_checkpoint_is_not_stale(tmp_path):
     rig.run()
     argv, _cwd = rig.launches[0]
     assert "--phase" not in argv[argv.index("--") + 1 :]
+
+
+def test_re_registering_a_resolved_recipe_reopens_it_with_its_history(tmp_path):
+    # An operator's --recipe is never a silent no-op: a row `health check` resolved
+    # (e.g. after a phase-A-only heal "succeeded") opens again and heals.
+    rig = Rig(tmp_path)
+    path = _second_recipe(tmp_path)
+    key = heal.register_recipe(rig.inc, path, now_iso="t")
+    rig.run(only_key=key)
+    row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
+    row["resolved_at"] = "t1"
+    write_row(rig.inc, row)
+    assert heal.register_recipe(rig.inc, path, now_iso="t2") == key
+    row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
+    assert not row.get("resolved_at") and row["reopened_at"] == "t2"
+    assert [a["action"] for a in row["resume_attempts"]] == ["launched"]
+    assert rig.run(sha="newer", only_key=key)["launched"] == [key]
