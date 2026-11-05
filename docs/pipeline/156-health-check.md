@@ -67,8 +67,12 @@ drive (warning only).
 launches at most one resume per incident per mirror SHA: the recipe argv + `--phase <A|BC|D>`
 (from the failed phase) + `--skip-upload --no-youtube-upload`, via
 the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). It is an
-audit-only resume; publish is never launched here. No readable recipe, or an unmappable phase,
-is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
+audit-only resume; publish is never launched here. When the checkpoint beside the recipe
+(`pipeline_state.json`) holds a phase whose stamped code version is no longer current (see
+`PHASE_CODE_VERSIONS`), `--phase` is dropped: the plain resume re-runs the stale phases and the
+phases built from them, reusing renders by fingerprint, because a lone `--phase D` would stop at
+its prerequisite check. That attempt records `stale_phases`. No readable recipe, or an
+unmappable phase on a current checkpoint, is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
 `{at, mirror_sha, slot, action: launched|skipped|refused, reason, job_name}` (+ `outcome`,
 `outcome_at` once the heal job ends); an unchanged repeat skip is not re-recorded.
 

@@ -51,6 +51,26 @@ def phase_letter(phase: Optional[str]) -> Optional[str]:
     return None
 
 
+def stale_phases(recipe_path: Path) -> List[str]:
+    """The completed phases of the recipe's checkpoint (``pipeline_state.json`` beside it) that
+    the current code re-runs because their stamped code version changed, plus the phases built
+    from them. ``[]`` for a missing or unreadable checkpoint (nothing to judge, the failed phase
+    decides)."""
+    from ..pipeline.orchestrator_fingerprint import (  # noqa: PLC0415 -- heavy, heal-only
+        invalidate_phases_if_code_version_stale,
+    )
+
+    try:
+        saved = json.loads((Path(recipe_path).parent / "pipeline_state.json").read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(saved, dict) or not isinstance(saved.get("phases_completed"), list):
+        return []
+    done = [p for p in saved["phases_completed"] if isinstance(p, str)]
+    kept = invalidate_phases_if_code_version_stale(saved, done)
+    return [p for p in done if p not in kept]
+
+
 def job_name(drive: str, sha: str) -> str:
     return f"gms-heal-{safe_name(drive)}-{sha[:7]}"
 
@@ -120,9 +140,10 @@ def launch_argv(
     jobs_dir: Path,
     name: str,
     recipe_argv: List[str],
-    letter: str,
+    letter: Optional[str],
     env: Optional[Dict[str, str]] = None,
 ):
+    """``letter`` None runs the plain resume: every phase the checkpoint does not hold."""
     # ``env K=V`` in the argv itself, so a dry run shows the staging the resume will use.
     prefix = ["env", *(f"{k}={v}" for k, v in sorted(env.items()))] if env else []
     return [
@@ -131,8 +152,15 @@ def launch_argv(
         "--name", name, "--heavy", "--detach", "--stall", _STALL_S,
         "--log-root", str(jobs_dir),
         "--",
-        *recipe_argv, "--phase", letter, "--skip-upload", "--no-youtube-upload",
+        *recipe_argv, *(["--phase", letter] if letter else []),
+        "--skip-upload", "--no-youtube-upload",
     ]  # fmt: skip
+
+
+def _launch_reason(stale: List[str]) -> str:
+    if stale:
+        return f"new mirror SHA; audit-only full resume (code version changed: {', '.join(stale)})"
+    return "new mirror SHA; audit-only resume"
 
 
 def _default_launcher(argv: List[str], cwd: str) -> Tuple[bool, str]:
@@ -332,6 +360,11 @@ def run_heal(
         recipe_path = row.get("resume_recipe")
         recipe = resume.read_recipe(Path(recipe_path)) if recipe_path else None
         letter = phase_letter(row.get("phase"))
+        stale = stale_phases(Path(recipe_path)) if recipe else []
+        if stale:
+            # `--phase X` stops at its prerequisite check once a stale phase is dropped
+            letter = None
+            att["stale_phases"] = stale
         slot = None
         if recipe is None:
             att.update(action="refused", reason="no readable resume.json for this incident")
@@ -339,7 +372,7 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif letter is None:
+        elif letter is None and not stale:
             att.update(action="refused", reason=f"cannot map phase {row.get('phase')!r} to A/BC/D")
         elif any(a.get("mirror_sha") == sha and a.get("action") == "launched" for a in attempts):
             continue  # guard (a): once per mirror SHA; silent so a pass is not noise
@@ -377,7 +410,7 @@ def run_heal(
                 ok, detail = launcher(argv, cwd)
                 att["job_name"] = name
                 if ok:
-                    att.update(action="launched", reason="new mirror SHA; audit-only resume")
+                    att.update(action="launched", reason=_launch_reason(stale))
                 else:
                     att["reason"] = f"launch failed: {detail}"
         if dry_run:

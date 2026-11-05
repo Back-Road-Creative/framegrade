@@ -435,3 +435,65 @@ def test_a_recorded_launcher_in_the_recipe_cannot_replace_the_heal_marker(tmp_pa
     rig.run()
     argv, _cwd = rig.launches[0]
     assert "GMS_LAUNCHED_BY=health-heal" in argv and "GMS_LAUNCHED_BY=console" not in argv
+
+
+def _checkpoint(rig: Rig, **versions) -> None:
+    """A completed checkpoint beside the rig's recipe, stamped with ``versions``."""
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    stamps = {**PHASE_CODE_VERSIONS, **versions}
+    (rig.tmp / "stages" / "pipeline_state.json").write_text(
+        json.dumps(
+            {
+                "phases_completed": ["phase_a", "phase_bc_day_first", "phase_d"],
+                "phase_code_versions": stamps,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_version_stale_checkpoint_resumes_every_phase_not_one(tmp_path):
+    # `--phase D` on a checkpoint whose phase_bc stamp is stale stops at the prerequisite
+    # check (the orchestrator drops the stale phase_bc), so a heal must run the plain resume:
+    # the stale phase and the phases built from it re-run, the current ones are reused.
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    rig = Rig(tmp_path)
+    _checkpoint(rig, phase_bc_day_first=PHASE_CODE_VERSIONS["phase_bc_day_first"] - 1)
+    out = rig.run()
+    assert out["launched"] == ["drive_failed:demo-drive-a:r1"]
+    argv, _cwd = rig.launches[0]
+    tail = argv[argv.index("--") + 1 :]
+    assert "--phase" not in tail
+    assert tail[-2:] == ["--skip-upload", "--no-youtube-upload"]
+    att = rig.row()["resume_attempts"][0]
+    assert att["stale_phases"] == ["phase_bc_day_first", "phase_d"]
+    assert "phase_bc_day_first" in att["reason"]
+
+
+def test_a_current_checkpoint_keeps_the_failed_phase(tmp_path):
+    rig = Rig(tmp_path)
+    _checkpoint(rig)
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert argv[-4:] == ["--phase", "D", "--skip-upload", "--no-youtube-upload"]
+    assert "stale_phases" not in rig.row()["resume_attempts"][0]
+
+
+def test_a_stale_checkpoint_resumes_even_when_the_phase_is_unmappable(tmp_path):
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    rig = Rig(tmp_path, phase=None)
+    _checkpoint(rig, phase_a=PHASE_CODE_VERSIONS["phase_a"] - 1)
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert "--phase" not in argv[argv.index("--") + 1 :]
+
+
+def test_an_unreadable_checkpoint_is_not_stale(tmp_path):
+    rig = Rig(tmp_path)
+    (rig.tmp / "stages" / "pipeline_state.json").write_text("{not json", encoding="utf-8")
+    rig.run()
+    argv, _cwd = rig.launches[0]
+    assert argv[-4:-2] == ["--phase", "D"]
