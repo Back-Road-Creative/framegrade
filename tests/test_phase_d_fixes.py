@@ -278,6 +278,32 @@ class TestChunkTimeout:
         assert result == "VID456"
         assert call_count == 2
 
+    def test_retry_budget_resets_after_a_chunk_succeeds(self):
+        """The retry budget is per chunk, not per upload: an 8 GB LF is 32
+        chunks of 256 MB, and Kenmare (2026-11-05) failed on its first
+        timeout after the 5th chunk because successful chunks used it up."""
+        from gomoveshift.pipeline.drive_phases import youtube_uploader as yu
+
+        progress = MagicMock(**{"progress.return_value": 0.5})
+        steps = [(progress, None)] * 31 + [
+            TimeoutError("chunk timed out"),
+            (None, {"id": "VID789"}),
+        ]
+        up = yu.YouTubeUploader.__new__(yu.YouTubeUploader)
+
+        def fake_next_chunk(req):
+            step = steps.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+
+        with (
+            patch.object(up, "_next_chunk_with_timeout", side_effect=fake_next_chunk),
+            patch.object(yu.time, "sleep") as sleep,
+        ):
+            assert up._execute_resumable(MagicMock()) == "VID789"
+        assert sleep.call_args.args[0] < 2 * yu.INITIAL_BACKOFF_SEC
+
     def test_timeout_exhausts_retries(self):
         """After MAX_RETRIES timeouts, TimeoutError should propagate."""
         from gomoveshift.pipeline.drive_phases import youtube_uploader as yu

@@ -7,7 +7,7 @@ helper so analytics sync and upload stay in lock-step.
 
 Key behaviors:
 - Resumable chunked upload (MediaFileUpload, resumable=True).
-- Transient network errors retry with backoff, capped at 5 attempts.
+- Transient network errors retry with backoff, capped at 5 attempts per chunk.
 - `RefreshError` (hard auth failure) is never retried.
 - Pipeline-state idempotency via `upload_if_needed(state, lf_idx, ...)`:
   if `state["youtube_uploads"][lf_idx]["video_id"]` exists, returns that record
@@ -487,6 +487,10 @@ class YouTubeUploader:
             attempt += 1
             try:
                 status, response = self._next_chunk_with_timeout(request)
+                # The retry budget is per chunk: a chunk that lands resets it,
+                # else an LF over 5 chunks fails on its first transient error.
+                attempt = 0
+                backoff = INITIAL_BACKOFF_SEC
                 if status is not None:
                     logger.debug(f"YouTube upload progress: {status.progress() * 100:.1f}%")
             except RefreshError:
