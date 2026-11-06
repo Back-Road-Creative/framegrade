@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.41] - 2026-11-06
+
+### Fixed
+
+- A second drive at the same place no longer has its shorts refused by `enqueue-plan`'s `cross-batch-repeat` rule. The YouTube description led every short with the fixed "POV driving through {place} Pt.N", whose first six words are the same for every drive there, and the caption openers could repeat one another project had already spooled. Caption openers now skip any opener whose first six words match text spooled in the last 60 days, read-only from the queue, and the description lead rotates through 14 phrases in the same way.
+
 ## [0.3.40] - 2026-11-05
 
 ### Fixed
@@ -555,7 +561,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...HEAD
+[0.3.41]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...v0.3.41
 [0.3.40]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...v0.3.40
 [0.3.39]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...v0.3.39
 [0.3.38]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...v0.3.38
