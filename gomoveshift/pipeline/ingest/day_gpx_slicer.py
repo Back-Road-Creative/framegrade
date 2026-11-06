@@ -6,7 +6,7 @@ fed from a day-long GPX; this module cuts that file into one sidecar per
 video so each sidecar passes the existing Phase-A correspondence gates
 (``assert_gpx_video_correspondence``) UNCHANGED.
 
-Window per video, in UTC: ``[start - HEAD_PAD, start + duration + TAIL_PAD]``.
+Window per video, in UTC: ``[start - HEAD_PAD, start + duration + tail_pad(duration)]``.
 
 * ``start`` is the camera-local time in the ``VID_YYYYMMDD_HHMMSS_...``
   filename shifted by the camera clock's UTC offset. With no offset given it is
@@ -25,8 +25,10 @@ Window per video, in UTC: ``[start - HEAD_PAD, start + duration + TAIL_PAD]``.
 * ``TAIL_PAD`` runs past the clip end so the last segment keeps an
   authoritative endpoint (A2B-ENDPOINT-LOSS: a slice stopping exactly at the
   clip end loses it).
-* HEAD+TAIL must stay inside the 25% / 120 s span gate, so a very short clip
-  is refused loudly by the real gate, never by a loosened one.
+* HEAD+TAIL must stay inside the 25% / 120 s span gate, which is never
+  loosened: a clip under 540 s (a recording's short last chapter) gets a
+  shorter tail (:func:`tail_pad`), down to 105 s, so its own padding cannot
+  fail the gate.
 
 Only ``VID_YYYYMMDD_HHMMSS_NN_NNN.mp4`` names carry a usable clock (strict
 filename contract); ``LRV_*`` proxies are skipped and any other ``.mp4`` is
@@ -47,7 +49,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ...analysis.gps_parser import parse_gpx_file
-from ..gopro_gps import GpxCorrespondenceError, assert_gpx_video_correspondence
+from ..gopro_gps import (
+    GPX_SPAN_ABS_TOLERANCE_SEC,
+    GPX_SPAN_REL_TOLERANCE,
+    GpxCorrespondenceError,
+    assert_gpx_video_correspondence,
+)
 from .gopro_parser import _ffprobe_creation_time, get_clip_duration
 
 logger = logging.getLogger(__name__)
@@ -62,6 +69,12 @@ OFFSET_RANGE_H = (-12.0, 14.0)  # inclusive; every inhabited UTC offset
 VID_RE = re.compile(r"^VID_(\d{8})_(\d{6})_(\d{2})_(\d{3})\.mp4$", re.IGNORECASE)
 TRKPT = re.compile(r"<trkpt\b.*?</trkpt>", re.DOTALL)
 TIME = re.compile(r"<time>([^<]+)</time>")
+
+
+def tail_pad(duration: float) -> float:
+    """``TAIL_PAD``, cut so ``HEAD_PAD`` + tail fits the span gate for ``duration``."""
+    room = max(GPX_SPAN_ABS_TOLERANCE_SEC, GPX_SPAN_REL_TOLERANCE * duration) - HEAD_PAD
+    return min(TAIL_PAD, room)
 
 
 class DayGpxSliceError(RuntimeError):
@@ -233,7 +246,7 @@ def slice_day_gpx(
                     "clock is local-as-Z)"
                 )
         lo = start - timedelta(seconds=HEAD_PAD)
-        hi = start + timedelta(seconds=dur + TAIL_PAD)
+        hi = start + timedelta(seconds=dur + tail_pad(dur))
         keep = [blob for ts, blob in points if lo <= ts <= hi]
         if not keep:
             raise DayGpxSliceError(

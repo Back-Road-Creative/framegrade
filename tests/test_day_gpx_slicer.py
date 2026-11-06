@@ -127,11 +127,34 @@ def test_own_sidecar_is_rewritten(src, day):
     slice_day_gpx(day, src, utc_offset_hours=-4)  # marker present -> idempotent
 
 
-def test_short_clip_refused_by_unchanged_span_gate(src, day):
-    (src / SHORT).write_bytes(b"x")  # 300 s: 435 s window is 135 s over, gate allows 120
-    with pytest.raises(DayGpxSliceError, match="Phase-A gate"):
+# (clip seconds, last trackpoint after start): the tail is 105 s under the 120 s
+# floor, and grows with the 25% tolerance until the full 120 s fits at 540 s.
+@pytest.mark.parametrize(
+    ("seconds", "last"), [(4.0, 109), (198.0, 303), (300.0, 405), (539.0, 658)]
+)
+def test_short_chapter_tail_pad_shrinks_to_fit_the_unchanged_span_gate(src, day, seconds, last):
+    # A recording's last chapter is whatever is left after its 30-min chapters
+    # (Ireland 09-17: 198 s). The full 15 + 120 s pad is over the gate's 120 s
+    # floor for any clip under 540 s, so the tail gives way, never the gate.
+    from gomoveshift.analysis.gps_parser import parse_gpx_file
+    from gomoveshift.pipeline.gopro_gps import assert_gpx_video_correspondence
+
+    (src / SHORT).write_bytes(b"x")
+    durations = {A: 600.0, B: 900.0, SHORT: seconds}
+    with patch.object(dgs, "get_clip_duration", side_effect=lambda p: durations[p.name]):
         slice_day_gpx(day, src, utc_offset_hours=-4)
-    assert not list(src.glob("*.gpx*"))
+    start = datetime(2024, 1, 1, 12, 30, 0, tzinfo=UTC)
+    sidecar = src / (Path(SHORT).stem + ".gpx")
+    assert _times(sidecar)[0] == start - timedelta(seconds=15)
+    assert _times(sidecar)[-1] == start + timedelta(seconds=last)
+    assert_gpx_video_correspondence(parse_gpx_file(sidecar), start, seconds)
+
+
+def test_padding_fits_the_span_gate_floor():
+    from gomoveshift.pipeline.gopro_gps import GPX_SPAN_ABS_TOLERANCE_SEC
+
+    assert dgs.HEAD_PAD + dgs.tail_pad(1.0) <= GPX_SPAN_ABS_TOLERANCE_SEC
+    assert dgs.tail_pad(600.0) == dgs.TAIL_PAD  # a long clip keeps the full endpoint pad
 
 
 def test_unparseable_filename_refused(src, day):
