@@ -714,6 +714,27 @@ GENERIC_HASHTAGS = [
 ]
 GENERIC_HASHTAGS_PER_POST = 2
 
+#: The lead of a short's YouTube description ("{lead} driving through
+#: {location} Pt.N"), rotated per project like the caption openers. The gate's
+#: ``cross-batch-repeat`` key is the first 6 words, and the part number is
+#: word 7, so one fixed lead made every drive at a place open alike.
+YOUTUBE_DESCRIPTION_LEADS = [
+    "POV",
+    "Dashcam POV",
+    "Driver's-seat view",
+    "Front-seat view",
+    "Windshield view",
+    "Ride along",
+    "Eyes forward",
+    "Hands on the wheel",
+    "Dashboard view",
+    "Through the windshield",
+    "Seat belt on",
+    "Road ahead",
+    "Wheel's-eye view",
+    "Cab view",
+]
+
 #: The ``june`` experiment hashtag mode (``publishing/experiments.py``): the
 #: June 2026 Facebook posts carried these three generics, then the place and
 #: region tags (upstream plan Appendix A, e.g. "#POVDriving #ScenicDrive
@@ -734,6 +755,53 @@ BASE_TAGS = [
     "road trip",
     "drive with me",
 ]
+
+
+def _opener_keys(texts: "Mapping[str, Sequence[str]]") -> "dict[str, list[tuple[str, ...]]]":
+    """Platform -> the gate's 6-word opener key of each text."""
+    from ..publishing.anti_spam_gate import text_opener_key
+
+    return {
+        platform: [k for k in (text_opener_key(t) for t in platform_texts) if k]
+        for platform, platform_texts in texts.items()
+    }
+
+
+def _opens_like(text: str, keys: "Sequence[tuple[str, ...]]") -> bool:
+    """Could text starting with ``text`` share a 6-word opener key with one of
+    ``keys``? A shorter fragment matches on the words it has, since what
+    follows it is not chosen here."""
+    from ..publishing.anti_spam_gate import CROSS_BATCH_PREFIX_WORDS, _normalize_words
+
+    words = tuple(_normalize_words(text)[:CROSS_BATCH_PREFIX_WORDS])
+    return any(key[: len(words)] == words for key in keys) if words else False
+
+
+def _read_spooled_texts(project_name: str) -> "dict[str, list[str]]":
+    """Text other projects spooled in the gate's window, read-only from the
+    queue beside ``DEFAULT_SEO_STORAGE``; no queue (or unreadable) is ``{}``
+    and creates nothing."""
+    import sqlite3
+
+    from ..publishing import anti_spam_gate
+    from . import longform_metadata
+
+    db_path = Path(longform_metadata.DEFAULT_SEO_STORAGE) / "social_queue.sqlite3"
+    if not db_path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        logger.warning("spooled-openers: cannot open %s: %s", db_path, exc)
+        return {}
+    conn.row_factory = sqlite3.Row
+    try:
+        return anti_spam_gate.recent_platform_texts(conn, exclude_projects={project_name})
+    except sqlite3.Error as exc:
+        logger.warning("spooled-openers: cannot read %s: %s", db_path, exc)
+        return {}
+    finally:
+        conn.close()
 
 
 class SocialGenerator:
@@ -763,6 +831,7 @@ class SocialGenerator:
         moment_kinds: "Optional[Mapping[int, str]]" = None,
         experiments: "Optional[Sequence[Experiment]]" = None,
         experiment_today: Optional[date] = None,
+        spooled_texts: "Optional[Mapping[str, Sequence[str]]]" = None,
     ):
         """
         Args:
@@ -798,7 +867,16 @@ class SocialGenerator:
                 ``policy.experiments``; ``()`` runs none.
             experiment_today: The date experiment windows are judged against
                 (default: today); fixed for tests and reruns.
+            spooled_texts: Platform -> text other projects already spooled
+                (``anti_spam_gate.recent_platform_texts``). Caption openers
+                and description leads skip any that would open the same 6
+                words, so the gate's ``cross-batch-repeat`` rule never fires
+                on generated text. ``None`` (default) reads the queue beside
+                ``DEFAULT_SEO_STORAGE`` on first use; ``{}`` avoids nothing.
         """
+        self._spooled_keys: "Optional[dict[str, list[tuple[str, ...]]]]" = (
+            None if spooled_texts is None else _opener_keys(spooled_texts)
+        )
         if experiments is None:
             from ..console.settings import current_brand
             from ..publishing.brand_policy import load_brand_policy
@@ -1107,6 +1185,30 @@ class SocialGenerator:
         """
         return self._compose_title(short_index, "titles", max_len=100, facts=facts)
 
+    def _spooled_opener_keys(self) -> "dict[str, list[tuple[str, ...]]]":
+        """Platform -> 6-word opener keys of text other projects spooled."""
+        if self._spooled_keys is None:
+            self._spooled_keys = _opener_keys(_read_spooled_texts(self.project_name))
+        return self._spooled_keys
+
+    def _fresh_rotating_pick(
+        self, pool: "list[str]", platform: str, part: str, short_index: int, render
+    ) -> str:
+        """:meth:`_rotating_pick` over the pool's entries whose ``render``-ed
+        text cannot open like spooled text, then the rest.
+
+        The fresh entries keep the project's shuffled order, so a batch still
+        never repeats an entry until they run out; past that the stale ones
+        follow (and the gate refuses them) rather than raising here.
+        """
+        order = list(pool)
+        random.Random(self._project_seed(f"captions:{platform}:{part}")).shuffle(order)
+        taken = self._spooled_opener_keys().get(platform, [])
+        fresh = [e for e in order if not _opens_like(render(e), taken)]
+        if len(fresh) < len(order):
+            order = fresh + [e for e in order if e not in fresh]
+        return order[(short_index - 1) % len(order)]
+
     def _rotating_pick(self, pool: "list[str]", platform: str, part: str, short_index: int) -> str:
         """The ``short_index``-th entry of ``pool`` in this project's shuffled order.
 
@@ -1123,11 +1225,18 @@ class SocialGenerator:
     ) -> str:
         """One platform caption sentence: opener + (detail | engagement prompt)."""
 
-        def fill(pool: "list[str]", part: str) -> str:
-            text = self._rotating_pick(pool, platform, part, short_index).format_map(fmap).strip()
+        def render(entry: str) -> str:
+            text = entry.format_map(fmap).strip()
             return text[:1].upper() + text[1:]
 
-        opener = fill(_PLATFORM_CAPTION_TEMPLATES[platform], "opener")
+        def fill(pool: "list[str]", part: str) -> str:
+            return render(self._rotating_pick(pool, platform, part, short_index))
+
+        opener = render(
+            self._fresh_rotating_pick(
+                _PLATFORM_CAPTION_TEMPLATES[platform], platform, "opener", short_index, render
+            )
+        )
         if opener[-1] not in ".?!":
             opener += "."
         tail = fill(
@@ -1396,8 +1505,19 @@ class SocialGenerator:
         ``"📍 {social_location_full}"`` instead — so search can still index
         the place while every other surface stays place-free.
         """
+
+        def lead_for(phrase: str) -> str:
+            return self._fresh_rotating_pick(
+                YOUTUBE_DESCRIPTION_LEADS,
+                "youtube",
+                "description-lead",
+                short_index,
+                lambda lead: f"{lead} {phrase}",
+            )
+
         if interactive:
-            base = f"POV driving through {LOCATION_WITHHELD} Pt.{short_index}"
+            phrase = f"driving through {LOCATION_WITHHELD} Pt.{short_index}"
+            base = f"{lead_for(phrase)} {phrase}"
             fixed_hashtags = ["#Shorts"]
             optional_hashtags = ["#POVDriving"]
             terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
@@ -1420,13 +1540,14 @@ class SocialGenerator:
         # wins its own branch (it's the most-specific GPS-verified anchor).
         if self.nearest_poi:
             self._used_pois[self.nearest_poi] = self._used_pois.get(self.nearest_poi, 0) + 1
-            base = f"POV driving near {self.nearest_poi}, {self.social_location_full}"
+            phrase = f"driving near {self.nearest_poi}, {self.social_location_full}"
             if self._used_pois[self.nearest_poi] > 1:
-                base += f" Pt.{short_index}"
+                phrase += f" Pt.{short_index}"
         elif self.road_name:
-            base = f"POV drive along {self.road_name}, {self.social_location_full} Pt.{short_index}"
+            phrase = f"driving along {self.road_name}, {self.social_location_full} Pt.{short_index}"
         else:
-            base = f"POV driving through {self.social_location_full} Pt.{short_index}"
+            phrase = f"driving through {self.social_location_full} Pt.{short_index}"
+        base = f"{lead_for(phrase)} {phrase}"
 
         # #Shorts is fixed; remaining hashtags are droppable. #4K removed:
         # shorts are 1080x1920 (never 4K), so the claim would be false.
@@ -1976,6 +2097,7 @@ class SocialGenerator:
         )
         clone.recording_date = self.recording_date
         clone.resolved_location = self.resolved_location
+        clone._spooled_keys = self._spooled_opener_keys()
         clone._own_regions = list(regions) if regions else None
         # The clip's own GPS road names, never the parent LF's ``roads``.
         clone._own_roads = list(roads) if roads else []

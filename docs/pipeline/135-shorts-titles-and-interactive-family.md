@@ -309,7 +309,14 @@ place and region tags are never part of that draw). Across batches,
 `anti_spam_gate.check_batch(..., recent_texts=...)` refuses (`cross-batch-repeat`) any
 caption or YouTube title whose first 6 normalized words match text spooled in the last 60
 days; `cmd_enqueue_plan` loads that text with `recent_platform_texts` from the sidecars
-the queue's deliveries point at.
+the queue's deliveries point at. The generator is built not to trip that rule:
+`SocialGenerator(spooled_texts=None)` reads the same text read-only from the queue beside
+`DEFAULT_SEO_STORAGE` (excluding its own project), and `_fresh_rotating_pick` walks the
+project's shuffled opener order past every entry that would open like it, falling back to
+the stale entries (which the gate then refuses) only when the fresh ones run out. The
+shorts YouTube description's lead ("POV", "Dashcam POV", …, `YOUTUBE_DESCRIPTION_LEADS`)
+rotates the same way, so "… driving through {place} Pt.N" no longer opens alike for every
+drive at a place.
 
 **Shape per platform:**
 - **YouTube** — description-style, 1–2 sentences naming place + terrain, a trailing
