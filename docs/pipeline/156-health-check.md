@@ -197,7 +197,11 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
 
 1. **Checks, no writes.** The drive must be `auditing` in `schedule.sqlite3`, or `failed` (a publish
    job that ended without uploading; it is reopened to `auditing` at the first write, step
-   `reopen:`); any other status is `refused` with the status named. One long-form, with no upload receipt under its output dir;
+   `reopen:`); any other status is `refused` with the status named. No upload receipt under its output dir;
+   the long-form count is `regular_lfs` in the `drive_plan.json` beside its `resume.json` (missing,
+   unreadable or empty is `refused` before any write). `health backlog` registers every drive with 1, so a
+   count that differs is a `count:` step and is written back with the reopen: the claim books one weekly
+   slot per long-form, the same series Phase D dates them by;
    no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
    root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
    version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing

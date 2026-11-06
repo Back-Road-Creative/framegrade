@@ -33,7 +33,7 @@ class Rig:
         self.launch_ok = True
         self.running = False
 
-    def audit(self, project="day-a", status="auditing", recipe=True):
+    def audit(self, project="day-a", status="auditing", recipe=True, lfs=1):
         out = self.out / project
         self.store.register_ready(
             project, "usa", 1, output_dir=str(out), status=status, mirror_sha="abc1234",
@@ -51,6 +51,8 @@ class Rig:
             ]  # fmt: skip
             body = {"argv": argv, "cwd": "/old", "env": {"GMS_INTERMEDIATE_DIR": str(self.stages / project)}}  # fmt: skip
             (stages / "resume.json").write_text(json.dumps(body))
+            plan = {"regular_lfs": [{"index": i} for i in range(1, lfs + 1)]}
+            (stages / "drive_plan.json").write_text(json.dumps(plan))
         return out
 
     def launcher(self, argv, cwd, env):
@@ -353,4 +355,54 @@ def test_a_failed_drive_with_an_upload_receipt_is_still_refused(tmp_path):
     before = rig.snapshot()
     res = rig.run()
     assert res["action"] == "refused" and "upload receipt" in res["reason"]
+    assert rig.snapshot() == before and not rig.launches
+
+
+def test_a_drive_that_rendered_two_long_forms_books_both(tmp_path):
+    """US-64, 2026-11-06: ``health backlog`` registers every launch as one LF, but the drive
+    rendered two. Publishing on the store's count would book LF1 only while Phase D dates LF2 a
+    week later with no booking. The publish now counts the render's LFs and books the series."""
+    rig = Rig(tmp_path)
+    rig.audit(lfs=2)
+    assert rig.store.drive("day-a").lf_count == 1
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert rig.store.drive("day-a").lf_count == 2
+    assert [b.slot_at.date().isoformat() for b in rig.store.bookings()] == ["2026-10-23", "2026-10-30"]  # fmt: skip
+    drive = rig.launches[0][0]
+    assert drive[drive.index("--lf-publish-date") + 1] == "2026-10-23"
+    assert any("2 long-forms" in s for s in res["steps"]), res["steps"]
+
+
+def test_a_corrected_long_form_count_is_dry_run_safe(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit(lfs=2)
+    before = rig.snapshot()
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_publish" and any("2 long-forms" in s for s in res["steps"])
+    assert rig.snapshot() == before and rig.store.drive("day-a").lf_count == 1
+    assert not rig.launches
+
+
+def test_a_launch_failure_keeps_the_corrected_count(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit(lfs=2)
+    rig.launch_ok = False
+    res = rig.run()
+    assert res["action"] == "refused"
+    d = rig.store.drive("day-a")
+    assert (d.status, d.lf_count) == ("auditing", 2) and rig.store.bookings() == []
+
+
+@pytest.mark.parametrize("plan", [None, "{not json", json.dumps({"regular_lfs": []})])
+def test_a_render_with_no_readable_long_form_plan_is_refused_before_any_write(tmp_path, plan):
+    rig = Rig(tmp_path)
+    rig.audit()
+    path = rig.stages / "day-a" / "day-a" / "_stages" / "drive_plan.json"
+    path.unlink()
+    if plan is not None:
+        path.write_text(plan)
+    before = rig.snapshot()
+    res = rig.run()
+    assert res["action"] == "refused" and "drive_plan.json" in res["reason"], res
     assert rig.snapshot() == before and not rig.launches

@@ -7,7 +7,10 @@ reopened to ``auditing`` at the first write) with no upload receipt; no drive jo
 rebind to the code root's venv and its checkpoint hold no phase the current code re-runs (Phase D
 refuses a missing prerequisite, after the slot is booked); and no older ``ready`` drive may sit ahead of it (Waypost claims the
 oldest ready drive of a region, never a named one), except one already uploaded outside a claim,
-which is retired from its receipts first (Waypost's ``retire_published``). Then ``set_status ready`` -> ``claim_or_reason``
+which is retired from its receipts first (Waypost's ``retire_published``). The long-form count comes from the
+``drive_plan.json`` beside the recipe (its ``regular_lfs``), not the store, which ``health backlog`` registers
+as 1; a corrected count is written back with the reopen, so the claim books one weekly slot per rendered
+long-form (none readable -> refuse). Then ``set_status ready`` -> ``claim_or_reason``
 -> a detached Phase D job (``--lf-publish-date`` = the claimed slot's local date, ``--youtube-upload
 --phase D``, the recipe's own region/mode/GPX flags and ``GMS_INTERMEDIATE_DIR``). A claim of any
 other drive, or a launch that fails, is undone. ``reconcile_publishes`` (called by ``health check``)
@@ -16,6 +19,7 @@ and retires each ``ready`` drive that is already uploaded."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -61,13 +65,24 @@ def phase_d_args(drive_argv: List[str], day: str, date: str) -> List[str]:
             "--youtube-upload", "--force", "--no-tmux", "--phase", "D"]  # fmt: skip
 
 
+def rendered_lf_count(recipe_path: Path) -> Optional[int]:
+    """How many long-forms the audit rendered: ``regular_lfs`` in the ``drive_plan.json`` beside
+    the recipe. ``None`` when it is missing, unreadable or empty."""
+    try:
+        plan = json.loads((Path(recipe_path).parent / "drive_plan.json").read_text())
+        lfs = plan.get("regular_lfs")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return len(lfs) if isinstance(lfs, list) and lfs else None
+
+
 def _refuse(res: Dict[str, Any], reason: str) -> Dict[str, Any]:
     return {**res, "action": "refused", "reason": reason}
 
 
-def _back_to_auditing(store: Any, drive: Any) -> None:
+def _back_to_auditing(store: Any, drive: Any, lf_count: Optional[int] = None) -> None:
     store.register_ready(
-        drive.project, drive.region, drive.lf_count, status="auditing",
+        drive.project, drive.region, lf_count or drive.lf_count, status="auditing",
         lf_mode=drive.lf_mode, ingest_mode=drive.ingest_mode,
     )  # fmt: skip
 
@@ -97,8 +112,6 @@ def run_publish(
     reopen = d.status == "failed"
     if d.status != "auditing" and not reopen:
         return _refuse(res, f"{project} is {d.status}; only an auditing drive can be approved")
-    if d.lf_count != 1:
-        return _refuse(res, f"{project} has {d.lf_count} long-forms; publish handles one")
     if _uploaded(d.output_dir):
         return _refuse(res, f"{project} already has an upload receipt under {d.output_dir}")
     if drive_running(jobs_dir):
@@ -114,6 +127,9 @@ def run_publish(
     if stale:
         return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
                        "re-run); re-audit it (health heal) before publishing")  # fmt: skip
+    lf_count = rendered_lf_count(recipe_path)
+    if lf_count is None:
+        return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip
     older = [r for r in store.drives(region, "ready") if (r.created_at, r.project) < (d.created_at, d.project)]  # fmt: skip
     published = [r.project for r in older if upload_receipts(r.output_dir)]
     older = [r for r in older if r.project not in published]
@@ -124,7 +140,9 @@ def run_publish(
         **resume.recipe_env(recipe),
         run_origin.LAUNCHED_BY_ENV: run_origin.PUBLISH_LAUNCHER,
     }
+    recount = lf_count != d.lf_count
     steps = [*([f"reopen: {project} failed -> auditing (no upload receipt)"] if reopen else []),
+             *([f"count: {project} rendered {lf_count} long-forms (store said {d.lf_count})"] if recount else []),
              *(f"retire: {p} (uploaded outside a claim: Waypost books its receipt, complete)" for p in published),
              f"approve: {project} auditing -> ready",
              f"claim: Waypost {region} slot for {project}",
@@ -144,8 +162,9 @@ def run_publish(
             store.retire_published(p, upload_receipts(store.drive(p).output_dir), now=now)
         except (SlotTaken, ValueError, KeyError) as exc:
             return _refuse(res, f"{p} is ready, older and uploaded, but Waypost refused to retire it: {exc}")  # fmt: skip
-    if reopen:
-        _back_to_auditing(store, d)
+    if reopen or recount:
+        _back_to_auditing(store, d, lf_count)
+    d = store.drive(project)
     store.set_status(project, "ready")
     try:
         c = claim_or_reason(store, cadence, region, now=now, lead_hours=lead_hours,
