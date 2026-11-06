@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.40] - 2026-11-05
+
+### Fixed
+
+- The day-GPX slicer no longer refuses a drive whose recording ends in a short chapter. Its 15 s + 120 s padding was over the span gate's 120 s floor for any clip under 540 s, so a fully covered 198 s last chapter failed as "GPX likely belongs to a different drive". The tail now shrinks (down to 105 s) to fit the unchanged gate.
+- A YouTube long-form upload now gets its 5 retries for each 256 MB chunk. Before, every chunk that uploaded used up one of the 5, so an LF over 1.25 GB failed on its first network timeout with no retry. Kenmare (about 8 GB) failed this way twice.
+
 ## [0.3.39] - 2026-11-05
 
 ### Fixed
@@ -548,7 +555,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...HEAD
+[0.3.40]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...v0.3.40
 [0.3.39]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...v0.3.39
 [0.3.38]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.37...v0.3.38
 [0.3.37]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.36...v0.3.37
