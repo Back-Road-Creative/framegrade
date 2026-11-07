@@ -94,6 +94,13 @@ class TestLfCoverage:
         assert res.passed is False
         assert "Roanoke" in res.message
 
+    def test_route_broadened_state_label_passes_only_with_a_matching_location(self):
+        # US-64 LF 1: the route check burned "Virginia"; Phase D's location
+        # follows the burn, never the narrower county it could not prove.
+        assert check_location_invariant(_meta("Virginia in 4K", "Virginia")).passed is True
+        res = check_location_invariant(_meta("Virginia in 4K", MONT))
+        assert res.passed is False and ROAN in res.message
+
 
 class TestShortCoverage:
     def test_two_county_sampled_vote_fails_even_when_burn_matches_one(self):

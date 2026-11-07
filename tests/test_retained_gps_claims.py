@@ -216,7 +216,7 @@ def _lf(index, *spans):
     return SimpleNamespace(index=index, segments=segs)
 
 
-def _enrich(lfs, labels, overrides=None, episodes=None):
+def _enrich(lfs, labels, overrides=None, episodes=None, locations=None):
     state = SimpleNamespace(
         gps_per_episode=episodes or _episode(),
         gpx_files=[],
@@ -230,7 +230,7 @@ def _enrich(lfs, labels, overrides=None, episodes=None):
         patch.object(ge, "_build_shared_geocoder", return_value=_BandGeocoder()),
         patch.object(ge, "_partition_lf_plans_by_date", return_value={"2026-01-02": lfs}),
         patch.object(ge, "_assert_per_lf_locations_resolvable", return_value=None),
-        patch.object(ge, "derive_per_lf_locations", return_value={}),
+        patch.object(ge, "derive_per_lf_locations", return_value=dict(locations or {})),
         patch.object(ge, "_resolve_lf_destination", return_value=""),
         patch.object(ge, "canonical_lf_ost_text", side_effect=lambda lf, **k: labels[lf.index]),
         patch.object(ge, "_differentiate_and_revalidate_siblings", return_value=None),

@@ -59,3 +59,24 @@ def test_t1_thumbnail_is_byte_equal_to_the_checked_text_not_the_meta_title(tmp_p
 
 def test_flatten_drops_empty_labels_and_keys_by_int():
     assert flatten_ost_text({"d1": {"1": "A", 2: ""}, "d2": {3: "C"}}) == {1: "A", 3: "C"}
+
+
+def test_broadened_label_also_replaces_the_location_label():
+    # The 📍 location (``per_lf_locations``) may not stay narrower than the burn:
+    # Phase D's coverage gate refuses a county line that omits a material county.
+    out = _enrich(
+        [_lf(1, (0.0, 280.0), (320.0, 580.0))],
+        {1: "Harrow, Westmark"},
+        locations={1: "Harrow, Westmark"},
+    )
+    assert out.per_lf_ost_text_by_date["2026-01-02"] == {1: "Ashby County, Westmark"}
+    assert out.per_lf_locations_by_date["2026-01-02"] == {1: "Ashby County, Westmark"}
+
+
+def test_supported_label_keeps_its_location_label():
+    out = _enrich(
+        [_lf(1, (0.0, 280.0))],
+        {1: "Harrow, Westmark"},
+        locations={1: "Ashby County, Westmark"},
+    )
+    assert out.per_lf_locations_by_date["2026-01-02"] == {1: "Ashby County, Westmark"}
