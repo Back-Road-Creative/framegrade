@@ -316,7 +316,8 @@ project's shuffled opener order past every entry that would open like it, fallin
 the stale entries (which the gate then refuses) only when the fresh ones run out. The
 shorts YouTube description's lead ("POV", "Dashcam POV", …, `YOUTUBE_DESCRIPTION_LEADS`)
 rotates the same way, so "… driving through {place} Pt.N" no longer opens alike for every
-drive at a place.
+drive at a place. No lead opens with a bare preposition ("Through …"): the plan grammar gate
+(`find_grammar_issues`) refuses that shape and the whole publish plan with it.
 
 **Shape per platform:**
 - **YouTube** — description-style, 1–2 sentences naming place + terrain, a trailing
