@@ -225,6 +225,11 @@ def _format_regions_line(regions, location: str) -> str:
     line already carry, which breaches the 2x location budget in
     ``check_description_redundancy``. When nothing else remains, the
     line is omitted entirely.
+
+    When ``location`` is a broad label that qualifies the region names
+    ("North Carolina" over "Polk County, North Carolina"), the trailing
+    ``", {location}"`` is dropped from each name: the ``Location:`` line
+    already says it, and one repeat per county breaches the same budget.
     """
     if not regions:
         return ""
@@ -233,6 +238,8 @@ def _format_regions_line(regions, location: str) -> str:
     # "Dingle, County Kerry, Ireland" legitimately contains the region
     # "County Kerry", and that line must still render.
     own = (location or "").strip()
+    suffix = f", {own}"
+    names = [n.strip().removesuffix(suffix) if own else n for n in names]
     names = [n for n in names if n.strip() != own]
     if not names:
         return ""
