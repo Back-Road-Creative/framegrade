@@ -586,6 +586,7 @@ def _enrich_per_lf_gps(
     # Keep what the check decided (refusals included, written before
     # the raise) as the system record the opt-in OST gate signal reads.
     claim_outcomes: dict = {}
+    claimed = {d: dict(day) for d, day in per_lf_ost_text_by_date.items()}
     try:
         route_claims_by_lf = enforce_route_claims(
             per_lf_ost_text_by_date,
@@ -599,6 +600,15 @@ def _enrich_per_lf_gps(
         )
     finally:
         record_system_reviews(state, per_lf_ost_text_by_date, claim_outcomes)
+    # A broadened burn broadens the LF's location label too: Phase D's
+    # ``📍 Location:`` line, description and hashtags read ``per_lf_locations``,
+    # and a county there that the burn could not prove omits the other
+    # material counties (the location invariant's coverage rule).
+    for date_key, day in per_lf_ost_text_by_date.items():
+        day_locations = per_lf_locations_by_date.get(date_key) or {}
+        for idx, text in day.items():
+            if text != claimed.get(date_key, {}).get(idx) and idx in day_locations:
+                day_locations[idx] = text
     # Persist the evidence the final-text review is built from (Phase D)
     # and re-verified against at upload.
     from .final_text_record import route_record
