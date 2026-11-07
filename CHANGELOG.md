@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.45] - 2026-11-07
+
+### Fixed
+
+- A Phase-D-only resume of a checkpoint whose burn label the route-claim check broadened now gives that LF the broadened text as its location, read from the sealed review in state. Before, the saved county reached Phase D and failed the location invariant after the encode (US-64, 2026-11-07).
+
 ## [0.3.44] - 2026-11-07
 
 ### Fixed
@@ -579,7 +585,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...HEAD
+[0.3.45]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...v0.3.45
 [0.3.44]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...v0.3.44
 [0.3.43]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...v0.3.43
 [0.3.42]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...v0.3.42
