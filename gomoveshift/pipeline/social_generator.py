@@ -717,7 +717,9 @@ GENERIC_HASHTAGS_PER_POST = 2
 #: The lead of a short's YouTube description ("{lead} driving through
 #: {location} Pt.N"), rotated per project like the caption openers. The gate's
 #: ``cross-batch-repeat`` key is the first 6 words, and the part number is
-#: word 7, so one fixed lead made every drive at a place open alike.
+#: word 7, so one fixed lead made every drive at a place open alike. No lead
+#: may open with a bare preposition ("Through ..."): the plan grammar gate
+#: (``find_grammar_issues``) refuses that shape and fails the whole plan.
 YOUTUBE_DESCRIPTION_LEADS = [
     "POV",
     "Dashcam POV",
@@ -728,7 +730,7 @@ YOUTUBE_DESCRIPTION_LEADS = [
     "Eyes forward",
     "Hands on the wheel",
     "Dashboard view",
-    "Through the windshield",
+    "Over the hood",
     "Seat belt on",
     "Road ahead",
     "Wheel's-eye view",

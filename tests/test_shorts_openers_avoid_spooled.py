@@ -105,3 +105,21 @@ def test_default_with_no_queue_db_creates_nothing(monkeypatch, tmp_path):
     gen = SocialGenerator(location="County Cork, Ireland", project_name="proj_bravo")
     assert gen._build_platform_captions(None, 1)["facebook"]
     assert not (tmp_path / "seo").exists()
+
+
+@pytest.mark.parametrize("project", [f"proj_{i}" for i in range(40)])
+def test_every_description_lead_passes_the_plan_grammar_gate(project):
+    # A lead opening with a bare preposition ("Through the windshield ...") was
+    # refused by PUBLISH-PLAN-GRAMMAR, failing the whole plan (Kenmare, 11-07).
+    from gomoveshift.pipeline.validation.content_gates import find_grammar_issues
+
+    gen = _gen(project)
+    descriptions = [gen._build_youtube_description(i) for i in range(1, 8)]
+    assert all(not find_grammar_issues(d) for d in descriptions), descriptions
+
+
+def test_no_description_lead_opens_with_a_bare_preposition():
+    from gomoveshift.pipeline._series_utils import is_title_prefixed
+    from gomoveshift.pipeline.social_generator import YOUTUBE_DESCRIPTION_LEADS
+
+    assert [lead for lead in YOUTUBE_DESCRIPTION_LEADS if is_title_prefixed(lead)] == []
