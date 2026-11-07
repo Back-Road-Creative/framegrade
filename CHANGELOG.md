@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.46] - 2026-11-07
+
+### Fixed
+
+- The `🗺️ Through:` line drops the LF's own label when it is the trailing qualifier of a region name, so an LF whose location was broadened to a state lists `Polk County, Henderson County` instead of repeating `North Carolina` per county and failing the description redundancy gate (US-64, 2026-11-07).
+
 ## [0.3.45] - 2026-11-07
 
 ### Fixed
@@ -585,7 +591,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...HEAD
+[0.3.46]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...v0.3.46
 [0.3.45]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...v0.3.45
 [0.3.44]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...v0.3.44
 [0.3.43]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...v0.3.43
