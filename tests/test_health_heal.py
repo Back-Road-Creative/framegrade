@@ -6,8 +6,14 @@ launches a real job or pushes."""
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from gomoveshift.health import heal, resume
 from gomoveshift.health.store import load_all, new_incident, write_row
@@ -568,3 +574,37 @@ def test_re_registering_a_resolved_recipe_reopens_it_with_its_history(tmp_path):
     assert not row.get("resolved_at") and row["reopened_at"] == "t2"
     assert [a["action"] for a in row["resume_attempts"]] == ["launched"]
     assert rig.run(sha="newer", only_key=key)["launched"] == [key]
+
+
+# ── The process fallback matches a drive, never a health call that names one ──
+# 2026-11-07: ``health backlog --supersede ... --reason "queue next Ireland drive"``
+# matched the old ``gomoveshift.* drive `` pattern on its own command line, so
+# every such call answered "a drive is running" with no drive alive.
+
+
+def _pgrep_pids(pattern: str) -> set[int]:
+    done = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True, check=False)
+    return {int(p) for p in done.stdout.split()}
+
+
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="needs pgrep")
+@pytest.mark.parametrize(
+    "argv, is_drive",
+    [
+        (["-m", "gomoveshift", "drive", "/mnt/d/_gms-sources/x", "--region", "usa"], True),
+        ([".venv/bin/gomoveshift", "--log-json", "drive", "/mnt/d/x"], True),
+        (["gomoveshift", "health", "backlog", "--reason", "next Ireland drive", "-n"], False),
+        (["gomoveshift", "health", "publish", "p", "--reason", "re-run the drive now"], False),
+    ],
+)
+def test_pgrep_pattern_matches_a_drive_process_only(argv, is_drive):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", *argv])
+    try:
+        for _ in range(50):  # the new pid's cmdline is readable almost at once
+            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") > 3:
+                break
+            time.sleep(0.02)
+        assert (proc.pid in _pgrep_pids(heal.DRIVE_PROCESS_PATTERN)) is is_drive
+    finally:
+        proc.kill()
+        proc.wait()
