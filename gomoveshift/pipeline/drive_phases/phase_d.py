@@ -38,6 +38,7 @@ from ..lf_segment_window import (  # noqa: F401 — re-exported; the engine impo
 )
 from ..longform_metadata import LongFormMetadataGenerator
 from ..media_api import deliverables_for_publish, publish_lf_paths
+from ..ost_system_review import locations_following_reviewed_burn
 from ..pipeline_validator import PipelineValidator
 from ..related_video_sidecar import emit_related_video_worklist
 from ..scheduler import PipelineScheduler, ReleaseSchedule  # noqa: F401 — patched in tests
@@ -1321,6 +1322,17 @@ class PhaseD:
             raise RuntimeError(
                 f"LF count mismatch: plan has {plan_count} LF(s) but "
                 f"{assembled_count} path(s) were assembled in Phase C"
+            )
+
+        # A checkpoint from before Phase BC broadened the location with the
+        # burn still names the unproven county; the sealed route-claim review
+        # in state says which LFs were broadened.
+        broadened = locations_following_reviewed_burn(state)
+        for idx, text in sorted(broadened.items()):
+            logger.warning(
+                "phase_d: LF %s location follows its broadened burn %r (route-claim review)",
+                idx,
+                text,
             )
 
         # Aggregated D-entry boundary contract — symmetric to the
