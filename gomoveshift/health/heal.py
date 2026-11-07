@@ -4,7 +4,7 @@ Per open ``drive_failed`` incident, at most one resume per new mirror SHA, launc
 through the job runner (``job_runner``). It never guesses an argv (no readable recipe = ``refused``) and never
 publishes: it appends ``--skip-upload --no-youtube-upload``. A ``no-auto-resume`` file beside the
 recipe refuses the drive on every SHA (an operator's stop). Guards, each a recorded skip: (a) this
-SHA already has a launched attempt, (b) a drive job is running, (c) the publish slot has passed
+recipe already has a launched attempt on this SHA, (b) a drive job is running, (c) the publish slot has passed
 or is unknown, (d) a metadata-gate failure with no generator change since the failure.
 Every attempt is appended to the row's ``resume_attempts``."""
 
@@ -145,7 +145,8 @@ def launch_argv(
         "--log-root", str(jobs_dir),
         "--",
         *recipe_argv,
-        "--skip-upload", "--no-youtube-upload",
+        # A heal of a heal reads a recipe that already carries them.
+        *(f for f in ("--skip-upload", "--no-youtube-upload") if f not in recipe_argv),
     ]  # fmt: skip
 
 
@@ -341,6 +342,14 @@ def run_heal(
     if not sha:
         out["notes"].append("mirror SHA unknown: nothing launched")
         return out
+    # Guard (a) is per recipe, not per row: ``health check`` files a failed heal job as a row of
+    # its own, and a per-row guard healed that row again on the same SHA, every tick.
+    launched_recipes = {
+        r.get("resume_recipe")
+        for r in rows
+        for a in r.get("resume_attempts") or []
+        if a.get("mirror_sha") == sha and a.get("action") == "launched"
+    }
     for row in rows:
         if row.get("resolved_at"):
             continue
@@ -361,8 +370,10 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif any(a.get("mirror_sha") == sha and a.get("action") == "launched" for a in attempts):
-            continue  # guard (a): once per mirror SHA; silent so a pass is not noise
+        elif recipe_path in launched_recipes or any(
+            a.get("mirror_sha") == sha and a.get("action") == "launched" for a in attempts
+        ):
+            continue  # guard (a): once per recipe per mirror SHA; silent so a pass is not noise
         elif drive_running(jobs_dir):
             att["reason"] = "a drive job is running"
         else:
@@ -398,6 +409,7 @@ def run_heal(
                 att["job_name"] = name
                 if ok:
                     att.update(action="launched", reason=_launch_reason(stale))
+                    launched_recipes.add(recipe_path)
                 else:
                     att["reason"] = f"launch failed: {detail}"
         if dry_run:

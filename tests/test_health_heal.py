@@ -145,6 +145,48 @@ def test_guard_a_once_per_mirror_sha(tmp_path):
     assert len(rig.launches) == 2
 
 
+def _failed_heal_row(rig: Rig, n: int) -> None:
+    # `health check` files a failed heal job as its own drive_failed row (keyed by that job's
+    # name), still pointing at the drive's one recipe.
+    first = next(r for r in load_all(rig.inc)[0] if r["key"] == "drive_failed:demo-drive-a:r1")
+    write_row(
+        rig.inc,
+        {
+            **first,
+            "key": f"drive_failed:gms-heal-demo-drive-a-abcdef1:h{n}",
+            "file": f"heal-{n}.json",
+            "drive": "gms-heal-demo-drive-a-abcdef1",
+            "job_name": "gms-heal-demo-drive-a-abcdef1",
+            "job_run_id": f"h{n}",
+            "resume_attempts": [],
+        },
+    )
+
+
+def test_guard_a_is_once_per_recipe_not_once_per_row(tmp_path):
+    # US-64, 11-06: each failed heal became a new row, and each new row healed again on the same
+    # SHA, so one deterministic failure re-ran hourly and kept the staging sync deferred forever.
+    rig = Rig(tmp_path)
+    rig.run()
+    _failed_heal_row(rig, 1)
+    out = rig.run()
+    assert len(rig.launches) == 1 and out["launched"] == []
+    _failed_heal_row(rig, 2)
+    rig.run()
+    assert len(rig.launches) == 1
+    rig.run(sha="1234567fedcba")  # pragma: allowlist secret
+    assert len(rig.launches) == 2  # new code: exactly one more resume of that recipe
+
+
+def test_a_heal_of_a_heal_does_not_repeat_the_audit_only_flags(tmp_path):
+    rig = Rig(
+        tmp_path, drive_args=["drive", "/in/demo-drive-a", "--skip-upload", "--no-youtube-upload"]
+    )
+    rig.run()
+    tail = rig.launches[0][0][rig.launches[0][0].index("--") + 1 :]
+    assert tail.count("--skip-upload") == 1 and tail.count("--no-youtube-upload") == 1
+
+
 def test_guard_b_skips_while_a_drive_job_is_running(tmp_path):
     rig = Rig(tmp_path)
     rig.running = True
