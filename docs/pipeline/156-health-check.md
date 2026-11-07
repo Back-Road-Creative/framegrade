@@ -66,8 +66,11 @@ saves never move `phase_reached`: an existing recipe stays byte-identical. Writi
 drive (warning only).
 
 **Heal.** `gomoveshift health heal [--dry-run] [--json]` takes open `drive_failed` rows and
-launches at most one resume per incident per mirror SHA: the recipe argv + `--skip-upload --no-youtube-upload`, via
-the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). It is an
+launches at most one resume per recipe per mirror SHA: the recipe argv + `--skip-upload --no-youtube-upload`
+(each added only when the recipe lacks it), via
+the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). A failed heal job becomes an
+incident row of its own, but it shares the drive's recipe, so it waits for new code like the
+first row. It is an
 audit-only resume; publish is never launched here. It never passes `--phase`, the drive CLI's
 single-phase mode: `--phase A` would pass phase A and then fail the DoD gate (`lf_count 0 < 1`)
 because B-D never ran. The plain resume runs every phase the checkpoint does not hold, so a
