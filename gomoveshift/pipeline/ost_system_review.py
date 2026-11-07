@@ -293,3 +293,42 @@ def surface_review_passes(state, surface: str, date: str, entries) -> tuple[bool
     if why:
         return False, f"system review did not pass: {why}"
     return True, f"system review record {record['text_hash']} ({WRITER})"
+
+
+def locations_following_reviewed_burn(state) -> dict:
+    """Give each LF whose burn the route-claim check broadened that broadened
+    text as its ``per_lf_locations`` entry too, from the day records in state.
+
+    Phase BC now writes both maps together (``_enrich_per_lf_gps``), but a
+    Phase-D-only resume loads a checkpoint an older revision wrote, where the
+    location kept the county the burn could not prove. A review counts only
+    when its record is sealed by this writer, it kept a label different from
+    the one requested, and that label is still the LF's exact burn text (an
+    operator re-label since then says nothing about the location). An LF with
+    no location entry stays missing. Returns ``{lf_index: new_location}``
+    and updates ``state`` in place when that is non-empty.
+    """
+    locations = dict(_field(state, "per_lf_locations") or {})
+    burn = _field(state, "per_lf_ost_text") or {}
+    changed: dict = {}
+    for record in (_field(state, "ost_system_review") or {}).values():
+        if not isinstance(record, dict) or record.get("writer") != WRITER:
+            continue
+        if record.get("digest") != _digest(record):
+            continue
+        for key, review in (record.get("reviews") or {}).items():
+            idx = int(key)
+            text = review.get("ost")
+            requested = review.get("label_requested")
+            if review.get("refused") or not text or not requested or text == requested:
+                continue
+            if idx not in locations or burn.get(idx) != text or locations[idx] == text:
+                continue
+            locations[idx] = text
+            changed[idx] = text
+    if changed:
+        if isinstance(state, dict):
+            state["per_lf_locations"] = locations
+        else:
+            state.per_lf_locations = locations
+    return changed

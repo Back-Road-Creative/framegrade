@@ -999,6 +999,116 @@ class TestPhaseDSocialGeneratorPerShortLocation:
                 PhaseD(get_config()).run(phase_d_state)
 
 
+class TestPhaseDLocationFollowsReviewedBurn:
+    """A Phase-D-only resume of a checkpoint whose Phase BC broadened a
+    burn label but kept the county in ``per_lf_locations`` (the code before
+    the broadening also replaced the location). Phase D must read the
+    broadened text from the route-claim review in state, or the location
+    invariant fails after the encode: the county omits the other material
+    county the state label covers."""
+
+    COUNTY = "Harrow County, Westmark"
+    REQUESTED = "Harrow & Ashby County, WM"
+    BROADENED = "Westmark"
+
+    def _review(self, state, *, ost_by_lf, requested_by_lf):
+        from gomoveshift.pipeline import ost_system_review as osr
+        from gomoveshift.pipeline.route_claims import route_claim_outcome
+
+        outcomes = {
+            idx: route_claim_outcome(idx, requested_by_lf[idx], None, chosen=ost, reason="")
+            for idx, ost in ost_by_lf.items()
+        }
+        osr.record_system_reviews(state, {"2025-09-14": dict(ost_by_lf)}, outcomes)
+
+    def _locations_at_entry(self, state, monkeypatch):
+        import gomoveshift.pipeline.drive_phases.phase_d as phase_d_mod
+
+        class _AtEntryError(Exception):
+            pass
+
+        seen = {}
+
+        def _stop(s):
+            seen.update(s["per_lf_locations"])
+            raise _AtEntryError
+
+        monkeypatch.setattr(phase_d_mod, "assert_phase_d_per_lf_inputs_present", _stop)
+        _install_fake_youtube_uploader(monkeypatch)
+        with (
+            _phase_d_patches()[0] as m0,
+            _phase_d_patches()[1] as m1,
+            _phase_d_patches()[2] as m2,
+            _phase_d_patches()[3] as m3,
+            _phase_d_patches()[4] as m4,
+            _phase_d_patches()[5] as m5,
+            _phase_d_patches()[6] as m6,
+            _phase_d_patches()[7] as m7,
+        ):
+            _setup_mocks((m0, m1, m2, m3, m4, m5, m6, m7))
+            with pytest.raises(_AtEntryError):
+                PhaseD(get_config()).run(state)
+        return seen, dict(state["per_lf_locations"])
+
+    def test_broadened_burn_replaces_the_saved_county(self, phase_d_state, monkeypatch):
+        phase_d_state["per_lf_locations"] = {1: self.COUNTY, 2: "Cork, Ireland"}
+        phase_d_state["per_lf_ost_text"] = {1: self.BROADENED, 2: "Cork, Ireland"}
+        self._review(
+            phase_d_state,
+            ost_by_lf={1: self.BROADENED, 2: "Cork, Ireland"},
+            requested_by_lf={1: self.REQUESTED, 2: "Cork, Ireland"},
+        )
+
+        seen, after = self._locations_at_entry(phase_d_state, monkeypatch)
+
+        assert seen == {1: self.BROADENED, 2: "Cork, Ireland"}
+        assert after == seen
+
+    def test_burn_changed_after_the_review_keeps_the_location(self, phase_d_state, monkeypatch):
+        """The review no longer describes the burn (an operator re-labelled
+        it), so it says nothing about the location."""
+        phase_d_state["per_lf_locations"] = {1: self.COUNTY, 2: "Cork, Ireland"}
+        phase_d_state["per_lf_ost_text"] = {1: "Harrow to Ashby", 2: "Cork, Ireland"}
+        self._review(
+            phase_d_state,
+            ost_by_lf={1: self.BROADENED, 2: "Cork, Ireland"},
+            requested_by_lf={1: self.REQUESTED, 2: "Cork, Ireland"},
+        )
+
+        seen, _ = self._locations_at_entry(phase_d_state, monkeypatch)
+
+        assert seen[1] == self.COUNTY
+
+    def test_a_label_the_check_kept_keeps_its_location(self, phase_d_state, monkeypatch):
+        phase_d_state["per_lf_locations"] = {1: self.COUNTY, 2: "Cork, Ireland"}
+        phase_d_state["per_lf_ost_text"] = {1: "Harrow to Ashby", 2: "Cork, Ireland"}
+        self._review(
+            phase_d_state,
+            ost_by_lf={1: "Harrow to Ashby", 2: "Cork, Ireland"},
+            requested_by_lf={1: "Harrow to Ashby", 2: "Cork, Ireland"},
+        )
+
+        seen, _ = self._locations_at_entry(phase_d_state, monkeypatch)
+
+        assert seen == {1: self.COUNTY, 2: "Cork, Ireland"}
+
+    def test_a_record_altered_after_sealing_is_ignored(self, phase_d_state):
+        from gomoveshift.pipeline import ost_system_review as osr
+
+        phase_d_state["per_lf_locations"] = {1: self.COUNTY, 2: "Cork, Ireland"}
+        phase_d_state["per_lf_ost_text"] = {1: self.BROADENED, 2: "Cork, Ireland"}
+        self._review(
+            phase_d_state,
+            ost_by_lf={1: self.BROADENED, 2: "Cork, Ireland"},
+            requested_by_lf={1: self.REQUESTED, 2: "Cork, Ireland"},
+        )
+        phase_d_state["ost_system_review"]["2025-09-14"]["reviews"]["1"]["refused"] = False
+        phase_d_state["ost_system_review"]["2025-09-14"]["date"] = "2025-09-15"
+
+        assert osr.locations_following_reviewed_burn(phase_d_state) == {}
+        assert phase_d_state["per_lf_locations"][1] == self.COUNTY
+
+
 # ── Phase D sidecar integrity gate ───────────────────────────────
 
 
