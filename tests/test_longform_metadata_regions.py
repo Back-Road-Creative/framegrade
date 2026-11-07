@@ -78,6 +78,43 @@ class TestFormatRegionsLineBasic:
 # ────────────────────────────────────────────────────────────────────
 
 
+class TestFormatRegionsLineOwnLabelQualifier:
+    """A broadened LF label ("North Carolina", from a route-claim review) is
+    the trailing qualifier of every county name in the Through line. Repeating
+    it per county made 'North Carolina' appear 5x and failed the 2x location
+    budget in ``check_description_redundancy`` (US-64 heal, 11-07)."""
+
+    _COUNTIES = [
+        "Transylvania County, North Carolina",
+        "Polk County, North Carolina",
+        "Henderson County, North Carolina",
+    ]
+
+    def test_drops_the_own_label_qualifier(self):
+        regions = [_r(n, country="USA") for n in self._COUNTIES]
+        line = _format_regions_line(regions, "North Carolina")
+        assert line == "🗺️ Through: Transylvania County, Polk County, Henderson County\n"
+
+    def test_keeps_a_qualifier_that_is_not_the_own_label(self):
+        regions = [_r("Rabun County, Georgia", country="USA"), _r(self._COUNTIES[1], country="USA")]
+        line = _format_regions_line(regions, "North Carolina")
+        assert line == "🗺️ Through: Rabun County, Georgia, Polk County\n"
+
+    def test_description_passes_the_redundancy_gate(self):
+        from gomoveshift.pipeline.validation.content_gates import check_description_redundancy
+
+        loc = "North Carolina"
+        regions = [_r(n, country="USA") for n in self._COUNTIES]
+        desc = (
+            f"POV drive through {loc} (1h 12m).\n"
+            f"4K drive through {loc}.\n"
+            f"\n"
+            f"📍 Location: {loc}\n"
+            f"{_format_regions_line(regions, loc)}"
+        )
+        assert check_description_redundancy({"description": desc, "location": loc}).passed
+
+
 class TestFormatRegionsLineSuppression:
     def test_none_returns_empty_string(self):
         assert _format_regions_line(None, "Anywhere, Ireland") == ""
