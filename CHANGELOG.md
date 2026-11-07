@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.47] - 2026-11-07
+
+### Fixed
+
+- Shorts YouTube descriptions no longer open "Through the windshield …": the plan grammar gate refused a lead starting with a bare preposition and failed the whole publish plan. The lead is now "Over the hood", and a test checks every lead against the gate.
+
 ## [0.3.46] - 2026-11-07
 
 ### Fixed
@@ -591,7 +597,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...HEAD
+[0.3.47]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...v0.3.47
 [0.3.46]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...v0.3.46
 [0.3.45]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...v0.3.45
 [0.3.44]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...v0.3.44
