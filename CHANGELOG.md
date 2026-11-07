@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.42] - 2026-11-06
+
+### Fixed
+
+- `health publish` books a Waypost slot for every long-form a drive rendered. It refused any drive the store did not list with exactly one long-form, and `health backlog` lists every drive with one, so a two-long-form drive would have got one booked slot while Phase D dated its second long-form a week later with nothing booked. The count now comes from the audit's `drive_plan.json` (`regular_lfs`); a count that differs from the store is written back before the claim, and a drive with no readable plan is refused before any write.
+
 ## [0.3.41] - 2026-11-06
 
 ### Fixed
@@ -561,7 +567,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...HEAD
+[0.3.42]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...v0.3.42
 [0.3.41]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...v0.3.41
 [0.3.40]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...v0.3.40
 [0.3.39]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.38...v0.3.39
