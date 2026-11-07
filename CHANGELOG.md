@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.43] - 2026-11-06
+
+### Fixed
+
+- When the route-claim check broadens a long-form's burned label (for example to the state), the LF's location label now broadens with it. Phase D used to keep the narrower county on the `📍 Location:` line, so the location invariant failed after the full encode (US-64 LF 1: burn "North Carolina", location "Transylvania County, North Carolina", Henderson County 37% of the footage).
+
 ## [0.3.42] - 2026-11-06
 
 ### Fixed
@@ -567,7 +573,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...HEAD
+[0.3.43]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...v0.3.43
 [0.3.42]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...v0.3.42
 [0.3.41]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...v0.3.41
 [0.3.40]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.39...v0.3.40
