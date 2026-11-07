@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.44] - 2026-11-07
+
+### Fixed
+
+- `health heal` resumes a drive at most once per recipe per mirror SHA. Before, `health check` filed each failed heal job as a new incident row and heal resumed that row again on the same code, so one deterministic failure re-ran every hour and its live job kept deferring the staging sync that carried the fix. A heal of a heal no longer repeats `--skip-upload --no-youtube-upload`.
+
 ## [0.3.43] - 2026-11-06
 
 ### Fixed
@@ -573,7 +579,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...HEAD
+[0.3.44]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.43...v0.3.44
 [0.3.43]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.42...v0.3.43
 [0.3.42]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.41...v0.3.42
 [0.3.41]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.40...v0.3.41
