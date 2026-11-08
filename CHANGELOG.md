@@ -5,6 +5,25 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.53] - 2026-11-08
+
+### Added
+
+- `analysis.sign_label.derive_sign_label`: a county-level label ("Colleton County, SC") derived from an LF's road signs, for an LF the camera never located. It is produced only when at least `sign_verify_min_corroborating_hits` (default 2) sign hits from distinct seconds name one county, no other county is named, exactly one state is named, and the LF has zero GPS fixes; otherwise it refuses with a reason naming the rule. The label carries its evidence (hit count, seconds, sign texts) for tier evidence and the OST system review. This release only derives; a later change writes it into the per-LF labels and shows it in `--list-lfs`.
+
+### Changed
+
+- `ocr.parse_sign_claims`: a full state name is a state claim only beside a place claim ("Colleton County South Carolina") or a boundary cue ("Welcome to", "State Line", "Entering", "Leaving", "Welcomes You"). A destination on an interstate guide or distance sign ("Winchester / West Virginia / Exit 310") is no longer a claim about where the camera is, so it can neither mislabel a GPS-less LF nor raise a false state conflict.
+- A drive with a GPS-less episode now reads its road signs by default. The sign OCR pass was opt-in (`--sign-verify`), so a drive the camera never located (`nctopa-2026-03-05-rec0063`: 13 chapters, zero locked fixes) rendered with no evidence of where it was. The operator's decision still wins: `--no-sign-verify` turns it off, `--sign-verify` turns it on for any drive. A GPS-less day is sampled every `sign_verify_gpsless_sample_period_s` (default 10 s) instead of the flat 120 per day, and EasyOCR runs on the GPU when torch sees one.
+
+### Fixed
+
+- `health backlog` launches a GPS-less row only when its `placeless_label` claims nothing (every word in `PLACELESS_NO_CLAIM_WORDS`, e.g. "Somewhere On The Road"). A descriptive label ("Through The Valleys And Ridges") is skipped at the backlog, before any render, with the words it claims named in the skip reason, and the row behind it still launches. `nctopa-2026-03-05-rec0063` had rendered that label over a drive that is mostly divided interstate and farmland; the label was operator-typed and nothing measured it. A label outside the placeless vocabulary is now also refused at the backlog instead of failing the launch job at argparse.
+- `health backlog` now retires and holds a rowless dead drive even while a drive is running. Before this, heal's resume of that same dead drive started just before each hourly backlog run, so the backlog stopped at "a drive is running" every hour. The hold was never written, and the next mirror SHA brought the same resume again, so neither region's backlog ever launched. The text output now also prints the `retired` and `held` lines, so the cron log shows them.
+- CI caches the pinned ffmpeg tarball under a key built from its checksum, and retries the download. On 11-08 the release host answered 504 and every test shard went red at "Install ffmpeg". A cached tarball is still checked against the pinned checksum.
+- `health check` and `health backlog` no longer treat a drive stopped at the OST audit gate (exit 5, `DRIVE WAITING:`) as failed. No `drive_failed` row is filed, so `health heal` stops re-resuming it onto the same gate on every mirror SHA. The backlog names the sidecar to review and the `.confirmed` marker to create, then resumes the drive from its stages on the next run once the marker exists.
+- `--ost-system-review` now passes a GPS-less drive run with a claim-free `--placeless-label`. Before, route claims had nothing to measure, so the long-form, Shorts and superlong gates always waited for a person to create `.confirmed`, even though backlog drives already pass the flag. An unmeasured LF, Short or superlong part (no lower-thirds) whose exact text is the drive's placeless label gets an `agree` review only when every word of that label is in `content_gates.PLACELESS_NO_CLAIM_WORDS` (no scenery, weather, season or time of day, e.g. "Somewhere On The Road"). A descriptive placeless label ("Through The Quiet Hills") and any other unmeasured text still wait for a person.
+
 ## [0.3.52] - 2026-11-08
 
 ### Fixed
@@ -627,7 +646,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...HEAD
+[0.3.53]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...v0.3.53
 [0.3.52]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...v0.3.52
 [0.3.51]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...v0.3.51
 [0.3.50]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...v0.3.50
