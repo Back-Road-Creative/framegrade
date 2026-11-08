@@ -271,6 +271,30 @@ def test_a_dry_run_names_the_retirement_but_writes_nothing(tmp_path):
     assert res["project"] == "day-a" and not rig.launches
 
 
+# A retired drive's recipe stayed live: ``health heal`` re-resumed the dead 03-04 audit on every
+# new mirror SHA (jobs ba3a9dbf, 15c1c9b0, 1affffde), each holding the heavy slot ~35 min.
+def test_retiring_holds_the_drives_recipe_so_heal_never_resumes_it(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "auditing"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    stages = rig.stages / "dropped" / "dropped" / "_stages"
+    stages.mkdir(parents=True)
+    (stages / "resume.json").write_text(json.dumps({"argv": ["drive", "/x"]}))
+    (rig.stages / "dropped" / "other" / "_stages").mkdir(parents=True)  # no recipe: left alone
+    assert rig.run(dry_run=True)["retired"] and not (stages / launch.HOLD_NAME).exists()
+    rig.run()
+    assert "9ee99a65" in (stages / launch.HOLD_NAME).read_text()
+    assert heal.resume.is_held(stages / "resume.json")
+    assert not (rig.stages / "dropped" / "other" / "_stages" / launch.HOLD_NAME).exists()
+
+
+def test_retiring_a_drive_with_no_stages_still_retires_it(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "auditing"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    assert rig.run()["action"] == "launched" and rig.retired == ["dropped"]
+
+
 def test_a_failed_audit_whose_row_is_still_listed_is_never_retired(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("day-a", "auditing"))

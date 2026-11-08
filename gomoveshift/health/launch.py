@@ -4,7 +4,7 @@ LF slot, audit only (``--skip-upload --no-youtube-upload``), through the job run
 Order, each a stop: the ``gms-backlog-launch`` lease (held = noop); a running drive (noop); a
 region row already ``auditing`` (noop: that audit owns the next slot, so a repeat call never
 launches a second drive; a failed one whose backlog row was dropped is ``retire``d to ``failed``
-instead); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
+instead, and its recipes get a ``no-auto-resume`` hold so ``health heal`` leaves it dead); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
 drives (none left = covered). A drive whose output dir already holds Phase D upload records
 (``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
@@ -333,6 +333,13 @@ def _supersede(project, reason, moves, now) -> None:
         (dst / SUPERSEDE_RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 
+def _hold_recipes(stages_root: Path, project: str, reason: str) -> None:
+    """``no-auto-resume`` beside each of a retired drive's resume recipes, so ``health heal``
+    never re-resumes it on a later mirror SHA."""
+    for recipe in sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json")):
+        (recipe.parent / HOLD_NAME).write_text(reason + "\n", encoding="utf-8")
+
+
 def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
     """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success.
 
@@ -454,6 +461,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         if failed:
             if not dry_run:
                 retire(project)
+                _hold_recipes(stages_root, project, f"retired by health backlog: {failed}")
             res.setdefault("retired", []).append({"project": project, "reason": failed})
             auditing.remove(project)
             mine = [d for d in mine if d.project != project]
