@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.49] - 2026-11-07
+
+### Fixed
+
+- `health backlog` no longer stalls a region on a failed audit whose row was dropped from `drive_backlog.yaml`. That drive could not be relaunched or superseded: `--supersede` refused because the row was not in the backlog. So every call refused until someone ran `set-status failed` by hand. Now the store row is set `failed`, the result lists it under `retired`, and the next row launches. A dry run only lists the retirement.
+
 ## [0.3.48] - 2026-11-07
 
 ### Fixed
@@ -603,7 +609,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...HEAD
+[0.3.49]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...v0.3.49
 [0.3.48]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...v0.3.48
 [0.3.47]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...v0.3.47
 [0.3.46]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...v0.3.46
