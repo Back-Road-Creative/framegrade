@@ -29,6 +29,9 @@ Shape of the pass, per calendar day:
    sign evidence is worth the most — with ``lat``/``lon`` recorded as ``None``.
 4. Stride the survivors evenly and cap the total per DAY, so the evidence is
    spread across the whole drive instead of clustering in its first minutes.
+   A GPS-less day's cap grows with its length (one sample per
+   ``sign_verify_gpsless_sample_period_s``): its signs are the only evidence,
+   and an exit sign is in frame for seconds, not minutes.
 5. Grab ONE native-resolution frame per sampled second (targeted seek), find
    the sign region with the cheap colour/shape filter already in
    ``analysis.signs``, OCR only that crop, and parse claims out of the text.
@@ -54,6 +57,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 import subprocess
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Optional
@@ -66,6 +70,7 @@ logger = logging.getLogger(__name__)
 # works with a config that predates them).
 _DEFAULT_MAX_SAMPLES_PER_DAY = 120
 _DEFAULT_MIN_SPEED_MPS = 5.0
+_DEFAULT_GPSLESS_SAMPLE_PERIOD_S = 10.0
 
 # Half-width (seconds) of the window the moving/stationary median is taken
 # over. Wide enough to span several 1 Hz fixes, narrow enough that a brief
@@ -291,6 +296,40 @@ def _moving_seconds(points, times, duration: float, min_speed_mps: float) -> lis
     return kept
 
 
+def _has_fixes(gps_entry) -> bool:
+    """``gps_per_episode`` entry carries a GPS track (``(GPSData, offset)``, data not None)."""
+    if not gps_entry:
+        return False
+    return gps_entry[0] is not None
+
+
+def sign_pass_wanted(config_flag, state_flag, gps_per_episode) -> bool:
+    """Whether Phase A reads the road signs this run.
+
+    An operator decision wins: ``state_flag`` is the flag registry's saved
+    sentinel (``None`` = never decided; ``False`` = ``--no-sign-verify``), and
+    a true ``config_flag`` is ``--sign-verify`` mirrored into ``config.drive``.
+    Undecided, the pass runs when any episode has no GPS track: a drive the
+    camera never located has nothing else that can say where it was, so its
+    signs are read without being asked for.
+    """
+    if state_flag is not None:
+        return bool(state_flag)
+    if config_flag:
+        return True
+    return any(not _has_fixes(entry) for entry in (gps_per_episode or []))
+
+
+def _day_sample_cap(
+    max_samples: int, period_s: float, day_seconds: float, day_has_gps: bool
+) -> int:
+    """Samples allowed for one day: the flat cap, or on a GPS-less day the larger
+    of that and one sample per ``period_s`` of footage."""
+    if day_has_gps or period_s <= 0:
+        return max_samples
+    return max(max_samples, int(math.ceil(day_seconds / period_s)))
+
+
 def _even_stride(items: list, cap: int) -> list:
     """At most ``cap`` items, strided evenly across the WHOLE list.
 
@@ -439,8 +478,8 @@ def collect_sign_hits(
 
     Args:
         config: the pipeline ``Config``. ``config.drive`` supplies
-            ``sign_verify_max_samples_per_day`` / ``sign_verify_min_speed_mps``
-            (both read defensively); ``config.sign_detection`` and
+            ``sign_verify_max_samples_per_day`` / ``sign_verify_min_speed_mps`` /
+            ``sign_verify_gpsless_sample_period_s`` (all read defensively); ``config.sign_detection`` and
             ``config.ocr`` supply the detection / OCR thresholds — this pass
             adds no duplicate confidence knobs of its own.
         ingest_plan: the Phase A ingest plan (its ``episodes``).
@@ -474,6 +513,12 @@ def collect_sign_hits(
     min_speed_mps = float(
         getattr(config.drive, "sign_verify_min_speed_mps", _DEFAULT_MIN_SPEED_MPS) or 0.0
     )
+    gpsless_period_s = float(
+        getattr(
+            config.drive, "sign_verify_gpsless_sample_period_s", _DEFAULT_GPSLESS_SAMPLE_PERIOD_S
+        )
+        or 0.0
+    )
 
     index_by_path = {str(path): i for i, path in enumerate(episode_files or [])}
     detector = SignDetector(config)
@@ -489,6 +534,7 @@ def collect_sign_hits(
 
         candidates: list[_Candidate] = []
         day_cursor = 0.0
+        day_has_gps = False
         for episode in getattr(batch, "episodes", None) or []:
             # Running cursor over the day's episodes in batch order — the same
             # computation the day master's own concat performs, so an
@@ -509,6 +555,7 @@ def collect_sign_hits(
                 if gps_per_episode and 0 <= episode_index < len(gps_per_episode)
                 else None
             )
+            day_has_gps = day_has_gps or _has_fixes(gps_entry)
             try:
                 candidates.extend(
                     _episode_candidates(
@@ -528,7 +575,9 @@ def collect_sign_hits(
                     exc,
                 )
 
-        sampled = _even_stride(candidates, max_samples)
+        sampled = _even_stride(
+            candidates, _day_sample_cap(max_samples, gpsless_period_s, day_cursor, day_has_gps)
+        )
         day_hits: list[SignHit] = []
         for candidate in sampled:
             try:
