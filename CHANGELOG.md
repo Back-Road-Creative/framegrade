@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.52] - 2026-11-08
+
+### Fixed
+
+- Phase A now refuses a full_drive day that the GPS-gap cut alone leaves under `full_drive_part_min_sec`, before the GPU scoring pass. The planner refuses that day anyway, since the stop mask can only cut more, but it used to do so only after scoring had run. On the 03-04 drive the new check gives the planner's own 2889 s against the 3600 s floor. A GPS-less day is never refused by this check.
+
 ## [0.3.51] - 2026-11-08
 
 ### Fixed
@@ -621,7 +627,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...HEAD
+[0.3.52]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...v0.3.52
 [0.3.51]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...v0.3.51
 [0.3.50]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...v0.3.50
 [0.3.49]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...v0.3.49
