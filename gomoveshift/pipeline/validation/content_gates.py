@@ -648,6 +648,17 @@ PLACELESS_LABEL_WORDS = frozenset(
         "off", "map", "in", "of", "a", "on", "through", "out", "into",
     }
 )  # fmt: skip
+# The part of that vocabulary that claims nothing about the footage either: no
+# scenery, weather, season, time of day or road kind. Only a label made of these
+# words is true of any drive, so only it may pass without a person
+# (``ost_system_review``); "Through The Quiet Hills" stays a person's call.
+PLACELESS_NO_CLAIM_WORDS = frozenset(
+    {
+        "somewhere", "between", "unknown", "unnamed", "untitled", "miles", "mile",
+        "drive", "driving", "road", "roads", "route", "pov",
+        "the", "and", "in", "of", "a", "on", "through", "out", "into",
+    }
+)  # fmt: skip
 PLACELESS_LABEL_MAX_CHARS = 40
 _PLACELESS_SHAPE_RE = re.compile(r"[A-Za-z' ]+")
 
@@ -672,6 +683,14 @@ def placeless_label_problem(label: str) -> Optional[str]:
             + " are outside the placeless vocabulary (a word that could name a place)"
         )
     return None
+
+
+def placeless_label_claims_nothing(label: str) -> bool:
+    """``label`` is a placeless label made only of :data:`PLACELESS_NO_CLAIM_WORDS`."""
+    text = (label or "").strip()
+    return placeless_label_problem(text) is None and all(
+        w in PLACELESS_NO_CLAIM_WORDS for w in text.lower().split()
+    )
 
 
 _LOCATION_LINE_RE = re.compile(r"\U0001f4cd Location:\s*(.+)")

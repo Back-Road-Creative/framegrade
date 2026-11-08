@@ -8,6 +8,15 @@ exact text checked, each LF's verdict (``agree`` or ``refused``) and the
 refusal reason. The record is sealed (``digest``) and carries its writer and
 version.
 
+A GPS-less drive run with ``--placeless-label`` has nothing to measure, but its
+label is checked by construction: one closed-vocabulary label that names no
+place (``content_gates.placeless_label_problem``). When that label also claims
+nothing about the footage (``content_gates.placeless_label_claims_nothing``:
+no scenery, weather, season or time of day), an unmeasured LF, Short or
+superlong part whose exact text is that label gets an ``agree`` review saying
+so. A descriptive label, and any other unmeasured text, still gets none, so a
+person confirms it.
+
 :func:`system_review_passes` is the fourth pass signal at both OST gates
 (``day_pipeline.run_day_pipeline`` and ``ost_audit_sidecar.lf_gate_or_raise``).
 It passes only when ``--ost-system-review`` was given on THIS run and the
@@ -59,16 +68,37 @@ def seal(record: dict) -> dict:
     return {**record, "digest": _digest(record)}
 
 
+PLACELESS_REASON = "placeless label: claim-free words only, makes no place or scenery claim"
+#: ``place_source`` of a Short whose inherited text is the drive's placeless label.
+PLACELESS_SOURCE = "placeless_label"
+
+
+def _placeless_outcome(state, text) -> Optional[dict]:
+    """An agreeing outcome for unmeasured ``text`` when it is exactly the
+    drive's placeless label and that label claims nothing about the footage
+    (``content_gates.placeless_label_claims_nothing``). A descriptive label
+    ("Through The Quiet Hills") is a claim only a person can check."""
+    from .validation.content_gates import placeless_label_claims_nothing
+
+    label = (_field(state, "placeless_label") or "").strip()
+    if not label or str(text or "").strip() != label:
+        return None
+    if not placeless_label_claims_nothing(label):
+        return None
+    return {"refused": False, "reason": PLACELESS_REASON, "label_requested": label}
+
+
 def record_system_reviews(state, ost_text_by_date: dict, outcomes: dict) -> None:
     """Write each day's record from the route-claim ``outcomes``
     (``{lf_index: route_claim_outcome}``) and the burn text in
     ``ost_text_by_date``. An LF with no outcome (no retained GPS to measure)
-    gets no review, so its day can only pass through a person."""
+    gets no review, so its day can only pass through a person -- unless its
+    text is the drive's placeless label (:func:`_placeless_outcome`)."""
     records = dict(_field(state, "ost_system_review") or {})
     for date, day in (ost_text_by_date or {}).items():
         reviews = {}
         for idx, text in day.items():
-            outcome = outcomes.get(idx)
+            outcome = outcomes.get(idx) or _placeless_outcome(state, text)
             if outcome is None:
                 continue
             refused = bool(outcome.get("refused"))
@@ -198,19 +228,25 @@ def record_surface_reviews(state, surface: str, date: str, entries, outcomes: di
     (``{entry_id: {"refused", "reason", "label_requested", "ost_text"}}``)
     measured over each entry's own retained GPS. An entry with no outcome, or
     whose text is not the text that was measured, gets no review, so its day
-    can only pass through a person."""
+    can only pass through a person -- unless its text is the drive's placeless
+    label and it burns no lower-third (a lower-third names a town)."""
     field = SURFACE_FIELDS[surface]
     records = dict(_field(state, field) or {})
     reviews, reviewed = {}, []
     for entry in entries or []:
         outcome = outcomes.get(_entry_id(surface, entry))
+        source = entry.get("place_source")
+        if outcome is None and not entry.get("lower_thirds"):
+            outcome = _placeless_outcome(state, entry["ost_text"])
+            if outcome is not None and surface == "shorts":
+                source = PLACELESS_SOURCE
         if outcome is None or outcome.get("ost_text", entry["ost_text"]) != entry["ost_text"]:
             continue
         refused = bool(outcome.get("refused"))
         reviewed.append(entry)
         reviews[str(_entry_id(surface, entry))] = {
             **_identity(surface, entry),
-            "place_source": entry.get("place_source"),
+            "place_source": source,
             "verdict": REFUSED if refused else AGREE,
             "refused": refused,
             "label_requested": outcome.get("label_requested"),
@@ -251,20 +287,26 @@ def _surface_refusal(record, surface: str, date: str, entries) -> Optional[str]:
         return "record seal does not match its contents"
     if record.get("date") != date:
         return f"record is for {record.get('date')!r}, not {date}"
+    reviews = record.get("reviews")
+    if not isinstance(reviews, dict):
+        return "record reviews are malformed"
+    # Inherited text passes only where this writer agreed it is the drive's
+    # placeless label (the hash below still binds the exact text).
+    placeless = {
+        k for k, r in reviews.items()
+        if isinstance(r, dict) and r.get("place_source") == PLACELESS_SOURCE
+    }  # fmt: skip
     inherited = [
         f"{name} {_entry_id(surface, e)} {e.get('ost_text')!r} text is inherited "
         f"({INHERITED_SOURCE}), not measured on its own clip"
         for e in sorted(entries, key=lambda e: _entry_id(surface, e))
-        if e.get("place_source") == INHERITED_SOURCE
+        if e.get("place_source") == INHERITED_SOURCE and str(_entry_id(surface, e)) not in placeless
     ]
     if inherited:
         return "; ".join(inherited)
     gate_ids = sorted(_entry_id(surface, e) for e in entries)
     if record.get("entry_ids") != gate_ids:
         return f"record covers {name}s {record.get('entry_ids')}, gate has {gate_ids}"
-    reviews = record.get("reviews")
-    if not isinstance(reviews, dict):
-        return "record reviews are malformed"
     refused = [
         f"{name} {i} {r.get('label_requested') or r.get('ost_text')!r} refused: {r.get('reason')}"
         for i, r in sorted(reviews.items())

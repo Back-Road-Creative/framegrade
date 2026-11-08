@@ -483,3 +483,104 @@ def test_b13_run_resets_the_opt_ins_after_the_resume_merge():
             lines.setdefault(name, []).append(node.lineno)
     assert "reset_ost_opt_ins_after_resume" in lines, "run() never resets the OST opt-ins"
     assert min(lines["reset_ost_opt_ins_after_resume"]) > min(lines["_try_resume"])
+
+
+# --- a placeless label is reviewed without GPS ------------------------------
+# ``--placeless-label`` burns one closed-vocabulary label that names no place
+# on every LF of a GPS-less drive. Route claims measure nothing there, so the
+# writer agrees on exactly that label when it makes no claim at all (no place,
+# no scenery, no time of day) and on nothing else. A descriptive label
+# ("Through The Quiet Hills") is a claim about the footage, so a person confirms it.
+
+PLACELESS = "Somewhere On The Road"
+DESCRIPTIVE = "Through The Quiet Hills"
+
+
+def _placeless_day(*, label=PLACELESS, texts=None, opt_in=True):
+    state = _state(opt_in=opt_in)
+    texts = texts or {1: label, 2: label}
+    for idx, text in texts.items():
+        state["per_lf_ost_text"][idx] = text
+        state["per_lf_titles"][idx] = f"{text} (Part {idx} of 2)"
+        state["per_lf_recording_date"][idx] = D
+        state["per_lf_locations"][idx] = text
+    state["placeless_label"] = label
+    osr.record_system_reviews(state, {D: texts}, {})
+    return state
+
+
+@TWO_LF_GATES
+def test_b15_a_gps_less_placeless_day_passes_on_the_system_record(tmp_path, gate):
+    state = _placeless_day()
+    gate(tmp_path, state)
+    assert state["ost_audit_passed"][D] is True
+    assert _no_markers(tmp_path)
+    review = state["ost_system_review"][D]["reviews"]["2"]
+    assert review["verdict"] == "agree" and review["ost"] == PLACELESS
+    assert "placeless" in review["reason"]
+
+
+@TWO_LF_GATES
+def test_b15_without_opt_in_the_placeless_day_stays_pending(tmp_path, gate):
+    state = _placeless_day(opt_in=False)
+    with pytest.raises(OstAuditPendingError):
+        gate(tmp_path, state)
+    assert _no_markers(tmp_path)
+
+
+def test_b15_a_label_outside_the_vocabulary_gets_no_review():
+    state = _placeless_day(label="Through Harrow Hills")
+    assert D not in state["ost_system_review"]
+
+
+@pytest.mark.parametrize("label", [DESCRIPTIVE, "A Long Morning Drive", "Back Roads In Fog"])
+def test_b15_a_descriptive_placeless_label_gets_no_review(label):
+    """In the vocabulary, but it describes the footage: a person checks it."""
+    state = _placeless_day(label=label)
+    assert D not in state["ost_system_review"]
+
+
+def test_b15_the_claim_free_words_sit_inside_the_placeless_vocabulary():
+    from gomoveshift.pipeline.validation import content_gates as cg
+
+    assert cg.PLACELESS_NO_CLAIM_WORDS <= cg.PLACELESS_LABEL_WORDS
+    assert not cg.PLACELESS_NO_CLAIM_WORDS & {"hills", "ridges", "valleys", "fog", "morning"}
+
+
+@TWO_LF_GATES
+def test_b15_a_descriptive_placeless_day_stays_pending(tmp_path, gate):
+    state = _placeless_day(label=DESCRIPTIVE)
+    with pytest.raises(OstAuditPendingError):
+        gate(tmp_path, state)
+    assert _no_markers(tmp_path)
+
+
+def test_b15_text_other_than_the_placeless_label_gets_no_review():
+    state = _placeless_day(texts={1: PLACELESS, 2: "Harrow, Westmark"})
+    assert state["ost_system_review"][D]["lf_indices"] == [1]
+
+
+def test_b15_no_placeless_label_keeps_the_gps_less_lf_unreviewed():
+    state = _state()
+    osr.record_system_reviews(state, {D: {1: PLACELESS}}, {})
+    assert D not in state["ost_system_review"]
+
+
+def test_b15_a_measured_outcome_wins_over_the_placeless_agreement():
+    state = _state()
+    state["placeless_label"] = PLACELESS
+    outcome = route_claim_outcome(1, PLACELESS, None, chosen=None, reason="claims a place")
+    osr.record_system_reviews(state, {D: {1: PLACELESS}}, {1: outcome})
+    assert state["ost_system_review"][D]["reviews"]["1"]["refused"] is True
+
+
+def test_b15_the_pre_burn_writer_agrees_on_a_placeless_drive():
+    state = SimpleNamespace(
+        gps_per_episode={}, gpx_files=[], episode_dates=[], per_lf_overrides={},
+        placeless_label=PLACELESS,
+    )  # fmt: skip
+    lfs = [_lf(1, (0.0, 280.0)), _lf(2, (300.0, 580.0))]
+    _enrich_into(state, lfs, {1: PLACELESS, 2: PLACELESS})
+    record = state.ost_system_review["2026-01-02"]
+    assert record["lf_indices"] == [1, 2]
+    assert {r["verdict"] for r in record["reviews"].values()} == {"agree"}
