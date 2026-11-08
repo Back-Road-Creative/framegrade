@@ -32,6 +32,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 from .. import run_origin
 from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
+from ..pipeline.validation.content_gates import (
+    PLACELESS_NO_CLAIM_WORDS,
+    placeless_label_claims_nothing,
+    placeless_label_problem,
+)
 from . import drives as drive_jobs
 from . import resume
 from .cadence import COVERAGE_HORIZON_H, _aware
@@ -180,6 +185,29 @@ def staged_sources(stages_root: Path) -> List[Tuple[Path, Set[str], bool]]:
     return out
 
 
+def placeless_label_skip_reason(label: str) -> Optional[str]:
+    """Why a backlog row's ``placeless_label`` may not launch unattended, or ``None``.
+
+    A placeless label is operator-typed and nothing in the pipeline measures it (no GPS, so
+    route claims have nothing to check). The launcher passes only a label that claims nothing
+    (``content_gates.placeless_label_claims_nothing``); a descriptive one is a claim about the
+    footage and is skipped here, before any render, instead of burning in and waiting for a
+    person at the OST audit gate. 2026-11-08: nctopa-2026-03-05-rec0063 rendered "Through The
+    Valleys And Ridges" over a drive that is mostly divided interstate and farmland.
+    """
+    problem = placeless_label_problem(label)
+    if problem:
+        return f"placeless_label {label!r}: {problem}"
+    if placeless_label_claims_nothing(label):
+        return None
+    claims = [w for w in label.split() if w.lower() not in PLACELESS_NO_CLAIM_WORDS]
+    return (
+        f"placeless_label {label!r} claims {', '.join(claims)}, which nothing measures on a "
+        "GPS-less drive; a backlog row launches only a claim-free label (every word in "
+        "PLACELESS_NO_CLAIM_WORDS, e.g. 'Somewhere On The Road')"
+    )
+
+
 def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) -> Optional[str]:
     """Why ``row`` is not launched, or ``None``. ``own_ok``: the row's own stage root is being
     superseded, so a hold or recipe under it does not skip the row (``staged`` excludes it)."""
@@ -192,6 +220,9 @@ def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) ->
         return f"missing source {missing[0]}"
     if row.day_gpx and not Path(row.day_gpx).is_file():
         return f"missing day_gpx {row.day_gpx}"
+    label = getattr(row, "placeless_label", "")
+    if label and (label_why := placeless_label_skip_reason(label)):
+        return label_why
     for marker in sorted(Path(stages_root).glob(f"{row.project}/**/_stages/{HOLD_NAME}")):
         if not own_ok:
             return f"operator hold: {marker}"
@@ -670,7 +701,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         drive_argv += ["--day-gpx", row.day_gpx]
         if row.camera_utc_offset_hours is not None:  # unset: the slicer measures it
             drive_argv += ["--camera-utc-offset-hours", str(row.camera_utc_offset_hours)]
-    if getattr(row, "placeless_label", ""):  # a no-GPS drive's label; argparse checks the words
+    if getattr(row, "placeless_label", ""):  # claim-free only: _skip_reason refused the rest
         drive_argv += ["--placeless-label", row.placeless_label]
     argv = _job_argv(code_root, jobs_dir, row.project, out_dir, drive_argv)
     env = {
