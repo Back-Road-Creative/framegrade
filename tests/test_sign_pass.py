@@ -628,3 +628,158 @@ class TestPhaseASignPassWiring:
         Version 2 is the GPS media-time origin bump, not the sign pass.
         """
         assert phase_a_mod.PHASE_A_CODE_VERSION == 2
+
+
+# ── a resume with Phase A checkpointed still reads the signs ─────────────
+# ``PhaseA.run`` is never re-entered once ``phase_a`` sits in
+# ``phases_completed`` (the orchestrator's resumed-phase branch runs only the
+# OST gate), so a GPS-less drive parked past Phase A before the pass became
+# the default would never have its signs read. ``sign_pass.run_sign_pass`` is
+# the one A6 body both callers share; the orchestrator back-fills with it.
+
+
+def _resumed_state(**over):
+    base = dict(
+        sign_hits_by_date=None,
+        sign_verify=None,
+        gps_per_episode=[(None, 0.0)],
+        ingest_plan=SimpleNamespace(episodes=[]),
+        episode_files=["/mock/ep0.mp4"],
+        episode_locations=[""],
+        phases_completed=["phase_a"],
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+_ONE_HIT = {"2026-03-05": [SignHit(0, 5.0, 5.0, "2026-03-05", "Colleton County")]}
+
+
+class TestRunSignPass:
+    def _call(self, state, config=None):
+        return sign_pass_mod.run_sign_pass(
+            config or _config(sign_verify=False),
+            state,
+            state.ingest_plan,
+            state.episode_files,
+            state.gps_per_episode,
+        )
+
+    def test_a_gpsless_drive_is_read_and_its_hits_recorded(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state()
+        assert self._call(state) is True
+        assert spy.calls == 1
+        assert state.sign_hits_by_date == {
+            "2026-03-05": [SignHit(0, 5.0, 5.0, "2026-03-05", "Colleton County").to_dict()]
+        }
+
+    def test_footage_already_read_is_not_decoded_again(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(sign_hits_by_date={"2026-03-05": []})
+        assert self._call(state) is False
+        assert spy.calls == 0
+        assert state.sign_hits_by_date == {"2026-03-05": []}
+
+    def test_the_operator_s_no_sign_verify_wins(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(sign_verify=False)
+        assert self._call(state) is False
+        assert spy.calls == 0 and state.sign_hits_by_date is None
+
+    def test_a_located_drive_without_the_flag_is_left_alone(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(gps_per_episode=[(object(), 0.0)])
+        assert self._call(state) is False
+        assert spy.calls == 0
+
+    def test_a_failing_pass_is_advisory(self, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("sign pass exploded")
+
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", _boom)
+        state = _resumed_state()
+        assert self._call(state) is False
+        assert state.sign_hits_by_date is None
+
+
+class TestResumedPhaseAReadsSigns:
+    """``DrivePipelineOrchestrator._execute_phases`` with ``phase_a`` resumed."""
+
+    def _run(self, monkeypatch, tmp_path, state, *, label_dry_run=False):
+        import time
+
+        from gomoveshift.pipeline import drive_orchestrator as orch_mod
+        from gomoveshift.pipeline.drive_orchestrator import DrivePipelineOrchestrator
+        from gomoveshift.pipeline.drive_phases import lf_listing
+
+        monkeypatch.setattr(orch_mod, "run_phase_a_ost_gate", lambda s: None)
+        seen_at_dry_run: list = []
+        monkeypatch.setattr(
+            lf_listing,
+            "print_label_dry_run",
+            lambda cfg, st: seen_at_dry_run.append(st.sign_hits_by_date) and False,
+        )
+        orch = DrivePipelineOrchestrator(_config(sign_verify=False))
+        saves: list = []
+        monkeypatch.setattr(orch, "_save_state", lambda f, s: saves.append(f))
+        monkeypatch.setattr(orch, "_emit_pipeline_summary", lambda **k: None)
+        state_file = tmp_path / "pipeline_state.json"
+        orch._execute_phases(
+            state=state,
+            state_file=state_file,
+            phase_defs=[
+                ("phase_a", lambda s: pytest.fail("a checkpointed phase_a must not re-run"))
+            ],
+            resumed_phases=["phase_a"],
+            source_dir=tmp_path,
+            project_dir=tmp_path,
+            location="",
+            list_lfs=False,
+            label_dry_run=label_dry_run,
+            start_time=time.time(),
+            stages_completed=["phase_a"],
+            errors=[],
+            timings={},
+        )
+        return saves, state_file, seen_at_dry_run
+
+    def test_a_checkpointed_gpsless_drive_has_its_signs_read_and_saved(self, monkeypatch, tmp_path):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state()
+        saves, state_file, _ = self._run(monkeypatch, tmp_path, state)
+        assert spy.calls == 1
+        assert state.sign_hits_by_date is not None
+        assert saves == [state_file], (
+            "the evidence must be checkpointed, or the next resume re-decodes"
+        )
+
+    def test_a_checkpoint_that_already_holds_evidence_is_not_decoded_or_saved_again(
+        self, monkeypatch, tmp_path
+    ):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(sign_hits_by_date={"2026-03-05": []})
+        saves, _, _ = self._run(monkeypatch, tmp_path, state)
+        assert spy.calls == 0
+        assert saves == []
+
+    def test_the_label_dry_run_sees_the_back_filled_evidence(self, monkeypatch, tmp_path):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state()
+        _, _, seen = self._run(monkeypatch, tmp_path, state, label_dry_run=True)
+        assert spy.calls == 1
+        assert seen and seen[0] is not None, "the dry-run printed before the signs were read"
+
+    def test_a_checkpoint_with_no_ingest_plan_is_left_alone(self, monkeypatch, tmp_path):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(ingest_plan=None)
+        saves, _, _ = self._run(monkeypatch, tmp_path, state)
+        assert spy.calls == 0 and saves == []
