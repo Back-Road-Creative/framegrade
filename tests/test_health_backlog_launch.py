@@ -288,6 +288,30 @@ def test_retiring_holds_the_drives_recipe_so_heal_never_resumes_it(tmp_path):
     assert not (rig.stages / "dropped" / "other" / "_stages" / launch.HOLD_NAME).exists()
 
 
+def test_a_rowless_drive_already_failed_in_the_store_gets_the_hold_too(tmp_path):
+    # retired before holds existed (or set ``failed`` by hand): no later run retires it again
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "failed"))
+    stages = rig.stages / "dropped" / "dropped" / "_stages"
+    stages.mkdir(parents=True)
+    (stages / "resume.json").write_text("{}")
+    assert rig.run(dry_run=True)["held"] == [str(stages)]
+    assert not (stages / launch.HOLD_NAME).exists()
+    res = rig.run()
+    assert res["held"] == [str(stages)] and res["action"] == "launched" and rig.retired == []
+    assert "failed" in (stages / launch.HOLD_NAME).read_text()
+    assert "held" not in rig.run()  # an existing hold is left as it is
+
+
+def test_a_failed_drive_whose_row_is_still_listed_gets_no_hold(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-b", "failed"))
+    stages = rig.stages / "day-b" / "day-b" / "_stages"
+    stages.mkdir(parents=True)
+    (stages / "resume.json").write_text("{}")
+    assert "held" not in rig.run() and not (stages / launch.HOLD_NAME).exists()
+
+
 def test_retiring_a_drive_with_no_stages_still_retires_it(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("dropped", "auditing"))

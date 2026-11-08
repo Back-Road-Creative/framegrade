@@ -136,7 +136,10 @@ neither, so it is retired instead: its store row is set `failed`, the result lis
 `retired` with the failed job, and selection goes on to the next row (`--dry-run` lists it and
 writes nothing). A retirement also writes a `no-auto-resume` hold beside each of the drive's
 `resume.json` recipes under the stages root, so `health heal` refuses it on every later mirror
-SHA instead of re-resuming a drive that can never pass. An audit with a row, one still running,
+SHA instead of re-resuming a drive that can never pass. A drive whose store row is already
+`failed` and has no row (retired before holds existed, or set `failed` by hand) gets the same
+hold on the next run; the result lists every stage dir held under `held`, and an existing hold
+is left as it is. An audit with a row, one still running,
 or one with no job record is never retired.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,

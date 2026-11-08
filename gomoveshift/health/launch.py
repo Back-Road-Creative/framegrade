@@ -34,7 +34,7 @@ from .. import run_origin
 from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, job_runner
-from .resume import HOLD_NAME
+from .resume import HOLD_NAME, is_held
 
 LEASE_NAME = "gms-backlog-launch"
 #: Where ``supersede`` moves a row's stale stage root and output dir (beside the live ones, so the
@@ -333,11 +333,16 @@ def _supersede(project, reason, moves, now) -> None:
         (dst / SUPERSEDE_RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
 
-def _hold_recipes(stages_root: Path, project: str, reason: str) -> None:
-    """``no-auto-resume`` beside each of a retired drive's resume recipes, so ``health heal``
-    never re-resumes it on a later mirror SHA."""
+def _hold_recipes(stages_root: Path, project: str, reason: str, dry_run: bool) -> List[str]:
+    """``no-auto-resume`` beside each of a given-up drive's unheld resume recipes, so ``health
+    heal`` never re-resumes it on a later mirror SHA; the stage dirs held (dry run: would be)."""
+    held = []
     for recipe in sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json")):
-        (recipe.parent / HOLD_NAME).write_text(reason + "\n", encoding="utf-8")
+        if not is_held(recipe):
+            if not dry_run:
+                (recipe.parent / HOLD_NAME).write_text(reason + "\n", encoding="utf-8")
+            held.append(str(recipe.parent))
+    return held
 
 
 def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
@@ -461,10 +466,19 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         if failed:
             if not dry_run:
                 retire(project)
-                _hold_recipes(stages_root, project, f"retired by health backlog: {failed}")
             res.setdefault("retired", []).append({"project": project, "reason": failed})
+            gone = f"retired by health backlog: {failed}"
+            held = _hold_recipes(stages_root, project, gone, dry_run)
+            if held:
+                res.setdefault("held", []).extend(held)
             auditing.remove(project)
             mine = [d for d in mine if d.project != project]
+    for project in sorted({d.project for d in mine if d.status == "failed"} - listed):
+        # a drive retired before holds existed, or set ``failed`` by hand, is never retired again
+        gone = "store row failed and no backlog row; health backlog gave it up"
+        held = _hold_recipes(stages_root, project, gone, dry_run)
+        if held:
+            res.setdefault("held", []).extend(held)
     relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
