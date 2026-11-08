@@ -471,37 +471,17 @@ class PhaseA:
         # plates / occupants, never signs — and records evidence ONLY: it
         # writes no location on any surface.
         #
-        # Placed BEFORE the cached-score early return below so a resume that
-        # reuses drive_scores.npz still back-fills the evidence. It is keyed
-        # independently of that cache (``state.sign_hits_by_date is None``), and
-        # PHASE_A_CODE_VERSION is deliberately NOT bumped — adding this pass
-        # must not invalidate a 3-4h scoring checkpoint. A populated field means
-        # the footage was already read, so a resume never re-decodes it.
-        from ...analysis.sign_pass import sign_pass_wanted
+        # Placed BEFORE the cached-score early return below so a re-scored
+        # run that reuses drive_scores.npz still back-fills the evidence. It is
+        # keyed independently of that cache (``state.sign_hits_by_date is
+        # None``), and PHASE_A_CODE_VERSION is deliberately NOT bumped — adding
+        # this pass must not invalidate a 3-4h scoring checkpoint. A resume
+        # with phase_a CHECKPOINTED never re-enters this method at all; the
+        # orchestrator's resumed-phase branch calls the same
+        # ``sign_pass.run_sign_pass`` body for that case.
+        from ...analysis.sign_pass import run_sign_pass
 
-        if state.sign_hits_by_date is None and sign_pass_wanted(
-            getattr(self.config.drive, "sign_verify", False),
-            getattr(state, "sign_verify", None),
-            gps_per_episode,
-        ):
-            try:
-                from ...analysis.sign_evidence import hits_by_date_to_dicts
-                from ...analysis.sign_pass import collect_sign_hits
-
-                sign_hits = collect_sign_hits(
-                    self.config,
-                    plan,
-                    episode_files,
-                    gps_per_episode,
-                )
-                state.sign_hits_by_date = hits_by_date_to_dicts(sign_hits)
-                logger.info(
-                    "  A6: sign pass recorded %d hit(s) across %d day(s)",
-                    sum(len(v) for v in (sign_hits or {}).values()),
-                    len(sign_hits or {}),
-                )
-            except Exception as e:  # noqa: BLE001 — advisory evidence never fails a run
-                logger.warning("  A6: sign pass failed (%s) -- continuing without sign evidence", e)
+        run_sign_pass(self.config, state, plan, episode_files, gps_per_episode)
 
         # Score-cache resume gate — reload the cached drive_scores.npz instead of
         # re-running the 3-4h scoring pass when nothing the scores depend on

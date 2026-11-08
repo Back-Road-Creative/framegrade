@@ -320,6 +320,47 @@ def sign_pass_wanted(config_flag, state_flag, gps_per_episode) -> bool:
     return any(not _has_fixes(entry) for entry in (gps_per_episode or []))
 
 
+def run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode) -> bool:
+    """Phase A's A6, the one body both callers share: read the drive's road
+    signs ONCE and record evidence only.
+
+    Called from ``PhaseA.run`` on a fresh or re-scored run, and from the
+    orchestrator's resumed-``phase_a`` branch — a checkpointed Phase A never
+    re-enters ``PhaseA.run``, so without that second caller a GPS-less drive
+    parked past Phase A before the pass became the default would never have
+    its signs read. Keyed on ``state.sign_hits_by_date is None`` (a populated
+    field means the footage was already read; a read-but-empty day persists
+    as ``{date: []}``) and on :func:`sign_pass_wanted`. Advisory: a failure is
+    logged and the field stays ``None`` so the next resume retries.
+
+    Returns True when the footage was read on THIS call, so the caller knows
+    the state changed and checkpoints it.
+    """
+    if getattr(state, "sign_hits_by_date", None) is not None:
+        return False
+    drive_cfg = getattr(config, "drive", None)
+    if not sign_pass_wanted(
+        getattr(drive_cfg, "sign_verify", False),
+        getattr(state, "sign_verify", None),
+        gps_per_episode,
+    ):
+        return False
+    try:
+        from .sign_evidence import hits_by_date_to_dicts
+
+        sign_hits = collect_sign_hits(config, ingest_plan, episode_files, gps_per_episode)
+        state.sign_hits_by_date = hits_by_date_to_dicts(sign_hits)
+        logger.info(
+            "  A6: sign pass recorded %d hit(s) across %d day(s)",
+            sum(len(v) for v in (sign_hits or {}).values()),
+            len(sign_hits or {}),
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — advisory evidence never fails a run
+        logger.warning("  A6: sign pass failed (%s) -- continuing without sign evidence", e)
+        return False
+
+
 def _day_sample_cap(
     max_samples: int, period_s: float, day_seconds: float, day_has_gps: bool
 ) -> int:

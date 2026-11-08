@@ -518,6 +518,31 @@ def run_phase_a_ost_gate(state) -> None:
     run_preflight_ost_check(ep_locs)
 
 
+def backfill_sign_pass_on_resume(config, state) -> bool:
+    """Read a checkpointed drive's road signs when Phase A never did.
+
+    The resumed-``phase_a`` branch skips ``PhaseA.run`` entirely, so its A6
+    sign pass never ran for a GPS-less drive parked past Phase A before the
+    pass became the default (or before ``--sign-verify`` was added to the
+    row). Everything A6 needs is on the resumed state: the ingest plan, the
+    episode paths and the per-episode GPS traces ``_try_resume`` rebuilt.
+    Returns True when the footage was read, so the caller checkpoints the
+    evidence before the label dry-run prints or the pre-encode gates read it.
+    """
+    ingest_plan = getattr(state, "ingest_plan", None)
+    episode_files = list(getattr(state, "episode_files", None) or [])
+    if ingest_plan is None or not episode_files:
+        return False
+    # No trace rebuilt for any episode means no episode carried GPS at
+    # ingest: the index-parallel GPS-less shape, so the default rule applies.
+    gps_per_episode = list(getattr(state, "gps_per_episode", None) or [])
+    if not gps_per_episode:
+        gps_per_episode = [(None, 0.0)] * len(episode_files)
+    from ..analysis.sign_pass import run_sign_pass
+
+    return run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode)
+
+
 class DrivePipelineOrchestrator:
     """Coordinates the full Drive Pipeline from raw GoPro files to published content."""
 
@@ -1687,6 +1712,13 @@ class DrivePipelineOrchestrator:
                         # Re-run the OST gate on resume — a checkpointed
                         # phase_a used to skip it entirely.
                         run_phase_a_ost_gate(state)
+                        # Likewise the A6 sign pass: PhaseA.run is never
+                        # re-entered here, so a GPS-less drive checkpointed
+                        # before the pass was the default has its signs read
+                        # now, and the evidence is saved before the dry-run
+                        # prints or phase_bc's gates read it.
+                        if backfill_sign_pass_on_resume(self.config, state):
+                            self._save_state(state_file, state)
                         if list_lfs or label_dry_run:
                             return _print_labels_and_return(), ost_audit_pending
                     continue
