@@ -8,9 +8,12 @@ degraded reverse-geocode), nothing downstream can tell. A physical sign in the
 frame can.
 
 Sign reading is therefore **advisory evidence that validates the existing
-``ResolvedLocation``, never a new location authority**: nothing in this module
-or its consumers ever writes a location. The flow is three decoupled halves
-joined by the two dataclasses here:
+``ResolvedLocation``, never a new location authority** for an LF the camera
+located: nothing in this module or its verifiers ever writes a location. The
+one exception is an LF with ZERO GPS fixes, where the signs are the only
+evidence there is: ``analysis.sign_label.derive_sign_label`` may then derive a
+county-level label from them, under fail-closed rules (see that module). The
+flow is three decoupled halves joined by the two dataclasses here:
 
 ``SignHit``
     One OCR'd sign observation, recorded during Phase A on raw (pre-blur)
