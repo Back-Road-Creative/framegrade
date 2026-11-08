@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.48] - 2026-11-07
+
+### Fixed
+
+- `health` no longer reports "a drive is running" because of its own arguments. With no live job record, the process check matched any `gomoveshift` command line containing " drive ", so `health backlog --supersede ... --reason "queue next Ireland drive"` blocked itself. Now it matches only when `drive` is the subcommand.
+
 ## [0.3.47] - 2026-11-07
 
 ### Fixed
@@ -597,7 +603,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...HEAD
+[0.3.48]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...v0.3.48
 [0.3.47]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...v0.3.47
 [0.3.46]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.45...v0.3.46
 [0.3.45]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.44...v0.3.45
