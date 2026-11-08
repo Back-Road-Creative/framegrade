@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.54] - 2026-11-08
+
+### Fixed
+
+- A resume with Phase A checkpointed now reads a GPS-less drive's road signs. `PhaseA.run` is never re-entered once `phase_a` is in `phases_completed`, so the A6 sign pass (on by default for a GPS-less drive since the previous release) never ran for a drive parked past Phase A, and `--label-dry-run` and the pre-encode sign gate saw no evidence. The orchestrator's resumed-phase branch now calls the same pass body (`sign_pass.run_sign_pass`) from the checkpointed ingest plan, episode paths and rebuilt GPS traces, saves the evidence, and only then prints the dry-run. Footage already read is never decoded again; `--no-sign-verify` still wins.
+
 ## [0.3.53] - 2026-11-08
 
 ### Added
@@ -646,7 +652,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...HEAD
+[0.3.54]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...v0.3.54
 [0.3.53]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...v0.3.53
 [0.3.52]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...v0.3.52
 [0.3.51]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...v0.3.51
