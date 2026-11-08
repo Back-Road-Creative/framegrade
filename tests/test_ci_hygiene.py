@@ -152,3 +152,24 @@ def test_ci_runs_once_per_commit():
     # twice.
     assert CI[True]["push"]["branches"] == ["main"]
     assert "pull_request" in CI[True]
+
+
+def test_ffmpeg_download_is_cached_by_checksum_and_retried():
+    # 11-08: the BtbN release host answered 504 for an hour and every shard of
+    # every PR went red at "Install ffmpeg". The tarball is pinned by checksum,
+    # so a cache keyed on that checksum can serve it; curl retries the rest.
+    shard_job = CI["jobs"]["test-shard"]
+    names = [s.get("name") for s in shard_job["steps"]]
+    (cache,) = [s for s in shard_job["steps"] if s.get("name") == "Cache ffmpeg download"]
+    (install,) = [s for s in shard_job["steps"] if s.get("name") == "Install ffmpeg"]
+    assert names.index("Cache ffmpeg download") < names.index("Install ffmpeg")
+    assert cache["uses"].startswith("actions/cache@")
+    assert "${{ env.FFMPEG_SHA256 }}" in cache["with"]["key"], cache["with"]["key"]
+    assert shard_job["env"]["FFMPEG_SHA256"] and shard_job["env"]["FFMPEG_URL"]
+    run = install["run"]
+    dl_dir = cache["with"]["path"].replace("~", "$HOME")
+    assert f'dl="{dl_dir}/ffmpeg.tar.xz"' in run, run
+    curl = next(line for line in run.splitlines() if "curl " in line)
+    assert "--retry " in curl and '"$dl"' in curl, curl
+    # A cache hit is still checked against the pin, never trusted blind.
+    assert 'echo "$FFMPEG_SHA256  $dl" | sha256sum -c -' in run, run
