@@ -1,3 +1,0 @@
-### Fixed
-
-- A resume with Phase A checkpointed now reads a GPS-less drive's road signs. `PhaseA.run` is never re-entered once `phase_a` is in `phases_completed`, so the A6 sign pass (on by default for a GPS-less drive since the previous release) never ran for a drive parked past Phase A, and `--label-dry-run` and the pre-encode sign gate saw no evidence. The orchestrator's resumed-phase branch now calls the same pass body (`sign_pass.run_sign_pass`) from the checkpointed ingest plan, episode paths and rebuilt GPS traces, saves the evidence, and only then prints the dry-run. Footage already read is never decoded again; `--no-sign-verify` still wins.
