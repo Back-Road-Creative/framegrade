@@ -489,3 +489,73 @@ def test_g2b10_an_unsupported_short_label_is_broadened_and_the_record_says_why(t
         assert r["label_requested"] == "Corvane, Westmark"
         assert "no retained GPS fix resolves to" in r["reason"]
         assert r["refused"] is False
+
+
+# --- a placeless label is reviewed without GPS ------------------------------
+
+PLACELESS = "Somewhere On The Road"
+DESCRIPTIVE = "Through The Quiet Hills"
+
+
+def _placeless_entries(surface, text=PLACELESS):
+    if surface == "shorts":
+        return [
+            _short(1, text, source="lf_label"),
+            _short(2, text, start=40.0, end=78.0, source="lf_label"),
+        ]
+    return [_part(1, text, lower_thirds=()), _part(2, text, lower_thirds=())]
+
+
+def _placeless_state(surface, entries, *, label=PLACELESS, opt_in=True):
+    state = _state(opt_in=opt_in)
+    state["placeless_label"] = label
+    osr.record_surface_reviews(state, surface, D, entries, {})
+    return state
+
+
+@SURFACE
+def test_g2b11_a_gps_less_placeless_day_passes_on_the_system_record(tmp_path, surface):
+    entries = _placeless_entries(surface)
+    state = _placeless_state(surface, entries)
+    _gate(tmp_path, surface, entries, state)
+    assert _no_markers(tmp_path)
+    review = state[osr.SURFACE_FIELDS[surface]][D]["reviews"]["1"]
+    assert review["verdict"] == "agree" and "placeless" in review["reason"]
+
+
+@SURFACE
+def test_g2b11_without_opt_in_the_placeless_day_stays_pending(tmp_path, surface):
+    entries = _placeless_entries(surface)
+    _pending(tmp_path, surface, entries, _placeless_state(surface, entries, opt_in=False))
+
+
+@SURFACE
+def test_g2b11_a_label_outside_the_vocabulary_gets_no_review(surface):
+    label = "Through Harrow Hills"
+    state = _placeless_state(surface, _placeless_entries(surface, label), label=label)
+    assert D not in (state.get(osr.SURFACE_FIELDS[surface]) or {})
+
+
+@SURFACE
+def test_g2b11_a_descriptive_placeless_label_gets_no_review(tmp_path, surface):
+    """In the vocabulary, but it describes the footage: a person checks it."""
+    entries = _placeless_entries(surface, DESCRIPTIVE)
+    state = _placeless_state(surface, entries, label=DESCRIPTIVE)
+    assert D not in (state.get(osr.SURFACE_FIELDS[surface]) or {})
+    _pending(tmp_path, surface, entries, state)
+
+
+def test_g2b11_an_inherited_short_other_than_the_placeless_label_still_refuses(tmp_path):
+    entries = [
+        _short(1, PLACELESS, source="lf_label"),
+        _short(2, "Corvane, Westmark", start=40.0, end=78.0, source="lf_label"),
+    ]
+    state = _placeless_state("shorts", entries)
+    _pending(tmp_path, "shorts", entries, state, match="short 2 'Corvane, Westmark'")
+
+
+def test_g2b11_a_placeless_day_with_lower_thirds_gets_no_review():
+    """A lower-third names a town; nothing measured it, so no agreement."""
+    entries = [_part(1, PLACELESS), _part(2, PLACELESS)]
+    state = _placeless_state("superlong", entries)
+    assert D not in (state.get(osr.SURFACE_FIELDS["superlong"]) or {})
