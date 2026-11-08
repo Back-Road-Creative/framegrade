@@ -216,10 +216,16 @@ def _proc_alive(ident: Any) -> bool:
         return False
 
 
+# ``drive`` must be the subcommand (only top-level options may sit before it), so a ``health``
+# call whose own arguments mention a drive (``--reason "queue next Ireland drive"``) never
+# matches itself.
+DRIVE_PROCESS_PATTERN = r"gomoveshift( -[^ ]+)* drive "
+
+
 def _pgrep_drive() -> bool:
     try:
         done = subprocess.run(  # noqa: S603,S607 -- fixed argv
-            ["pgrep", "-f", r"gomoveshift.* drive "], capture_output=True, timeout=10, check=False
+            ["pgrep", "-f", DRIVE_PROCESS_PATTERN], capture_output=True, timeout=10, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return False
