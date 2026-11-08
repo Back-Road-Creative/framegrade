@@ -288,6 +288,28 @@ def test_retiring_holds_the_drives_recipe_so_heal_never_resumes_it(tmp_path):
     assert not (rig.stages / "dropped" / "other" / "_stages" / launch.HOLD_NAME).exists()
 
 
+# 11-08: heal launched the dead 03-04 resume (jobs 8e6e2e9f, 12fbd6e1) two seconds before each
+# hourly backlog, so the backlog always stopped at "a drive is running" and never held it; the
+# resume failed in ~11 s and heal relaunched it on the next mirror SHA, starving both regions.
+def test_retiring_and_holding_run_even_while_a_drive_is_running(tmp_path):
+    rig = Rig(tmp_path)
+    rig.running = True
+    rig.drives.append(drive("dropped", "auditing"))
+    rig.drives.append(drive("gone", "failed"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    held = []
+    for project in ("dropped", "gone"):
+        stages = rig.stages / project / project / "_stages"
+        stages.mkdir(parents=True)
+        (stages / "resume.json").write_text("{}")
+        held.append(stages)
+    res = rig.run()
+    assert res["reason"] == "a drive is running; one heavy drive at a time"
+    assert rig.retired == ["dropped"] and not rig.launches
+    assert res["held"] == [str(s) for s in held]
+    assert all(heal.resume.is_held(s / "resume.json") for s in held)
+
+
 def test_a_rowless_drive_already_failed_in_the_store_gets_the_hold_too(tmp_path):
     # retired before holds existed (or set ``failed`` by hand): no later run retires it again
     rig = Rig(tmp_path)
@@ -1211,3 +1233,130 @@ def test_supersede_still_refuses_a_ready_store_row(tmp_path):
     rig.supersede = ("day-a", "re-render")
     res = rig.run()
     assert res["action"] == "refused" and "in the schedule store (ready)" in res["reason"], res
+
+
+# 2026-11-08: nctopa-2026-03-05-rec0063's audit stopped at the OST audit gate (exit 5, "DRIVE
+# WAITING:"), which every placeless drive does: no GPS, no system review, so a person confirms its
+# OST. The backlog called that "audit failed ... relaunch it", and nothing resumed it once confirmed.
+GATE_LINE = (
+    "DRIVE WAITING: ost_audit — OST audit pending for day(s) ['2026-03-05']: review each "
+    "ost_audit_<date>.json sidecar and create the matching .confirmed file — next: review the "
+    "audit, confirm it, then re-run the same command to resume"
+)
+ENDED = 1000.0
+
+
+def _waiting(rig, project="day-a", *, hold=False):
+    """``project``'s audit stopped at the OST gate: its job ended exit 5 on the waiting line."""
+    stages = rig.stage(project, rig.rows[0].sources, hold=hold)
+    recipe = json.loads((stages / "resume.json").read_text())
+    recipe["argv"] += [
+        "--output-dir",
+        str(rig.out / project),
+        "--placeless-label",
+        "Over The Ridges",
+    ]
+    recipe.update(cwd="/old/svc", env={"GMS_INTERMEDIATE_DIR": str(rig.stages / project)})
+    (stages / "resume.json").write_text(json.dumps(recipe))
+    sidecar = stages / "ost_audit_2026-03-05.json"
+    sidecar.write_text("{}")
+    os.utime(sidecar, (ENDED - 60, ENDED - 60))
+    rig.drives.append(drive(project, "auditing"))
+    job(rig, "1a3f8a41", project, "failed", ENDED - 3600, exit_code=5)
+    d = rig.tmp / "jobs" / "1a3f8a41"
+    rec = json.loads((d / "job.json").read_text())
+    rec["result"]["ended_at"] = ENDED
+    (d / "job.json").write_text(json.dumps(rec))
+    (d / "output.log").write_text(
+        f"01:44:24 [INFO] gomoveshift.cli.handlers.drive {GATE_LINE}\n{GATE_LINE}\n"
+    )
+    return stages, sidecar
+
+
+def _confirm(sidecar, at):
+    marker = sidecar.with_suffix(".confirmed")
+    marker.write_text("")
+    os.utime(marker, (at, at))
+    return marker
+
+
+def test_an_audit_waiting_at_the_ost_gate_is_not_called_failed(tmp_path):
+    rig = Rig(tmp_path)
+    _, sidecar = _waiting(rig)
+    res = rig.run()
+    assert res["action"] == "noop" and launch.exit_code(res) == 0, res
+    assert "failed" not in res["reason"] and "relaunch" not in res["reason"]
+    assert "OST audit" in res["reason"] and str(sidecar) in res["reason"]
+    assert str(sidecar.with_suffix(".confirmed")) in res["reason"]
+    assert not rig.launches and not rig.retired
+
+
+def test_a_confirmed_ost_audit_resumes_the_waiting_drive_from_its_stages(tmp_path):
+    rig = Rig(tmp_path)
+    stages, sidecar = _waiting(rig)
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run()
+    assert res["action"] == "launched" and res["project"] == "day-a", res
+    assert "resum" in res["reason"]
+    ((argv, cwd, env),) = rig.launches
+    assert argv[argv.index("--name") + 1] == "gms-backlog-day-a"
+    drive_argv = argv[argv.index("--") + 1 :]
+    assert drive_argv[:4] == [
+        str(rig.tmp / ".venv" / "bin" / "python"),
+        "-m",
+        "gomoveshift",
+        "drive",
+    ]
+    assert "--placeless-label" in drive_argv and "--skip-upload" in drive_argv
+    assert argv[argv.index("--expect") + 1] == str(
+        rig.out / "day-a" / "**" / "shorts" / "**" / "*.mp4"
+    )
+    assert env["GMS_INTERMEDIATE_DIR"] == str(rig.stages / "day-a")
+    assert not rig.registered  # the store row is already ``auditing``
+
+
+def test_a_confirmation_older_than_the_wait_never_resumes_it_again(tmp_path):
+    # The drive stopped AFTER the marker was made (the audit text changed and the gate reopened):
+    # resuming again would only stop at the same gate, every tick.
+    rig = Rig(tmp_path)
+    _, sidecar = _waiting(rig)
+    _confirm(sidecar, ENDED - 30)
+    res = rig.run()
+    assert res["action"] == "noop" and "OST audit" in res["reason"], res
+    assert not rig.launches
+
+
+def test_an_operator_hold_keeps_a_confirmed_waiting_drive_where_it_is(tmp_path):
+    rig = Rig(tmp_path)
+    _, sidecar = _waiting(rig, hold=True)
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run()
+    assert res["action"] == "noop" and "hold" in res["reason"], res
+    assert not rig.launches
+
+
+def test_a_confirmed_waiting_drive_dry_run_launches_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _, sidecar = _waiting(rig)
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_launch" and res["argv"], res
+    assert not rig.launches
+
+
+def test_a_waiting_audit_with_no_backlog_row_is_never_retired(tmp_path):
+    rig = Rig(tmp_path)
+    _waiting(rig)
+    rig.rows = [r for r in rig.rows if r.project != "day-a"]
+    res = rig.run()
+    assert not rig.retired and not rig.launches
+    assert res["action"] == "noop" and "OST audit" in res["reason"], res
+
+
+def test_a_waiting_audit_can_still_be_superseded(tmp_path):
+    rig = Rig(tmp_path)
+    _waiting(rig)
+    rig.supersede = ("day-a", "relaunch as best_moments")
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert "1a3f8a41" in res["relaunch"]

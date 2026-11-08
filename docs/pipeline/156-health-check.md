@@ -18,6 +18,10 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    drives run through launcher scripts). Row file: `<drive>.json`. A later `succeeded` run of the
    same job name resolves it, and so does a later succeeded drive job under ANY name that shares
    its `expect` log path or its stages dir (audit failed, publish succeeded).
+   A job that ended exit 5 (`EXIT_WAITING_AT_GATE`) with `DRIVE WAITING:` as its log's last
+   closing line stopped at a human gate (the OST audit) and is not a failure: no row is filed, an
+   open one is resolved, so `health heal` never re-resumes it onto the same gate. `health
+   backlog` resumes it once the gate is confirmed (below).
 2. **LF slot inside 48 h with nothing booked while a drive is ready.** A free slot is a
    `next_available` row of `build_schedule_report` (the scheduler already excludes booked slots);
    "ready" is `ScheduleStore.ready_depth(region) > 0` over `<seo.storage_path>/schedule.sqlite3`.
@@ -131,6 +135,16 @@ An `auditing` drive whose newest `gms-backlog-<project>` job record ended in any
 `succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
 code: the failed audit still holds its slot, so the operator relaunches it (the drive resumes
 from its stages) or supersedes it (below); a relaunched job that is running is a `noop` again.
+An audit whose newest job stopped at the OST audit gate (exit 5, `DRIVE WAITING:`; every
+placeless drive does, since a no-GPS LF gets no system review) is not failed: it is a `noop`
+naming each `ost_audit_<date>.json` sidecar under its stages and the `.confirmed` marker to
+create. Once every sidecar has its marker and one marker is newer than the job's end, the next
+run resumes the drive from its `resume.json` (rebound to the code root's venv, audit only, under
+the same `gms-backlog-<project>` job name; nothing is registered, the store row is already
+`auditing`). Markers all older than the stop did not pass the gate (the audit changed), so the
+drive stays a `noop` asking for a re-review instead of re-resuming every tick. A `no-auto-resume`
+hold keeps a confirmed drive where it is; `--supersede` sets a waiting audit aside like a failed
+one, and a waiting audit with no backlog row is never retired.
 A failed audit whose project no longer has a `drive_backlog.yaml` row for the region can be
 neither, so it is retired instead: its store row is set `failed`, the result lists it under
 `retired` with the failed job, and selection goes on to the next row (`--dry-run` lists it and
@@ -140,7 +154,11 @@ SHA instead of re-resuming a drive that can never pass. A drive whose store row 
 `failed` and has no row (retired before holds existed, or set `failed` by hand) gets the same
 hold on the next run; the result lists every stage dir held under `held`, and an existing hold
 is left as it is. An audit with a row, one still running,
-or one with no job record is never retired.
+or one with no job record is never retired. Retiring and holding launch nothing, so they run
+before the one-heavy-drive check and happen even while a drive runs. On 11-08, heal's own resume
+of the dead 03-04 drive started two seconds before each hourly backlog, so the hold was never
+written. The text output, which is what the cron logs, prints `retired <project>: <reason>` and
+`held <stages dir> (no-auto-resume)`, or `would retire` and `would hold` under `--dry-run`.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
 a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,

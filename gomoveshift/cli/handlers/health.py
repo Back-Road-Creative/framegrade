@@ -161,6 +161,11 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         verb = "would supersede" if args.dry_run else "superseded"  # a dry run moves nothing
         for move in result.get("supersede", {}).get("moves", []):
             print(f"{verb} {move['from']} -> {move['to']}")
+        retired, held = ("would retire", "would hold") if args.dry_run else ("retired", "held")
+        for gone in result.get("retired", []):
+            print(f"{retired} {gone['project']}: {gone['reason']}")
+        for stages in result.get("held", []):
+            print(f"{held} {stages} ({launch.HOLD_NAME})")
         for row in result.get("storage", []):
             state = "ok" if row["ok"] else "SHORT"
             print(f"storage dev {row['device']}: {row['free_gb']:.1f} GB free, need "

@@ -32,8 +32,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 from .. import run_origin
 from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
+from . import drives as drive_jobs
+from . import resume
 from .cadence import COVERAGE_HORIZON_H, _aware
-from .heal import _STALL_S, SERVICE_DIR, _job_records, job_runner
+from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
 from .resume import HOLD_NAME, is_held
 
 LEASE_NAME = "gms-backlog-launch"
@@ -345,25 +347,107 @@ def _hold_recipes(stages_root: Path, project: str, reason: str, dry_run: bool) -
     return held
 
 
+def _newest_audit(jobs_dir: Path, project: str) -> Optional[Dict[str, Any]]:
+    name = f"gms-backlog-{project}"
+    recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
+    return max(recs, key=lambda r: float(r.get("created_at") or 0)) if recs else None
+
+
+def _gate_wait(jobs_dir: Path, rec: Dict[str, Any]) -> Optional[str]:
+    """The job's ``DRIVE WAITING:`` line when it stopped at a human gate (its own output.log)."""
+    code = (rec.get("result") or {}).get("exit_code")
+    if code != drive_jobs.EXIT_WAITING_AT_GATE:
+        return None
+    return drive_jobs.gate_wait(code, drive_jobs._tail(Path(jobs_dir) / str(rec.get("run_id")) / "output.log"))  # fmt: skip
+
+
 def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
-    """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success.
+    """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success
+    or a stop at a human gate (``_ost_gate``).
 
     A failed audit still holds its slot, so without this every later call is a silent noop;
     the operator relaunches (the drive resumes from its stages) or supersedes it."""
-    name = f"gms-backlog-{project}"
-    recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
-    if not recs:
+    rec = _newest_audit(jobs_dir, project)
+    if rec is None:
         return None
-    rec = max(recs, key=lambda r: float(r.get("created_at") or 0))
     result = rec.get("result") or {}
     state = result.get("state")
-    if state in (None, "running", "succeeded"):
+    if state in (None, "running", "succeeded") or _gate_wait(jobs_dir, rec):
         return None
     return (
         f"audit failed: {project} job {rec.get('run_id')} ended {state} "
         f"(exit {result.get('exit_code')}); relaunch it (stages resume), or --supersede {project} "
         "to set the run aside and launch the row as it now reads"
     )
+
+
+def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple[str, bool]]:
+    """``(reason, confirmed)`` when the newest audit of ``project`` stopped at the OST audit gate
+    (every placeless drive does: no GPS, no system review), else None.
+
+    Confirmed: each ``ost_audit_<date>.json`` sidecar has its ``.confirmed`` marker and one was
+    made after the run stopped. Markers all older than the stop did not pass the gate (the audit
+    changed since), so resuming would only stop at the same gate again, every tick."""
+    rec = _newest_audit(jobs_dir, project)
+    if rec is None or not _gate_wait(jobs_dir, rec):
+        return None
+    ended = float((rec.get("result") or {}).get("ended_at") or 0)
+    sidecars = sorted(Path(stages_root).glob(f"{project}/**/_stages/ost_audit_*.json"))
+    markers = [s.with_suffix(".confirmed") for s in sidecars]
+    pending = [m for m in markers if not m.exists()]
+    fresh = any(m.exists() and m.stat().st_mtime > ended for m in markers)
+    if sidecars and not pending and fresh:
+        return f"{project}: OST audit confirmed since job {rec.get('run_id')} stopped at it", True
+    head = f"audit waiting at the OST audit gate: {project} job {rec.get('run_id')} stopped for a person's review; "  # fmt: skip
+    if not sidecars:
+        return head + f"no ost_audit_<date>.json sidecar under {Path(stages_root) / project}", False
+    todo = pending or markers  # every marker predates the stop: the audit changed, re-review it
+    again = "" if pending else " (replace the existing marker: the audit changed after it)"
+    return (
+        head + "review " + ", ".join(str(m.with_suffix(".json")) for m in todo)
+        + " and create " + ", ".join(str(m) for m in todo) + again
+        + "; the next backlog tick resumes it from its stages",
+        False,
+    )  # fmt: skip
+
+
+def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_dir, dry_run,
+                      launcher, installed_version, latest_version):  # fmt: skip
+    """Resume a drive whose OST audit was confirmed, from its own recipe, under its backlog job
+    name; the store row is already ``auditing``, so nothing is registered."""
+    recipes = sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json"))
+    if any(is_held(r) for r in recipes):
+        return {**res, "reason": f"{project}: OST audit confirmed, but an operator hold ({HOLD_NAME}) keeps it where it is"}  # fmt: skip
+    recipe = resume.read_recipe(recipes[0]) if recipes else None
+    if recipe is None:
+        return {**res, "action": "refused", "reason": f"{project}: OST audit confirmed, but no readable resume.json under {Path(stages_root) / project}"}  # fmt: skip
+    bound, cwd = bind_to_code_root(code_root, recipe["argv"])
+    if bound is None:
+        return {**res, "action": "refused", "reason": f"{project}: {cwd}"}
+    bound += [f for f in ("--skip-upload", "--no-youtube-upload") if f not in bound]
+    flag = "--output-dir"
+    out_dir = Path(bound[bound.index(flag) + 1]) if flag in bound[:-1] else Path(output_root) / project  # fmt: skip
+    argv = _job_argv(code_root, jobs_dir, project, out_dir, bound)
+    env = {**resume.recipe_env(recipe), run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER}
+    res.update(argv=argv, env=env, resume_recipe=str(recipes[0]))
+    if dry_run:
+        return {**res, "action": "would_launch", "reason": f"{project}: would resume it from its stages"}  # fmt: skip
+    stale = stale_pin_reason(Path(bound[0]), installed_version, latest_version)
+    if stale:
+        return {**res, "action": "refused", "reason": stale}
+    ok, detail = launcher(argv, cwd, env)
+    if not ok:
+        return {**res, "action": "refused", "reason": f"launch failed: {detail}"}
+    return {**res, "action": "launched", "reason": f"{project}: OST audit confirmed; resuming it from its stages"}  # fmt: skip
+
+
+def _job_argv(code_root, jobs_dir, project: str, out_dir: Path, drive_argv: List[str]) -> List[str]:
+    return [
+        "python3", str(job_runner(code_root)),
+        "--name", f"gms-backlog-{project}", "--heavy", "--detach", "--stall", _STALL_S,
+        "--expect", str(out_dir / "**" / "shorts" / "**" / "*.mp4"),
+        "--log-root", str(jobs_dir), "--", *drive_argv,
+    ]  # fmt: skip
 
 
 def _slot_target(slots, ready: int, now: datetime) -> Optional[Tuple[datetime, str]]:
@@ -450,8 +534,6 @@ def run_backlog(
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede):  # fmt: skip
-    if drive_running():
-        return {**res, "reason": "a drive is running; one heavy drive at a time"}
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -479,9 +561,23 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         held = _hold_recipes(stages_root, project, gone, dry_run)
         if held:
             res.setdefault("held", []).extend(held)
+    # retiring and holding launch nothing, so they run even while a drive does: heal's own
+    # resume of a dead drive would otherwise land before every tick and keep it unheld forever
+    if drive_running():
+        return {**res, "reason": "a drive is running; one heavy drive at a time"}
     relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
+        gate = None if failed else _ost_gate(jobs_dir, stages_root, auditing[0])
+        if gate and auditing[0] == target:
+            failed = gate[0]  # superseding an audit waiting at its gate sets it aside the same way
+        elif gate:
+            res["project"] = auditing[0]
+            if not gate[1]:
+                return {**res, "reason": gate[0]}
+            return _resume_confirmed(res, auditing[0], stages_root, output_root, code_root,
+                                     jobs_dir, dry_run, launcher, installed_version,
+                                     latest_version)  # fmt: skip
         if not failed:
             return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
         if auditing[0] != target:
@@ -576,12 +672,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             drive_argv += ["--camera-utc-offset-hours", str(row.camera_utc_offset_hours)]
     if getattr(row, "placeless_label", ""):  # a no-GPS drive's label; argparse checks the words
         drive_argv += ["--placeless-label", row.placeless_label]
-    argv = [
-        "python3", str(job_runner(code_root)),
-        "--name", f"gms-backlog-{row.project}", "--heavy", "--detach", "--stall", _STALL_S,
-        "--expect", str(out_dir / "**" / "shorts" / "**" / "*.mp4"),
-        "--log-root", str(jobs_dir), "--", *drive_argv,
-    ]  # fmt: skip
+    argv = _job_argv(code_root, jobs_dir, row.project, out_dir, drive_argv)
     env = {
         "GMS_INTERMEDIATE_DIR": str(root),
         run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER,

@@ -20,6 +20,11 @@ _DRIVE_NAME_RE = re.compile(r"\b(?:project|drive)[ _]name\s*[=:]\s*['\"]?([A-Za-
 _PHASE_RE = re.compile(r"\b(phase_[a-z0-9_]+|Phase [A-F])\b")
 _GATE_RE = re.compile(r"([A-Za-z][A-Za-z /_-]{2,60}?)\s+HARD FAIL|\bGATE[ _]([A-Z_]+)")
 _TS_PREFIX_RE = re.compile(r"^.*?(?=" + re.escape(MARKER) + ")")
+# ``cli.handlers.drive``: a run stopped at a human gate (OST audit pending) ends with this exit
+# code and a ``DRIVE WAITING:`` closing line. Waiting for a person, not a failure.
+EXIT_WAITING_AT_GATE = 5
+WAITING = "DRIVE WAITING:"
+_CLOSING_RE = re.compile(r"DRIVE (?:WAITING:|COMPLETED|FAILED)")
 
 
 def _tail(path: Path) -> Optional[List[str]]:
@@ -45,6 +50,17 @@ def parse_log(lines: List[str]) -> Dict[str, Optional[str]]:
         if m := _GATE_RE.search(line):
             out["gate"] = (m.group(1) or m.group(2)).strip()
     return out
+
+
+def gate_wait(exit_code: Any, lines: Optional[List[str]]) -> Optional[str]:
+    """The ``DRIVE WAITING: ...`` line when a run ended stopped at a human gate, else None:
+    exit ``EXIT_WAITING_AT_GATE`` AND that line as the log's last closing line."""
+    if exit_code != EXIT_WAITING_AT_GATE:
+        return None
+    for line in reversed(lines or []):
+        if m := _CLOSING_RE.search(line):
+            return line[m.start() :].strip() if line[m.start() :].startswith(WAITING) else None
+    return None
 
 
 def _expect_logs(rec: Dict[str, Any]) -> List[Path]:
@@ -127,16 +143,20 @@ def detect(
         log_path: Optional[Path] = None
         marked = False
         recipe: Optional[str] = None
+        waiting: Optional[str] = None
         for lp in logs:
             lines = _tail(lp)
             if lines is None:
                 continue
+            waiting = waiting or gate_wait(exit_code, lines)
             p = parse_log(lines)
             if p["error"] or log_path is None:
                 parsed, log_path = p, lp
             marked = marked or bool(p["error"])
             recipe = resume.parse_recipe_path(lines) or recipe
-        failed = state == "failed" or (exit_code not in (None, 0) and marked)
+        # a run waiting at a human gate is not a failure: heal re-resuming it on every mirror
+        # SHA only stops it at the same gate; the backlog resumes it once the gate is confirmed
+        failed = not waiting and (state == "failed" or (exit_code not in (None, 0) and marked))
         run_id = str(rec.get("run_id") or "")
         if not failed:
             if state in ("succeeded",):
