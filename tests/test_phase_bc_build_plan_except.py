@@ -77,6 +77,8 @@ def test_expected_failures_degrade_to_none(tmp_path: Path, monkeypatch, exc):
     monkeypatch.setattr(LongFormAssembler, "build_drive_plan", _boom)
     state = _state(tmp_path)
     assert _build_drive_plan_from_state(_config(), state) is None
+    assert state.drive_plan_build_error == str(exc)  # the gate names this cause, not --fresh
+    assert "drive_plan_build_error" not in state.to_dict()  # per-invocation, never persisted
 
 
 @pytest.mark.parametrize(

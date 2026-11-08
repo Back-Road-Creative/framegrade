@@ -319,6 +319,21 @@ class TestDrivePlanBuiltGate:
         assert "--per-lf-location" in str(exc.value)
         assert "2" in str(exc.value)  # day-batch count surfaced
 
+    def test_names_the_planners_own_refusal_instead_of_fresh(self):
+        # 03-04 (job 9ee99a65): the cause sat only in a WARNING line; the raise said "--fresh",
+        # which cannot lift a day under the full_drive floor after the GPS-gap cut
+        import pytest
+
+        state = self._state()
+        state.drive_plan_build_error = (
+            "Day 2026-03-04: kept (stop-masked) footage 2889s is under "
+            "full_drive_part_min_sec=3600s"
+        )
+        with pytest.raises(ValueError) as exc:
+            _assert_drive_plan_built(None, state, self._batches())
+        assert "2889s is under full_drive_part_min_sec=3600s" in str(exc.value)
+        assert "--fresh" not in str(exc.value)
+
     def test_passes_when_plan_present(self):
         _assert_drive_plan_built(object(), self._state(), self._batches())
 

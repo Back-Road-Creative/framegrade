@@ -161,6 +161,7 @@ _UNSERIALIZED_FIELDS = frozenset(
         "ost_audit_confirmed_this_run",
         "ost_system_review_this_run",
         "force_sidecar_reset",
+        "drive_plan_build_error",
     }
 )
 
@@ -220,6 +221,9 @@ class PipelineState:
     social_posts_per_lf: Optional[dict] = None  # dict[int, list]
 
     # ── Phase BC day-first ─────────────────────────────────────────────
+    # ``build_drive_plan``'s own refusal when the plan build failed this run (``None`` = built
+    # or never tried); ``_assert_drive_plan_built`` raises with it. Per-invocation: unserialized.
+    drive_plan_build_error: Optional[str] = None
     per_day_locations: Optional[dict] = None
     day_artifacts: Optional[list] = None
     per_lf_locations: Optional[dict] = None
