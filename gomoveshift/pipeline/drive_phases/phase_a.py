@@ -117,6 +117,68 @@ def _assert_no_scored_gaps(valid_episodes: list, file_scores: list) -> None:
             )
 
 
+def _assert_days_clear_gps_gap_floor(
+    drive, file_boundaries: list, file_durations: list, episode_dates: list, gps_per_episode: list
+) -> None:
+    """Refuse a full_drive day the GPS-gap cut alone leaves under the part minimum.
+
+    The drive planner cuts every second with no usable fix within the
+    route-claim gap (``longform_assembler._with_gps_gap_mask``), ORed with the
+    stop mask, then refuses a day whose kept footage is under
+    ``full_drive_part_min_sec`` (``plan_full_drive_parts``). The gap cut needs
+    only the parsed GPX, and the stop mask can only cut more, so a day already
+    under the floor here is certain to be refused -- raised before the GPU
+    scoring pass instead of after it. Mirrors the planner's per-day slicing
+    over the same 1 Hz rows the labels-only path synthesises. Inactive unless
+    both part bounds are set and the resolved LF mode is ``full_drive``; a
+    GPS-less day masks nothing, as in the planner.
+    """
+    part_min = getattr(drive, "full_drive_part_min_sec", None)
+    if part_min is None or getattr(drive, "full_drive_part_max_sec", None) is None:
+        return
+    if resolve_lf_mode(drive) != "full_drive" or not file_boundaries:
+        return
+    from ..longform_assembler import _with_gps_gap_mask
+    from ..regular_lf_planner import InsufficientFootageError
+    from ..stop_mask import GPS_MAX_FIX_GAP_S
+
+    chunks = []
+    for (start, _end), duration in zip(file_boundaries, file_durations):
+        rows = _synthetic_score_rows(duration)
+        rows[:, COL_TIMESTAMP] += start
+        chunks.append(rows)
+    scores = np.concatenate(chunks)
+    timestamps = scores[:, COL_TIMESTAMP]
+
+    day_groups: dict = {}
+    for i, day in enumerate(episode_dates):
+        day_groups.setdefault(day, []).append(i)
+    for day in sorted(day_groups):
+        indices = day_groups[day]
+        day_boundaries = [file_boundaries[i] for i in indices]
+        day_start = min(b[0] for b in day_boundaries)
+        day_end = max(b[1] for b in day_boundaries)
+        day_scores = scores[(timestamps >= day_start) & (timestamps < day_end)]
+        if len(day_scores) == 0:
+            continue
+        gap = _with_gps_gap_mask(
+            day_scores,
+            day_boundaries,
+            [gps_per_episode[i] for i in indices],
+            np.zeros(len(day_scores), dtype=bool),
+        )
+        kept = int(np.count_nonzero(~gap))
+        if kept < part_min:
+            raise InsufficientFootageError(
+                f"Day {day}: at most {kept}s of footage survives the GPS-gap cut "
+                f"({len(day_scores) - kept}s has no usable fix within "
+                f"{GPS_MAX_FIX_GAP_S}s), under full_drive_part_min_sec={part_min}s; the "
+                "stop mask can only cut more, so the drive plan is certain to refuse "
+                "this day. Refused before scoring. Footage is never padded, repeated or "
+                "joined to another day."
+            )
+
+
 def _sample_source_sharpness(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES) -> list:
     """Sharpness of ``n`` evenly spaced frames of one source (undecodable frames dropped).
 
@@ -317,6 +379,10 @@ class PhaseA:
             file_boundaries.append((offset, offset + duration))
             offset += duration
             valid_episodes.append(ep)
+
+        _assert_days_clear_gps_gap_floor(
+            self.config.drive, file_boundaries, file_durations, episode_dates, gps_per_episode
+        )
 
         # Auto-derive per-episode + drive-level OST from GPS
         try:

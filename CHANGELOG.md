@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.51] - 2026-11-08
+
+### Fixed
+
+- When phase_bc can't build a drive plan, its error now gives `build_drive_plan`'s own reason. One example: "kept (stop-masked) footage 2889s is under full_drive_part_min_sec=3600s". The old message said "despite complete inputs ... Re-run with --fresh", but a fresh run hits the same refusal. The real cause appeared only in an earlier WARNING line. The old wording stays only for a failed build that recorded no reason.
+
 ## [0.3.50] - 2026-11-08
 
 ### Fixed
@@ -615,7 +621,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...HEAD
+[0.3.51]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...v0.3.51
 [0.3.50]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...v0.3.50
 [0.3.49]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...v0.3.49
 [0.3.48]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...v0.3.48
