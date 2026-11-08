@@ -1426,6 +1426,16 @@ def _assert_drive_plan_built(real_plan, state, day_batches) -> None:
     if not (has_footage and inputs_ready):
         return
     n_batches = sum(1 for b in (day_batches or []) if getattr(b, "episodes", None))
+    cause = getattr(state, "drive_plan_build_error", None)
+    if cause:
+        # the planner refused the footage itself (e.g. a day under the full_drive floor after the
+        # GPS-gap cut): a fresh rebuild hits the same refusal, so name the cause instead
+        raise ValueError(
+            "phase_bc: cannot enter encoding — drive plan build FAILED (no DrivePlan) for "
+            f"{n_batches} day batch(es) with footage: {cause}. Re-running, even fresh, "
+            "refuses the same footage; change the source subset or the drive config, or "
+            "supply per-LF overrides (--per-lf-location '0=<route>'; --list-lfs shows indices)."
+        )
     raise ValueError(
         "phase_bc: cannot enter encoding — drive plan build FAILED (no "
         f"DrivePlan) for {n_batches} day batch(es) with footage despite "
@@ -1556,6 +1566,7 @@ def _build_drive_plan_from_state(config: Config, state) -> Optional[DrivePlan]:
         # caught here — swallowing them would silently rebuild LFs from
         # possibly-corrupt segments and mask a real defect.
         logger.warning("  day-first: build_drive_plan failed: %s", exc)
+        state.drive_plan_build_error = str(exc)
         return None
 
 
