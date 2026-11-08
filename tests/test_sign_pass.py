@@ -645,6 +645,9 @@ def _resumed_state(**over):
         gps_per_episode=[(None, 0.0)],
         ingest_plan=SimpleNamespace(episodes=[]),
         episode_files=["/mock/ep0.mp4"],
+        episode_dates=["2026-03-05"],
+        file_durations=[100.0],
+        gpx_files=[None],
         episode_locations=[""],
         phases_completed=["phase_a"],
     )
@@ -705,6 +708,86 @@ class TestRunSignPass:
         state = _resumed_state()
         assert self._call(state) is False
         assert state.sign_hits_by_date is None
+
+
+class TestBackfillRehydratesTheResumedPlan:
+    """``backfill_sign_pass_on_resume`` with the plan a JSON round-trip yields.
+
+    ``IngestPlan.from_dict`` is a shallow rehydrate: ``episodes`` come back as
+    the raw ``list[dict]`` they were serialized as. ``group_episodes_by_day``
+    reads them with ``getattr``, every episode is silently dropped, and the
+    pass reports "0 hit(s) across 0 day(s)" in no time at all — the exact
+    failure nctopa-2026-03-05-rec0063 showed on its first back-fill. The
+    back-fill must hand the pass a plan it can group.
+    """
+
+    def _state(self, tmp_path):
+        from gomoveshift.pipeline.ingest.gopro_parser import IngestPlan
+
+        ep_path = str(tmp_path / "episode_01_2026-03-05.mp4")
+        plan = IngestPlan.from_dict(
+            {
+                "source_dir": str(tmp_path),
+                "episodes": [
+                    {
+                        "index": 1,
+                        "recordings": [],
+                        "location": "",
+                        "date": "2026-03-05",
+                        "concat_path": ep_path,
+                        "gpx_path": None,
+                        "gpx_source": "gpmf",
+                    }
+                ],
+            }
+        )
+        assert isinstance(plan.episodes[0], dict), "the shape under test is the shallow one"
+        return _resumed_state(
+            ingest_plan=plan,
+            episode_files=[ep_path],
+            episode_dates=["2026-03-05"],
+            file_durations=[13208.3],
+            gpx_files=[None],
+        )
+
+    def test_the_pass_is_handed_a_plan_it_can_group_by_day(self, monkeypatch, tmp_path):
+        from gomoveshift.pipeline.day_grouper import group_episodes_by_day
+        from gomoveshift.pipeline.drive_orchestrator import backfill_sign_pass_on_resume
+
+        handed: list = []
+
+        def spy(config, ingest_plan, episode_files, gps_per_episode, **k):
+            handed.append(ingest_plan)
+            return {"2026-03-05": []}
+
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = self._state(tmp_path)
+        assert backfill_sign_pass_on_resume(_config(sign_verify=False), state) is True
+        batches = group_episodes_by_day(handed[0])
+        assert [b.date for b in batches] == ["2026-03-05"], (
+            "dict episodes group into 0 days; the back-fill must rehydrate them"
+        )
+        (ep,) = batches[0].episodes
+        assert str(ep.concat_path) == state.episode_files[0]
+        assert ep.total_duration == pytest.approx(13208.3)
+
+    def test_the_real_pass_sees_the_footage_not_zero_days(self, monkeypatch, tmp_path):
+        """End to end through ``collect_sign_hits``: the one sampled second is OCR'd."""
+        from gomoveshift.pipeline.drive_orchestrator import backfill_sign_pass_on_resume
+
+        sampled: list = []
+        monkeypatch.setattr(
+            sign_pass_mod,
+            "_hit_for_candidate",
+            lambda cand, date, **k: sampled.append((cand.episode_index, cand.t_local)) or None,
+        )
+        state = self._state(tmp_path)
+        assert backfill_sign_pass_on_resume(_config(sign_verify=False), state) is True
+        assert state.sign_hits_by_date == {"2026-03-05": []}
+        assert sampled, (
+            "a 13208 s GPS-less episode yields zero sampled seconds only if it was dropped"
+        )
+        assert {idx for idx, _ in sampled} == {0}
 
 
 class TestResumedPhaseAReadsSigns:
