@@ -145,3 +145,27 @@ def test_no_supersede_passes_none(tmp_path, wired):
     wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
     health.cmd_health(_args(tmp_path), SimpleNamespace())
     assert wired["supersede"] is None
+
+
+def test_retirements_and_holds_reach_the_cron_log(tmp_path, capsys, wired):
+    # the cron logs only the text lines; a hold the backlog wrote was invisible there
+    wired["_result"] = {
+        "action": "noop", "reason": "a drive is running; one heavy drive at a time", "skipped": [],
+        "retired": [{"project": "nc-a", "reason": "audit failed: nc-a job 9ee99a65 ended failed"}],
+        "held": ["/st/nc-a/nc-a/_stages"],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "retired nc-a: audit failed: nc-a job 9ee99a65 ended failed" in out
+    assert "held /st/nc-a/nc-a/_stages (no-auto-resume)" in out
+    assert out.rstrip().endswith("noop: a drive is running; one heavy drive at a time")
+
+
+def test_a_dry_run_says_would_retire_and_would_hold(tmp_path, capsys, wired):
+    wired["_result"] = {
+        "action": "noop", "reason": "covered", "skipped": [],
+        "retired": [{"project": "nc-a", "reason": "r"}], "held": ["/st/nc-a/nc-a/_stages"],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "would retire nc-a: r" in out and "would hold /st/nc-a/nc-a/_stages" in out

@@ -288,6 +288,28 @@ def test_retiring_holds_the_drives_recipe_so_heal_never_resumes_it(tmp_path):
     assert not (rig.stages / "dropped" / "other" / "_stages" / launch.HOLD_NAME).exists()
 
 
+# 11-08: heal launched the dead 03-04 resume (jobs 8e6e2e9f, 12fbd6e1) two seconds before each
+# hourly backlog, so the backlog always stopped at "a drive is running" and never held it; the
+# resume failed in ~11 s and heal relaunched it on the next mirror SHA, starving both regions.
+def test_retiring_and_holding_run_even_while_a_drive_is_running(tmp_path):
+    rig = Rig(tmp_path)
+    rig.running = True
+    rig.drives.append(drive("dropped", "auditing"))
+    rig.drives.append(drive("gone", "failed"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    held = []
+    for project in ("dropped", "gone"):
+        stages = rig.stages / project / project / "_stages"
+        stages.mkdir(parents=True)
+        (stages / "resume.json").write_text("{}")
+        held.append(stages)
+    res = rig.run()
+    assert res["reason"] == "a drive is running; one heavy drive at a time"
+    assert rig.retired == ["dropped"] and not rig.launches
+    assert res["held"] == [str(s) for s in held]
+    assert all(heal.resume.is_held(s / "resume.json") for s in held)
+
+
 def test_a_rowless_drive_already_failed_in_the_store_gets_the_hold_too(tmp_path):
     # retired before holds existed (or set ``failed`` by hand): no later run retires it again
     rig = Rig(tmp_path)

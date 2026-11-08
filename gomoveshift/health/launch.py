@@ -534,8 +534,6 @@ def run_backlog(
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede):  # fmt: skip
-    if drive_running():
-        return {**res, "reason": "a drive is running; one heavy drive at a time"}
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -563,6 +561,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         held = _hold_recipes(stages_root, project, gone, dry_run)
         if held:
             res.setdefault("held", []).extend(held)
+    # retiring and holding launch nothing, so they run even while a drive does: heal's own
+    # resume of a dead drive would otherwise land before every tick and keep it unheld forever
+    if drive_running():
+        return {**res, "reason": "a drive is running; one heavy drive at a time"}
     relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])

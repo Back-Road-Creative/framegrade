@@ -154,7 +154,11 @@ SHA instead of re-resuming a drive that can never pass. A drive whose store row 
 `failed` and has no row (retired before holds existed, or set `failed` by hand) gets the same
 hold on the next run; the result lists every stage dir held under `held`, and an existing hold
 is left as it is. An audit with a row, one still running,
-or one with no job record is never retired.
+or one with no job record is never retired. Retiring and holding launch nothing, so they run
+before the one-heavy-drive check and happen even while a drive runs. On 11-08, heal's own resume
+of the dead 03-04 drive started two seconds before each hourly backlog, so the hold was never
+written. The text output, which is what the cron logs, prints `retired <project>: <reason>` and
+`held <stages dir> (no-auto-resume)`, or `would retire` and `would hold` under `--dry-run`.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
 a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
