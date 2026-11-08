@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from gomoveshift.health import cadence, run_check
 from gomoveshift.health import check as check_mod
 from gomoveshift.health.drives import parse_log
-from gomoveshift.health.store import load_all, write_row
+from gomoveshift.health.store import load_all, new_incident, write_row
 from gomoveshift.publishing.queue import open_queue_db
 
 NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
@@ -389,3 +389,50 @@ def test_an_open_row_filed_without_its_recipe_gains_it_when_detection_finds_it(t
     assert row["log_path"] == str(tmp_path / "jobs" / "r1" / "output.log")
     assert row["resume_attempts"] == [{"action": "refused"}] and row["pushed"]
     assert out["new"] == [] and out["pushed"] == []
+
+
+# 2026-11-08: nctopa-2026-03-05-rec0063 stopped at the OST audit gate (exit 5, "DRIVE WAITING:").
+# That is a human gate, not a failure: a drive_failed row made heal re-resume it on every mirror
+# SHA, only to stop at the same gate a minute later.
+WAITING = (
+    "DRIVE WAITING: ost_audit — OST audit pending for day(s) ['2026-03-05']: review each "
+    "ost_audit_<date>.json sidecar and create the matching .confirmed file — next: review the "
+    "audit, confirm it, then re-run the same command to resume"
+)
+
+
+def test_a_drive_waiting_at_a_human_gate_is_not_a_failed_drive(tmp_path):
+    _job_with_own_log(
+        tmp_path, "w1", "gms-backlog-demo-drive-a",
+        ["project_name=demo-drive-a", f"01:44:24 [INFO] gomoveshift.cli.handlers.drive {WAITING}", WAITING],
+        expect="/mnt/d/GMSVidOutput/demo-drive-a/**/shorts/**/*.mp4", rc=5,
+    )  # fmt: skip
+    assert _run(tmp_path, lambda *a: True)["incidents"] == []
+
+
+def test_an_open_failure_row_for_a_drive_now_waiting_at_its_gate_is_resolved(tmp_path):
+    _job_with_own_log(
+        tmp_path, "w1", "gms-backlog-demo-drive-a", [WAITING],
+        expect="/mnt/d/GMSVidOutput/demo-drive-a/**/shorts/**/*.mp4", rc=5,
+    )  # fmt: skip
+    key = "drive_failed:gms-backlog-demo-drive-a:w1"
+    write_row(tmp_path / "inc", new_incident("drive_failed", key, "x.json", "2026-01-10T11:00:00Z",
+                                             drive="gms-backlog-demo-drive-a", error="exit 5"))  # fmt: skip
+    result = _run(tmp_path, lambda *a: True)
+    assert key in result["resolved"] and result["incidents"] == []
+
+
+def test_exit_5_without_the_waiting_line_is_still_a_failure(tmp_path):
+    _job_with_own_log(
+        tmp_path, "w1", "gms-backlog-demo-drive-a", ["DRIVE FAILED: exit code 5 (see messages above)"],
+        expect="/mnt/d/GMSVidOutput/demo-drive-a/**/shorts/**/*.mp4", rc=5,
+    )  # fmt: skip
+    (row,) = _run(tmp_path, lambda *a: True)["incidents"]
+    assert row["kind"] == "drive_failed"
+
+
+def test_the_waiting_exit_code_is_the_drive_clis_own():
+    from gomoveshift.cli.handlers.drive import EXIT_WAITING_AT_GATE
+    from gomoveshift.health import drives
+
+    assert drives.EXIT_WAITING_AT_GATE == EXIT_WAITING_AT_GATE
