@@ -1726,10 +1726,13 @@ class DriveConfig(BaseModel):
     # ROAD-SIGN GPS VERIFICATION (--sign-verify). Master switch for the whole
     # feature: the Phase A per-day sign OCR pass AND the advisory per-LF
     # comparison of what the signs say against the LF's resolved location.
-    # Default OFF for its first release for two reasons: it adds a second
+    # Default OFF on a drive with GPS for two reasons: it adds a second
     # decode pass over the day's footage to a run that already takes hours,
     # and the advisory warning should be observed before the cost is imposed on
-    # every run. Detection/OCR confidence knobs are NOT duplicated here; they
+    # every run. A drive with a GPS-less episode runs the pass regardless
+    # (``sign_pass.sign_pass_wanted``): its signs are the only evidence of where
+    # it was, and only an explicit --no-sign-verify turns that off.
+    # Detection/OCR confidence knobs are NOT duplicated here; they
     # live on SignDetectionConfig / OCRConfig (their single home).
     sign_verify: bool = False
     # Escalate a corroborated state/county conflict from a label-gate warning
@@ -1740,6 +1743,12 @@ class DriveConfig(BaseModel):
     # text is only legible at full resolution, so each sample is expensive;
     # the cap bounds the pass's wall-clock regardless of how long the day is.
     sign_verify_max_samples_per_day: int = 120
+    # A GPS-less day is instead read every this-many seconds of footage (an
+    # interstate exit sign is in frame for a few seconds; 120 samples over a
+    # four-hour drive would miss most of them). The flat cap above still
+    # applies to a day that has a trace; the larger of the two bounds a
+    # GPS-less day.
+    sign_verify_gpsless_sample_period_s: float = 10.0
     # Only MOVING seconds are sampled (ground speed, m/s). A parked second's
     # sign is not evidence about the route — it is whatever happens to be
     # framed outside the windscreen, and it would be sampled repeatedly.

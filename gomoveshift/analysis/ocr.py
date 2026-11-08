@@ -245,6 +245,18 @@ def parse_sign_claims(text: Optional[str]) -> list[SignClaim]:
     return claims
 
 
+def _cuda_available() -> bool:
+    """torch sees a CUDA device. Any failure to probe is ``False``: the CPU
+    reader is always correct, only slower, and a GPS-less drive's sign pass
+    is the one place that speed decides minutes versus hours."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 — a probe failure must never fail OCR
+        return False
+
+
 class OCREngine:
     """
     OCR engine combining EasyOCR for fast local processing
@@ -280,7 +292,7 @@ class OCREngine:
 
             self._easyocr_reader = easyocr.Reader(
                 self.config.ocr.languages,
-                gpu=False,  # Set True if GPU available
+                gpu=_cuda_available(),
                 verbose=False,
             )
         return self._easyocr_reader

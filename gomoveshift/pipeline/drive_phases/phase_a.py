@@ -465,7 +465,8 @@ class PhaseA:
             logger.info("  Drive-level OST: %s", drive_ost)
             state.location = drive_ost
 
-        # Road-sign OCR evidence pass (advisory, opt-in via --sign-verify).
+        # Road-sign OCR evidence pass (advisory; --sign-verify, or by default
+        # when an episode has no GPS track — ``sign_pass.sign_pass_wanted``).
         # Reads signs off the RAW, PRE-BLUR episodes — blur covers faces /
         # plates / occupants, never signs — and records evidence ONLY: it
         # writes no location on any surface.
@@ -476,7 +477,13 @@ class PhaseA:
         # PHASE_A_CODE_VERSION is deliberately NOT bumped — adding this pass
         # must not invalidate a 3-4h scoring checkpoint. A populated field means
         # the footage was already read, so a resume never re-decodes it.
-        if getattr(self.config.drive, "sign_verify", False) and state.sign_hits_by_date is None:
+        from ...analysis.sign_pass import sign_pass_wanted
+
+        if state.sign_hits_by_date is None and sign_pass_wanted(
+            getattr(self.config.drive, "sign_verify", False),
+            getattr(state, "sign_verify", None),
+            gps_per_episode,
+        ):
             try:
                 from ...analysis.sign_evidence import hits_by_date_to_dicts
                 from ...analysis.sign_pass import collect_sign_hits

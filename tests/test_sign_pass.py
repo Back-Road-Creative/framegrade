@@ -180,6 +180,8 @@ class TestCollectSignHits:
         assert hit.parsed_claims()[0].value == "Colleton"
 
     def test_per_day_sample_cap_is_never_exceeded_and_spreads(self):
+        """On a day with a trace the flat cap is the ceiling (a GPS-less day is
+        sampled by period instead — see the gpsless test below)."""
         ep = _episode(0, "/v/long.mp4", 600.0, datetime(2026, 5, 24, 9, 0, 0))
         grab = _GrabSpy(lambda _p, _t: None)
 
@@ -187,7 +189,7 @@ class TestCollectSignHits:
             _config(sign_verify_max_samples_per_day=10),
             _plan([ep]),
             [ep.concat_path],
-            [(None, 0.0)],
+            [_gps(1_000_000.0, _track(600))],
             grab_frame_fn=grab,
             ocr_fn=_ocr_ok,
             parse_claims_fn=_parse_county,
@@ -200,6 +202,44 @@ class TestCollectSignHits:
         assert times[-1] > 500.0, "sampling must reach the day's end, not cluster at the start"
         gaps = [b - a for a, b in zip(times, times[1:])]
         assert max(gaps) - min(gaps) <= 1.0, "stride must be even across the day"
+
+    def test_a_gpsless_day_is_sampled_every_period_not_at_the_flat_cap(self):
+        """No GPS means the signs are the drive's only evidence, so a GPS-less day
+        is read every ``sign_verify_gpsless_sample_period_s`` seconds; the flat
+        per-day cap only governs days that have a trace to lean on."""
+        ep = _episode(0, "/v/nogps-long.mp4", 600.0, datetime(2026, 5, 24, 9, 0, 0))
+        grab = _GrabSpy(lambda _p, _t: None)
+
+        collect_sign_hits(
+            _config(sign_verify_max_samples_per_day=10, sign_verify_gpsless_sample_period_s=10.0),
+            _plan([ep]),
+            [ep.concat_path],
+            [(None, 0.0)],
+            grab_frame_fn=grab,
+            ocr_fn=_ocr_ok,
+            parse_claims_fn=_parse_county,
+        )
+
+        times = grab.times
+        assert len(times) == 60, "600 s / 10 s period = 60 samples, not the flat cap of 10"
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        assert max(gaps) - min(gaps) <= 1.0, "stride must stay even across the day"
+
+    def test_a_gps_day_keeps_the_flat_cap(self):
+        ep = _episode(0, "/v/gps-long.mp4", 600.0, datetime(2026, 5, 24, 9, 0, 0))
+        grab = _GrabSpy(lambda _p, _t: None)
+
+        collect_sign_hits(
+            _config(sign_verify_max_samples_per_day=10, sign_verify_gpsless_sample_period_s=10.0),
+            _plan([ep]),
+            [ep.concat_path],
+            [_gps(1_000_000.0, _track(600))],
+            grab_frame_fn=grab,
+            ocr_fn=_ocr_ok,
+            parse_claims_fn=_parse_county,
+        )
+
+        assert len(grab.times) == 10, "a day with a trace is still bounded by the flat cap"
 
     def test_stationary_seconds_excluded_when_gps_present(self):
         crawl = _track(30, deg_per_sec=0.000009)  # ~1 m/s — parked/creeping
@@ -398,6 +438,31 @@ class TestCollectSignHits:
 
 
 # ── Phase A wiring ────────────────────────────────────────────────────────
+class TestSignPassWanted:
+    """When the pass runs: an operator decision wins; undecided, a drive with a
+    GPS-less episode reads its signs because nothing else can say where it was."""
+
+    @pytest.mark.parametrize(
+        "config_flag, state_flag, gps, wanted",
+        [
+            (False, None, [(None, 0.0)], True),  # undecided, no GPS: signs are the only evidence
+            (
+                False,
+                None,
+                [(None, 0.0), _gps(1.0, _track(3))],
+                True,
+            ),  # one GPS-less episode is enough
+            (False, None, [_gps(1.0, _track(3))], False),  # undecided, GPS everywhere: stays opt-in
+            (False, None, [], False),  # nothing to read
+            (False, False, [(None, 0.0)], False),  # --no-sign-verify is respected even without GPS
+            (True, None, [_gps(1.0, _track(3))], True),  # --sign-verify (config mirror) wins
+            (False, True, [_gps(1.0, _track(3))], True),  # a saved --sign-verify wins on resume
+        ],
+    )
+    def test_decision(self, config_flag, state_flag, gps, wanted):
+        assert sign_pass_mod.sign_pass_wanted(config_flag, state_flag, gps) is wanted
+
+
 class _StubScorer:
     def __init__(self, *a, **k):
         pass
@@ -485,12 +550,22 @@ class TestPhaseASignPassWiring:
         monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
         return spy
 
-    def test_flag_off_leaves_state_untouched(self, phase_a_env, monkeypatch):
+    def test_explicit_no_sign_verify_leaves_state_untouched(self, phase_a_env, monkeypatch):
         spy = self._spy(monkeypatch)
         state = phase_a_env.state()
+        state.sign_verify = False  # --no-sign-verify, saved by the flag registry
         PhaseA(_config(sign_verify=False)).run(state)
         assert state.sign_hits_by_date is None
         assert spy.calls == 0
+
+    def test_a_gpsless_drive_runs_the_pass_without_the_flag(self, phase_a_env, monkeypatch):
+        """The fixture drive has no GPX, so its signs are read by default."""
+        spy = self._spy(monkeypatch)
+        state = phase_a_env.state()
+        assert state.sign_verify is None, "the operator did not decide"
+        PhaseA(_config(sign_verify=False)).run(state)
+        assert spy.calls == 1
+        assert state.sign_hits_by_date is not None
 
     def test_flag_on_populates_state(self, phase_a_env, monkeypatch):
         spy = self._spy(monkeypatch)
@@ -524,8 +599,10 @@ class TestPhaseASignPassWiring:
     def test_pass_runs_before_the_cached_score_early_return(self, phase_a_env, monkeypatch):
         """A resume that reuses drive_scores.npz must still back-fill evidence."""
         spy = self._spy(monkeypatch)
-        # First run populates the score cache (sign flag OFF).
-        PhaseA(_config(sign_verify=False)).run(phase_a_env.state())
+        # First run populates the score cache (sign pass explicitly OFF).
+        first = phase_a_env.state()
+        first.sign_verify = False
+        PhaseA(_config(sign_verify=False)).run(first)
         assert (phase_a_env.stages / "drive_scores.npz").exists()
         assert spy.calls == 0
 

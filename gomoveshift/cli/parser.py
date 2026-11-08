@@ -1192,7 +1192,8 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "as INDEPENDENT evidence (signs are not derived from the GPS track). "
         "Advisory by default — a corroborated disagreement warns at the label "
         "gate and never changes a location. Costs an extra decode pass over "
-        "the day's footage.",
+        "the day's footage. A drive with a GPS-less episode reads its signs "
+        "without this flag; --no-sign-verify turns that off.",
     )
     p.add_argument(
         "--no-sign-verify",
