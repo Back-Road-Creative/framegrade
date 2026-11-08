@@ -99,6 +99,16 @@ _COUNTY_MARKER_TOKENS = frozenset({"county", "co", "co."})
 #   Irish/UK — "N59", "M50", "R336", "A4"; stay unhyphenated.
 _EURO_ROUTE_RE = re.compile(r"\b[NMRA]\d{1,4}\b")
 
+# A full state name is a location claim only when the sign is ABOUT the state:
+# a boundary cue ("Welcome to South Carolina", "North Carolina State Line",
+# "Entering Virginia", "Leaving West Virginia", "Georgia Welcomes You") or a
+# place claim beside it ("Colleton County, South Carolina"). On its own it is
+# a destination on a guide or distance sign ("Winchester / West Virginia /
+# Exit 310"), which says where the road goes, not where the camera is.
+_STATE_BOUNDARY_CUE_RE = re.compile(
+    r"welcome\s+to\b|f[aá]ilte\s+go\b|state\s+line\b|\bentering\b|\bleaving\b|welcomes\s+you\b"
+)
+
 # Lazily-built lookup tables (see ``_sign_tables``).
 _SIGN_TABLES: dict = {}
 
@@ -229,8 +239,11 @@ def parse_sign_claims(text: Optional[str]) -> list[SignClaim]:
 
     has_place = bool(seen)
 
-    for name in state_names:
-        _add(_CLAIM_STATE, name)
+    # A full state name is a claim only beside a place claim or a boundary cue
+    # (``_STATE_BOUNDARY_CUE_RE``); a bare destination on a guide sign is not.
+    if has_place or _STATE_BOUNDARY_CUE_RE.search(lowered):
+        for name in state_names:
+            _add(_CLAIM_STATE, name)
     # A bare postal abbreviation is only a state claim alongside a place claim
     # ("Example County, SC") — on its own it is two uppercase letters.
     if has_place:

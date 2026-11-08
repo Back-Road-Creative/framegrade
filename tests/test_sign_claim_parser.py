@@ -15,6 +15,8 @@ The two properties under test are:
   guards must survive the move from single-match to multi-match parsing.
 """
 
+import pytest
+
 from gomoveshift.analysis.ocr import OCREngine, parse_sign_claims
 from gomoveshift.models import LocationType
 
@@ -215,3 +217,40 @@ def test_claim_kinds_are_plain_location_type_value_strings():
     for claim in parse_sign_claims("Welcome to Walterboro — Colleton County, SC I 95"):
         assert isinstance(claim.kind, str)
         assert claim.kind in {t.value for t in LocationType}
+
+
+# ── a state name is a claim only beside a place or a boundary cue ──────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Winchester West Virginia Exit 310",  # interstate guide sign: a destination
+        "West Virginia 120",  # distance sign
+        "Virginia Tech 3 mi",
+        "North Carolina",  # bare, no cue: ambiguous
+    ],
+)
+def test_a_bare_state_name_with_no_place_and_no_boundary_cue_is_not_a_claim(text):
+    assert _values(text, STATE) == []
+
+
+@pytest.mark.parametrize(
+    "text, state",
+    [
+        ("Welcome to South Carolina", "South Carolina"),
+        ("South Carolina State Line", "South Carolina"),
+        ("Entering North Carolina", "North Carolina"),
+        ("Now Entering Virginia", "Virginia"),
+        ("Leaving West Virginia", "West Virginia"),
+        ("Georgia Welcomes You", "Georgia"),
+        ("Welcome to West Virginia Wild and Wonderful", "West Virginia"),
+    ],
+)
+def test_a_state_boundary_sign_is_still_a_state_claim(text, state):
+    assert _values(text, STATE) == [state]
+
+
+def test_a_state_name_beside_a_place_claim_is_still_a_state_claim():
+    assert _values("Colleton County South Carolina", STATE) == ["South Carolina"]
+    assert _values("Welcome to Walterboro South Carolina", STATE) == ["South Carolina"]
