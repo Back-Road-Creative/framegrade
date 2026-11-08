@@ -710,6 +710,47 @@ class TestRunSignPass:
         assert state.sign_hits_by_date is None
 
 
+class TestZeroDaysIsNotEvidence:
+    """``run_sign_pass`` never records ``{}``, and never trusts one it finds.
+
+    A pass that grouped zero days decoded nothing; a saved ``{}`` (what the
+    first rec0063 back-fill left behind) must read as unread so the next
+    resume retries instead of trusting empty evidence.
+    """
+
+    def _call(self, state, config=None):
+        return sign_pass_mod.run_sign_pass(
+            config or _config(sign_verify=False),
+            state,
+            state.ingest_plan,
+            state.episode_files,
+            state.gps_per_episode,
+        )
+
+    def test_a_pass_that_grouped_zero_days_leaves_the_field_unset(self, monkeypatch):
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", _CollectSpy({}))
+        state = _resumed_state()
+        assert self._call(state) is False
+        assert state.sign_hits_by_date is None, "{} would read as evidence on the next resume"
+
+    def test_a_checkpoint_holding_an_empty_dict_is_read_again(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(sign_hits_by_date={})
+        assert self._call(state) is True
+        assert spy.calls == 1
+        assert state.sign_hits_by_date == {
+            "2026-03-05": [h.to_dict() for h in _ONE_HIT["2026-03-05"]]
+        }
+
+    def test_a_read_but_empty_day_still_counts_as_read(self, monkeypatch):
+        spy = _CollectSpy(_ONE_HIT)
+        monkeypatch.setattr(sign_pass_mod, "collect_sign_hits", spy)
+        state = _resumed_state(sign_hits_by_date={"2026-03-05": []})
+        assert self._call(state) is False
+        assert spy.calls == 0
+
+
 class TestBackfillRehydratesTheResumedPlan:
     """``backfill_sign_pass_on_resume`` with the plan a JSON round-trip yields.
 
