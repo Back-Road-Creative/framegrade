@@ -1,3 +1,0 @@
-### Fixed
-
-- `--ost-system-review` now passes a GPS-less drive run with a claim-free `--placeless-label`. Before, route claims had nothing to measure, so the long-form, Shorts and superlong gates always waited for a person to create `.confirmed`, even though backlog drives already pass the flag. An unmeasured LF, Short or superlong part (no lower-thirds) whose exact text is the drive's placeless label gets an `agree` review only when every word of that label is in `content_gates.PLACELESS_NO_CLAIM_WORDS` (no scenery, weather, season or time of day, e.g. "Somewhere On The Road"). A descriptive placeless label ("Through The Quiet Hills") and any other unmeasured text still wait for a person.

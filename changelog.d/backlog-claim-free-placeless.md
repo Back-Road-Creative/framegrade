@@ -1,3 +1,0 @@
-### Fixed
-
-- `health backlog` launches a GPS-less row only when its `placeless_label` claims nothing (every word in `PLACELESS_NO_CLAIM_WORDS`, e.g. "Somewhere On The Road"). A descriptive label ("Through The Valleys And Ridges") is skipped at the backlog, before any render, with the words it claims named in the skip reason, and the row behind it still launches. `nctopa-2026-03-05-rec0063` had rendered that label over a drive that is mostly divided interstate and farmland; the label was operator-typed and nothing measured it. A label outside the placeless vocabulary is now also refused at the backlog instead of failing the launch job at argparse.
