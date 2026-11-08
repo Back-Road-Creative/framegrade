@@ -150,7 +150,7 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         dry_run=args.dry_run, lease_acquire=acquire, lease_release=release,
         drive_running=lambda: default_drive_running(jobs_dir),
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
-        launcher=launch.default_launcher, register=register,
+        launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
     )  # fmt: skip
     if args.json:

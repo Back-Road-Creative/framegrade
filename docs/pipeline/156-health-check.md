@@ -131,6 +131,11 @@ An `auditing` drive whose newest `gms-backlog-<project>` job record ended in any
 `succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
 code: the failed audit still holds its slot, so the operator relaunches it (the drive resumes
 from its stages) or supersedes it (below); a relaunched job that is running is a `noop` again.
+A failed audit whose project no longer has a `drive_backlog.yaml` row for the region can be
+neither, so it is retired instead: its store row is set `failed`, the result lists it under
+`retired` with the failed job, and selection goes on to the next row (`--dry-run` lists it and
+writes nothing). An audit with a row, one still running, or one with no job record is never
+retired.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
 a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
