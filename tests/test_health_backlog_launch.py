@@ -49,6 +49,7 @@ class Rig:
         self.launches: list = []
         self.launch_ok = True
         self.registered: list = []
+        self.retired: list = []
         self.installed = "0.3.25"
         self.latest = "0.3.25"
         self.supersede = None
@@ -100,7 +101,7 @@ class Rig:
             lease_release=lambda: self.leases.append("release"),
             drive_running=lambda: self.running, disk=self.disk, preflight=self.preflight,
             render_gate=self.render_gate, launcher=self.launcher,
-            register=lambda **kw: self.registered.append(kw),
+            register=lambda **kw: self.registered.append(kw), retire=self.retired.append,
             installed_version=lambda python: self.installed,
             latest_version=lambda: self.latest,
             **({"supersede": self.supersede} if self.supersede else {}),
@@ -242,6 +243,56 @@ def test_an_audit_with_no_job_record_or_a_succeeded_job_stays_a_noop(tmp_path):
     job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
     job(rig, "other", "day-b", "failed", 300.0)
     assert rig.run()["action"] == "noop"
+
+
+# 2026-11-07: nctopa-2026-03-04's audit failed for good (under the floor once GPS-less spans were
+# cut), so its row was dropped from the backlog. The store row stayed ``auditing``, every
+# ``health backlog --region usa`` refused on it, and ``--supersede`` refused "no usa row ... in
+# the backlog": no tracked way out but a hand ``set-status``.
+
+
+def test_a_failed_audit_with_no_backlog_row_is_retired_and_the_next_row_launches(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "auditing"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    res = rig.run()
+    assert rig.retired == ["dropped"]
+    assert res["retired"] == [{"project": "dropped", "reason": res["retired"][0]["reason"]}]
+    assert "9ee99a65" in res["retired"][0]["reason"]
+    assert res["action"] == "launched" and res["project"] == "day-a"
+
+
+def test_a_dry_run_names_the_retirement_but_writes_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "auditing"))
+    job(rig, "9ee99a65", "dropped", "failed", 100.0)
+    res = rig.run(dry_run=True)
+    assert rig.retired == [] and [r["project"] for r in res["retired"]] == ["dropped"]
+    assert res["project"] == "day-a" and not rig.launches
+
+
+def test_a_failed_audit_whose_row_is_still_listed_is_never_retired(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "fbc9336e", "day-a", "failed", 100.0)
+    assert rig.run()["action"] == "refused" and rig.retired == []
+
+
+def test_a_rowless_audit_that_is_running_or_unrecorded_is_never_retired(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("dropped", "auditing"))
+    assert rig.run()["action"] == "noop" and rig.retired == []
+    job(rig, "old", "dropped", "failed", 100.0)
+    job(rig, "new", "dropped", "running", 200.0)
+    res = rig.run()
+    assert "audit in progress" in res["reason"] and rig.retired == []
+
+
+def test_a_rowless_failed_audit_in_another_region_is_left_alone(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("ie-gone", "auditing", region="ireland"))
+    job(rig, "x", "ie-gone", "failed", 100.0)
+    assert rig.run()["action"] == "launched" and rig.retired == []
 
 
 def test_auditing_in_another_region_does_not_block(tmp_path):
@@ -543,7 +594,7 @@ def test_an_exception_mid_run_still_releases_the_lease(tmp_path):
             code_root=rig.tmp, jobs_dir=rig.tmp, mirror_sha="x", now=NOW, dry_run=False,
             lease_acquire=rig.lease_acquire, lease_release=lambda: rig.leases.append("release"),
             drive_running=boom, disk=rig.disk, preflight=rig.preflight, render_gate=rig.render_gate, launcher=rig.launcher,
-            register=lambda **kw: None,
+            register=lambda **kw: None, retire=lambda project: None,
         )  # fmt: skip
     assert rig.leases == ["acquire", "release"]
 

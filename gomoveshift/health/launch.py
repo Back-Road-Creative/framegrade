@@ -3,7 +3,8 @@ LF slot, audit only (``--skip-upload --no-youtube-upload``), through the job run
 
 Order, each a stop: the ``gms-backlog-launch`` lease (held = noop); a running drive (noop); a
 region row already ``auditing`` (noop: that audit owns the next slot, so a repeat call never
-launches a second drive); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
+launches a second drive; a failed one whose backlog row was dropped is ``retire``d to ``failed``
+instead); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
 drives (none left = covered). A drive whose output dir already holds Phase D upload records
 (``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
@@ -415,6 +416,7 @@ def run_backlog(
     render_gate: Callable[[Path, Any], Optional[str]],
     launcher: Callable[[List[str], str, Dict[str, str]], Tuple[bool, str]],
     register: Callable[..., None],
+    retire: Callable[[str], None],
     disk: Disk = default_disk,
     installed_version: Callable[[Path], Optional[str]] = default_installed_version,
     latest_version: Callable[[], str] = default_latest_version,
@@ -426,7 +428,7 @@ def run_backlog(
     try:
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    drive_running, preflight, render_gate, launcher, register, disk,
+                    drive_running, preflight, render_gate, launcher, register, retire, disk,
                     installed_version, latest_version, supersede)  # fmt: skip
     finally:
         if not dry_run:
@@ -435,7 +437,7 @@ def run_backlog(
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
-         launcher, register, disk, installed_version, latest_version, supersede):  # fmt: skip
+         launcher, register, retire, disk, installed_version, latest_version, supersede):  # fmt: skip
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
@@ -444,6 +446,17 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
     target = supersede[0] if supersede else None
+    listed = {r.project for r in rows if r.region == region}
+    for project in [p for p in auditing if p not in listed and p != target]:
+        # a failed audit whose backlog row was dropped can never be relaunched or superseded;
+        # its store row is retired (``failed``) so it stops holding the region's next slot
+        failed = _failed_audit(jobs_dir, project)
+        if failed:
+            if not dry_run:
+                retire(project)
+            res.setdefault("retired", []).append({"project": project, "reason": failed})
+            auditing.remove(project)
+            mine = [d for d in mine if d.project != project]
     relaunch = None
     if auditing:
         failed = _failed_audit(jobs_dir, auditing[0])
@@ -671,6 +684,22 @@ def load_inputs(config: Any, region: str, ledger_path: Optional[Path], now: date
     known = {(e.project_name or "").strip().lower() for e in ledger.entries} - {""}
     rows = backlog.load(drive_backlog_path())
     return region, rows, drives, slots, known, register
+
+
+def store_retire(config: Any) -> Callable[[str], None]:
+    """``retire(project)``: ``set_status failed`` in ``schedule.sqlite3``, opened only when a
+    retirement happens."""
+
+    def retire(project: str) -> None:
+        from seo_manager.scheduling.store import ScheduleStore
+
+        from ..pipeline.seo_slots import STORE_FILENAME, waypost_cadence
+
+        cad = waypost_cadence(config)
+        path = Path(config.seo.storage_path) / STORE_FILENAME
+        ScheduleStore(path, cad.tz, cad.regions).set_status(project, "failed")
+
+    return retire
 
 
 def open_store(store_path: Path, make: Callable[[Path], Any]):

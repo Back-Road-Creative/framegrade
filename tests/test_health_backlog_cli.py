@@ -89,6 +89,30 @@ def test_absent_store_is_created_only_by_register(tmp_path):
     assert [(d.project, d.status) for d in drives] == [("sc-a", "auditing")]
 
 
+def test_store_retire_sets_the_drive_failed_and_opens_nothing_until_called(tmp_path, monkeypatch):
+    from zoneinfo import ZoneInfo
+
+    from seo_manager.scheduling.store import ScheduleStore
+
+    from gomoveshift.pipeline import seo_slots
+
+    tz = ZoneInfo("America/New_York")
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    monkeypatch.setattr(seo_slots, "waypost_cadence", lambda cfg: SimpleNamespace(tz=tz, regions=["usa"]))  # fmt: skip
+    retire = launch.store_retire(config)
+    assert not (tmp_path / seo_slots.STORE_FILENAME).exists()
+    store = ScheduleStore(tmp_path / seo_slots.STORE_FILENAME, tz, ["usa"])
+    store.register_ready(project="sc-a", region="usa", status="auditing", lf_count=1)
+    retire("sc-a")
+    assert [(d.project, d.status) for d in store.all_drives()] == [("sc-a", "failed")]
+
+
+def test_the_handler_wires_a_store_retire(tmp_path, wired):
+    wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    assert callable(wired["retire"])
+
+
 def test_supersede_needs_a_reason_at_the_parser(tmp_path, capsys):
     with pytest.raises(SystemExit):
         health.cmd_health(_args(tmp_path, "--supersede", "ire-a"), SimpleNamespace())
