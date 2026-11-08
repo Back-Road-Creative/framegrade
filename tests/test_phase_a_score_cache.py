@@ -261,3 +261,28 @@ class TestScoredGapGuard:
         episodes = [SimpleNamespace(index=0, total_duration=0.0)]
         file_scores = [np.zeros((0, 11), dtype=np.float64)]
         phase_a_mod._assert_no_scored_gaps(episodes, file_scores)
+
+
+class TestPhaseARefusesGpsGapDayBeforeScoring:
+    """#229: a full_drive day the GPS-gap cut leaves under the part minimum is
+    refused on the parsed GPX, before ``score_file`` (the GPU pass) ever runs."""
+
+    def test_refusal_lands_before_any_episode_is_scored(self, tmp_path, monkeypatch):
+        from gomoveshift.analysis.shorts_models import GPSData, GPSTrackpoint
+        from gomoveshift.config import DriveConfig
+        from gomoveshift.pipeline.regular_lf_planner import InsufficientFootageError
+
+        stages = tmp_path / "stages"
+        stages.mkdir()
+        files = _make_episode_files(tmp_path)
+        episodes = [_episode(i, f) for i, f in enumerate(files)]
+        episodes[0].gpx_path = str(tmp_path / "ep_0.gpx")  # 120 s of fixes; ep 1 has none
+        _patch_phase_a(monkeypatch, episodes)
+        fixes = [GPSTrackpoint(35.0 + 1e-5 * i, -80.0, None, 1_000_000.0 + i) for i in range(120)]
+        monkeypatch.setattr(phase_a_mod, "parse_gpx_file", lambda p: GPSData(trackpoints=fixes))
+
+        config = Config()
+        config.drive = DriveConfig(full_drive_part_min_sec=200, full_drive_part_max_sec=400)
+        with pytest.raises(InsufficientFootageError, match="2026-05-24"):
+            PhaseA(config).run(_state(tmp_path, stages_base=stages))
+        assert _SpyScorer.score_file_calls == 0, "the refusal must land before the scoring pass"
