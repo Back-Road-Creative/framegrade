@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.50] - 2026-11-08
+
+### Fixed
+
+- A drive that `health backlog` retires is no longer re-resumed by `health heal` on every new mirror SHA. Before this, the dead 03-04 audit was resumed three times (jobs ba3a9dbf, 15c1c9b0, 1affffde), and each run held the heavy slot for about 35 minutes while the backlog waited. Retiring now writes the `no-auto-resume` hold beside each of the drive's resume recipes, and heal already refuses a held recipe. A drive already `failed` in the store with no backlog row gets the same hold on the next run, and the result lists each held stage dir under `held`.
+
 ## [0.3.49] - 2026-11-07
 
 ### Fixed
@@ -609,7 +615,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.50...HEAD
+[0.3.50]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.49...v0.3.50
 [0.3.49]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.48...v0.3.49
 [0.3.48]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.47...v0.3.48
 [0.3.47]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.46...v0.3.47
