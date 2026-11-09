@@ -438,6 +438,11 @@ class PipelineState:
     # into raw dicts. Persisted so a resume never re-decodes footage for
     # evidence it already gathered.
     sign_hits_by_date: Optional[dict] = None
+    # Per-day stage counters of that pass (``analysis.sign_pass.SignPassDayStats``
+    # as dicts: candidates / sampled / grabbed / region / ocr_text / claims /
+    # elapsed_s), so a day's "0 hits" can be read as "0 frames decoded" or
+    # "0 sign regions" without re-reading the footage. Plain JSON.
+    sign_pass_stats: Optional[dict] = None
     # ``--no-audio`` — strip the audio track from the day master (encoded
     # ``-an``), so every LF stream-cut from it ships silent (shorts are
     # always muted). Mirrored to ``config.drive.skip_audio`` (the pipeline

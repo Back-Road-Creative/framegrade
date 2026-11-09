@@ -59,6 +59,7 @@ import bisect
 import logging
 import math
 import subprocess
+import time
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, Optional
 
@@ -71,6 +72,12 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_SAMPLES_PER_DAY = 120
 _DEFAULT_MIN_SPEED_MPS = 5.0
 _DEFAULT_GPSLESS_SAMPLE_PERIOD_S = 10.0
+
+# Progress is logged at INFO every this many sampled seconds per day (and at the
+# day's end), with elapsed time and an ETA. A GPS-less 4K day on a slow mount
+# runs ~7 s per sample, so 50 is a line roughly every six minutes — rec0063
+# (1320 samples) was silent for two hours before this existed.
+PROGRESS_EVERY = 50
 
 # Half-width (seconds) of the window the moving/stationary median is taken
 # over. Wide enough to span several 1 Hz fixes, narrow enough that a brief
@@ -97,6 +104,35 @@ class _Candidate:
     ep_master_start: float
     lat: Optional[float]
     lon: Optional[float]
+
+
+@dataclass
+class SignPassDayStats:
+    """Where one day's sampled seconds died, stage by stage.
+
+    ``sampled`` seconds were attempted; ``grabbed`` decoded to a frame;
+    ``region`` had a sign-shaped region; ``ocr_text`` read non-empty text;
+    ``claims`` parsed to at least one place claim (= the day's hits). The
+    counters ride on the A6 log line and persist as ``state.sign_pass_stats``
+    so "0 hits" can be told apart from "0 frames decoded" without a probe.
+    """
+
+    candidates: int = 0
+    sampled: int = 0
+    grabbed: int = 0
+    region: int = 0
+    ocr_text: int = 0
+    claims: int = 0
+    elapsed_s: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def summary(self) -> str:
+        return (
+            f"sampled={self.sampled} grabbed={self.grabbed} region={self.region} "
+            f"ocr_text={self.ocr_text} claims={self.claims}"
+        )
 
 
 def _default_grab_frame(video_path: Any, t_local: float):
@@ -349,7 +385,10 @@ def run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode) ->
     try:
         from .sign_evidence import hits_by_date_to_dicts
 
-        sign_hits = collect_sign_hits(config, ingest_plan, episode_files, gps_per_episode)
+        stats: dict = {}
+        sign_hits = collect_sign_hits(
+            config, ingest_plan, episode_files, gps_per_episode, stats=stats
+        )
         if not sign_hits:
             # Zero days means no episode was grouped, so no frame was read:
             # recording ``{}`` would make the next resume trust it as evidence.
@@ -360,10 +399,16 @@ def run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode) ->
             )
             return False
         state.sign_hits_by_date = hits_by_date_to_dicts(sign_hits)
+        if hasattr(state, "sign_pass_stats"):
+            state.sign_pass_stats = stats
+        per_day = "; ".join(
+            f"{date}: {SignPassDayStats(**day).summary()}" for date, day in sorted(stats.items())
+        )
         logger.info(
-            "  A6: sign pass recorded %d hit(s) across %d day(s)",
+            "  A6: sign pass recorded %d hit(s) across %d day(s) — %s",
             sum(len(v) for v in (sign_hits or {}).values()),
             len(sign_hits or {}),
+            per_day or "no stage counts",
         )
         return True
     except Exception as e:  # noqa: BLE001 — advisory evidence never fails a run
@@ -479,15 +524,22 @@ def _hit_for_candidate(
     grab_frame_fn,
     ocr_fn,
     parse_claims_fn,
+    stats: Optional[SignPassDayStats] = None,
 ) -> Optional[SignHit]:
-    """One sampled second → a ``SignHit``, or ``None`` when it yields no claim."""
+    """One sampled second → a ``SignHit``, or ``None`` when it yields no claim.
+
+    ``stats`` (when given) counts the stage each second reached.
+    """
+    stats = stats if stats is not None else SignPassDayStats()
     frame = grab_frame_fn(candidate.video_path, candidate.t_local)
     if frame is None or getattr(frame, "size", 0) == 0:
         return None
+    stats.grabbed += 1
 
     crop = _find_sign_crop(detector, frame)
     if crop is None:
         return None  # cheap filter — no sign region, so no OCR for this second
+    stats.region += 1
 
     result = ocr_fn(crop)
     if not result:
@@ -495,12 +547,14 @@ def _hit_for_candidate(
     text, confidence = result[0], result[1]
     if not text or not str(text).strip():
         return None
+    stats.ocr_text += 1
 
     claims = _claim_dicts(parse_claims_fn(str(text)))
     if not claims:
         # OCR noise that names no place is NOT evidence — discard it rather
         # than persisting unreadable text into state.
         return None
+    stats.claims += 1
 
     return SignHit(
         episode_index=candidate.episode_index,
@@ -524,6 +578,7 @@ def collect_sign_hits(
     grab_frame_fn=None,
     ocr_fn=None,
     parse_claims_fn=None,
+    stats: Optional[dict] = None,
 ) -> dict[str, list[SignHit]]:
     """Read road signs out of a drive's raw footage, one bucket per calendar day.
 
@@ -542,6 +597,9 @@ def collect_sign_hits(
         grab_frame_fn: ``(video_path, t_local) -> BGR ndarray | None``.
         ocr_fn: ``(bgr_roi) -> (text, confidence) | None``.
         parse_claims_fn: ``(text) -> list[SignClaim]``.
+        stats: when a dict is passed, it is filled with
+            ``{date: SignPassDayStats.to_dict()}`` — the per-stage counters
+            for every grouped day, beside the evidence they explain.
 
     Returns:
         ``{date: [SignHit, ...]}`` sorted by ``ts_day``. EVERY grouped day is
@@ -629,8 +687,12 @@ def collect_sign_hits(
         sampled = _even_stride(
             candidates, _day_sample_cap(max_samples, gpsless_period_s, day_cursor, day_has_gps)
         )
+        day_stats = SignPassDayStats(candidates=len(candidates))
+        started = time.monotonic()
         day_hits: list[SignHit] = []
         for candidate in sampled:
+            day_stats.sampled += 1
+            _log_progress(date, day_stats, len(sampled), len(day_hits), started)
             try:
                 hit = _hit_for_candidate(
                     candidate,
@@ -639,6 +701,7 @@ def collect_sign_hits(
                     grab_frame_fn=grab,
                     ocr_fn=ocr,
                     parse_claims_fn=parse,
+                    stats=day_stats,
                 )
             except Exception as exc:  # noqa: BLE001 — advisory: skip the second
                 logger.debug(
@@ -653,12 +716,45 @@ def collect_sign_hits(
 
         day_hits.sort(key=lambda h: h.ts_day)
         hits_by_date[date] = day_hits
+        day_stats.elapsed_s = round(time.monotonic() - started, 1)
+        if stats is not None:
+            stats[date] = day_stats.to_dict()
         logger.info(
-            "  Sign pass %s: %d hit(s) from %d sampled second(s) (%d candidate(s))",
+            "  Sign pass %s: %d hit(s) from %d sampled second(s) (%d candidate(s)) — %s, %.0fs",
             date,
             len(day_hits),
             len(sampled),
             len(candidates),
+            day_stats.summary(),
+            day_stats.elapsed_s,
         )
 
     return hits_by_date
+
+
+def _log_progress(
+    date: str, stats: SignPassDayStats, total: int, hits: int, started: float
+) -> None:
+    """One INFO line every ``PROGRESS_EVERY`` sampled seconds (the day's own
+    summary line closes it, so a short day stays quiet).
+
+    Called BEFORE the sample is decoded with ``stats.sampled`` already counting
+    it, so a wedged seek is reported at the second it is about to spend on;
+    elapsed and ETA use the mean cost of the seconds already finished.
+    """
+    done = stats.sampled
+    if done % max(int(PROGRESS_EVERY), 1):
+        return
+    finished = done - 1
+    elapsed = time.monotonic() - started
+    eta = (elapsed / finished) * (total - finished) if finished > 0 else float("nan")
+    logger.info(
+        "  Sign pass %s: progress %d/%d sampled, %d hit(s), %.0fs elapsed, ETA %.0fs (%s)",
+        date,
+        done,
+        total,
+        hits,
+        elapsed,
+        eta,
+        stats.summary(),
+    )
