@@ -34,15 +34,17 @@ def _run(argv):
 
 def test_parser_accepts_flags_and_has_no_out():
     args = _build_parser().parse_args(
-        "photos sort /tmp/x --dry-run --index-only --reprocess --workers 3 --no-stacks --gpu".split()
+        "photos sort /tmp/x --dry-run --index-only --reprocess --workers 3 --no-stacks".split()
     )
     assert (args.photos_command, args.folder) == ("sort", "/tmp/x")
-    assert args.dry_run and args.index_only and args.reprocess and args.no_stacks and args.gpu
+    assert args.dry_run and args.index_only and args.reprocess and args.no_stacks
     assert args.workers == 3
     defaults = _build_parser().parse_args("photos sort /tmp/x".split())
     assert defaults.workers == 2 and not defaults.dry_run
     with pytest.raises(SystemExit):
         _build_parser().parse_args("photos sort /tmp/x --out /tmp/y".split())
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args("photos sort /tmp/x --gpu".split())
 
 
 def test_config_default_and_override(tmp_path):

@@ -2,7 +2,7 @@
 
 `gomoveshift photos sort <folder>` takes a whole folder of photos (searched recursively), drops duplicates, sorts what is left by subject and develops each photo into a fixed output home. Outputs are private working JPEGs: no face blur, never the website. Originals are only opened read-only.
 
-Flags: `--dry-run`, `--index-only`, `--reprocess`, `--workers N` (default 2, clamped to 1..4), `--no-stacks`, `--gpu`, `--resume RUN_DIR` (finish an earlier run's group outputs; note 178). The command runs at the lowest CPU priority (`os.nice(19)`) so GoMoveShift renders on the same box always win the CPU. There is no `--out`: the home is `photos.sort_root` (default `/mnt/d/camPics_output`). `--no-stacks` and `--gpu` are accepted and written to `run.json`; nothing in this command uses them yet. The process lowers its own priority (`nice` 10) and takes the shared media admission fence like the other heavy photo commands (busy: "Waiting for shared media admission; no images decoded.", exit 2).
+Flags: `--dry-run`, `--index-only`, `--reprocess`, `--workers N` (default 2, clamped to 1..4), `--no-stacks` (skip the night-sky stacks; note 178), `--resume RUN_DIR` (finish an earlier run's group outputs; note 178). There is no `--gpu`: the sort never takes the shared GPU lock, which belongs to the GoMoveShift drives. The command runs at the lowest CPU priority (`os.nice(19)`) so GoMoveShift renders on the same box always win the CPU. There is no `--out`: the home is `photos.sort_root` (default `/mnt/d/camPics_output`). The process takes the shared media admission fence like the other heavy photo commands (busy: "Waiting for shared media admission; no images decoded.", exit 2).
 
 ## Refusals
 

@@ -318,13 +318,14 @@ def test_index_html_lists_every_output_escaped(tmp_path, root):
     assert page.count("<section") == 1
 
 
-def test_originals_unchanged_and_gpu_flag_recorded(folder, root):
+def test_originals_unchanged_and_flags_recorded(folder, root):
     (folder / "clip.MOV").write_bytes(b"mov")
     before = hash_tree(folder.parent)
-    result = run(folder, root, Spy(), opts(gpu=True, no_stacks=True, workers=9))
+    result = run(folder, root, Spy(), opts(no_stacks=True, workers=9))
     assert hash_tree(folder.parent) == before
     args = json.loads((result.run_dir / "run.json").read_text())["args"]
-    assert args["gpu"] is True and args["no_stacks"] is True and args["workers"] == 4
+    assert args["no_stacks"] is True and args["workers"] == 4
+    assert "gpu" not in args
 
 
 def test_warnings_and_summary(folder, root):

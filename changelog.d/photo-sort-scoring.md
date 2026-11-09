@@ -5,5 +5,5 @@
   Files are renamed `NNN-<stem>.jpg` with NNN the quality rank (1 = best); `ranked.csv` carries every
   component, and `index.html` shows each section in rank order with the total under each thumbnail. The
   aesthetic pass runs once per run on the CPU (2 threads), caches by source sha256 in the ledger, and
-  `--gpu` takes the shared GPU lock for that pass only, falling back to CPU if it is busy.
+  never takes the shared GPU lock, so it cannot hold up a GoMoveShift render.
 - `gomoveshift photos fetch-models`: the explicit, hash-checked download of the aesthetic weights.
