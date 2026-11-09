@@ -109,6 +109,22 @@ attempt history is kept; a resolved row is reopened, stamped `reopened_at`, so a
 `health check` saw fail, e.g. an evidence run. An unreadable recipe exits 2 and writes nothing;
 with `--dry-run` the row is registered in a scratch copy and the incidents dir is untouched.
 
+**By hand, from the recipe.** `gomoveshift drive --from-recipe <path-or-project>` is the manual
+relaunch that never retypes the environment. The argument is the recipe file, a `_stages` or
+project dir holding one, or a bare project name resolved to the one live recipe under the stages
+root (`GMS_INTERMEDIATE_DIR`, else the cache home; `<root>/<project>/_stages` and
+`<root>/<run>/<project>/_stages`, never `_superseded`; none or several refuse, listing them).
+Before argparse runs, the recipe's argv becomes the command line (`--fresh` was already stripped
+when it was written) and its recorded `GMS_INTERMEDIATE_DIR` is set in the process, so
+`_stages_base` lands on the dir the run used — the same env, not a second lookup. Only `--phase`,
+`--publish`, `--lf-day`, `--lf-publish-date`, `--skip-upload`, `--no-youtube-upload`, `--force` and
+`--no-tmux` may be added; a directory, `--fresh` or any other flag refuses naming it, as does an
+environment that already sets a different `GMS_INTERMEDIATE_DIR` ("unset it or drop
+--from-recipe"), a recipe that is not a `<python> -m gomoveshift drive …` run, and an unreadable
+one. Refusals exit 2 before anything is touched; a relaunch rewrites `resume.json` through the
+normal path. 2026-11-08: a hand relaunch of nctopa-2026-03-05-rec0063 with a retyped env chose a
+fresh stage dir and orphaned the earlier 139 GB one (`cleanup <project> --abandoned` reclaims it).
+
 A `--dry-run` pass launches nothing and writes no row, but each would-launch attempt in
 `attempts` carries the exact `argv` (the job-runner wrapper and the rebound drive command), `cwd`,
 `interpreter`, `job_name` and `mirror_sha`, so the resume can be graded before it runs.
