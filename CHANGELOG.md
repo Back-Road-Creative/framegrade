@@ -5,6 +5,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.61] - 2026-11-09
+
+### Changed
+
+- redactcam pinned to `ce6a1c2`: stage-1 detection decodes the day master through
+  ffmpeg NVDEC (`-hwaccel cuda`, `hevc_cuvid`/`h264_cuvid`/`av1_cuvid`) piped as
+  bgr24, falling back to `cv2.VideoCapture` when ffmpeg, the cuda hwaccel or the
+  cuvid decoder is missing, the probe fails, the clip is rotated, or the run resumes
+  from a checkpoint (`start_frame > 0`). Measured on a 4K60 HEVC master: 18.1 fps
+  cv2 vs 31.8 fps NVDEC. `REDACTCAM_DECODE=cv2|nvdec|auto` overrides.
+  `tests/test_redactcam_parity.py` pins the new `decode="auto"` default.
+
 ## [0.3.60] - 2026-11-09
 
 ### Fixed
@@ -711,7 +723,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.60...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.61...HEAD
+[0.3.61]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.60...v0.3.61
 [0.3.60]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.59...v0.3.60
 [0.3.59]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.58...v0.3.59
 [0.3.58]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...v0.3.58
