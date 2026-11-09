@@ -239,16 +239,23 @@ def test_main_expands_applies_the_env_and_dispatches_the_recipe_argv(tmp_path, m
         seen["env"] = os.environ.get("GMS_INTERMEDIATE_DIR")
         return 0
 
-    monkeypatch.delenv("GMS_INTERMEDIATE_DIR", raising=False)
     monkeypatch.setattr(
         "sys.argv", ["gomoveshift", "drive", "--from-recipe", str(recipe), "--phase", "A"]
     )
+    # ``main()`` applies the recipe env with ``os.environ.update`` — by design, so the
+    # drive's children inherit it. In the test process that write must not outlive the
+    # test: ``monkeypatch.delenv`` on an UNSET name records nothing to restore, and the
+    # leaked ``GMS_INTERMEDIATE_DIR`` sent every later orchestrator test on the same
+    # xdist worker to the wrong stage base (#258 CI shard 2; .data/logs/u5-leak-red.log).
+    # ``patch.dict(os.environ)`` snapshots and restores the whole mapping.
     with (
+        patch.dict(os.environ),
         patch.dict(cli._COMMAND_MAP, {"drive": fake_drive}),
         patch.object(cli, "get_config", return_value=SimpleNamespace()),
         patch("gomoveshift.pipeline.schedule_constants.apply_config"),
         patch.object(from_recipe, "default_stages_root", return_value=_root(tmp_path)),
     ):
+        os.environ.pop("GMS_INTERMEDIATE_DIR", None)
         rc = cli.main()
     assert rc == 0
     assert seen == {
@@ -257,6 +264,10 @@ def test_main_expands_applies_the_env_and_dispatches_the_recipe_argv(tmp_path, m
         "env": str(_root(tmp_path) / "rec0063-signs-resume3"),
     }
     assert str(recipe) in capsys.readouterr().out
+    assert (
+        "GMS_INTERMEDIATE_DIR" not in os.environ
+        or os.environ["GMS_INTERMEDIATE_DIR"] != seen["env"]
+    ), "the recipe env leaked out of the test"
 
 
 def test_main_refuses_with_exit_2_and_the_reason(tmp_path, monkeypatch, capsys):
