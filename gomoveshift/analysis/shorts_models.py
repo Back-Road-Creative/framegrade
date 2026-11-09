@@ -197,9 +197,16 @@ class GPSTrackpoint:
 
 @dataclass
 class GPSData:
-    """Collection of GPS trackpoints with metadata."""
+    """Collection of GPS trackpoints with metadata.
+
+    ``creator`` is the GPX root's ``creator`` attribute (``None`` when absent):
+    the origin of the track. The GPS-gap rules read it (``route_claims.fix_gap_s``)
+    because a day-GPX slice from a phone logger is judged at a wider fix gap
+    than a GoPro GPMF track.
+    """
 
     trackpoints: List["GPSTrackpoint"]
+    creator: Optional[str] = None
 
     @property
     def start_time(self) -> Optional[float]:

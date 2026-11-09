@@ -13,10 +13,17 @@ can be missed; the place floor (``min_place_s``) is set well above the bin.
 
 Gap rule: a valid fix is finite, in range, not 0,0, and
 not a repeat of an earlier timestamp (the trackpoints carry no DOP or fix type to
-filter on). A gap is a fix-to-fix interval longer than ``GAP_S`` (exactly 5.0 s
-is not a gap), measured from the nearest valid fix on each side even when that
-fix lies outside the window, so a dropout a cut falls inside still counts; only
-its retained overlap counts toward ``gap_seconds``. The evidence is sampled:
+filter on). A gap is a fix-to-fix interval longer than the window's fix gap
+(``GAP_S``, 5 s, unless the window says otherwise; exactly 5.0 s is not a gap),
+measured from the nearest valid fix on each side even when that fix lies outside
+the window, so a dropout a cut falls inside still counts; only its retained
+overlap counts toward ``gap_seconds``. The fix gap follows the track's origin
+(``fix_gap_s``): a GoPro GPMF track logs one fix a second, so a longer silence is
+lock loss; a day-GPX slice the slicer wrote (``creator`` = the slicer's marker)
+comes from a phone logger that sleeps for a few seconds at a time, and is judged
+at ``DAY_TRACK_GAP_S``, one evidence bin, because a hole no longer than the bin
+adds no uncertainty the sampled method does not already accept. Any track of
+unknown origin keeps ``GAP_S``. The evidence is sampled:
 it never proves containment (``containment_proven`` is always false). A separate
 Census polygon check can record bounded containment under explicit travel and
 GPS-error assumptions; the sampled fields and gaps remain unchanged.
@@ -39,9 +46,15 @@ from gomoveshift.pipeline.geo_constants import US_STATE_ABBREVS
 from gomoveshift.pipeline.location_evidence import _evidence_id
 
 #: A stretch with no valid fix longer than this is a gap (not interpolated).
+#: Models a GoPro GPMF track: one fix a second, so a longer silence is lock loss.
 GAP_S = 5.0
 #: One reverse-geocode per bin of retained time.
 BIN_S = 30.0
+#: The fix gap for a day-GPX slice the slicer wrote (a phone logger, bursty with
+#: holes of a few seconds; Clonakilty day 12: 58 holes of 5-20 s in 886 fixes).
+#: One evidence bin: a hole no longer than the bin adds no uncertainty the
+#: sampled method does not already accept.
+DAY_TRACK_GAP_S = BIN_S
 #: Retained time in a place at or above this makes the place required.
 MIN_PLACE_S = 60.0
 #: A region label must cover this share of retained time with GPS.
@@ -254,11 +267,43 @@ class RouteWindow:
     # boundary reachability uses them; place votes never count excluded footage.
     prev_fix: Optional[tuple] = None
     next_fix: Optional[tuple] = None
+    #: The fix gap this window's track is judged at (``fix_gap_s`` of its
+    #: episode's GPSData); ``None`` takes ``measure_route``'s ``gap_s``.
+    gap_s: Optional[float] = None
+
+
+def fix_gap_s(gps_data) -> float:
+    """The fix gap a track is judged at, from its GPX ``creator``.
+
+    ``DAY_TRACK_GAP_S`` for a sidecar the day-GPX slicer wrote (a GPSData, or
+    the dict a resumed checkpoint holds, whose ``creator`` is the slicer's
+    marker); ``GAP_S`` for a GPMF track and for any track of unknown origin.
+    """
+    from .ingest.day_gpx_slicer import MARKER
+
+    if gps_data is None:
+        return GAP_S
+    creator = (
+        gps_data.get("creator")
+        if isinstance(gps_data, dict)
+        else getattr(gps_data, "creator", None)
+    )
+    return DAY_TRACK_GAP_S if creator == MARKER else GAP_S
+
+
+def day_fix_gap_s(gps_per_episode) -> float:
+    """The fix gap one day's planner mask applies: the common ``fix_gap_s`` of
+    its GPS-bearing episodes. A day mixing a GPMF track with a day-GPX slice
+    takes the stricter value (fail closed). No GPS at all: ``GAP_S``."""
+    gaps = {
+        fix_gap_s(entry[0]) for entry in gps_per_episode or [] if entry and entry[0] is not None
+    }
+    return min(gaps) if gaps else GAP_S
 
 
 @dataclass
 class RouteGap:
-    """A fix-to-fix interval over ``GAP_S``; ``[start_s, end_s)`` is its retained part."""
+    """A fix-to-fix interval over the window's fix gap; ``[start_s, end_s)`` is its retained part."""
 
     segment_id: str
     source: str
@@ -330,6 +375,9 @@ class RouteEvidence:
     boundary_notes: list = field(default_factory=list)
     boundary_proofs: dict = field(default_factory=dict)
     windows_key: str = ""
+    #: Every fix gap the windows were judged at, sorted (one value for a drive
+    #: of one track origin).
+    gap_thresholds_s: tuple = (GAP_S,)
 
     @classmethod
     def from_record(cls, record: dict) -> "RouteEvidence":
@@ -377,6 +425,7 @@ class RouteEvidence:
             bins,
             boundary_proofs=dict(record.get("boundary_proofs") or {}),
             windows_key=record.get("windows_key") or "",
+            gap_thresholds_s=_thresholds(record.get("gap_threshold_s", GAP_S)),
         )
 
     @property
@@ -417,7 +466,11 @@ class RouteEvidence:
             "timeline": TIMELINE,
             "timestamp_source": TIMESTAMP_SOURCE,
             "tick_s": self.tick_s,
-            "gap_threshold_s": GAP_S,
+            "gap_threshold_s": (
+                self.gap_thresholds_s[0]
+                if len(self.gap_thresholds_s) == 1
+                else list(self.gap_thresholds_s)
+            ),
             "gap_rule": "fix-to-fix interval > gap_threshold_s; retained overlap only",
             "retained_seconds": round(self.retained_seconds, 3),
             "coverage_pct": round(self.coverage * 100, 2),
@@ -586,6 +639,13 @@ def _valid(lat, lon) -> bool:
 
 #: Float slack on the gap boundary: 5.0 s computed from two floats is still 5.0 s.
 _EPS = 1e-9
+
+
+def _thresholds(value) -> tuple:
+    """``gap_threshold_s`` as recorded (one number, or the list of a mixed drive)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(sorted(float(v) for v in value)) or (GAP_S,)
+    return (float(value),)
 
 
 def _window_gaps(w: RouteWindow, fixes, gap_s: float, tick_s: Optional[float], notes) -> list:
@@ -770,9 +830,12 @@ def measure_route(
     first: dict = {}
     unresolved = 0.0
     line: list = []  # (window index, time, 0 gap / 1 bin, item): retained order
+    used: set = set()
     for wi, (w, (fixes, _inv, _dup)) in enumerate(zip(windows, cleaned)):
         retained += max(0.0, w.end_s - w.start_s)
-        wgaps = _window_gaps(w, fixes, gap_s, tick_s, notes)
+        w_gap_s = float(w.gap_s) if w.gap_s is not None else gap_s
+        used.add(w_gap_s)
+        wgaps = _window_gaps(w, fixes, w_gap_s, tick_s, notes)
         gaps.extend(wgaps)
         line.extend((wi, g.start_s, 0, g) for g in wgaps)
         a = w.start_s
@@ -820,6 +883,7 @@ def measure_route(
         tick_s=tick_s,
         boundary_notes=notes,
         windows_key=retained_windows_key(windows),
+        gap_thresholds_s=tuple(sorted(used)) or (gap_s,),
     )
 
 

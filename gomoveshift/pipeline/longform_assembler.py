@@ -44,26 +44,32 @@ def _with_gps_gap_mask(
     """``stop_mask`` OR the GPS-gap veto, for ``full_drive`` planning.
 
     A place named in viewer text means every retained second is provably inside
-    it, so a span with no usable fix for longer than the route-claim gap
-    (``stop_mask.GPS_MAX_FIX_GAP_S`` == ``route_claims.GAP_S``) must not be
-    retained: the claim gate would refuse it and the drive could not label any
-    LF. Same veto the shorts planner uses. ``None`` mask stays ``None`` (the
-    planner refuses it); a GPS-less day masks nothing extra (operator label).
+    it, so a span with no usable fix for longer than the route-claim gap must
+    not be retained: the claim gate would refuse it and the drive could not
+    label any LF. The gap is the one the gate applies to the same tracks
+    (``route_claims.day_fix_gap_s``: ``GAP_S`` for GPMF, ``DAY_TRACK_GAP_S``
+    for a day-GPX slice, the stricter when a day mixes them). Same veto the
+    shorts planner uses. ``None`` mask stays ``None`` (the planner refuses it);
+    a GPS-less day masks nothing extra (operator label).
     """
     if stop_mask is None or len(day_scores) == 0 or not _has_gps(gps_per_episode):
         return stop_mask
     from .gps_enrichment import _build_drive_gps_points
+    from .route_claims import day_fix_gap_s
     from .stop_mask import build_gps_gap_mask
 
     points = _build_drive_gps_points(boundaries, gps_per_episode)
     base = float(day_scores[0, COL_TIMESTAMP])
     points = [(t - base, lat, lon) for t, lat, lon in points]
-    gap = build_gps_gap_mask(len(day_scores), points)
+    max_gap_s = day_fix_gap_s(gps_per_episode)
+    gap = build_gps_gap_mask(len(day_scores), points, max_gap_s=max_gap_s)
     merged = np.asarray(stop_mask, dtype=bool) | gap
     extra = int(np.count_nonzero(merged)) - int(np.count_nonzero(stop_mask))
     if extra:
         logger.info(
-            "[full_drive] GPS-gap mask: %d additional s cut (no fix within route-claim gap)", extra
+            "[full_drive] GPS-gap mask: %d additional s cut (no fix within %gs route-claim gap)",
+            extra,
+            max_gap_s,
         )
     return merged
 
