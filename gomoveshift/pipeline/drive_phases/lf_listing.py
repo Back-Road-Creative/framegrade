@@ -137,6 +137,14 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
         dom = dominant_location(pts, geocoder) if pts else None
         if dom is None or not dom.county:
             print(f"  {idx:>3}  <no GPS — --per-lf-location override required>")
+            if sign_on:
+                _print_lf_sign_suggestion(
+                    config,
+                    idx,
+                    sign_hits_by_lf.get(idx) or [],
+                    gps_fix_count=len(pts or []),
+                    sign_error=sign_error,
+                )
             continue
         label = f"{dom.county}, {dom.state}" if dom.state else dom.county
         if dom.name:
@@ -379,6 +387,44 @@ def _bucket_sign_hits(state: Any, drive_plan: Any) -> dict:
 
     hits_by_date = hits_by_date_from_state(getattr(state, "sign_hits_by_date", None))
     return bucket_hits_by_lf(hits_by_date, drive_plan) or {}
+
+
+def _print_lf_sign_suggestion(
+    config: Any, idx: int, hits: list, *, gps_fix_count: int, sign_error: str = ""
+) -> None:
+    """Suggest a sign-derived label for an LF the GPS chain could not label.
+
+    SUGGEST ONLY. The LF printed ``<no GPS — --per-lf-location override
+    required>``; this prints, beneath it, the label
+    ``sign_label.explain_sign_label`` would allow from the LF's own road signs
+    — with a ready-to-copy ``--per-lf-location`` form — or every rule that
+    refused one. Nothing is written into the override map or the state: the
+    operator copies the suggestion, and the OST review still needs a person.
+    Like the sign-evidence block, a failure degrades to ``unavailable`` and
+    never costs the operator the listing.
+    """
+    try:
+        if sign_error:
+            raise RuntimeError(sign_error)
+        from ...analysis.sign_label import explain_sign_label
+
+        drive_cfg = getattr(config, "drive", None)
+        min_hits = int(getattr(drive_cfg, "sign_verify_min_corroborating_hits", 2) or 2)
+        label, reasons = explain_sign_label(
+            idx, hits, min_corroborating_hits=min_hits, gps_fix_count=gps_fix_count
+        )
+        if label is None:
+            print(f"       sign-derived label: none ({len(hits)} sign hit(s))")
+        else:
+            print(
+                f"       sign-derived label (suggest only): {label.label!r} — copy as "
+                f"--per-lf-location '{idx}={label.label}'"
+            )
+        for reason in reasons:
+            print(f"         - {reason}")
+    except Exception as exc:  # noqa: BLE001 — a suggestion never breaks the gate
+        logger.warning("  sign-derived label: LF %s suggestion failed: %s", idx, exc)
+        print(f"       sign-derived label: unavailable ({exc})")
 
 
 def _print_lf_sign_evidence(config: Any, idx: int, dom: Any, hits: list) -> None:
