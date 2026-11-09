@@ -23,7 +23,9 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+
+from ..health import heal
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,13 @@ _MAIN_COMPLETION_MARKER = "csv_generation"
 _DRIVE_COMPLETION_KEY = "phases_completed"
 _DRIVE_COMPLETION_MARKER = "phase_d"
 
+# Sidecars an abandoned-run check reads (names pinned where they are written).
+_RUN_LOCK_NAME = "pipeline_state.lock"  # orchestrator_lock._acquire_run_lock default
+_HOLD_NAME = "no-auto-resume"  # health.resume.HOLD_NAME
+_ABANDONED_HINT = (
+    "killed or superseded run? `cleanup <project> --abandoned` says whether it qualifies"
+)
+
 
 @dataclass
 class CleanupPlan:
@@ -60,6 +69,55 @@ class CleanupPlan:
     skipped: List[Dict] = field(default_factory=list)  # [{"path": str, "reason": str}]
     # Copied-source dirs (``<stage_cache_base>/sources/<project>``) being reclaimed.
     source_dirs: List[Dict] = field(default_factory=list)  # [{"path": str, "size": int}]
+    # Whole ``_stages`` dirs of abandoned runs (``--abandoned``; see ``abandoned_refusal``).
+    abandoned: List[Dict] = field(default_factory=list)  # [{"path", "size", "reason"}]
+
+
+# The live-drive probe is heal's — one `pgrep` pattern for the whole codebase. Callers
+# that pass no probe get ``_live_drive_probe``, which looks heal up at call time so a
+# test patching ``gomoveshift.health.heal._pgrep_drive`` is honoured.
+default_drive_running = heal._pgrep_drive
+
+
+def _live_drive_probe() -> bool:
+    return heal._pgrep_drive()
+
+
+def abandoned_refusal(
+    stages_dir: Path, *, drive_running_fn: Optional[Callable[[], bool]] = None
+) -> Optional[str]:
+    """Why an incomplete ``stages_dir`` is NOT an abandoned run, or ``None`` when every rule holds.
+
+    An abandoned run is one a relaunch or a kill left behind: nothing holds its run lock, no
+    drive is running anywhere (a live drive could be the one about to resume it), and no
+    operator hold says it is waiting. The first failing rule is the reason, so the dry-run
+    says what to clear. 2026-11-08: nctopa-2026-03-05-rec0063 relaunched under a different
+    ``GMS_INTERMEDIATE_DIR`` left 139 GB that ``cleanup`` could only skip.
+    """
+    from .orchestrator_lock import _pid_is_alive, _read_lock_metadata
+
+    if stages_dir.is_symlink():
+        return "stage dir is a symlink — never followed"
+    if (stages_dir / _HOLD_NAME).exists():
+        return f"under a {_HOLD_NAME} hold — the run is waiting, not abandoned"
+    lock = stages_dir / _RUN_LOCK_NAME
+    if lock.exists():
+        pid = _read_lock_metadata(lock).get("pid")
+        if isinstance(pid, int) and _pid_is_alive(pid):
+            return f"run lock {lock.name} held by live pid {pid}"
+    if (drive_running_fn or _live_drive_probe)():
+        return "a gomoveshift drive is running — abandoned runs are reclaimed only when none is"
+    return None
+
+
+def _tree_size(root: Path) -> int:
+    total = 0
+    for cur, _dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            p = Path(cur) / name
+            if not p.is_symlink():
+                total += p.stat().st_size
+    return total
 
 
 class PipelineCleanup:
@@ -90,6 +148,12 @@ class PipelineCleanup:
       preflight tells operators to make of a cross-filesystem source) are
       reclaimed with a published drive. Symlinks inside are unlinked, never
       followed; a symlinked ``sources/<project>`` is skipped outright.
+    - Abandoned runs (``plan_cleanup(..., abandoned=True)``, the CLI's
+      ``cleanup <project> --abandoned``): an INCOMPLETE ``_stages`` dir is
+      planned whole when :func:`abandoned_refusal` finds nothing — no hold,
+      no run lock held by a live pid, no ``gomoveshift drive`` running
+      anywhere — and it clears the age gate. Without the flag it is skipped
+      as before, with a hint. The output dir and every other project stay.
     - NEVER touches: Google Drive files, D: drive output, source videos on D:
     """
 
@@ -99,6 +163,8 @@ class PipelineCleanup:
         staging_dir: Optional[Path] = None,
         d_drive_base: Optional[Path] = None,
         stage_cache_base: Optional[Path] = None,
+        *,
+        drive_running_fn: Optional[Callable[[], bool]] = None,
     ):
         from ..paths import gms_output_dir, gms_staging_dir
 
@@ -108,6 +174,7 @@ class PipelineCleanup:
         # Drive runs' ext4 stage cache (``paths.gms_intermediate_base``). Unset:
         # only ``output_base`` is scanned. The ``cleanup`` CLI always sets it.
         self.stage_cache_base = stage_cache_base
+        self._drive_running_fn = drive_running_fn or _live_drive_probe
 
     def discover_projects(self) -> List[Path]:
         """Find project directories in the output base and the stage cache."""
@@ -202,11 +269,14 @@ class PipelineCleanup:
         min_age_days: int = 7,
         *,
         ffprobe_fn: Optional[object] = None,
+        abandoned: bool = False,
     ) -> CleanupPlan:
         """
         Build a cleanup plan listing files to delete with reasons.
 
         Returns a CleanupPlan with files (to delete) and skipped (with reasons).
+        ``abandoned`` also plans an incomplete project's whole ``_stages`` dir
+        under ``plan.abandoned`` when :func:`abandoned_refusal` allows it.
 
         ``ffprobe_fn`` is injectable for tests; default is
         ``ffmpeg_runner.validate_video`` (lazy-imported). It must accept a
@@ -239,6 +309,20 @@ class PipelineCleanup:
                 continue
 
             # Pipeline completion check
+            if not pipeline_complete and abandoned:
+                stages_dir = project_dir / "_stages"
+                why = abandoned_refusal(stages_dir, drive_running_fn=self._drive_running_fn)
+                if why:
+                    plan.skipped.append({"path": str(stages_dir), "reason": why})
+                else:
+                    plan.abandoned.append(
+                        {
+                            "path": str(stages_dir),
+                            "size": _tree_size(stages_dir),
+                            "reason": "abandoned run (incomplete, unlocked, unheld, no drive running)",
+                        }
+                    )
+                continue
             if not pipeline_complete:
                 logger.warning(
                     "⚠ cleanup: project %s skipped — pipeline not complete "
@@ -257,7 +341,8 @@ class PipelineCleanup:
                         "reason": (
                             f"Pipeline not complete (neither "
                             f"{_MAIN_COMPLETION_MARKER} in {_MAIN_COMPLETION_KEY} "
-                            f"nor {_DRIVE_COMPLETION_MARKER} in {_DRIVE_COMPLETION_KEY})"
+                            f"nor {_DRIVE_COMPLETION_MARKER} in {_DRIVE_COMPLETION_KEY}); "
+                            f"{_ABANDONED_HINT}"
                         ),
                     }
                 )
@@ -492,6 +577,25 @@ class PipelineCleanup:
                     os.rmdir(cur)
                 except OSError:
                     pass
+
+        for entry in plan.abandoned:
+            # The one recursive removal: an abandoned run's ``_stages`` dir, re-checked
+            # at execute time (a drive may have started since the plan was built).
+            root = Path(entry["path"])
+            if root.name != "_stages" or root.is_symlink() or not root.is_dir():
+                logger.warning("  Not an abandoned stage dir, left alone: %s", root)
+                continue
+            why = abandoned_refusal(root, drive_running_fn=self._drive_running_fn)
+            if why:
+                logger.warning("  Abandoned stage dir kept: %s — %s", root, why)
+                continue
+            size_gb = entry["size"] / (1024**3)
+            logger.info("  Removing abandoned stage dir: %s (%.2f GB)", root, size_gb)
+            try:
+                shutil.rmtree(root)
+                deleted += 1
+            except OSError as e:
+                logger.warning("  Failed to remove %s: %s", root, e)
 
         return deleted
 

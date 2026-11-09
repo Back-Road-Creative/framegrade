@@ -24,6 +24,14 @@ def cmd_cleanup(args, config):
         stage_cache_base=stage_cache_base,
     )
 
+    abandoned = bool(getattr(args, "abandoned", False))
+    if abandoned and not args.project:
+        print(
+            "Error: --abandoned needs a project name; it never sweeps every project",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.project:
         candidates = [output_base / args.project, stage_cache_base / args.project]
         existing = [p for p in candidates if p.exists()]
@@ -41,9 +49,10 @@ def cmd_cleanup(args, config):
         print("No projects found.")
         return 0
 
-    plan = cleanup.plan_cleanup(projects, min_age_days=args.min_age)
+    plan = cleanup.plan_cleanup(projects, min_age_days=args.min_age, abandoned=abandoned)
+    abandoned_dirs = getattr(plan, "abandoned", None) or []
 
-    if not plan.files:
+    if not plan.files and not abandoned_dirs:
         print("Nothing to clean up.")
         if args.project and plan.skipped:
             # A named project that was skipped reclaimed nothing: say why and
@@ -55,9 +64,12 @@ def cmd_cleanup(args, config):
         return 0
 
     # Display plan
-    total_bytes = sum(f["size"] for f in plan.files)
+    total_bytes = sum(f["size"] for f in plan.files) + sum(d["size"] for d in abandoned_dirs)
     prefix = "DRY RUN \u2014 " if not args.confirm else ""
-    print(f"{prefix}Cleanup plan: {len(plan.files)} files, {total_bytes / (1024**3):.2f} GB")
+    print(
+        f"{prefix}Cleanup plan: {len(plan.files)} files, {len(abandoned_dirs)} abandoned stage "
+        f"dir(s), {total_bytes / (1024**3):.2f} GB"
+    )
     print()
 
     for f in plan.files:
@@ -71,6 +83,12 @@ def cmd_cleanup(args, config):
         print(
             f"  {'RECLAIM' if args.confirm else 'WOULD RECLAIM'} SOURCES DIR: {d['path']} "
             f"({d['size'] / (1024**3):.2f} GB)"
+        )
+
+    for d in abandoned_dirs:
+        print(
+            f"  {'REMOVE' if args.confirm else 'WOULD REMOVE'} ABANDONED STAGE DIR: {d['path']} "
+            f"({d['size'] / (1024**3):.2f} GB) — {d['reason']}"
         )
 
     if plan.skipped:
