@@ -20,6 +20,7 @@ class LocationType(str, Enum):
     RIVER_CROSSING = "river_crossing"
     ROAD_SIGN = "road_sign"
     BUSINESS = "business"
+    DESTINATION = "destination"
     UNKNOWN = "unknown"
 
 

@@ -1963,6 +1963,9 @@ def _assert_sign_verify(state, config) -> None:
             min_corroborating_hits=int(
                 getattr(drive_cfg, "sign_verify_min_corroborating_hits", 2) or 2
             ),
+            destination_max_km=float(
+                getattr(drive_cfg, "sign_verify_destination_max_km", 80.0) or 80.0
+            ),
             # Deliberately NO geocode_fn: a HARD gate must not depend on a live
             # network service — a Nominatim outage would block an encode on an
             # infrastructure blip rather than on real evidence. Proximity

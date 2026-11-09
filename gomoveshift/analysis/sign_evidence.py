@@ -54,6 +54,13 @@ STATUS_NO_SIGNAL = "no-signal"
 STATUS_CONFLICTS = "conflicts"
 
 
+def _opt_float(value: Any) -> Optional[float]:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class SignClaim:
     """One location assertion parsed from a sign's OCR text.
@@ -74,11 +81,16 @@ class SignClaim:
         The OCR text the claim was extracted from, kept for operator review of
         a flagged conflict (a noisy sign is judged by its raw text, not its
         parse).
+    distance_mi:
+        Only on a ``"destination"`` (guide sign) claim: the miles the sign says
+        the place is ahead. ``None`` everywhere else, and in hits stored before
+        the field existed.
     """
 
     kind: str
     value: str
     raw_text: str = ""
+    distance_mi: Optional[float] = None
 
 
 @dataclass
@@ -135,6 +147,7 @@ class SignHit:
                         kind=str(c.get("kind", "")),
                         value=str(c.get("value", "")),
                         raw_text=str(c.get("raw_text", "")),
+                        distance_mi=_opt_float(c.get("distance_mi")),
                     )
                 )
         return out
