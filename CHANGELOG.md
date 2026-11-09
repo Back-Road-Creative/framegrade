@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.55] - 2026-11-08
+
+### Fixed
+
+- The resumed-Phase-A sign back-fill now reads the footage. The checkpointed ingest plan is a shallow rehydrate whose `episodes` are the serialized dicts, so `group_episodes_by_day` dropped every one and the pass logged "0 hit(s) across 0 day(s)" in under a second without decoding a frame (seen on `nctopa-2026-03-05-rec0063`). The back-fill resolves the plan the way the day phase does, from the parallel state arrays, before the pass samples it. A pass that groups zero days is no longer recorded as evidence, and a checkpoint already holding `{}` is read again on its next resume.
+
 ## [0.3.54] - 2026-11-08
 
 ### Fixed
@@ -652,7 +658,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...HEAD
+[0.3.55]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...v0.3.55
 [0.3.54]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...v0.3.54
 [0.3.53]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...v0.3.53
 [0.3.52]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.51...v0.3.52
