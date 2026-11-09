@@ -88,17 +88,42 @@ def _placeless_outcome(state, text) -> Optional[dict]:
     return {"refused": False, "reason": PLACELESS_REASON, "label_requested": label}
 
 
+#: ``place_source`` of a Short whose inherited text is the drive's computed bracket label.
+BRACKET_SOURCE = "bracket_route"
+
+
+def _bracket_outcome(state, text) -> Optional[dict]:
+    """An agreeing outcome for unmeasured ``text`` when it is exactly the label
+    ``--bracket-gpx`` computed from the fixes before and after the footage
+    (``state.bracket_route``); the reason carries both fixes and the common region."""
+    from .bracket_route import bracket_outcome
+
+    record = _field(state, "bracket_route")
+    if not isinstance(record, dict):
+        return None
+    label = str(record.get("label") or "").strip()
+    if not label or str(text or "").strip() != label:
+        return None
+    return bracket_outcome(record)
+
+
+def _unmeasured_outcome(state, text) -> Optional[dict]:
+    """The drive's placeless or bracket label agreeing with itself, else ``None``."""
+    return _placeless_outcome(state, text) or _bracket_outcome(state, text)
+
+
 def record_system_reviews(state, ost_text_by_date: dict, outcomes: dict) -> None:
     """Write each day's record from the route-claim ``outcomes``
     (``{lf_index: route_claim_outcome}``) and the burn text in
     ``ost_text_by_date``. An LF with no outcome (no retained GPS to measure)
     gets no review, so its day can only pass through a person -- unless its
-    text is the drive's placeless label (:func:`_placeless_outcome`)."""
+    text is the drive's placeless label (:func:`_placeless_outcome`) or its
+    computed bracket label (:func:`_bracket_outcome`)."""
     records = dict(_field(state, "ost_system_review") or {})
     for date, day in (ost_text_by_date or {}).items():
         reviews = {}
         for idx, text in day.items():
-            outcome = outcomes.get(idx) or _placeless_outcome(state, text)
+            outcome = outcomes.get(idx) or _unmeasured_outcome(state, text)
             if outcome is None:
                 continue
             refused = bool(outcome.get("refused"))
@@ -229,7 +254,7 @@ def record_surface_reviews(state, surface: str, date: str, entries, outcomes: di
     measured over each entry's own retained GPS. An entry with no outcome, or
     whose text is not the text that was measured, gets no review, so its day
     can only pass through a person -- unless its text is the drive's placeless
-    label and it burns no lower-third (a lower-third names a town)."""
+    or computed bracket label and it burns no lower-third (a lower-third names a town)."""
     field = SURFACE_FIELDS[surface]
     records = dict(_field(state, field) or {})
     reviews, reviewed = {}, []
@@ -240,6 +265,10 @@ def record_surface_reviews(state, surface: str, date: str, entries, outcomes: di
             outcome = _placeless_outcome(state, entry["ost_text"])
             if outcome is not None and surface == "shorts":
                 source = PLACELESS_SOURCE
+            elif outcome is None:
+                outcome = _bracket_outcome(state, entry["ost_text"])
+                if outcome is not None and surface == "shorts":
+                    source = BRACKET_SOURCE
         if outcome is None or outcome.get("ost_text", entry["ost_text"]) != entry["ost_text"]:
             continue
         refused = bool(outcome.get("refused"))
@@ -291,10 +320,10 @@ def _surface_refusal(record, surface: str, date: str, entries) -> Optional[str]:
     if not isinstance(reviews, dict):
         return "record reviews are malformed"
     # Inherited text passes only where this writer agreed it is the drive's
-    # placeless label (the hash below still binds the exact text).
+    # placeless or bracket label (the hash below still binds the exact text).
     placeless = {
         k for k, r in reviews.items()
-        if isinstance(r, dict) and r.get("place_source") == PLACELESS_SOURCE
+        if isinstance(r, dict) and r.get("place_source") in (PLACELESS_SOURCE, BRACKET_SOURCE)
     }  # fmt: skip
     inherited = [
         f"{name} {_entry_id(surface, e)} {e.get('ost_text')!r} text is inherited "

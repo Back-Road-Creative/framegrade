@@ -1317,6 +1317,14 @@ def award_tier_for_evidence(
         # claims nothing a trace could back.
         return None, 5
     gps_points = evidence.get("gps_points")
+    bracket = evidence.get("bracket")
+    if gps_points is None and isinstance(bracket, dict):
+        # The ladder's bracket tier: the region comes from the fixes before and after
+        # the footage (``bracket_route``), so no footage coverage exists to measure; the
+        # award is the common-region level's tier (county 3, state/country 4).
+        from gomoveshift.pipeline.bracket_route import BRACKET_LEVEL_TIER
+
+        return None, BRACKET_LEVEL_TIER.get(str(bracket.get("level")), 4)
     if gps_points is None:
         return None, None
     window = window or evidence.get("window") or gq.trace_time_window(gps_points)
@@ -1383,6 +1391,19 @@ def check_specificity_ladder(metadata_json: dict, evidence: Optional[dict] = Non
             gate="specificity_ladder",
             passed=True,
             message="specificity ladder: placeless label makes no location claim",
+        )
+
+    bracket = evidence.get("bracket")
+    if isinstance(bracket, dict) and label != str(bracket.get("label") or "").strip():
+        # The bracket tier backs exactly one text: the label computed from the two
+        # fixes. Anything else burned under its flag is a claim the bracket never made.
+        return GateResult(
+            gate="specificity_ladder",
+            passed=False,
+            message=(
+                f"specificity ladder: {label!r} is flagged bracket but is not the computed "
+                f"bracket label {bracket.get('label')!r}"
+            ),
         )
 
     gps_points = evidence.get("gps_points")

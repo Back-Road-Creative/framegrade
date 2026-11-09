@@ -43,6 +43,7 @@ from ...config import Config, resolve_lf_mode
 from ...day_layout import day_date_from_lf_path as _day_date_from_lf_path
 from ...models import DrivePlan, RegularLFPlan
 from .. import volume_source
+from ..bracket_route import BRACKET_TIER_REASON
 from ..day_grouper import group_episodes_by_day
 from ..day_pipeline import DayArtifacts, _enforce_shorts_contract, run_all_days
 from ..forward_geocode import forward_geocode as _ladder_forward_geocode
@@ -533,6 +534,7 @@ class PhaseBCDayFirst:
                 resolved_by_lf=state.per_lf_resolved_location or {},
                 geocode_fn=_ladder_forward_geocode,
                 placeless_label=getattr(state, "placeless_label", None),
+                bracket_route=getattr(state, "bracket_route", None),
             )
             # Re-render any below-tier-1 (but renderable) LF at its awarded
             # tier BEFORE the gate, so a demoted label reaches the gate no longer
@@ -1666,12 +1668,21 @@ def _build_ladder_evidence(
     resolved_by_lf=None,
     geocode_fn=None,
     placeless_label=None,
+    bracket_route=None,
 ) -> dict:
     """Per-LF evidence for the pre-encode specificity ladder.
 
     ``placeless_label`` (``--placeless-label``): an LF whose burned text is exactly
     that label gets ``placeless=True`` and ``tier_reason`` — the ladder awards it
     tier 5 and the gate re-checks the vocabulary; every other LF is untouched.
+
+    ``bracket_route`` (``--bracket-gpx``, the ``state.bracket_route`` record): an LF
+    whose burned text is exactly the computed bracket label gets
+    ``has_bracket_route=True``, the record under ``bracket`` and ``tier_reason`` — the
+    ladder awards the record's level (county → 3, state/country → 4) and the gate
+    re-checks that the text IS the computed label. This is the ladder's bracket tier,
+    fed for the first time: the region comes from the fixes before and after the
+    footage, not from this LF's (absent) model.
 
     Wires, per LF: the raw trace (``gps_points``), the FOOTAGE DURATION from
     the LF plan's segments (sum of segment spans; the gate's fallback
@@ -1733,6 +1744,11 @@ def _build_ladder_evidence(
         if placeless_label and str(per_lf_ost_text[i]).strip() == placeless_label.strip():
             ev["placeless"] = True
             ev["tier_reason"] = PLACELESS_TIER_REASON
+        bracket_label = str((bracket_route or {}).get("label") or "").strip()
+        if bracket_label and str(per_lf_ost_text[i]).strip() == bracket_label:
+            ev["has_bracket_route"] = True
+            ev["bracket"] = dict(bracket_route)
+            ev["tier_reason"] = BRACKET_TIER_REASON
         out[idx] = ev
     return out
 
@@ -1741,6 +1757,7 @@ PLACELESS_TIER_REASON = "placeless_operator_label"
 
 _TIER_EVIDENCE_SCALAR_KEYS = (
     "placeless",
+    "bracket",
     "tier_reason",
     "corroborations",
     "has_bracket_route",
@@ -1793,16 +1810,16 @@ def _degrade_labels_to_awarded_tier(
         rl = (resolved_by_lf or {}).get(idx)
         if not ev or ev.get("authoritative"):
             continue
-        if rl is None and not ev.get("placeless"):
-            continue  # a GPS-dead placeless LF has no model by design; it is still awarded
+        if rl is None and not (ev.get("placeless") or ev.get("bracket")):
+            continue  # a GPS-dead placeless/bracket LF has no model by design; still awarded
         coverage, tier = award_tier_for_evidence(ev)
         if tier is not None:
             tier_by_lf[idx] = int(tier)
             evidence_record[idx] = _serializable_tier_evidence(ev)
             if coverage is not None:
                 coverage_by_lf[idx] = round(float(coverage) * 100, 1)
-        if tier is None or tier == 1 or tier >= 5:
-            continue
+        if tier is None or tier == 1 or tier >= 5 or ev.get("bracket"):
+            continue  # a bracket label already IS its tier's rendering
         state_full = getattr(rl, "dominant_state", None)
         label = render_degraded_tier_label(
             tier,

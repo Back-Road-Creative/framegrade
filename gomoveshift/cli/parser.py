@@ -48,6 +48,20 @@ def _weekday(raw: str) -> str:
     return day
 
 
+def _bracket_file(raw: str) -> str:
+    """argparse ``type=`` for each ``--bracket-gpx`` path: an existing ``.gpx`` or GoPro
+    recording (``.mp4``/``.mov``), so a typo is refused at parse time, not hours into a
+    render when the bracket is resolved."""
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"--bracket-gpx file not found: {raw}")
+    if path.suffix.lower() not in {".gpx", ".mp4", ".mov"}:
+        raise argparse.ArgumentTypeError(
+            f"--bracket-gpx file must be a .gpx or a GoPro .mp4/.mov recording: {raw}"
+        )
+    return str(path)
+
+
 def _placeless_label(raw: str) -> str:
     """argparse ``type=`` for ``--placeless-label``.
 
@@ -224,6 +238,7 @@ def _validate_per_lf_location_args(args: argparse.Namespace) -> None:
                 ("--location", "location"),
                 ("--per-lf-location", "per_lf_locations"),
                 ("--day-gpx", "day_gpx"),
+                ("--bracket-gpx", "bracket_gpx"),
             )
             if getattr(args, dest, None)
         ]
@@ -232,6 +247,24 @@ def _validate_per_lf_location_args(args: argparse.Namespace) -> None:
                 f"--placeless-label cannot be combined with {', '.join(clash)}: a drive "
                 "that names its places is checked against its trace; a placeless label "
                 "claims none."
+            )
+    if getattr(args, "bracket_gpx", None):
+        # The bracket label is computed from the two fixes; a typed label or a trace of the
+        # footage itself would be a second, different basis for the same burned text.
+        clash = [
+            flag
+            for flag, dest in (
+                ("--location", "location"),
+                ("--per-lf-location", "per_lf_locations"),
+                ("--day-gpx", "day_gpx"),
+            )
+            if getattr(args, dest, None)
+        ]
+        if clash:
+            raise argparse.ArgumentTypeError(
+                f"--bracket-gpx cannot be combined with {', '.join(clash)}: the bracket "
+                "label is computed from the fixes before and after the footage, not typed "
+                "or traced."
             )
     overrides = getattr(args, "per_lf_locations", None) or []
     if not overrides:
@@ -493,7 +526,25 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "Between'. Letters, spaces and apostrophes only, 1-40 chars, every word from "
         "the fixed placeless vocabulary (no place names, digits or 'to'). Burned on "
         "every LF as a tier-5 'no location claim'; refused with --location, "
-        "--per-lf-location or --day-gpx.",
+        "--per-lf-location, --day-gpx or --bracket-gpx.",
+    )
+    # The bracket-route tier of the specificity ladder: a GPS-less drive's label
+    # COMPUTED from the last fix recorded before the footage and the first fix after
+    # it (the narrowest region both geocode to). Nothing is typed; refused beside any
+    # typed label or a trace of the footage itself.
+    p.add_argument(
+        "--bracket-gpx",
+        nargs=2,
+        type=_bracket_file,
+        default=None,
+        metavar=("BEFORE", "AFTER"),
+        help="Two files bracketing GPS-less footage: a .gpx track or GoPro recording "
+        "whose LAST fix precedes the footage, and one whose FIRST fix follows it. The "
+        "on-screen label is the narrowest region (county, state or country) both fixes "
+        "reverse-geocode to, burned on every LF and recorded as the ladder's bracket "
+        "tier. Refused when the fixes are out of order, more than 36 h apart, the "
+        "footage dates fall outside them, or they share no region; refused with "
+        "--location, --per-lf-location, --day-gpx or --placeless-label.",
     )
     # Discovery-only mode. Runs Phase A + builds the drive plan,
     # prints the LF index → suggested-label table, exits 0 without

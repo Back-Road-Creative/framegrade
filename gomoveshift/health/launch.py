@@ -238,6 +238,29 @@ def location_labels_skip_reason(row) -> Optional[str]:
     return None
 
 
+def bracket_gpx_skip_reason(row) -> Optional[str]:
+    """Why a backlog row's ``bracket_gpx`` (the two fixes files whose last/first fix bracket
+    GPS-less footage) may not launch, or ``None``: exactly two paths, both present, and none
+    of the typed-label / traced-footage flags the drive refuses beside ``--bracket-gpx``.
+    The region itself is computed by the drive, not judged here."""
+    pair = [str(p) for p in (getattr(row, "bracket_gpx", ()) or ())]
+    if not pair:
+        return None
+    if len(pair) != 2:
+        return f"bracket_gpx needs exactly two files (before, after), got {len(pair)}"
+    missing = [p for p in pair if not Path(p).is_file()]
+    if missing:
+        return f"missing bracket_gpx {missing[0]}"
+    clash = [
+        name
+        for name in ("placeless_label", "day_gpx", "location", "per_lf_locations")
+        if getattr(row, name, None)
+    ]
+    if clash:
+        return f"bracket_gpx cannot be combined with {', '.join(clash)}"
+    return None
+
+
 def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) -> Optional[str]:
     """Why ``row`` is not launched, or ``None``. ``own_ok``: the row's own stage root is being
     superseded, so a hold or recipe under it does not skip the row (``staged`` excludes it)."""
@@ -255,6 +278,8 @@ def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) ->
         return label_why
     if labels_why := location_labels_skip_reason(row):
         return labels_why
+    if bracket_why := bracket_gpx_skip_reason(row):
+        return bracket_why
     for marker in sorted(Path(stages_root).glob(f"{row.project}/**/_stages/{HOLD_NAME}")):
         if not own_ok:
             return f"operator hold: {marker}"
@@ -735,6 +760,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             drive_argv += ["--camera-utc-offset-hours", str(row.camera_utc_offset_hours)]
     if getattr(row, "placeless_label", ""):  # claim-free only: _skip_reason refused the rest
         drive_argv += ["--placeless-label", row.placeless_label]
+    if getattr(row, "bracket_gpx", ()):  # both files present: _skip_reason refused the rest
+        drive_argv += ["--bracket-gpx", *[str(p) for p in row.bracket_gpx]]
     for idx, label in getattr(row, "per_lf_locations", ()) or ():  # _skip_reason validated
         drive_argv += ["--per-lf-location", f"{idx}={label}"]
     if getattr(row, "location", ""):
