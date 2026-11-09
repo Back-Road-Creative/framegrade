@@ -84,7 +84,28 @@ def test_dry_run_through_cli_prints_counts_and_writes_nothing(tmp_path, monkeypa
     folder = tmp_path / "card"
     _photo(folder / "a.jpg")
     assert _run(f"photos sort {folder} --dry-run --workers 1") == 0
-    nice.assert_called_once_with(10)
+    nice.assert_called_once_with(19)
     out = capsys.readouterr().out
     assert "estimate" in out.lower() and "other" in out
     assert not root.exists()
+
+
+def test_resume_flag_reaches_run_sort(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_NIGHT_ADMISSION_LOCK", str(tmp_path / "admission.lock"))
+    _use_photos_config(monkeypatch, sort_root=str(tmp_path / "out"))
+    monkeypatch.setattr(ps.os, "nice", Mock())
+    run_sort = Mock()
+    monkeypatch.setattr(ps, "run_sort", run_sort)
+    run_dir = tmp_path / "out" / "2026-11-09-card"
+    assert _run(f"photos sort {tmp_path / 'card'} --resume {run_dir}") == 0
+    assert run_sort.call_args.kwargs["resume"] == run_dir
+
+
+def test_without_resume_run_sort_gets_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_NIGHT_ADMISSION_LOCK", str(tmp_path / "admission.lock"))
+    _use_photos_config(monkeypatch, sort_root=str(tmp_path / "out"))
+    monkeypatch.setattr(ps.os, "nice", Mock())
+    run_sort = Mock()
+    monkeypatch.setattr(ps, "run_sort", run_sort)
+    assert _run(f"photos sort {tmp_path / 'card'}") == 0
+    assert run_sort.call_args.kwargs["resume"] is None

@@ -391,7 +391,7 @@ def test_lower_priority_ignores_failure(monkeypatch):
     calls = []
     monkeypatch.setattr(ps.os, "nice", lambda n: calls.append(n))
     ps.lower_priority()
-    assert calls == [10]
+    assert calls == [19]
 
     def boom(n):
         raise OSError("no")

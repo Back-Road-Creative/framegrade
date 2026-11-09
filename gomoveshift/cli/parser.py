@@ -2539,6 +2539,12 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Run the aesthetic model on the GPU, holding the shared GPU lock for that pass "
         "(CPU if the lock is busy)",
     )
+    sort_p.add_argument(
+        "--resume",
+        metavar="RUN_DIR",
+        help="Finish the unfinished stacks, HDR fuses and panoramas of an earlier run "
+        "(no re-develop, no re-score)",
+    )
     photos_sub.add_parser(
         "fetch-models",
         help="Download the pinned aesthetic-model weights (the only network step; hash-checked)",

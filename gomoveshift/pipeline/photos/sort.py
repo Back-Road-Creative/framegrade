@@ -56,7 +56,7 @@ FETCH_MODELS_COMMAND = "gomoveshift photos fetch-models"
 #: Paths handed to ``compute_batch_corrections`` at once, to bound memory.
 CORRECTION_CHUNK = 60
 WORKERS_MIN, WORKERS_MAX = 1, 4
-NICE_INCREMENT = 10
+NICE_INCREMENT = 19  # lowest: the GMS drives on this box always win the CPU
 LEDGER_NAME = "ledger.sqlite"
 SIDECAR_SUFFIXES = frozenset({".xmp", ".json", ".pp3", ".dop", ".aae"})
 
