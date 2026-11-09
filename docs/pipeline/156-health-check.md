@@ -161,7 +161,9 @@ written. The text output, which is what the cron logs, prints `retired <project>
 `held <stages dir> (no-auto-resume)`, or `would retire` and `would hold` under `--dry-run`.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
-a missing source file, a missing `day_gpx` track, an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
+a missing source file, a missing `day_gpx` track, a `placeless_label` that claims something, typed
+labels (`per_lf_locations` / `location`) the drive's own `--per-lf-location` rules would refuse
+(`location labels: <the parser's reason>`), an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
 or a held earlier stage whose sources overlap the row's), or every source already staged by an
 earlier run's `resume.json`.
 
@@ -193,7 +195,11 @@ python> -m gomoveshift drive <subset> --region R --publish D --lf-day D --ingest
 --force --no-tmux`) with `GMS_INTERMEDIATE_DIR=S/<project>`, and registers the drive `auditing`
 in the store. A row with a `day_gpx` (footage with no GPS of its own) adds `--day-gpx <track>
 --camera-utc-offset-hours <N>` from the row; Waypost refuses a row that sets one without the
-other. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
+other. A row with `per_lf_locations` (footage whose place the camera never recorded, with the
+operator's label typed per LF into the row) adds `--per-lf-location <i>=<label>` per entry and
+`--location <label>` when the row sets one, so nothing is typed at launch time; the labels are
+checked against the drive's own rules before any render (`location_labels_skip_reason`) and the
+drive still waits for a person at the OST audit gate, since no GPS gives it a system review. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
 `--dry-run` takes no lease, writes nothing and prints the exact argv, env and storage table.
 
 **Supersede.** `--supersede <project> --reason <text>` replaces that row's own earlier run, for

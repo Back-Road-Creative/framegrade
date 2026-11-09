@@ -570,6 +570,91 @@ def test_a_row_without_a_placeless_label_passes_no_label(tmp_path):
     assert "--placeless-label" not in rig.launches[0][0]
 
 
+def _labeled_row(rig, per_lf, location=""):
+    row = rig.rows[0]
+    return BacklogRow(
+        row.project, row.region, row.sources, "generic", row.lf_mode,
+        per_lf_locations=tuple(per_lf), location=location,
+    )  # fmt: skip
+
+
+# nctopa-2026-03-05-rec0063 (GPS-less, no track): its labels are the operator's, typed once into
+# the backlog row, and the launcher hands them to the drive. Nothing is typed at launch time.
+def test_a_row_with_per_lf_locations_launches_with_each_label_and_the_drive_wide_one(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows[0] = _labeled_row(
+        rig,
+        [(1, "Example Town to Beta Pass, Example County, Exampleland"),
+         (2, "Beta Pass to Gamma Falls, Example County, Exampleland")],
+        location="Example County, Exampleland",
+    )  # fmt: skip
+    res = rig.run()
+    assert res["action"] == "launched", res
+    drive_args = rig.launches[0][0][rig.launches[0][0].index("--") + 1 :]
+    per_lf = [drive_args[i + 1] for i, a in enumerate(drive_args) if a == "--per-lf-location"]
+    assert per_lf == [
+        "1=Example Town to Beta Pass, Example County, Exampleland",
+        "2=Beta Pass to Gamma Falls, Example County, Exampleland",
+    ]
+    assert drive_args[drive_args.index("--location") + 1] == "Example County, Exampleland"
+    assert "--placeless-label" not in drive_args and "--day-gpx" not in drive_args
+
+
+def test_a_row_with_per_lf_locations_and_no_drive_wide_label_passes_only_the_per_lf_flags(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows[0] = _labeled_row(rig, [(1, "Example Town, Example County")])
+    res = rig.run()
+    assert res["action"] == "launched", res
+    drive_args = rig.launches[0][0]
+    assert "--per-lf-location" in drive_args and "--location" not in drive_args
+
+
+def test_a_row_without_location_fields_passes_neither_flag(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    drive_args = rig.launches[0][0]
+    assert "--per-lf-location" not in drive_args and "--location" not in drive_args
+
+
+# The drive's own label rules (``cli.parser._validate_per_lf_location_args``) judge the row
+# before any render: a refused row is skipped at the backlog with the parser's reason, never
+# failed hours later at the launch job's argparse, and the row behind it still launches.
+@pytest.mark.parametrize(
+    "per_lf, location, expected",
+    [
+        ([(1, "To Beta Pass, Example County")], "", "starts with a bare preposition"),
+        ([(1, "Beta Pass, Example County")], "Exampleland", "must have >= 2 components"),
+        ([(1, "Beta Pass, Example County")], "Beta Pass, Example County", "equals --location"),
+        (
+            [(1, "Beta Pass, Example County, Exampleland")],
+            "Other County, Exampleland",
+            "is not a comma-suffix",
+        ),
+    ],
+)
+def test_a_row_the_drive_would_refuse_is_skipped_before_any_render(
+    tmp_path, per_lf, location, expected
+):
+    rig = Rig(tmp_path)
+    rig.rows[0] = _labeled_row(rig, per_lf, location=location)
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    (skip,) = res["skipped"]
+    assert skip["project"] == "day-a" and skip["reason"].startswith("location labels: ")
+    assert expected in skip["reason"], skip["reason"]
+    assert rig.gates == [(rig.sources / "day-b", "day-b")]  # never reached the render gate
+    assert "--per-lf-location" not in rig.launches[0][0]
+
+
+def test_location_labels_skip_reason_is_none_for_a_row_the_drive_accepts():
+    row = BacklogRow(
+        "p", "usa", ("/v.mp4",), "generic", "full_drive",
+        per_lf_locations=((1, "Beta Pass, Example County, Exampleland"),),
+        location="Example County, Exampleland",
+    )  # fmt: skip
+    assert launch.location_labels_skip_reason(row) is None
+
+
 def test_a_missing_day_gpx_skips_the_row(tmp_path):
     rig = Rig(tmp_path)
     rig.rows[0] = _gpx_row(rig, tmp_path / "gone.gpx")

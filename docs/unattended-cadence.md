@@ -94,7 +94,9 @@ refuses and names them. An unreadable decision store halts planning with
 raw GoPro chapters on D:. It is tenant data, so it lives in the operator's inputs directory (`GMS_INPUTS_DIR`) at
 `gomoveshift/console/brands/gomoveshift/drive_backlog.yaml` and is read through
 `gomoveshift.paths.drive_backlog_path()`. Its
-header names the re-cuts already public and the footage left out.
+header names the re-cuts already public and the footage left out. A row for footage with no
+GPS and no track carries the operator's labels (`per_lf_locations`, `location`) so the
+launcher hands them to the drive; nothing is typed at launch time.
 `tests/test_drive_backlog_manifest.py` checks that the consumer resolves to it, that it
 parses, and that no chapter is queued twice.
 

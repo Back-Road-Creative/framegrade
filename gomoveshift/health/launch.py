@@ -208,6 +208,36 @@ def placeless_label_skip_reason(label: str) -> Optional[str]:
     )
 
 
+def location_labels_skip_reason(row) -> Optional[str]:
+    """Why a backlog row's typed labels (``per_lf_locations`` / ``location``) may not launch,
+    or ``None``: the drive's own ``--per-lf-location`` / ``--location`` rules
+    (``cli.parser._validate_per_lf_location_args``), applied before any render so a refused row
+    is skipped at the backlog with the parser's reason instead of failing the launch job at
+    argparse hours later. Wording is the operator's; this judges only what the drive would.
+    """
+    per_lf = list(getattr(row, "per_lf_locations", ()) or ())
+    location = getattr(row, "location", "") or ""
+    if not per_lf and not location:
+        return None
+    import argparse
+
+    from ..cli.parser import _per_lf_location_kv, _validate_per_lf_location_args
+
+    try:
+        pairs = [_per_lf_location_kv(f"{idx}={label}") for idx, label in per_lf]
+        _validate_per_lf_location_args(
+            argparse.Namespace(
+                per_lf_locations=pairs,
+                location=location,
+                placeless_label=getattr(row, "placeless_label", ""),
+                day_gpx=getattr(row, "day_gpx", ""),
+            )
+        )
+    except argparse.ArgumentTypeError as exc:
+        return f"location labels: {exc}"
+    return None
+
+
 def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) -> Optional[str]:
     """Why ``row`` is not launched, or ``None``. ``own_ok``: the row's own stage root is being
     superseded, so a hold or recipe under it does not skip the row (``staged`` excludes it)."""
@@ -223,6 +253,8 @@ def _skip_reason(row, store_status, known, staged, stages_root, own_ok=False) ->
     label = getattr(row, "placeless_label", "")
     if label and (label_why := placeless_label_skip_reason(label)):
         return label_why
+    if labels_why := location_labels_skip_reason(row):
+        return labels_why
     for marker in sorted(Path(stages_root).glob(f"{row.project}/**/_stages/{HOLD_NAME}")):
         if not own_ok:
             return f"operator hold: {marker}"
@@ -703,6 +735,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             drive_argv += ["--camera-utc-offset-hours", str(row.camera_utc_offset_hours)]
     if getattr(row, "placeless_label", ""):  # claim-free only: _skip_reason refused the rest
         drive_argv += ["--placeless-label", row.placeless_label]
+    for idx, label in getattr(row, "per_lf_locations", ()) or ():  # _skip_reason validated
+        drive_argv += ["--per-lf-location", f"{idx}={label}"]
+    if getattr(row, "location", ""):
+        drive_argv += ["--location", row.location]
     argv = _job_argv(code_root, jobs_dir, row.project, out_dir, drive_argv)
     env = {
         "GMS_INTERMEDIATE_DIR": str(root),

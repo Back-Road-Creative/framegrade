@@ -1,0 +1,3 @@
+### Added
+
+- `health backlog` reads a row's `per_lf_locations` (1-based LF index to label) and `location` (Waypost 0.5.x `BacklogRow`) and hands them to the drive as `--per-lf-location <i>=<label>` / `--location <label>`, so a GPS-less recording with no day track (`nctopa-2026-03-05-rec0063`) launches from the backlog with the operator's labels typed once into the row instead of a hand launch. The row is checked against the drive's own label rules before any render (`location_labels_skip_reason`): a label the parser would refuse skips the row at the backlog with the parser's reason, and the row behind it still launches. The drive still waits for a person at the OST audit gate.
