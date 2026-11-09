@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.56] - 2026-11-08
+
+### Added
+
+- `--day-gpx` now covers GoPro footage. A GoPro whose GPMF never locked (`nctopa-2026-03-05-rec0063`: 13 chapters, zero fixes) had no GPS at all and could only be labeled by hand; the day-GPX slicer now cuts a phone track into one sidecar per `GXccNNNN.MP4` chapter, starting a recording at its chapter 01 `creation_time` (UTC, so `--camera-utc-offset-hours` is refused) and each later chapter after the earlier chapters' durations. GoPro ingest reads those sidecars for an episode whose own GPMF does not cover every chapter, merged into one track and tagged `external` so Phase A runs the GPX-video correspondence gate; an episode with GPMF on every chapter keeps its GPMF. Sidecars beside only some chapters, a missing chapter 01 or `creation_time`, and a directory mixing GoPro and `VID_` names are refused.
+
+### Fixed
+
+- A day-GPX-sliced track is judged at a 30 s fix gap (`route_claims.DAY_TRACK_GAP_S`, one evidence bin), not the 5 s GPMF rule. The slicer's sidecar is a phone logger's track with holes of a few seconds while the phone sleeps; judged at 5 s, `ireland-2025-09-17-baltimore-clonakilty` lost 1085 s to the GPS-gap cut and fell under the 3600 s part floor on footage with GPS throughout (longest hole in the day track: 20 s). The tolerance follows the GPX `creator` (`GPSData.creator`, kept by the parser and the checkpoint; the GoPro sidecar merge now writes the slicer's marker too) and is applied on both sides of the contract: the planner mask and the Phase-A floor check (`day_fix_gap_s`: the stricter value when a day mixes GPMF and day-track episodes), and the route-claim gate (`RouteWindow.gap_s`; `gap_threshold_s` records every value used). GPMF tracks and tracks of unknown origin keep 5 s; Shorts and superlong parts keep 5 s.
+
 ## [0.3.55] - 2026-11-08
 
 ### Fixed
@@ -658,7 +668,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...HEAD
+[0.3.56]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...v0.3.56
 [0.3.55]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...v0.3.55
 [0.3.54]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...v0.3.54
 [0.3.53]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.52...v0.3.53
