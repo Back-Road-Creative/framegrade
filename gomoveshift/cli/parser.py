@@ -542,8 +542,10 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "whose LAST fix precedes the footage, and one whose FIRST fix follows it. The "
         "on-screen label is the narrowest region (county, state or country) both fixes "
         "reverse-geocode to, burned on every LF and recorded as the ladder's bracket "
-        "tier. Refused when the fixes are out of order, more than 36 h apart, the "
-        "footage dates fall outside them, or they share no region; refused with "
+        "tier. A county or state needs fixes at most 36 h apart; a country at most 48 h. "
+        "Refused when the fixes are out of order, more than 48 h apart, the "
+        "footage dates fall outside them, or they share no region at a level the gap "
+        "allows; refused with "
         "--location, --per-lf-location, --day-gpx or --placeless-label.",
     )
     # Discovery-only mode. Runs Phase A + builds the drive plan,

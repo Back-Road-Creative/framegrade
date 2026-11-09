@@ -220,11 +220,54 @@ def test_a_file_with_no_timed_fix_is_refused(tmp_path):
         )
 
 
-def test_a_gap_over_the_cap_is_refused(tmp_path):
+def test_the_gap_caps_are_per_level():
+    # A county claim needs a tight bracket; a whole country survives a longer one.
+    assert br.BRACKET_MAX_GAP_H_BY_LEVEL == {"county": 36.0, "state": 36.0, "country": 48.0}
+    assert br.BRACKET_MAX_GAP_H == 48.0
+
+
+def test_a_gap_over_every_cap_is_refused(tmp_path):
     before, after = _pair(tmp_path, after_start=T0 + timedelta(hours=br.BRACKET_MAX_GAP_H + 1))
     with pytest.raises(br.BracketRouteRefusedError, match="apart"):
         br.resolve_bracket_route(
             before, after, geocode_fn=_geocoder(KERRY, KERRY), footage_dates=["2025-09-16"]
+        )
+
+
+def test_a_county_within_its_cap_keeps_the_county(tmp_path):
+    before, after = _pair(tmp_path, after_start=T0 + timedelta(hours=30))
+    route = br.resolve_bracket_route(
+        before, after, geocode_fn=_geocoder(KERRY, KERRY), footage_dates=["2025-09-16"]
+    )
+    assert (route.level, route.label) == ("county", "County Kerry, Ireland")
+
+
+def test_a_county_past_its_cap_names_only_the_country(tmp_path):
+    # 40 h: both fixes in one county, but that is too long to prove the county.
+    before, after = _pair(tmp_path, after_start=T0 + timedelta(hours=40))
+    route = br.resolve_bracket_route(
+        before, after, geocode_fn=_geocoder(KERRY, KERRY), footage_dates=["2025-09-16"]
+    )
+    assert (route.level, route.label) == ("country", "Ireland")
+    assert br.BRACKET_LEVEL_TIER[route.level] == 4
+
+
+def test_a_state_past_its_cap_names_only_the_country(tmp_path):
+    before, after = _pair(tmp_path, after_start=T0 + timedelta(hours=40))
+    route = br.resolve_bracket_route(
+        before, after, geocode_fn=_geocoder(FRANKLIN_PA, ADAMS_PA), footage_dates=["2025-09-16"]
+    )
+    assert (route.level, route.label) == ("country", "United States")
+
+
+def test_a_long_gap_across_countries_is_refused(tmp_path):
+    before, after = _pair(tmp_path, after_start=T0 + timedelta(hours=40))
+    with pytest.raises(br.BracketRouteRefusedError, match="common region"):
+        br.resolve_bracket_route(
+            before,
+            after,
+            geocode_fn=_geocoder(KERRY, FRANKLIN_PA),
+            footage_dates=["2025-09-16"],
         )
 
 
