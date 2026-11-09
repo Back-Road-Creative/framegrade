@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.59] - 2026-11-09
+
+### Added
+
+- `health backlog` reads a row's `per_lf_locations` (1-based LF index to label) and `location` (Waypost 0.5.x `BacklogRow`) and hands them to the drive as `--per-lf-location <i>=<label>` / `--location <label>`, so a GPS-less recording with no day track (`nctopa-2026-03-05-rec0063`) launches from the backlog with the operator's labels typed once into the row instead of a hand launch. The row is checked against the drive's own label rules before any render (`location_labels_skip_reason`): a label the parser would refuse skips the row at the backlog with the parser's reason, and the row behind it still launches. The drive still waits for a person at the OST audit gate.
+
 ## [0.3.58] - 2026-11-09
 
 ### Fixed
@@ -698,7 +704,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.58...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.59...HEAD
+[0.3.59]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.58...v0.3.59
 [0.3.58]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...v0.3.58
 [0.3.57]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...v0.3.57
 [0.3.56]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...v0.3.56
