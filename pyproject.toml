@@ -87,7 +87,7 @@ dependencies = [
     # happens to be installed or 404s on PyPI. ci/siblings.txt pins the same
     # commits. Like the four libraries below, requirements.lock carries no entry
     # for them (an unnamed `git+` line is rejected by `uv pip install --constraint`).
-    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@2ce9f47098e64f3b1a218a69e665252b031180f9",
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@e63c463504b55bf53a05b7aae3879aa1a73e1e2c",
     "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at
