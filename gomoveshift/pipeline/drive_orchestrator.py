@@ -27,7 +27,11 @@ from .clip_claims import record_claims
 from .color_filters import source_cadence_conflicts
 from .drive_phases.phase_a import PhaseA
 from .drive_phases.phase_b_preview import PhaseBPreview
-from .drive_phases.phase_bc_day_first import PhaseBCDayFirst, _day_dir_has_finals
+from .drive_phases.phase_bc_day_first import (
+    PhaseBCDayFirst,
+    _day_dir_has_finals,
+    _resolve_ingest_plan,
+)
 from .drive_phases.phase_d import PUBLISH_DAYS, PhaseD
 from .drive_phases.phase_d_fingerprint import (
     invalidate_phase_d_if_fingerprint_stale,
@@ -532,6 +536,15 @@ def backfill_sign_pass_on_resume(config, state) -> bool:
     ingest_plan = getattr(state, "ingest_plan", None)
     episode_files = list(getattr(state, "episode_files", None) or [])
     if ingest_plan is None or not episode_files:
+        return False
+    # ``IngestPlan.from_dict`` is a shallow rehydrate: a resumed plan's
+    # ``episodes`` are the ``list[dict]`` the checkpoint serialized, and
+    # ``group_episodes_by_day`` reads them with ``getattr`` — every episode
+    # is dropped and the pass reports 0 hits across 0 days without decoding
+    # a frame. Resolve the plan the way the day phase does, from the parallel
+    # state arrays, so the pass sees the footage.
+    ingest_plan = _resolve_ingest_plan(state)
+    if ingest_plan is None or not getattr(ingest_plan, "episodes", None):
         return False
     # No trace rebuilt for any episode means no episode carried GPS at
     # ingest: the index-parallel GPS-less shape, so the default rule applies.

@@ -328,15 +328,16 @@ def run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode) ->
     orchestrator's resumed-``phase_a`` branch — a checkpointed Phase A never
     re-enters ``PhaseA.run``, so without that second caller a GPS-less drive
     parked past Phase A before the pass became the default would never have
-    its signs read. Keyed on ``state.sign_hits_by_date is None`` (a populated
-    field means the footage was already read; a read-but-empty day persists
-    as ``{date: []}``) and on :func:`sign_pass_wanted`. Advisory: a failure is
-    logged and the field stays ``None`` so the next resume retries.
+    its signs read. Keyed on ``state.sign_hits_by_date`` holding at least one
+    day (a read-but-empty day persists as ``{date: []}``, so a drive that was
+    read stays populated; ``{}`` means zero days were read, i.e. nothing was,
+    and is never recorded) and on :func:`sign_pass_wanted`. Advisory: a
+    failure is logged and the field stays ``None`` so the next resume retries.
 
     Returns True when the footage was read on THIS call, so the caller knows
     the state changed and checkpoints it.
     """
-    if getattr(state, "sign_hits_by_date", None) is not None:
+    if getattr(state, "sign_hits_by_date", None):
         return False
     drive_cfg = getattr(config, "drive", None)
     if not sign_pass_wanted(
@@ -349,6 +350,15 @@ def run_sign_pass(config, state, ingest_plan, episode_files, gps_per_episode) ->
         from .sign_evidence import hits_by_date_to_dicts
 
         sign_hits = collect_sign_hits(config, ingest_plan, episode_files, gps_per_episode)
+        if not sign_hits:
+            # Zero days means no episode was grouped, so no frame was read:
+            # recording ``{}`` would make the next resume trust it as evidence.
+            logger.warning(
+                "  A6: sign pass grouped 0 day(s) from %d episode path(s) -- "
+                "nothing read, evidence left unset so the next resume retries",
+                len(episode_files or []),
+            )
+            return False
         state.sign_hits_by_date = hits_by_date_to_dicts(sign_hits)
         logger.info(
             "  A6: sign pass recorded %d hit(s) across %d day(s)",
