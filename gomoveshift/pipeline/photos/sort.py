@@ -1,8 +1,10 @@
 """``photos sort``: dedupe, classify and develop a whole folder into one fixed home.
 
 Stages: inventory -> camera facts -> dedupe against the ledger -> classify ->
-develop each unique photo into ``<run>/<category>/NNN-<stem>.jpg`` -> report.
-Order inside a category is capture order (a quality order is a later stage).
+develop each unique photo into ``<run>/<category>/NNN-<stem>.jpg`` -> score the
+developed JPEGs -> renumber each category by quality -> report. Without a scoring
+hook the order stays capture order; ``NNN`` is the quality rank (1 = best) once
+shots are scored. Quality decides order, never inclusion.
 Outputs are private working JPEGs, so faces are not blurred. Originals are only
 ever opened read-only. A photo that fails to develop is reported in
 ``skipped.csv`` and the run goes on; nothing drops a photo silently.
@@ -16,6 +18,7 @@ import json
 import os
 import time
 from collections import Counter
+from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -24,8 +27,11 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from ... import __version__
+from ..orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, release_gpu_lock
+from . import quality_order
+from .aesthetic import AestheticModelUnavailable
 from .capture_meta import CaptureRecord, read_capture_records
-from .dedupe import Ledger, dedupe
+from .dedupe import Ledger, dedupe, sha256_file
 from .develop import (
     SUPPORTED_EXTENSIONS,
     compute_batch_corrections,
@@ -39,6 +45,14 @@ from .subject import UNKNOWN_SUBJECT, CaptureOptics, SubjectCategory, recognise_
 
 #: Rough seconds to develop one photo on one worker; only feeds the dry-run estimate.
 DEVELOP_S_PER_PHOTO_ESTIMATE = 20.0
+#: Rough seconds to score one photo's aesthetic on CPU (2 threads); dry-run estimate only.
+AESTHETIC_S_PER_PHOTO_ESTIMATE = 3.0
+#: Ledger score name for the aesthetic value; bump the suffix if the model changes.
+AESTHETIC_SCORE_NAME = "aesthetic:v1"
+AESTHETIC_THREADS = 2
+#: Shots listed per category in the terminal summary.
+TOP_N = 5
+FETCH_MODELS_COMMAND = "gomoveshift photos fetch-models"
 #: Paths handed to ``compute_batch_corrections`` at once, to bound memory.
 CORRECTION_CHUNK = 60
 WORKERS_MIN, WORKERS_MAX = 1, 4
@@ -66,6 +80,8 @@ RANKED_COLUMNS = (
     "capture_time",
     "quality_score",
     "aesthetic_score",
+    "technical",
+    "category_score",
 )
 
 
@@ -114,6 +130,49 @@ class SortHooks:
     corrections: Callable = compute_batch_corrections
     develop: Callable = develop_one
     executor_factory: Callable = ProcessPoolExecutor
+    #: ``score(rgb, category, *, aesthetic, path, exposure_s, focal_mm) -> ShotScore``;
+    #: ``None`` leaves the category in capture order (see ``scoring_hooks``).
+    score: Optional[Callable] = None
+    #: ``factory(use_gpu=bool) -> scorer`` with ``score_unit(rgb) -> 0..1``; ``None`` = no aesthetic.
+    aesthetic_factory: Optional[Callable] = None
+    gpu_lock: Callable = acquire_gpu_lock
+    gpu_release: Callable = release_gpu_lock
+
+
+@dataclass(frozen=True)
+class ShotScore:
+    """One developed shot's score; the two part maps stay apart (``astro`` names ``stars`` in both)."""
+
+    technical: float
+    category: float
+    aesthetic: Optional[float]
+    total: float
+    technical_parts: Mapping[str, float]
+    category_parts: Mapping[str, float]
+
+
+def score_shot(
+    rgb, category: str, *, aesthetic=None, path=None, exposure_s=None, focal_mm=None
+) -> ShotScore:
+    night = category == quality_order.CATEGORY_NIGHT_SKY
+    tech, tparts = quality_order.technical_score(
+        rgb, night=night, path=path, exposure_s=exposure_s, focal_mm=focal_mm
+    )
+    cat, cparts = quality_order.category_signals(category, rgb)
+    aes = None if aesthetic is None else min(1.0, max(0.0, float(aesthetic)))
+    return ShotScore(tech, cat, aes, quality_order.combine(tech, cat, aes), tparts, cparts)
+
+
+def make_aesthetic_scorer(*, use_gpu: bool = False):
+    """The real local scorer, built once per run in the parent process."""
+    from .aesthetic import AestheticScorer
+
+    return AestheticScorer(use_gpu=use_gpu, threads=AESTHETIC_THREADS)
+
+
+def scoring_hooks(**over) -> SortHooks:
+    """The real hooks plus real scoring; the CLI runs with these."""
+    return SortHooks(score=score_shot, aesthetic_factory=make_aesthetic_scorer, **over)
 
 
 @dataclass
@@ -201,9 +260,11 @@ def _index_html(run_dir: Path, source: Path, ranked) -> str:
             name = Path(row["output"]).name
             rel = html.escape(quote(f"{folder}/{name}"))
             label = html.escape(name)
+            total = row.get("quality_score")
+            note = f"<small>{float(total):.2f}</small>" if total not in (None, "") else ""
             items.append(
                 f'<a href="{rel}"><img src="{rel}" alt="{label}" loading="lazy" '
-                f'width="240"><span>{label}</span></a>'
+                f'width="240"><span>{label}</span>{note}</a>'
             )
         sections.append(
             f"<section><h2>{html.escape(folder)} ({len(items)})</h2>\n"
@@ -247,6 +308,156 @@ def _develop_all(plan, run_dir, hooks, workers, skipped):
                 continue
             developed.append((item, out))
     return developed
+
+
+def _read_rgb(path: Path):
+    """The developed JPEG as uint8 RGB; read in the parent so the workers' memory stays bounded."""
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(path) as img:
+        return np.asarray(img.convert("RGB"), dtype=np.uint8)
+
+
+def _aesthetic_value(scorer, ledger, sha_source: Path, rgb, stats) -> Optional[float]:
+    """Cached by source sha256; a miss runs the model and stores the value."""
+    try:
+        sha = sha256_file(sha_source)
+        hit = ledger.get_score(sha, AESTHETIC_SCORE_NAME)
+        if hit is not None:
+            stats["aesthetic_cached"] += 1
+            return hit
+        value = float(scorer.score_unit(rgb))
+        ledger.put_score(sha, AESTHETIC_SCORE_NAME, value)
+        stats["aesthetic_scored"] += 1
+        return value
+    except Exception:  # one image never drops the shot
+        stats["aesthetic_failed"] += 1
+        return None
+
+
+def _open_aesthetic(hooks, options, warn):
+    """``(scorer or None, lock or None)``; the GPU lock is taken only for ``--gpu``."""
+    lock, use_gpu = None, False
+    if options.gpu:
+        try:
+            lock = hooks.gpu_lock(wait_s=0)
+            use_gpu = True
+        except (GpuLockBusyError, OSError) as exc:
+            warn(f"--gpu: the GPU lock is busy ({exc}); aesthetic scoring runs on CPU")
+    try:
+        return hooks.aesthetic_factory(use_gpu=use_gpu), lock
+    except AestheticModelUnavailable as exc:
+        warn(
+            f"aesthetic model unavailable ({exc}); ordering without an aesthetic score. "
+            f"Fetch the weights with: {FETCH_MODELS_COMMAND}"
+        )
+    except Exception as exc:  # e.g. onnxruntime cannot load the file
+        warn(f"aesthetic model failed to load ({exc}); ordering without an aesthetic score")
+    return None, lock
+
+
+def _score_all(done, records, ledger, hooks, options, warn):
+    """Score each developed JPEG; returns ``({source: ShotScore | None}, stats)``."""
+    stats = {
+        "aesthetic_cached": 0,
+        "aesthetic_scored": 0,
+        "aesthetic_failed": 0,
+        "score_failed": 0,
+    }
+    scores: dict[Path, Optional[ShotScore]] = {}
+    scorer, lock = None, None
+    try:
+        if hooks.aesthetic_factory is not None:
+            scorer, lock = _open_aesthetic(hooks, options, warn)
+        for (path, _name, _rank, reading), out in done:
+            rec = records.get(path) or CaptureRecord(path=path)
+            try:
+                rgb = _read_rgb(out)
+            except Exception:
+                stats["score_failed"] += 1
+                scores[path] = None
+                continue
+            aesthetic = _aesthetic_value(scorer, ledger, path, rgb, stats) if scorer else None
+            try:
+                scores[path] = hooks.score(
+                    rgb,
+                    reading.category.value,
+                    aesthetic=aesthetic,
+                    path=path,
+                    exposure_s=rec.exposure_s,
+                    focal_mm=rec.focal_length_mm,
+                )
+            except Exception:
+                stats["score_failed"] += 1
+                scores[path] = None
+    finally:
+        if lock is not None:
+            hooks.gpu_release(*lock)
+    for key, label in (
+        ("aesthetic_failed", "aesthetic score failed"),
+        ("score_failed", "quality score failed"),
+    ):
+        if stats[key]:
+            warn(f"{label} for {stats[key]} shot(s); they follow the scored ones in capture order")
+    return scores, stats
+
+
+def _renumber(renames) -> None:
+    """Rename ``(old, new)`` pairs in place through temp names so no pair can collide."""
+    moves = [(old, new) for old, new in renames if old != new]
+    temps = []
+    for i, (old, new) in enumerate(moves):
+        tmp = old.with_name(f".renumber-{i}-{old.name}")
+        os.replace(old, tmp)
+        temps.append((tmp, new))
+    for tmp, new in temps:
+        os.replace(tmp, new)
+
+
+def _rank_by_quality(done, scores):
+    """Rank each category (total desc, then capture order for unscored); rename the files.
+
+    Returns ranked-row dicts ordered by ``(category, new rank)``.
+    """
+    by_folder: dict[str, list] = {}
+    for entry in done:
+        by_folder.setdefault(entry[0][1], []).append(entry)
+    rows, renames = [], []
+    for folder, entries in by_folder.items():
+        entries.sort(key=lambda e: e[0][2])
+        scored = {str(e[0][0]): scores[e[0][0]] for e in entries if scores.get(e[0][0])}
+        order = quality_order.order_category(scored)
+        by_key = {str(e[0][0]): e for e in entries}
+        sequence = [by_key[k] for k in order] + [e for e in entries if str(e[0][0]) not in scored]
+        for rank, ((path, name, _old, reading), out) in enumerate(sequence, 1):
+            final = out.with_name(f"{rank:03d}-{path.stem}.jpg")
+            renames.append((out, final))
+            rows.append((name, rank, path, final, reading))
+    _renumber(renames)
+    return rows
+
+
+def _score_columns(rows, scores):
+    tech = sorted({k for r in rows for k in (scores.get(r[2]) or _NO_SCORE).technical_parts})
+    cat = sorted({k for r in rows for k in (scores.get(r[2]) or _NO_SCORE).category_parts})
+    return tech, cat
+
+
+_NO_SCORE = ShotScore(0.0, 0.0, None, 0.0, {}, {})
+
+
+def _top_lines(ranked, limit: int = TOP_N) -> list[str]:
+    lines = []
+    for folder in dict.fromkeys(r["category"] for r in ranked):
+        top = [r for r in ranked if r["category"] == folder and r.get("quality_score", "") != ""]
+        if top:
+            lines.append(f"  top {folder}:")
+            lines += [
+                f"    {r['rank']:>3}. {Path(r['output']).name}  {float(r['quality_score']):.2f}"
+                for r in top[:limit]
+            ]
+    return lines
 
 
 def _corrections(chunk, hooks, skipped):
@@ -325,21 +536,35 @@ def run_sort(
             plan.extend((p, name, i, r) for i, (p, r) in enumerate(members, 1))
         planned = {name: len(members) for name, members in plan_by_folder.items()}
 
+        warnings = list(warnings)
+
+        def warn(message: str) -> None:
+            warnings.append(message)
+            say(f"warning: {message}")
+
         meta = {
             "source": str(folder),
             "framegrade_version": __version__,
             "run_id": run_id,
             "args": {**asdict(options), "workers": workers},
-            "warnings": list(warnings),
+            "warnings": warnings,
         }
         estimate = len(plan) * DEVELOP_S_PER_PHOTO_ESTIMATE / workers
+        if hooks.aesthetic_factory is not None:
+            estimate += len(plan) * AESTHETIC_S_PER_PHOTO_ESTIMATE
 
         if options.dry_run:
             counts = {**planned, "duplicates": len(result.duplicates), "skipped": len(skipped)}
             _summary(say, planned, counts, time.monotonic() - started)
             say(
                 f"Estimate: {estimate / 60:.1f} min to develop {len(plan)} photos "
-                f"({DEVELOP_S_PER_PHOTO_ESTIMATE:g} s each / {workers} workers). Nothing written."
+                f"({DEVELOP_S_PER_PHOTO_ESTIMATE:g} s each / {workers} workers"
+                + (
+                    f", plus {AESTHETIC_S_PER_PHOTO_ESTIMATE:g} s each aesthetic scoring"
+                    if hooks.aesthetic_factory is not None
+                    else ""
+                )
+                + "). Nothing written."
             )
             return SortResult(None, counts, estimate)
 
@@ -352,26 +577,43 @@ def run_sort(
             return SortResult(run_dir, counts)
 
         done = _develop_all(plan, run_dir, hooks, workers, skipped)
-        lap("develop", mark)
-        done.sort(key=lambda d: (d[0][1], d[0][2]))
+        mark = lap("develop", mark)
+        scores, stats = {}, None
+        if hooks.score is not None:
+            scores, stats = _score_all(done, records, ledger, hooks, options, warn)
+            mark = lap("score", mark)
+        ordered = _rank_by_quality(done, scores)
+        tech_cols, cat_cols = _score_columns(ordered, scores)
         ranked = []
-        for (path, name, rank, reading), out in done:
+        for name, rank, path, out, reading in ordered:
             rec = records.get(path) or CaptureRecord(path=path)
-            ranked.append(
-                {
-                    "category": name,
-                    "rank": rank,
-                    "source": str(path),
-                    "output": str(out),
-                    "confidence": f"{reading.confidence:g}",
-                    "evidence": "; ".join(reading.evidence),
-                    "capture_time": rec.datetime_original or "",
-                }
-            )
+            sc = scores.get(path)
+            row = {
+                "category": name,
+                "rank": rank,
+                "source": str(path),
+                "output": str(out),
+                "confidence": f"{reading.confidence:g}",
+                "evidence": "; ".join(reading.evidence),
+                "capture_time": rec.datetime_original or "",
+            }
+            if sc is not None:
+                row["quality_score"] = f"{sc.total:.4f}"
+                row["technical"] = f"{sc.technical:.4f}"
+                row["category_score"] = f"{sc.category:.4f}"
+                if sc.aesthetic is not None:
+                    row["aesthetic_score"] = f"{sc.aesthetic:.4f}"
+                for k, v in sc.technical_parts.items():
+                    row[f"technical.{k}"] = f"{v:.4f}"
+                for k, v in sc.category_parts.items():
+                    row[f"category.{k}"] = f"{v:.4f}"
+            ranked.append(row)
+        columns = (*RANKED_COLUMNS, *(f"technical.{k}" for k in tech_cols))
+        columns += tuple(f"category.{k}" for k in cat_cols)
         _write_csv(
             run_dir / "ranked.csv",
-            RANKED_COLUMNS,
-            [[row.get(col, "") for col in RANKED_COLUMNS] for row in ranked],
+            columns,
+            [[row.get(col, "") for col in columns] for row in ranked],
         )
         _write_csv(
             run_dir / "duplicates.csv",
@@ -390,10 +632,14 @@ def run_sort(
             duplicates=len(result.duplicates),
             skipped=len(skipped),
         )
+        if stats is not None:
+            meta["scoring"] = stats
         _save_meta(run_dir, meta, timings, started)
         ledger.record(run_id, _ledger_rows(result, [d[0][0] for d in done]))
         counts = {**categories, "duplicates": len(result.duplicates), "skipped": len(skipped)}
         _summary(say, categories, counts, time.monotonic() - started)
+        for line in _top_lines(ranked):
+            say(line)
         return SortResult(run_dir, counts)
     finally:
         if ledger is not None:

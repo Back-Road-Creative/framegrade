@@ -2533,7 +2533,16 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
     sort_p.add_argument(
         "--no-stacks", action="store_true", help="Skip astro stacking (run.json only)"
     )
-    sort_p.add_argument("--gpu", action="store_true", help="Allow GPU stages (run.json only)")
+    sort_p.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Run the aesthetic model on the GPU, holding the shared GPU lock for that pass "
+        "(CPU if the lock is busy)",
+    )
+    photos_sub.add_parser(
+        "fetch-models",
+        help="Download the pinned aesthetic-model weights (the only network step; hash-checked)",
+    )
 
     # photos develop — per-photo style variants into a LOCAL working dir (no
     # journey/day, no clustering, no blur — never the public site tree).
