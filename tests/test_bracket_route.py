@@ -518,7 +518,8 @@ def test_a_bracket_row_launches_with_both_files(tmp_path):
     rig = Rig(tmp_path)
     before, after = _pair(tmp_path)
     row = rig.rows[0]
-    rig.rows[0] = SimpleNamespace(**dataclasses.asdict(row), bracket_gpx=(str(before), str(after)))
+    # The pinned Waypost BacklogRow carries the pair itself (waypost#109).
+    rig.rows[0] = dataclasses.replace(row, bracket_gpx=(str(before), str(after)))
     res = rig.run()
     assert res["project"] == row.project, res
     argv, _cwd, _env = rig.launches[0]
@@ -533,9 +534,7 @@ def test_a_bracket_row_with_a_missing_file_is_skipped_before_launch(tmp_path):
     rig = Rig(tmp_path)
     before, _after = _pair(tmp_path)
     row = rig.rows[0]
-    rig.rows[0] = SimpleNamespace(
-        **dataclasses.asdict(row), bracket_gpx=(str(before), str(tmp_path / "gone.gpx"))
-    )
+    rig.rows[0] = dataclasses.replace(row, bracket_gpx=(str(before), str(tmp_path / "gone.gpx")))
     res = rig.run()
     assert res["project"] == "day-b"
     assert "bracket_gpx" in res["skipped"][0]["reason"]
