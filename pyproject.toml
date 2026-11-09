@@ -1,6 +1,6 @@
 [project]
 name = "gomoveshift-video"
-version = "0.3.61"
+version = "0.3.62"
 description = "A media engine that grades video and photos, checks each finished file and builds route films from GPS tracks"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -87,7 +87,7 @@ dependencies = [
     # happens to be installed or 404s on PyPI. ci/siblings.txt pins the same
     # commits. Like the four libraries below, requirements.lock carries no entry
     # for them (an unnamed `git+` line is rejected by `uv pip install --constraint`).
-    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@e63c463504b55bf53a05b7aae3879aa1a73e1e2c",
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@d74f50aa6139082dfd90f31adbf46c496f647d80",
     "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at
