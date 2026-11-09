@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.58] - 2026-11-09
+
+### Fixed
+
+- A stateless-county long-form label with its country tail ("County Cork, Ireland", the label the pipeline itself builds) now gets region facts at the pre-render title gate instead of refusing the encode with `facts_unavailable`; `region_label` appends the country for a single Irish county as it already did for a pair.
+
 ## [0.3.57] - 2026-11-09
 
 ### Added
@@ -692,7 +698,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.58...HEAD
+[0.3.58]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...v0.3.58
 [0.3.57]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...v0.3.57
 [0.3.56]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...v0.3.56
 [0.3.55]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...v0.3.55
