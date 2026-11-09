@@ -457,6 +457,9 @@ def _print_lf_sign_evidence(config: Any, idx: int, dom: Any, hits: list) -> None
         resolved,
         min_corroborating_hits=min_hits,
         geocode_fn=_nominatim_search,
+        destination_max_km=float(
+            getattr(drive_cfg, "sign_verify_destination_max_km", 80.0) or 80.0
+        ),
     )
     hit_count = int(getattr(verdict, "hit_count", 0) or len(hits))
     print(f"       sign evidence: {getattr(verdict, 'status', '?')} ({hit_count} hit(s))")

@@ -72,7 +72,15 @@ def _install_fake_sign_verify(
             regions=["Beaufort County"],
         )
 
-    def verify_lf(lf_index, hits, resolved, *, min_corroborating_hits=2, geocode_fn=None):
+    def verify_lf(
+        lf_index,
+        hits,
+        resolved,
+        *,
+        min_corroborating_hits=2,
+        geocode_fn=None,
+        destination_max_km=80.0,
+    ):
         calls["verify_lf"].append(
             {
                 "lf_index": lf_index,
@@ -87,7 +95,13 @@ def _install_fake_sign_verify(
         return verdict
 
     def verify_all(
-        hits_by_date, drive_plan, resolved_by_lf, *, min_corroborating_hits=2, geocode_fn=None
+        hits_by_date,
+        drive_plan,
+        resolved_by_lf,
+        *,
+        min_corroborating_hits=2,
+        geocode_fn=None,
+        destination_max_km=80.0,
     ):
         calls["verify_all"].append(
             {

@@ -57,6 +57,7 @@ KIND_COUNTY = "county_boundary"
 KIND_STATE = "state_boundary"
 KIND_TOWN = "town_entry"
 KIND_ROUTE = "route_marker"
+KIND_DESTINATION = "destination"
 
 # A region / vote key is ``"County, State"`` on the persisted model and
 # ``"County|State"`` on the ``dominant_location`` adapter's output; split on
@@ -298,12 +299,35 @@ def _group_by_name(
             key = _bare_place(claim.value)
             if not key:
                 continue
-            entry = groups.setdefault(key, {"display": claim.value, "hits": set(), "texts": []})
+            entry = groups.setdefault(
+                key, {"display": claim.value, "hits": set(), "texts": [], "distance": None}
+            )
+            if entry["distance"] is None:
+                entry["distance"] = claim.distance_mi
             entry["hits"].add(pos)
             text = (claim.raw_text or hit.raw_text or "").strip()
             if text and text not in entry["texts"]:
                 entry["texts"].append(text)
     return groups
+
+
+_DESTINATION_SLACK_KM = 5.0
+
+
+def _destination_candidates(name: str) -> list[str]:
+    """The name as read, plus the N<->W initial-letter variant OCR confuses."""
+    out = [name]
+    if name[:1] in ("N", "W"):
+        out.append(("W" if name[0] == "N" else "N") + name[1:])
+    return out
+
+
+def _destination_summary(groups: dict[str, dict[str, Any]]) -> str:
+    parts = []
+    for _name, entry in sorted(groups.items()):
+        miles = entry["distance"]
+        parts.append(f"{entry['display']!r}" + (f" {miles:g} mi" if miles is not None else ""))
+    return ", ".join(parts)
 
 
 def _quoted(texts: list[str]) -> str:
@@ -317,6 +341,7 @@ def verify_lf(
     *,
     min_corroborating_hits: int = 2,
     geocode_fn: Optional[Callable[[str], Any]] = None,
+    destination_max_km: float = 80.0,
 ) -> SignVerdict:
     """Compare one LF's sign hits against its ``ResolvedLocation``.
 
@@ -335,6 +360,11 @@ def verify_lf(
       nothing, the town is forward-geocoded and a distance line is recorded as
       advisory context — still never a conflict. ``geocode_fn`` defaults to
       ``None`` (no network); a ``None`` return (degraded geocoder) is a skip.
+    * **destination** claims (guide signs): corroboration-only, NEVER a conflict
+      and never a label. The place (plus an N<->W initial-letter variant) is
+      forward-geocoded; a candidate within ``destination_max_km`` of where the
+      sign was read is kept, and exactly one kept candidate whose distance is
+      consistent with the sign's miles corroborates.
     * **route** claims: corroboration-only, member-wise against ``road`` /
       ``road_refs``.
     * no claims at all → ``STATUS_NO_SIGNAL``. Silence is not agreement.
@@ -362,6 +392,12 @@ def verify_lf(
             f"sampled regions or county vote (GPS-less, legacy, or quorum-degraded LF); "
             f"{len(typed_hits)} sign hit(s) left uncompared"
         )
+        dest = _group_by_name(_claim_bearing(typed_hits), KIND_DESTINATION)
+        if dest:
+            verdict.reasons.append(
+                f"LF {lf_idx}: {len(dest)} destination sign(s) read: "
+                f"{_destination_summary(dest)} — uncompared (no fix); advisory, never a label"
+            )
         return verdict
 
     claim_hits = _claim_bearing(typed_hits)
@@ -473,6 +509,57 @@ def verify_lf(
             f"was read — advisory context only"
         )
 
+    # ── destination claims: corroboration-only, never a conflict ──
+    for _name, entry in sorted(_group_by_name(claim_hits, KIND_DESTINATION).items()):
+        display = entry["display"]
+        miles = entry["distance"]
+        said = f"{miles:g} mi ahead" if miles is not None else "ahead"
+        head = f"LF {lf_idx}: destination sign(s) {_quoted(entry['texts'])} name {display!r} {said}"
+        if geocode_fn is None:
+            verdict.reasons.append(f"{head} — advisory only (no gazetteer)")
+            continue
+        anchor = _latlon(model.endpoints.get("start")) or _latlon(model.endpoints.get("end"))
+        for pos, hit, _claims in claim_hits:
+            if pos in entry["hits"] and hit.lat is not None and hit.lon is not None:
+                anchor = (float(hit.lat), float(hit.lon))
+                break
+        if anchor is None:
+            verdict.reasons.append(f"{head} — advisory only (no anchor to compare)")
+            continue
+        from ..pipeline.title_builder import _haversine_km_simple
+
+        kept: list[tuple[str, float]] = []
+        for cand in _destination_candidates(display):
+            try:
+                coords = _latlon(geocode_fn(cand))
+            except Exception as exc:  # noqa: BLE001 — a geocoder failure is never a verdict
+                verdict.reasons.append(
+                    f"LF {lf_idx}: forward geocode of {cand!r} failed ({exc}) — skipped"
+                )
+                continue
+            if coords is None:
+                continue
+            km = _haversine_km_simple(anchor[0], anchor[1], coords[0], coords[1])
+            if km <= float(destination_max_km):
+                kept.append((cand, km))
+        if not kept:
+            verdict.reasons.append(f"{head} — unconfirmed — advisory")
+        elif len(kept) > 1:
+            names = ", ".join(c for c, _ in kept)
+            verdict.reasons.append(f"{head} — ambiguous ({names}) — advisory, no corroboration")
+        else:
+            cand, km = kept[0]
+            if miles is not None and km <= miles * 1.609 + _DESTINATION_SLACK_KM:
+                corroborating_hits |= entry["hits"]
+                verdict.reasons.append(
+                    f"{head} — {cand!r} corroborates (~{km:.0f} km, sign said {miles:g} mi)"
+                )
+            else:
+                verdict.reasons.append(
+                    f"{head} — {cand!r} is a confirmed place but ~{km:.0f} km from where "
+                    f"read — advisory"
+                )
+
     # ── route claims: corroboration-only, never a conflict ──
     for _name, entry in sorted(_group_by_name(claim_hits, KIND_ROUTE).items()):
         display = entry["display"]
@@ -515,6 +602,7 @@ def verify_all(
     *,
     min_corroborating_hits: int = 2,
     geocode_fn: Optional[Callable[[str], Any]] = None,
+    destination_max_km: float = 80.0,
 ) -> dict[int, SignVerdict]:
     """Bucket every hit, then verify each LF that HAS a resolved model.
 
@@ -543,5 +631,6 @@ def verify_all(
             model,
             min_corroborating_hits=min_corroborating_hits,
             geocode_fn=geocode_fn,
+            destination_max_km=destination_max_km,
         )
     return verdicts

@@ -1758,6 +1758,11 @@ class DriveConfig(BaseModel):
     # reported (or, under strict, raised). One misread sign is an OCR error;
     # several agreeing ones are evidence.
     sign_verify_min_corroborating_hits: int = 2
+    # A guide-sign destination ("Woodstock 1 MILE") is advisory evidence only:
+    # its place name is forward-geocoded and kept as a candidate only when it
+    # lands within this many km of where the sign was read. Never a label,
+    # never a conflict.
+    sign_verify_destination_max_km: float = 80.0
     # NVDEC hardware decode for the day-master encode. When True,
     # ``single_pass._run_encode_step`` adds ``-hwaccel cuda
     # -hwaccel_output_format cuda`` before the input and prepends

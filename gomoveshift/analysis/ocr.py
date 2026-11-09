@@ -80,6 +80,62 @@ _CLAIM_COUNTY = LocationType.COUNTY_BOUNDARY.value
 _CLAIM_STATE = LocationType.STATE_BOUNDARY.value
 _CLAIM_TOWN = LocationType.TOWN_ENTRY.value
 _CLAIM_ROUTE = LocationType.ROUTE_MARKER.value
+_CLAIM_DESTINATION = LocationType.DESTINATION.value
+
+# Guide / destination signs ("EXIT 283 Woodstock 1 MILE"). Advisory only: the
+# claim says where the road goes, so it never feeds a label or a conflict. The
+# grammar runs on an OCR-noise-normalised COPY of the text.
+_DEST_RE = re.compile(
+    r"(?:\bEXIT\s*\d+[A-Z]?\s+)?"
+    r"(?:\d+\s+)*"
+    r"((?:[A-Z][a-z]+(?:-[A-Z][a-z]+)*)(?:\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)*){0,2})"
+    r"\s+(\d+(?:\.\d+)?|\d+/\d+)\s*(?i:miles?)\b"
+)
+_DEST_ROUTE_TOKENS = frozenset({"i", "us"})
+
+
+def _normalise_ocr_noise(text: str) -> str:
+    """Deterministic OCR-noise cleanup for the destination grammar only.
+
+    ``EExIT`` -> ``EXIT`` (a doubled leading letter), and ``0``/``1`` inside a
+    mostly-alphabetic token read as ``O``/``I``.
+    """
+
+    def _fix(match: re.Match) -> str:
+        tok = match.group(0)
+        if tok.upper() == "EEXIT":
+            return "EXIT"
+        letters = sum(ch.isalpha() for ch in tok)
+        if letters >= 3 and letters > len(tok) / 2 and any(ch in "01" for ch in tok):
+            return tok.replace("0", "O").replace("1", "I")
+        return tok
+
+    return re.sub(r"[A-Za-z01]+", _fix, text)
+
+
+def _destination_claims(text: str) -> list[tuple[str, float]]:
+    tables = _sign_tables()
+    out: list[tuple[str, float]] = []
+    for match in _DEST_RE.finditer(_normalise_ocr_noise(text)):
+        place = match.group(1)
+        tokens = place.lower().split()
+        if place.lower() in tables["name_by_lower"]:
+            continue
+        if tokens[0] in _CAPTURE_STOP_WORDS or tokens[0] in _DEST_ROUTE_TOKENS:
+            continue
+        if place.upper() in tables["name_by_abbrev"] or place.upper() == "EXIT":
+            continue
+        dist = match.group(2)
+        if "/" in dist:
+            num, den = dist.split("/")
+            if not float(den):
+                continue
+            miles = float(num) / float(den)
+        else:
+            miles = float(dist)
+        out.append((place.title(), miles))
+    return out
+
 
 # A "Welcome to X" capture is greedy and swallows the rest of a multi-line sign
 # ("Exampleville — Example County, SC"). The placename is the first segment; cut
@@ -202,6 +258,14 @@ def parse_sign_claims(text: Optional[str]) -> list[SignClaim]:
         seen.add((kind, value))
         claims.append(SignClaim(kind=kind, value=value, raw_text=text))
 
+    for place, miles in _destination_claims(text):
+        if (_CLAIM_DESTINATION, place) in seen:
+            continue
+        seen.add((_CLAIM_DESTINATION, place))
+        claims.append(
+            SignClaim(kind=_CLAIM_DESTINATION, value=place, raw_text=text, distance_mi=miles)
+        )
+
     for pattern, loc_type in _LOCATION_PATTERNS:
         if loc_type not in (LocationType.TOWN_ENTRY, LocationType.COUNTY_BOUNDARY):
             continue
@@ -237,7 +301,7 @@ def parse_sign_claims(text: Optional[str]) -> list[SignClaim]:
                     continue
                 _add(_CLAIM_TOWN, captured.title())
 
-    has_place = bool(seen)
+    has_place = any(kind != _CLAIM_DESTINATION for kind, _ in seen)
 
     # A full state name is a claim only beside a place claim or a boundary cue
     # (``_STATE_BOUNDARY_CUE_RE``); a bare destination on a guide sign is not.
