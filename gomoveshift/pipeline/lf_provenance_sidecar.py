@@ -116,6 +116,12 @@ def build_lf_provenance_payload(state) -> dict:
                     "placeless operator label (--placeless-label): the burned text claims "
                     "no place, so no locked-GPS coverage is measured (tier 5)"
                 )
+            elif isinstance(ev_rec, dict) and ev_rec.get("bracket"):
+                reasons["fix_density_pct"] = (
+                    "bracket-route label (--bracket-gpx): the region comes from the fixes "
+                    "before and after the footage (see tier_evidence.bracket), so no "
+                    "locked-GPS coverage of the footage itself is measured"
+                )
             else:
                 reasons["fix_density_pct"] = (
                     "no locked-GPS coverage recorded; the pre-encode "

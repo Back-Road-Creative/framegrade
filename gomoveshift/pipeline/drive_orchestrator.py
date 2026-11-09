@@ -893,6 +893,7 @@ class DrivePipelineOrchestrator:
         output_cadence: Optional[str] = None,
         insert_still_motion: Optional[str] = None,
         placeless_label: Optional[str] = None,
+        bracket_gpx: Optional[list] = None,
     ) -> DrivePipelineResult:
         """Execute the full Drive Pipeline (or a single phase).
 
@@ -1132,6 +1133,7 @@ class DrivePipelineOrchestrator:
                 output_cadence=output_cadence,
                 insert_still_motion=insert_still_motion,
                 placeless_label=placeless_label,
+                bracket_gpx=bracket_gpx,
             )
             stages_dir = stages_base
             if str(output_base).startswith("/mnt/"):
@@ -1989,6 +1991,7 @@ class DrivePipelineOrchestrator:
         output_cadence: Optional[str] = None,
         insert_still_motion: Optional[str] = None,
         placeless_label: Optional[str] = None,
+        bracket_gpx: Optional[list] = None,
     ) -> tuple[PipelineState, bool, bool, bool]:
         """Construct the fresh ``PipelineState`` + coerce CLI sentinels.
 
@@ -2069,6 +2072,7 @@ class DrivePipelineOrchestrator:
                 "output_cadence": output_cadence,
                 "insert_still_motion": insert_still_motion,
                 "placeless_label": placeless_label,
+                "bracket_gpx": bracket_gpx,
             },
             config=self.config,
         )

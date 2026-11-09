@@ -1033,6 +1033,7 @@ def _cmd_drive_impl(args, config):
             output_cadence=getattr(args, "output_cadence", None),
             insert_still_motion=getattr(args, "insert_still_motion", None),
             placeless_label=getattr(args, "placeless_label", None),
+            bracket_gpx=getattr(args, "bracket_gpx", None),
         )
     except PipelineValidationError as exc:
         # Outermost boundary: log full report and exit non-zero. The

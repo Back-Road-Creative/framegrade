@@ -103,6 +103,7 @@ _VALUE_SAMPLES = {  # non-bool sentinel rows: (cli_value, saved_value)
     "output_cadence": ("source", "fixed"),
     "insert_still_motion": ("push_in", "none"),
     "placeless_label": ("Somewhere Between", "Back Country Night"),
+    "bracket_gpx": (["/gpx/day3.gpx", "/gpx/day5.gpx"], ["/gpx/day2.gpx", "/gpx/day4.gpx"]),
 }
 _VALUE_RULES = [r for r in _MERGED_RULES if r.state_field in _VALUE_SAMPLES]
 assert len(_BOOL_RULES) + len(_VALUE_RULES) == len(_MERGED_RULES)

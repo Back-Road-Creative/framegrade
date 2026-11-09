@@ -533,6 +533,42 @@ def _enrich_per_lf_gps(
             for _lf in _lfs or []:
                 per_lf_overrides[int(getattr(_lf, "index", 0))] = _placeless
         state.per_lf_overrides = dict(per_lf_overrides)
+    _bracket = [str(p) for p in (getattr(state, "bracket_gpx", None) or []) if str(p).strip()]
+    if _bracket:
+        # ``--bracket-gpx``: the ladder's bracket tier. ONE label for every LF, computed
+        # from the last fix before the footage and the first fix after it; the full
+        # basis (both fixes, geocodes, gap, level) is kept on ``state.bracket_route``
+        # for the ladder evidence, the OST system review and the provenance sidecar.
+        from pathlib import Path as _Path
+
+        from .bracket_route import resolve_bracket_route
+
+        if geocoder is None:
+            raise RuntimeError(
+                "--bracket-gpx needs the reverse geocoder (gps_journey) to name the region "
+                "both bracket fixes fall in; it is not importable, so no label can be computed."
+            )
+        _stages = getattr(state, "stages_base", None) or (
+            _Path(str(getattr(state, "output_base", None) or ".")) / "_stages"
+        )
+        _route = resolve_bracket_route(
+            _bracket[0],
+            _bracket[1],
+            geocode_fn=geocoder.reverse_geocode_detailed,
+            footage_dates=getattr(state, "episode_dates", None) or [],
+            workdir=_Path(str(_stages)) / "bracket_gpx",
+        )
+        for _lfs in (lf_plans_by_date or {}).values():
+            for _lf in _lfs or []:
+                per_lf_overrides[int(getattr(_lf, "index", 0))] = _route.label
+        state.per_lf_overrides = dict(per_lf_overrides)
+        state.bracket_route = _route.to_record()
+        if not (getattr(state, "location", None) or "").strip():
+            state.location = _route.label  # the drive-wide fallback is the same computed label
+        logger.info(
+            "bracket route: %s (%s level) from fixes %s and %s, %.1f h apart",
+            _route.label, _route.level, _route.before.time_iso, _route.after.time_iso, _route.gap_h,
+        )  # fmt: skip
     _assert_per_lf_locations_resolvable(
         lf_plans_by_date or {},
         gps_points_by_lf=gps_points_by_lf or {},

@@ -574,6 +574,12 @@ class PipelineState:
     # it out as the per-LF override of every LF and marks each LF's ladder
     # evidence placeless (tier 5).
     placeless_label: Optional[str] = None
+    # ``--bracket-gpx BEFORE AFTER``: the two files whose fixes bracket GPS-less footage.
+    # Phase BC resolves them ONCE into ``bracket_route`` (``bracket_route.BracketRoute``
+    # record: both fixes, their gap, both geocodes, the common-region level and the
+    # computed label) and burns that label on every LF as the ladder's bracket tier.
+    bracket_gpx: Optional[list] = None
+    bracket_route: Optional[dict] = None
 
     # ── Orchestrator bookkeeping ───────────────────────────────────────
     run_start: Optional[str] = None  # ISO-8601 anchor for DoD freshness checks

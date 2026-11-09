@@ -116,6 +116,7 @@ class TestCLIDrivePlanDict:
         mock_args.publish = "tue"
         mock_args.location = None
         mock_args.placeless_label = None  # argparse default; a bare MagicMock attr is truthy
+        mock_args.bracket_gpx = None  # same: argparse default, never a truthy mock
         mock_args.start_date = None
         mock_args.shorts_per_day = None
         mock_args.shorts_target = None
@@ -172,6 +173,7 @@ class TestCLIDrivePlanDict:
         mock_args.publish = "tue"
         mock_args.location = None
         mock_args.placeless_label = None  # argparse default; a bare MagicMock attr is truthy
+        mock_args.bracket_gpx = None  # same: argparse default, never a truthy mock
         mock_args.start_date = None
         mock_args.shorts_per_day = None
         mock_args.shorts_target = None
