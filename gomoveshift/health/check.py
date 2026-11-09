@@ -17,6 +17,7 @@ _EVENTS = {
     "lf_slot_unbooked": "health_lf_slot_unbooked",
     "lf_slot_uncovered": "health_lf_slot_uncovered",
     "queue_stalled": "health_queue_stalled",
+    "placeless_label_unverifiable": "health_placeless_label_unverifiable",
 }
 
 _BACKFILL = ("resume_recipe", "log_path")
@@ -35,6 +36,17 @@ def _line(row: Dict[str, Any]) -> str:
             else f"drive_backlog.yaml has no {row['region']} row left to audit"
         )
         return f"LF slot {row['slot']} ({row['region']}) has no ready drive; {todo}."
+    if row["kind"] == "placeless_label_unverifiable":
+        why = (
+            f"claims {', '.join(row['claims'])}"
+            if row.get("claims")
+            else row.get("reason", "is not a valid placeless label")
+        )
+        return (
+            f"drive_backlog.yaml row {row['project']} carries placeless_label {row['label']!r}, "
+            f"which {why}: nothing measures a label on a GPS-less drive, so the row never "
+            "launches. Edit the row to a claim-free label (e.g. 'Somewhere On The Road')."
+        )
     return f"{row['due_deliveries']} publishing deliveries are due and nothing has touched the queue in {row['quiet_hours']} h."
 
 
@@ -53,6 +65,55 @@ def _next_drives(store: Any, regions: List[str], notes: List[str]) -> Dict[str, 
         region: (row.project if (row := backlog.next_row(rows, region, store)) else None)
         for region in regions
     }
+
+
+def _backlog_rows(notes: List[str]) -> Optional[List[Any]]:
+    """The ``drive_backlog.yaml`` rows, or ``None`` (noted) when unreadable: an unreadable
+    backlog proves nothing either way, so it must not close an open incident."""
+    try:
+        from seo_manager.scheduling import backlog
+
+        from ..paths import drive_backlog_path
+
+        path = drive_backlog_path()
+        if not path.is_file():
+            notes.append(f"{path} absent: rule 5 not evaluated")
+            return None
+        return list(backlog.load(path))
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"rule 5 not evaluated: {type(exc).__name__}: {exc}")
+        return None
+
+
+def placeless_label_incidents(rows: List[Any], now_iso: str) -> List[Dict[str, Any]]:
+    """Rule 5: one incident per backlog row whose ``placeless_label`` the launcher refuses
+    (``launch.placeless_label_skip_reason``). A label nothing can measure may say nothing the
+    footage cannot prove, so such a row never launches; it is surfaced here, open for as long
+    as the yaml carries the label, instead of parking silently."""
+    from ..pipeline.validation.content_gates import placeless_label_claimed_words
+    from .launch import placeless_label_skip_reason
+    from .store import new_incident, safe_name
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        label = getattr(row, "placeless_label", "") or ""
+        reason = placeless_label_skip_reason(label) if label else None
+        if not reason:
+            continue
+        project = row.project
+        out.append(
+            new_incident(
+                "placeless_label_unverifiable",
+                f"placeless_label_unverifiable:{project}",
+                f"placeless_label_{safe_name(str(project))}.json",
+                now_iso,
+                project=project,
+                label=label,
+                claims=placeless_label_claimed_words(label),
+                reason=reason,
+            )
+        )
+    return out
 
 
 def _cadence_rows(
@@ -138,6 +199,9 @@ def run_check(
     drive_rows, succeeded, bad_jobs = drives.detect(jobs_dir, sha, now_iso)
     reconciled = _reconcile_publishes(config, jobs_dir, notes)
     found = {"drive_failed": drive_rows, **_cadence_rows(config, ledger_path, now, now_iso, notes)}
+    backlog_rows = _backlog_rows(notes)
+    if backlog_rows is not None:
+        found["placeless_label_unverifiable"] = placeless_label_incidents(backlog_rows, now_iso)
 
     resolved: List[str] = []
     new: List[str] = []

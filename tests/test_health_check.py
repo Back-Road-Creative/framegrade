@@ -436,3 +436,56 @@ def test_the_waiting_exit_code_is_the_drive_clis_own():
     from gomoveshift.health import drives
 
     assert drives.EXIT_WAITING_AT_GATE == EXIT_WAITING_AT_GATE
+
+
+# -- rule 5: a backlog row whose placeless_label claims something (nothing can verify it) -----
+
+
+def _label_row(project, label):
+    return SimpleNamespace(project=project, placeless_label=label)
+
+
+def test_a_claiming_placeless_label_is_an_incident_naming_row_label_and_words():
+    rows = check_mod.placeless_label_incidents(
+        [
+            _label_row("a", "Through The Valleys And Ridges"),
+            _label_row("b", "Somewhere On The Road"),
+            _label_row("c", ""),
+        ],
+        NOW.isoformat(),
+    )
+    assert [r["project"] for r in rows] == ["a"]
+    row = rows[0]
+    assert row["kind"] == "placeless_label_unverifiable"
+    assert row["key"] == "placeless_label_unverifiable:a"
+    assert row["label"] == "Through The Valleys And Ridges"
+    assert row["claims"] == ["Valleys", "Ridges"]
+    line = check_mod._line(row)
+    assert "a" in line and "Valleys, Ridges" in line
+
+
+def test_check_opens_the_incident_once_and_closes_it_when_the_yaml_drops_the_label(
+    tmp_path, monkeypatch
+):
+    rows = [_label_row("a", "Somewhere In The Hills"), _label_row("b", "Somewhere On The Road")]
+    monkeypatch.setattr(check_mod, "_backlog_rows", lambda notes: rows)
+    sent = []
+    first = _run(tmp_path, lambda *a: sent.append(a) or True)
+    assert first["new"] == ["placeless_label_unverifiable:a"]
+    assert sent[0][0] == "health_placeless_label_unverifiable"
+    again = _run(tmp_path, lambda *a: sent.append(a) or True)
+    assert again["new"] == [] and len(sent) == 1
+    rows[0] = _label_row("a", "Somewhere On The Road")
+    closed = _run(tmp_path, lambda *a: True)
+    assert closed["resolved"] == ["placeless_label_unverifiable:a"]
+    assert closed["incidents"] == []
+
+
+def test_an_unreadable_backlog_closes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        check_mod, "_backlog_rows", lambda notes: [_label_row("a", "Out Through Open Country")]
+    )
+    _run(tmp_path, lambda *a: True)
+    monkeypatch.setattr(check_mod, "_backlog_rows", lambda notes: None)
+    result = _run(tmp_path, lambda *a: True)
+    assert result["resolved"] == [] and len(result["incidents"]) == 1

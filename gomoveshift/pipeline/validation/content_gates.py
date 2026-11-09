@@ -693,6 +693,19 @@ def placeless_label_claims_nothing(label: str) -> bool:
     )
 
 
+PLACELESS_CLAIM_FREE_EXAMPLE = "Somewhere On The Road"
+
+
+def placeless_label_claimed_words(label: str) -> list[str]:
+    """The words of ``label`` outside :data:`PLACELESS_NO_CLAIM_WORDS`, in order, as typed.
+
+    Nothing in the pipeline can measure a placeless label, so each such word is a claim about
+    the footage that cannot be verified. Shared by the CLI refusal and the backlog launcher so
+    both name the same words.
+    """
+    return [w for w in (label or "").split() if w.lower() not in PLACELESS_NO_CLAIM_WORDS]
+
+
 _LOCATION_LINE_RE = re.compile(r"\U0001f4cd Location:\s*(.+)")
 # The above-the-fold SEO hook line is produced as "… 4K drive …" by
 # longform_metadata (_SEO_HOOK_* templates); "scenic" is not an accepted term.

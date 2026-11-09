@@ -51,15 +51,29 @@ def _weekday(raw: str) -> str:
 def _placeless_label(raw: str) -> str:
     """argparse ``type=`` for ``--placeless-label``.
 
-    Robust by construction: only words from ``PLACELESS_LABEL_WORDS`` (letters,
-    spaces, apostrophes; 1-40 chars) get past the parser, so the burned label
-    cannot name a place. The rejection names the offending word(s).
+    Robust by construction: only words from ``PLACELESS_NO_CLAIM_WORDS`` (letters,
+    spaces, apostrophes; 1-40 chars) get past the parser. Nothing can measure a
+    placeless label, so any word that claims scenery, weather, time of day or road
+    kind is a statement about the footage that cannot be verified; the rejection
+    names the offending word(s).
     """
-    from ..pipeline.validation.content_gates import placeless_label_problem
+    from ..pipeline.validation.content_gates import (
+        PLACELESS_CLAIM_FREE_EXAMPLE,
+        placeless_label_claimed_words,
+        placeless_label_problem,
+    )
 
     problem = placeless_label_problem(raw)
     if problem:
         raise argparse.ArgumentTypeError(problem)
+    claims = placeless_label_claimed_words(raw)
+    if claims:
+        raise argparse.ArgumentTypeError(
+            f"placeless label {raw.strip()!r} claims {', '.join(claims)}, which nothing "
+            "measures on a GPS-less drive; a placeless label may say nothing the footage "
+            "cannot prove: use only words from PLACELESS_NO_CLAIM_WORDS, e.g. "
+            f"{PLACELESS_CLAIM_FREE_EXAMPLE!r}"
+        )
     return raw.strip()
 
 

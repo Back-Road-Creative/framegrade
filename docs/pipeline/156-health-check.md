@@ -31,6 +31,12 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    (non-shadow, non-terminal, `scheduled_at` null or past, platform not paused) and no delivery
    row has `updated_at` within 24 h. Every dispatch attempt rewrites `updated_at`, so a quiet queue
    with due work means the drain is not running. Row file: `queue_stalled.json`.
+5. **Unverifiable placeless label.** A `drive_backlog.yaml` row carries a `placeless_label` the
+   launcher refuses (`launch.placeless_label_skip_reason`): it claims scenery, weather, time of
+   day or road kind, which nothing can measure on a GPS-less drive, so it cannot be said. The row
+   never launches (the rows behind it still do) and the incident stays open while the yaml carries
+   the label; editing the row to a claim-free label (e.g. `Somewhere On The Road`) closes it. An
+   absent or unreadable backlog closes nothing. Row file: `placeless_label_<project>.json`.
 
 A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve against the cwd).
 
@@ -43,14 +49,15 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
 `job_run_id`, `failed_at`, `staging_sha`, `resume_recipe` (path of the drive's `resume.json`, or null), `resume_attempts`
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
-`last_updated_at`, `quiet_hours`.
+`last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`.
 
 ## Resume recipe and `health heal`
 
