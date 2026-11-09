@@ -671,6 +671,17 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "push-in across the hold (config.drive.insert_still_motion, default none).",
     )
     p.add_argument("--fresh", action="store_true", help="Force restart from scratch")
+    p.add_argument(
+        "--from-recipe",
+        metavar="PATH_OR_PROJECT",
+        default=None,
+        help="Relaunch from the run's own <stages>/resume.json (a recipe file, a _stages or "
+        "project dir, or a bare project name with one recipe under GMS_INTERMEDIATE_DIR / the "
+        "cache home): its argv and GMS_INTERMEDIATE_DIR replace the command line before parsing, "
+        "so the same stage dir is reached. Only --phase, --publish, --lf-day, --lf-publish-date, "
+        "--skip-upload, --no-youtube-upload, --force and --no-tmux may be added; --fresh, a "
+        "directory or any other flag refuses. Handled in the CLI entry, never seen by the handler.",
+    )
     p.add_argument("--no-tmux", action="store_true", help="Skip tmux launcher")
     # The four upload flags use the
     # argparse-sentinel pattern — default=None, action="store_const",

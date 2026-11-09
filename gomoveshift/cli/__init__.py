@@ -181,8 +181,23 @@ def _cmd_server(args, config):
 
 def main():
     """Main CLI entry point."""
+    import os
+
+    from . import from_recipe
+
     parser = _build_parser()
-    args = parser.parse_args()
+    # ``drive --from-recipe``: the recipe's argv and env replace the command line BEFORE
+    # parsing, so every later stage-dir lookup sees the env the original run had.
+    try:
+        argv, env, recipe_path = from_recipe.expand(sys.argv[1:], environ=os.environ)
+    except from_recipe.FromRecipeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if recipe_path is not None:
+        os.environ.update(env)
+        shown = " ".join(f"{k}={v}" for k, v in sorted(env.items())) or "(default stage cache)"
+        print(f"Relaunching from recipe {recipe_path} with {shown}", flush=True)
+    args = parser.parse_args(argv)
 
     if args.command is None:
         parser.print_help()
