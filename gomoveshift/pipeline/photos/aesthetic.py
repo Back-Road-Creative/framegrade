@@ -91,8 +91,7 @@ def _ensure_one(spec: ModelSpec, directory: Path, allow_download: bool, fetch) -
     if not allow_download:
         raise AestheticModelUnavailable(
             f"{spec.name} is missing or fails its sha256 check in {directory}; fetch the pinned "
-            "weights with: python -c 'from gomoveshift.pipeline.photos.aesthetic import "
-            "fetch_models; fetch_models()'"
+            "weights with: gomoveshift photos fetch-models (runs aesthetic.fetch_models)"
         )
     directory.mkdir(parents=True, exist_ok=True)
     part = directory / (spec.name + ".part")

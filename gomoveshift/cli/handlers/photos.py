@@ -1932,15 +1932,36 @@ def _cmd_photos_sort(args) -> int:
         **{k: getattr(args, k) for k in sort.SortOptions.__dataclass_fields__}
     )
     try:
-        sort.run_sort(Path(args.folder), get_config().photos.resolve_sort_root(), options)
+        sort.run_sort(
+            Path(args.folder),
+            get_config().photos.resolve_sort_root(),
+            options,
+            sort.scoring_hooks(),
+        )
     except sort.SortRefusalError as exc:
         print(f"photos sort refused: {exc}", file=sys.stderr)
         return 2
     return 0
 
 
+def _cmd_photos_fetch_models(args) -> int:
+    """``photos fetch-models``: download and verify the aesthetic weights (explicit, never implicit)."""
+    from ...pipeline.photos import aesthetic
+
+    try:
+        vision, head = aesthetic.fetch_models()
+    except aesthetic.AestheticModelUnavailable as exc:
+        print(f"photos fetch-models failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"vision model -> {vision}")
+    print(f"aesthetic head -> {head}")
+    return 0
+
+
 def cmd_photos(args, config):
     """Daily photo social media posting pipeline."""
+    if args.photos_command == "fetch-models":
+        return _cmd_photos_fetch_models(args)
     if args.photos_command == "night":
         from .night import cmd_night
 
