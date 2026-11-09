@@ -58,19 +58,24 @@ UNPASSED_DETECT_AND_TRACK_DEFAULTS = {
     "checkpoint_path": None,
     "checkpoint_every_frames": 0,
     "checkpoint_overlap_frames": 90,
+    # Detection heartbeat: a once-a-minute INFO line from
+    # detect_and_track, which reaches drive.log through the root logger. A
+    # multi-hour blur pass was otherwise silent and read as a hang.
+    # Pinned so a redactcam that silences or floods it fails here.
+    "progress_every_s": 60.0,
+    # Frame source (redactcam ce6a1c2): "auto" tries the ffmpeg NVDEC pipe and
+    # falls back to cv2 when cuda/cuvid is missing, the probe fails, the clip is
+    # rotated, or the run resumes from a checkpoint. The service passes nothing
+    # and relies on the fallback chain; a redactcam that defaults to a backend
+    # with no fallback ("nvdec") or drops the GPU path ("cv2") fails here.
+    "decode": "auto",
 }
 
 # Defaults of parameters a newer redactcam adds. Each is checked exactly like
 # the table above whenever the installed redactcam has it, so this test can
 # land before the dependency pin moves. Move an entry up into the table above
 # once the pin that adds it has landed.
-PINNED_WHEN_PRESENT_DEFAULTS = {
-    # Detection heartbeat: a once-a-minute INFO line from
-    # detect_and_track, which reaches drive.log through the root logger. A
-    # multi-hour blur pass was otherwise silent and read as a hang.
-    # Pinned so a redactcam that silences or floods it fails here.
-    "progress_every_s": 60.0,
-}
+PINNED_WHEN_PRESENT_DEFAULTS: dict[str, object] = {}
 
 
 def _defaults(fn):
