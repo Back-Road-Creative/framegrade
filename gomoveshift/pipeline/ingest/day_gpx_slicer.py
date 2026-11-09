@@ -35,6 +35,16 @@ filename contract); ``LRV_*`` proxies are skipped and any other ``.mp4`` is
 refused. A ``creation_time`` equal to the filename time measures 0 h (a container
 clock that is local-as-Z); it is accepted only if the GPX gate passes.
 
+GoPro chapter files (``GXccNNNN.MP4``, ``cc`` = chapter, ``NNNN`` = recording)
+are the fallback for a GoPro whose own GPMF never locked. Their name carries no
+clock, so a recording's start is its chapter-01 ``creation_time`` (GoPro writes
+it in UTC); ``utc_offset_hours`` does not apply and is refused, as is a
+recording with no chapter 01 or no ``creation_time``. Chapter ``cc`` starts after
+the durations of chapters ``01..cc-1``. A directory mixing GoPro and ``VID_``
+names is refused (ingest refuses the mix too). The GoPro ingest reads these
+sidecars only for an episode whose GPMF does not cover every chapter
+(``extract_and_merge_gpx``).
+
 A sidecar this module wrote carries ``creator="gms-day-gpx-slicer"``; only such
 files are rewritten. Any other existing ``<stem>.gpx`` is the operator's and
 is never overwritten.
@@ -55,7 +65,7 @@ from ..gopro_gps import (
     GpxCorrespondenceError,
     assert_gpx_video_correspondence,
 )
-from .gopro_parser import _ffprobe_creation_time, get_clip_duration
+from .gopro_parser import GOPRO_RE, _ffprobe_creation_time, get_clip_duration
 
 logger = logging.getLogger(__name__)
 
@@ -171,14 +181,15 @@ def _measure_offset(firsts: list[tuple[Path, str, str, float]]) -> float:
 def slice_day_gpx(
     day_gpx: Path, source_dir: Path, utc_offset_hours: float | None = None
 ) -> list[SliceResult]:
-    """Write ``<stem>.gpx`` beside every ``VID_*.mp4`` in ``source_dir``.
+    """Write ``<stem>.gpx`` beside every ``VID_*.mp4`` or ``GXccNNNN.MP4`` in ``source_dir``.
 
     ``utc_offset_hours`` is the camera clock's UTC offset (local = UTC + N, so
     US Eastern daylight time is ``-4``). Left ``None`` it is measured from the first
     chapters' ffprobe ``creation_time`` (see the module docstring); given, it must agree with
-    that ``creation_time`` to within 60 s. Raises :class:`DayGpxSliceError`
-    before writing anything it cannot stand behind; all sidecars are validated
-    before any is written.
+    that ``creation_time`` to within 60 s. GoPro chapters take their start from
+    chapter 01's ``creation_time`` (UTC) and refuse an offset. Raises
+    :class:`DayGpxSliceError` before writing anything it cannot stand behind;
+    all sidecars are validated before any is written.
     """
     day_gpx, source_dir = Path(day_gpx), Path(source_dir)
     if not day_gpx.is_file():
@@ -193,23 +204,46 @@ def slice_day_gpx(
         raise DayGpxSliceError(f"no .mp4 files in {source_dir}")
     points = _load_points(day_gpx)
 
+    gopro = bool(GOPRO_RE.match(videos[0].name))
     clips = []
     for video in videos:
-        m = VID_RE.match(video.name)
-        if not m:
+        m = GOPRO_RE.match(video.name)
+        if bool(m) != gopro:
             raise DayGpxSliceError(
-                f"{video.name}: cannot read camera time (expected VID_YYYYMMDD_HHMMSS_...)"
+                f"{source_dir}: source dir mixes GoPro (GXccNNNN.MP4) and VID_ names; "
+                "one camera naming per drive"
             )
+        if m:
+            key: tuple[str, ...] = ("gopro", m.group(2))
+            seq = int(m.group(1))
+        else:
+            m = VID_RE.match(video.name)
+            if not m:
+                raise DayGpxSliceError(
+                    f"{video.name}: cannot read camera time "
+                    "(expected VID_YYYYMMDD_HHMMSS_... or GXccNNNN.MP4)"
+                )
+            key, seq = m.group(1, 2, 3), int(m.group(4))
         dur = get_clip_duration(video)
         if dur <= 0:
             raise DayGpxSliceError(f"{video.name}: ffprobe duration unavailable")
-        clips.append((video, m.group(1, 2, 3), int(m.group(4)), dur))
+        clips.append((video, key, seq, dur))
+    if gopro and utc_offset_hours is not None:
+        raise DayGpxSliceError(
+            "GoPro chapters carry no filename clock; their ffprobe creation_time is UTC, "
+            "so --camera-utc-offset-hours does not apply (drop it)"
+        )
     # Seconds of earlier chapters of the same recording before each clip.
     lead: dict[Path, float] = {}
     for key in {k for _, k, _, _ in clips}:
         chapters = sorted((seq, video, dur) for video, k, seq, dur in clips if k == key)
         elapsed = 0.0
         for (seq, video, dur), prev in zip(chapters, [None, *chapters]):
+            if gopro and prev is None and seq != 1:
+                raise DayGpxSliceError(
+                    f"{video.name}: chapter of a GoPro recording whose chapter 01 is "
+                    "missing; its start cannot be known"
+                )
             if prev is not None and seq != prev[0] + 1:
                 raise DayGpxSliceError(
                     f"{video.name}: chapter of a recording whose previous chapter "
@@ -218,7 +252,7 @@ def slice_day_gpx(
             lead[video] = elapsed
             elapsed += dur
 
-    measured = utc_offset_hours is None
+    measured = utc_offset_hours is None and not gopro
     if measured:
         firsts = [(v, d, h, 0.0) for v, (d, h, _l), _s, _u in clips if lead[v] == 0.0]
         utc_offset_hours = _measure_offset(firsts)
@@ -226,12 +260,29 @@ def slice_day_gpx(
             "day-gpx: measured camera UTC offset %+g h from creation_time of %s",
             utc_offset_hours, ", ".join(v.name for v, *_ in firsts),
         )  # fmt: skip
+    # GoPro: a recording's clock is its chapter 01 creation_time (UTC).
+    anchor: dict[tuple[str, ...], datetime] = {}
+    if gopro:
+        for video, key, _seq, _dur in clips:
+            if lead[video] != 0.0:
+                continue
+            ct = _ffprobe_creation_time(video)
+            if ct is None:
+                raise DayGpxSliceError(
+                    f"{video.name}: ffprobe creation_time unavailable; a GoPro recording's "
+                    "start is its chapter 01 creation_time and cannot be known without it"
+                )
+            anchor[key] = ct.replace(tzinfo=timezone.utc) if ct.tzinfo is None else ct
     planned: list[tuple[Path, str, SliceResult]] = []
-    for video, (date, hms, _lens), _seq, dur in clips:
-        local = datetime.strptime(date + hms, "%Y%m%d%H%M%S")
-        start = (local - timedelta(hours=utc_offset_hours)).replace(tzinfo=timezone.utc)
-        start += timedelta(seconds=lead[video])
-        ct = _ffprobe_creation_time(video)
+    for video, key, _seq, dur in clips:
+        if gopro:
+            start = anchor[key] + timedelta(seconds=lead[video])
+        else:
+            date, hms, _lens = key
+            local = datetime.strptime(date + hms, "%Y%m%d%H%M%S")
+            start = (local - timedelta(hours=utc_offset_hours)).replace(tzinfo=timezone.utc)
+            start += timedelta(seconds=lead[video])
+        ct = None if gopro else _ffprobe_creation_time(video)
         if ct is not None and not measured:
             if ct.tzinfo is None:
                 ct = ct.replace(tzinfo=timezone.utc)
@@ -249,9 +300,13 @@ def slice_day_gpx(
         hi = start + timedelta(seconds=dur + tail_pad(dur))
         keep = [blob for ts, blob in points if lo <= ts <= hi]
         if not keep:
+            why = (
+                "GoPro creation_time is not this day's track, or day GPX is another day"
+                if gopro
+                else f"camera offset {utc_offset_hours:+g} h wrong, or day GPX is another day"
+            )
             raise DayGpxSliceError(
-                f"{video.name}: no trackpoints in {lo.isoformat()}..{hi.isoformat()} "
-                f"(camera offset {utc_offset_hours:+g} h wrong, or day GPX is another day)"
+                f"{video.name}: no trackpoints in {lo.isoformat()}..{hi.isoformat()} ({why})"
                 + _zero_hint(measured, utc_offset_hours)
             )
         sidecar = video.with_suffix(".gpx")
