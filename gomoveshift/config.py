@@ -811,6 +811,8 @@ class PhotosConfig(BaseModel):
     # needing a clock. Refused at the CLI door when the volume is not mounted, so
     # an unmounted volume costs nothing rather than a whole render.
     contact_sheet_root: str = ""  # "" → <paths.gms_data_home()>/contact-sheets
+    # Fixed home of ``photos sort``: ``runs/<date>_<folder>/`` plus ``ledger.sqlite``.
+    sort_root: str = "/mnt/d/camPics_output"
     develop_styles: str = ""
     # Style lever: amplifies every style's delta over the measured base.
     # 1.0 is the operator-calibrated bake; >1 pushes the looks toward renderer
@@ -1260,6 +1262,10 @@ class PhotosConfig(BaseModel):
         if self.contact_sheet_root:
             return Path(self.contact_sheet_root).expanduser()
         return gms_data_home() / "contact-sheets"
+
+    def resolve_sort_root(self) -> Path:
+        """Where every ``photos sort`` run folder and the dedupe ledger live."""
+        return Path(self.sort_root).expanduser()
 
 
 class GPSQualityConfig(BaseModel):

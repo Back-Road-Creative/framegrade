@@ -2512,6 +2512,27 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
         "base (default: photos.style_strength, 1.0 = the calibrated bake; 2 = extreme)",
     )
 
+    # photos sort — dedupe, classify and develop a whole folder into the fixed
+    # photos.sort_root (no --out: the output home is always the same).
+    sort_p = photos_sub.add_parser(
+        "sort", help="Dedupe, classify and develop a folder of photos into photos.sort_root"
+    )
+    sort_p.add_argument("folder", help="Folder of photos (searched recursively)")
+    sort_p.add_argument(
+        "--dry-run", action="store_true", help="Classify, count, estimate; no writes"
+    )
+    sort_p.add_argument("--index-only", action="store_true", help="Record shots in the ledger only")
+    sort_p.add_argument(
+        "--reprocess", action="store_true", help="Develop shots already in the ledger"
+    )
+    sort_p.add_argument(
+        "--workers", type=int, default=2, help="Develop processes, 1..4 (default 2)"
+    )
+    sort_p.add_argument(
+        "--no-stacks", action="store_true", help="Skip astro stacking (run.json only)"
+    )
+    sort_p.add_argument("--gpu", action="store_true", help="Allow GPU stages (run.json only)")
+
     # photos develop — per-photo style variants into a LOCAL working dir (no
     # journey/day, no clustering, no blur — never the public site tree).
     dev = photos_sub.add_parser(

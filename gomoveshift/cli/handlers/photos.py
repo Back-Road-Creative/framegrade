@@ -1922,6 +1922,23 @@ def _cmd_photos_astro_combine(args) -> int:
     return 0
 
 
+def _cmd_photos_sort(args) -> int:
+    """``photos sort``: the stages live in ``pipeline.photos.sort``."""
+    from ...config import get_config
+    from ...pipeline.photos import sort
+
+    sort.lower_priority()
+    options = sort.SortOptions(
+        **{k: getattr(args, k) for k in sort.SortOptions.__dataclass_fields__}
+    )
+    try:
+        sort.run_sort(Path(args.folder), get_config().photos.resolve_sort_root(), options)
+    except sort.SortRefusalError as exc:
+        print(f"photos sort refused: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def cmd_photos(args, config):
     """Daily photo social media posting pipeline."""
     if args.photos_command == "night":
@@ -1933,6 +1950,7 @@ def cmd_photos(args, config):
         "astro": _cmd_photos_astro,
         "astro-combine": _cmd_photos_astro_combine,
         "astro-inspect": _cmd_photos_astro_inspect,
+        "sort": _cmd_photos_sort,
     }
     if args.photos_command in astro_handlers:
         from ...pipeline.media_admission import MediaAdmissionError, media_admission
