@@ -1,0 +1,12 @@
+## Photo quality order (implementation)
+
+- **What it is** (`gomoveshift/pipeline/photos/quality_order.py`): a score that orders shots inside one category, best first. It never excludes a shot; inclusion is decided elsewhere. It scores the developed image (uint8 RGB), the thing a person looks at.
+- **Entry points.** `score_developed(rgb, category, aesthetic=None, path=None, exposure_s=None, focal_mm=None)` returns a `QualityScore(technical, category, aesthetic, total, parts)`. `order_category(scored)` returns keys by `total` descending, ties by key ascending. `technical_score`, `category_signals` and `combine` are the pieces.
+- **Bounded and pure.** Every measure runs on a copy whose long edge is at most 1024 px. The input array is never changed. Every number returned is finite and in 0..1; a flat black or white frame scores in range.
+- **Technical.** Sharpness is the cull Laplacian variance `s` through `s / (s + 300)`, minus clipping: white share above 2% and (day only) black share above 10%, one point per unit of excess.
+- **Night (`astro`).** Technical becomes 0.40 star count (`n / (n + 30)`), 0.20 star sharpness (FWHM 2 px or less is 1, falling to 0 at 8 px), 0.25 trailing (1 minus star ellipticity), 0.15 frame sharpness, minus the clip penalty. A frame triage marks unusable is multiplied by 0.4 and still returned. A frame with no stars scores low.
+- **Category signal.** Landscape: mean of golden-hour and sky ratio (haze is skipped; there is no cheap source for it). Night sky: mean of star count, sky darkness (median luma against 80) and foreground separation (lower-third vs upper-third luma gap, 64 or more is 1). Close-up: 0.6 subject isolation (middle-half sharpness over border sharpness, `r / (r + 3)`) plus 0.4 colour vibrancy. Every other category: mean of vibrancy and mid-tone balance (mean luma against 118).
+- **Combine.** `technical * ((1 - w) * category + w * aesthetic)` with `w = 0.5`; with no aesthetic score, `technical * category`.
+- **Parts.** `parts` carries every named component (sharpness, clip_penalty, the star measures, and the category signals) for `ranked.csv`.
+- **Refusals.** A frame that is not HxWx3 uint8 raises `ValueError`. Category strings are `SubjectCategory` values (`astro`, `close_up`, `landscape`); the module does not import the enum.
+- **Tests:** `tests/test_photo_quality_order.py` (synthetic checkerboards, star fields and gradients, no real photos).
