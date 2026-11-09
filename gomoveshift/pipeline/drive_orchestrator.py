@@ -441,6 +441,80 @@ def preserve_per_lf_overrides_on_resume(state, cli_overrides: Optional[dict]) ->
                 setattr(state, field, {**derived, **cli_overrides})
 
 
+#: Phases whose output has the label burned in or written out (the LF/short
+#: renders carry the OST, phase_d builds titles, thumbnails and the upload set
+#: from it). A corrected placeless label re-runs both.
+_PLACELESS_RELABEL_REBUILT_PHASES = ("phase_bc_day_first", "phase_d")
+
+
+def relabel_placeless_on_resume(
+    state,
+    resumed_phases: list[str],
+    stages_completed: list[str],
+    *,
+    output_base,
+    stages_dir,
+) -> list[str]:
+    """Make a corrected ``--placeless-label`` replace the old text on resume.
+
+    ``placeless_label`` is CLI-wins in ``merge_on_resume``, but the checkpoint
+    restores the per-LF mirrors with the OLD text and
+    ``preserve_per_lf_overrides_on_resume`` re-applies only ``--per-lf-location``
+    (refused beside a placeless label), so a Phase-D-only resume would reuse
+    finals already burned with a label that may claim what nothing measures.
+
+    When the label in force differs from the text any LF carries, every LF
+    gets the new label through ``preserve_per_lf_overrides_on_resume``, then
+    everything built from the old text is dropped through the existing
+    mechanisms: ``phase_bc_day_first`` and ``phase_d`` leave the resume set
+    (the per-LF OST fingerprint then re-burns each LF), ``per_day_completed``
+    is cleared so no fast path reconstructs old finals, and the OST audit
+    confirmations (state passes/hashes, system-review records, the
+    ``ost_audit_<date>.json`` sidecar and ``*.confirmed`` markers) are purged
+    so a confirmation of the old text cannot carry over. An unchanged label is
+    a no-op. Returns the trimmed ``resumed_phases``.
+    """
+    label = (getattr(state, "placeless_label", None) or "").strip()
+    if not label:
+        return resumed_phases
+    indices: set[int] = set()
+    stale = False
+    for field in ("per_lf_overrides", *PER_LF_OVERRIDE_MIRROR_FIELDS):
+        for key, text in (getattr(state, field, None) or {}).items():
+            indices.add(int(key))
+            stale = stale or text != label
+    if not stale:
+        return resumed_phases
+    logger.warning(
+        "PLACELESS-RELABEL-ON-RESUME: the checkpoint carries a different placeless "
+        "label than --placeless-label %r -- re-labelling every LF and re-running %s.",
+        label,
+        ", ".join(_PLACELESS_RELABEL_REBUILT_PHASES),
+    )
+    preserve_per_lf_overrides_on_resume(state, {i: label for i in sorted(indices)})
+    drop = set(_PLACELESS_RELABEL_REBUILT_PHASES)
+    resumed_phases = [p for p in resumed_phases if p not in drop]
+    stages_completed[:] = [p for p in stages_completed if p not in drop]
+    state.phases_completed = [
+        p for p in (getattr(state, "phases_completed", None) or []) if p not in drop
+    ]
+    state.per_day_completed = {}
+    state.ost_audit_passed = {}
+    state.ost_audit_hash = {}
+    state.shorts_ost_system_review = {}
+    state.superlong_ost_system_review = {}
+    mirror = Path(output_base) / "_stages"
+    seen: set[Path] = set()
+    for base in (Path(output_base), Path(stages_dir), mirror):
+        for pattern in ("ost_audit_*.json", "*.confirmed"):
+            for path in base.glob(pattern):
+                if path.resolve() not in seen:
+                    seen.add(path.resolve())
+                    path.unlink()
+                    logger.info("  placeless relabel: cleared old-text artifact %s", path)
+    return resumed_phases
+
+
 def reset_force_sidecar_reset_after_resume(state, cli_value: Optional[bool]) -> None:
     """Force ``state.force_sidecar_reset`` to THIS invocation's CLI intent,
     unconditionally, AFTER the resume merge.
@@ -1108,6 +1182,15 @@ class DrivePipelineOrchestrator:
             # override string is burned verbatim downstream). Extracted for
             # unit-testability (mirrors the schedule-region-stale helper).
             preserve_per_lf_overrides_on_resume(state, per_lf_overrides)
+            # A corrected --placeless-label replaces the old text everywhere it was
+            # burned or written (see ``relabel_placeless_on_resume``).
+            resumed_phases = relabel_placeless_on_resume(
+                state,
+                resumed_phases,
+                stages_completed,
+                output_base=output_base,
+                stages_dir=stages_dir,
+            )
             # ── force_sidecar_reset per-invocation reset (post-merge) ────────
             # See ``reset_force_sidecar_reset_after_resume`` docstring — must
             # run here, after ``_try_resume``'s ``merge_on_resume`` call.
