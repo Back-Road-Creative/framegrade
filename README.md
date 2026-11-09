@@ -105,6 +105,25 @@ project that is skipped (too recent, pipeline not complete) prints the reason
 and exits `2`, so `cleanup <project> --confirm && ...` never reports a reclaim
 that did not happen; a project with nothing left to reclaim exits `0`.
 
+### `gomoveshift cleanup <project> --abandoned [--confirm] [--min-age N]`
+
+Reclaims a killed or superseded run's whole `_stages/` dir — the one case the
+plain `cleanup` can only `SKIP … Pipeline not complete` (a relaunch under a
+different `GMS_INTERMEDIATE_DIR` left one such 139 GB dir behind). A project
+name is required; the flag never sweeps every project. The dir is **abandoned**
+only when every rule holds, checked in this order, and the first failing rule
+is the `SKIP` reason: `_stages` is not a symlink; no `no-auto-resume` hold
+(a held run is waiting, not abandoned); the run lock `pipeline_state.lock` is
+absent or its pid is dead; no `gomoveshift drive` process is running anywhere
+(the same `pgrep` the doctor uses — a live drive might be the one about to
+resume it); and the `--min-age` gate passes. A complete project is never
+abandoned (the plain rules apply). The dry run prints `WOULD REMOVE ABANDONED
+STAGE DIR: <path> (<GB>)`; `--confirm` re-checks the rules and removes that
+one dir with `rmtree`, the only recursive removal `cleanup` makes. The output
+dir, the copied sources and every other project are untouched. Without the
+flag an incomplete project still exits `2`, its `SKIP` line now naming
+`--abandoned`.
+
 During a drive, each long-form's work files (`lf_NN_segments.mp4`,
 `lf_NN_with_montage.mp4`, `.lf_NN_work/`) are released as soon as that
 long-form's final is burned and fingerprinted, so a multi-part day holds one
