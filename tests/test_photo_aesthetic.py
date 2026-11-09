@@ -199,11 +199,11 @@ def test_model_dir_default_under_data_home(monkeypatch, tmp_path):
 
 
 def test_pinned_constants():
-    assert (
-        ae.VISION_SPEC.sha256 == "9a658de8944a2001719beabf6c5030cfe7b3dc80e85983f69fc648d6b4d7ec0f"
-    )
+    vision_pin = "9a658de8944a2001719beabf6c5030cfe7b3dc80e85983f69fc648d6b4d7ec0f"  # pragma: allowlist secret (public model checksum, not a credential)
+    head_pin = "21dd590f3ccdc646f0d53120778b296013b096a035a2718c9cb0d511bff0f1e0"  # pragma: allowlist secret (public model checksum, not a credential)
+    assert ae.VISION_SPEC.sha256 == vision_pin
     assert ae.VISION_SPEC.size == 307001500
-    assert ae.HEAD_SPEC.sha256 == "21dd590f3ccdc646f0d53120778b296013b096a035a2718c9cb0d511bff0f1e0"
+    assert ae.HEAD_SPEC.sha256 == head_pin
     assert ae.HEAD_SPEC.size == 3714759
     assert ae.VISION_SPEC.url.startswith("https://huggingface.co/Xenova/clip-vit-large-patch14/")
     assert ae.HEAD_SPEC.url.startswith("https://github.com/christophschuhmann/")

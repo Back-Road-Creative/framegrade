@@ -50,13 +50,13 @@ VISION_SPEC = ModelSpec(
     "vision_model_quantized.onnx",
     "https://huggingface.co/Xenova/clip-vit-large-patch14/resolve/main/onnx/vision_model_quantized.onnx",
     307001500,
-    "9a658de8944a2001719beabf6c5030cfe7b3dc80e85983f69fc648d6b4d7ec0f",
+    "9a658de8944a2001719beabf6c5030cfe7b3dc80e85983f69fc648d6b4d7ec0f",  # pragma: allowlist secret (public model checksum, not a credential)
 )
 HEAD_SPEC = ModelSpec(
     "sac+logos+ava1-l14-linearMSE.pth",
     "https://github.com/christophschuhmann/improved-aesthetic-predictor/raw/main/sac+logos+ava1-l14-linearMSE.pth",
     3714759,
-    "21dd590f3ccdc646f0d53120778b296013b096a035a2718c9cb0d511bff0f1e0",
+    "21dd590f3ccdc646f0d53120778b296013b096a035a2718c9cb0d511bff0f1e0",  # pragma: allowlist secret (public model checksum, not a credential)
 )
 
 
