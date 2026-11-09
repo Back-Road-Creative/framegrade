@@ -49,6 +49,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -83,6 +84,7 @@ class SubjectCategory(str, Enum):
     LONG_EXPOSURE = "long_exposure"
     EXPOSURE_BRACKET = "exposure_bracket"
     LANDSCAPE = "landscape"
+    CLOSE_UP = "close_up"
 
 
 # Confidences. Operator is the only 1.0 on the board; inference caps below it,
@@ -123,6 +125,11 @@ PORTRAIT_APERTURE_MAX = 2.8
 LANDSCAPE_FOCAL_MM_MAX = 35.0
 LANDSCAPE_APERTURE_MIN = 8.0
 
+# Close-up: "not landscape (within feet) or macro". Focus within ~10 ft, or a
+# macro lens / implied magnification f/(d-f) of a quarter or more.
+CLOSE_UP_FOCUS_M_MAX = 3.0
+MACRO_MAGNIFICATION_MIN = 0.25
+
 # Long exposure that is NOT astro: the tripod water frame — a shutter no hand
 # holds, at a gain that says the scene was bright. Named for what the EXIF
 # proves (a long exposure), not for what it probably is (a waterfall): the
@@ -150,6 +157,10 @@ class CaptureOptics:
 
     focal_length_mm: float | None = None
     f_number: float | None = None
+    #: Subject distance in metres (EXIF FocusDistance); Pillow cannot read it,
+    #: so the caller supplies it (``recognise_photos(optics=...)``).
+    focus_distance_m: float | None = None
+    lens_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +277,44 @@ def _astro_like(exif: PhotoExif, scene: SceneProfile | None = None) -> bool:
     return _night(exif, scene)[0]
 
 
+def _close_up(optics: CaptureOptics) -> SubjectReading | None:
+    """Near focus and/or macro optics. ``None`` when neither evidences a close-up.
+
+    A macro lens NAME is only a hint: with a known far focus (and a magnification
+    under the floor) it is not a close-up. Near focus alone is moderate; near
+    focus plus a macro signal (name or magnification) takes the sequence-bonus
+    step, capped at ``CONFIDENCE_INFERENCE_MAX``. A macro name with no focus
+    distance at all is a weak reading.
+    """
+    focus = optics.focus_distance_m
+    focus_ok = focus is not None and math.isfinite(focus) and focus > 0.0
+    near = focus_ok and focus <= CLOSE_UP_FOCUS_M_MAX
+    evidence: list[str] = []
+    named_macro = bool(optics.lens_model) and "macro" in optics.lens_model.lower()
+    macro = named_macro
+    if named_macro:
+        evidence.append(f"lens: {optics.lens_model}")
+    focal = optics.focal_length_mm
+    if focus_ok and focal and focal > 0.0 and focus > focal / 1000.0:
+        f = focal / 1000.0
+        magnification = f / (focus - f)
+        if magnification >= MACRO_MAGNIFICATION_MIN:
+            macro = True
+            evidence.append(f"magnification {magnification:.2f} >= {MACRO_MAGNIFICATION_MIN:g}")
+    if near:
+        evidence.insert(0, f"focus distance {focus:g} m <= {CLOSE_UP_FOCUS_M_MAX:.1f} m")
+        confidence = CONFIDENCE_MODERATE
+        if macro:
+            confidence = min(
+                CONFIDENCE_MODERATE + CONFIDENCE_SEQUENCE_BONUS, CONFIDENCE_INFERENCE_MAX
+            )
+    elif named_macro and not focus_ok:
+        confidence = CONFIDENCE_WEAK
+    else:
+        return None
+    return SubjectReading(SubjectCategory.CLOSE_UP, confidence, SOURCE_INFERENCE, tuple(evidence))
+
+
 def recognise_subject(
     *,
     scene: SceneProfile | None = None,
@@ -310,6 +359,10 @@ def recognise_subject(
             return SubjectReading(
                 SubjectCategory.ASTRO, confidence, SOURCE_INFERENCE, tuple(evidence)
             )
+
+    close_up = _close_up(optics)
+    if close_up is not None:
+        return close_up
 
     focal, aperture = optics.focal_length_mm, optics.f_number
     night_now = _night(exif, scene)[0]
@@ -399,7 +452,9 @@ def _session_astro_frames(
 
 
 def recognise_photos(
-    photo_paths, scenes: Mapping[Path, SceneProfile] | None = None
+    photo_paths,
+    scenes: Mapping[Path, SceneProfile] | None = None,
+    optics: Mapping[Path, CaptureOptics] | None = None,
 ) -> dict[Path, SubjectReading]:
     """Recognise a whole card at once, reading EXIF and sidecars from disk.
 
@@ -408,7 +463,9 @@ def recognise_photos(
     ``.subject.json`` supplies the operator's correction, which wins. ``scenes``
     optionally supplies already-computed ``SceneProfile``s — nothing here
     decodes a pixel, so a card reads in milliseconds and a caller that has
-    profiled its frames gets the extra evidence for free.
+    profiled its frames gets the extra evidence for free. ``optics`` optionally
+    supplies a path's ``CaptureOptics`` (e.g. with focus distance) in place of
+    ``read_capture_optics``.
     """
     paths = [Path(p) for p in photo_paths or []]
     bracketed = {Path(p) for group in detect_brackets(paths) for p in group}
@@ -419,7 +476,7 @@ def recognise_photos(
         p: recognise_subject(
             scene=(scenes or {}).get(p),
             exif=exifs[p],
-            optics=read_capture_optics(p),
+            optics=(optics or {}).get(p) or read_capture_optics(p),
             in_exposure_bracket=p in bracketed,
             session_astro_frames=sequence_frames[p],
             correction=read_subject_correction(p),
