@@ -14,6 +14,7 @@ import pytest
 
 from gomoveshift.analysis.shorts_models import GPSData, GPSTrackpoint
 from gomoveshift.pipeline.drive_phases.phase_a import _assert_days_clear_gps_gap_floor
+from gomoveshift.pipeline.ingest.day_gpx_slicer import MARKER
 from gomoveshift.pipeline.regular_lf_planner import InsufficientFootageError
 
 DAY = "2026-03-04"
@@ -27,10 +28,15 @@ def _drive(mode="full_drive", part_min=3600, part_max=7200):
     )
 
 
-def _gps(seconds, start=1_000_000.0):
-    """A GPX with one usable fix per second for ``seconds`` footage seconds."""
-    tps = [GPSTrackpoint(35.0 + 1e-5 * i, -80.0, None, start + i) for i in range(int(seconds))]
-    return (GPSData(trackpoints=tps), start)
+def _gps(seconds, start=1_000_000.0, *, hole_len=0, every=120, creator=None):
+    """A GPX with one usable fix per second for ``seconds`` footage seconds,
+    silent for ``hole_len`` s every ``every`` s (a phone logger asleep)."""
+    tps = [
+        GPSTrackpoint(35.0 + 1e-5 * i, -80.0, None, start + i)
+        for i in range(int(seconds))
+        if i % every >= hole_len
+    ]
+    return (GPSData(trackpoints=tps, creator=creator), start)
 
 
 def _layout(durations):
@@ -82,3 +88,21 @@ def test_each_day_is_judged_on_its_own_footage():
 )
 def test_inactive_unless_full_drive_with_both_part_bounds(drive):
     _check(drive, [3000.0, 3000.0], [DAY, DAY], [_gps(3000), (None, 0.0)])
+
+
+def test_a_day_track_with_phone_holes_is_judged_at_the_day_track_gap():
+    # Clonakilty's shape: 4000 s with a 20 s hole every 120 s. At 5 s the holes
+    # cut 660 s and the day falls under 3600 s; a slicer-written track is
+    # judged at 30 s and passes.
+    with pytest.raises(InsufficientFootageError, match=DAY):
+        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=20)])
+    _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=20, creator=MARKER)])
+
+
+def test_the_refusal_names_the_tolerance_it_applied():
+    with pytest.raises(InsufficientFootageError) as exc:
+        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=60, every=120, creator=MARKER)])
+    assert "within 30.0s" in str(exc.value)
+    with pytest.raises(InsufficientFootageError) as exc:
+        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=60, every=120)])
+    assert "within 5.0s" in str(exc.value)

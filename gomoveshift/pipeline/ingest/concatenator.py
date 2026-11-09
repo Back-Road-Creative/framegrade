@@ -350,10 +350,15 @@ def _merge_sidecar_gpx_files(sidecars: list[Path], output_dir: Path, episode: Ep
     Each sidecar is padded 15 s before and 120 s past its chapter, so adjacent
     sidecars repeat the points around every chapter join. The merged track
     keeps each timestamp once, in time order, so the GPS-gap mask and the
-    journey see one continuous track rather than a segment that jumps back.
+    journey see one continuous track rather than a segment that jumps back. It
+    carries the slicer's ``creator`` marker: it is still a day-GPX slice, and
+    the GPS-gap rules judge such a track at the day-track fix gap
+    (``route_claims.fix_gap_s``).
     """
     import gpxpy
     import gpxpy.gpx
+
+    from .day_gpx_slicer import MARKER
 
     by_time = {}
     for sidecar in sidecars:
@@ -370,6 +375,7 @@ def _merge_sidecar_gpx_files(sidecars: list[Path], output_dir: Path, episode: Ep
             f"({', '.join(s.name for s in sidecars)})"
         )
     merged = gpxpy.gpx.GPX()
+    merged.creator = MARKER
     track = gpxpy.gpx.GPXTrack()
     segment = gpxpy.gpx.GPXTrackSegment()
     segment.points = [by_time[t] for t in sorted(by_time)]

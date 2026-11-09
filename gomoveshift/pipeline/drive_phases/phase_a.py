@@ -140,7 +140,7 @@ def _assert_days_clear_gps_gap_floor(
         return
     from ..longform_assembler import _with_gps_gap_mask
     from ..regular_lf_planner import InsufficientFootageError
-    from ..stop_mask import GPS_MAX_FIX_GAP_S
+    from ..route_claims import day_fix_gap_s
 
     chunks = []
     for (start, _end), duration in zip(file_boundaries, file_durations):
@@ -161,18 +161,16 @@ def _assert_days_clear_gps_gap_floor(
         day_scores = scores[(timestamps >= day_start) & (timestamps < day_end)]
         if len(day_scores) == 0:
             continue
+        day_gps = [gps_per_episode[i] for i in indices]
         gap = _with_gps_gap_mask(
-            day_scores,
-            day_boundaries,
-            [gps_per_episode[i] for i in indices],
-            np.zeros(len(day_scores), dtype=bool),
+            day_scores, day_boundaries, day_gps, np.zeros(len(day_scores), dtype=bool)
         )
         kept = int(np.count_nonzero(~gap))
         if kept < part_min:
             raise InsufficientFootageError(
                 f"Day {day}: at most {kept}s of footage survives the GPS-gap cut "
                 f"({len(day_scores) - kept}s has no usable fix within "
-                f"{GPS_MAX_FIX_GAP_S}s), under full_drive_part_min_sec={part_min}s; the "
+                f"{day_fix_gap_s(day_gps)}s), under full_drive_part_min_sec={part_min}s; the "
                 "stop mask can only cut more, so the drive plan is certain to refuse "
                 "this day. Refused before scoring. Footage is never padded, repeated or "
                 "joined to another day."

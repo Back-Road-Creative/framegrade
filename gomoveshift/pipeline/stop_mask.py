@@ -246,6 +246,9 @@ def states_to_stop_mask(states: np.ndarray) -> np.ndarray:
 # every window of the planner's 15-s minimum holding at least two fixes just as
 # 7 s did, so every window left open can vote its own place.
 GPS_MAX_FIX_GAP_S = _ROUTE_CLAIM_GAP_S
+# The full_drive planner (``longform_assembler._with_gps_gap_mask``) passes
+# ``max_gap_s=route_claims.day_fix_gap_s(...)`` instead: a day-GPX slice is
+# judged at ``route_claims.DAY_TRACK_GAP_S``. Shorts keep this default.
 
 
 def build_gps_gap_mask(

@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
+from gomoveshift.analysis.gps_parser import parse_gpx_file
 from gomoveshift.pipeline.ingest.concatenator import extract_and_merge_gpx
 from gomoveshift.pipeline.ingest.day_gpx_slicer import MARKER
 from gomoveshift.pipeline.ingest.gopro_parser import Episode, GoProChapter, GoProRecording
@@ -145,3 +146,16 @@ def test_no_lock_and_no_sidecars_stays_gps_less(src, tmp_path):
     with patch("gomoveshift.pipeline.gopro_gps.detect_gpmf_stream", return_value=False):
         assert extract_and_merge_gpx(ep, tmp_path / "out") is None
     assert ep.gpx_path is None and ep.gpx_source == "gpmf"
+
+
+def test_the_merged_sidecar_track_carries_the_slicer_marker(src, tmp_path):
+    # The merged track is still a day-GPX slice: it must carry the slicer's
+    # ``creator`` so the GPS-gap rules judge it at the day-track tolerance.
+    ep = _episode(src)
+    _sidecar(src / "GX010063.gpx", START - timedelta(seconds=15), 15 + 1025 + 120)
+    _sidecar(src / "GX020063.gpx", START + timedelta(seconds=1025 - 15), 15 + 1025 + 120)
+    _sidecar(src / "GX030063.gpx", START + timedelta(seconds=2050 - 15), 15 + 671 + 120)
+    with patch("gomoveshift.pipeline.gopro_gps.detect_gpmf_stream", return_value=False):
+        merged = extract_and_merge_gpx(ep, tmp_path / "out")
+    assert f'creator="{MARKER}"' in merged.read_text(encoding="utf-8")[:512]
+    assert parse_gpx_file(merged).creator == MARKER

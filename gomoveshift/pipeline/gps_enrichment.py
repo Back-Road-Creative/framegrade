@@ -1428,7 +1428,7 @@ def _build_route_windows_by_lf(drive_plan: Optional[DrivePlan], gps_per_episode)
     """``{lf_index: [RouteWindow]}`` — each retained segment with its own fixes
     in segment media seconds (no dedup: a gap must stay visible). Same GLOBAL
     index constraint as :func:`_build_gps_points_by_lf`."""
-    from .route_claims import RouteWindow
+    from .route_claims import RouteWindow, fix_gap_s
 
     if drive_plan is None or not gps_per_episode:
         return {}
@@ -1441,6 +1441,9 @@ def _build_route_windows_by_lf(drive_plan: Optional[DrivePlan], gps_per_episode)
             if hit is None:
                 continue
             corrected, pts, episode_pts = hit
+            # The raw state entry (GPSData or a resumed dict) names the track's
+            # origin; the gate judges this window's fixes at that origin's gap.
+            gap_s = fix_gap_s(gps_per_episode[int(getattr(seg, "source_file_index", -1))][0])
             start_s = float(getattr(seg, "start_time", 0.0) or 0.0)
             end_s = float(getattr(seg, "end_time", 0.0) or 0.0)
             prev_s, next_s = _nearest_outside_fixes(episode_pts, corrected, start_s, end_s)
@@ -1456,6 +1459,7 @@ def _build_route_windows_by_lf(drive_plan: Optional[DrivePlan], gps_per_episode)
                     next_fix_s=next_s,
                     prev_fix=prev_fix,
                     next_fix=next_fix,
+                    gap_s=gap_s,
                 )
             )
         if windows:

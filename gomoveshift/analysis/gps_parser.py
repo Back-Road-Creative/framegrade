@@ -140,4 +140,4 @@ def parse_gpx_file(gpx_path: Path) -> GPSData:
 
     logger.debug(f"Parsed {len(trackpoints)} trackpoints from {gpx_path.name}")
 
-    return GPSData(trackpoints=trackpoints)
+    return GPSData(trackpoints=trackpoints, creator=root.get("creator"))
