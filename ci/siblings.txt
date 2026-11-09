@@ -1,4 +1,4 @@
 # The two sibling packages this repo imports, pinned to one reviewed revision
 # each. Bump both the revision and the tests that depend on it in one change.
-seo-manager @ git+https://github.com/Back-Road-Creative/waypost@e63c463504b55bf53a05b7aae3879aa1a73e1e2c
+seo-manager @ git+https://github.com/Back-Road-Creative/waypost@d74f50aa6139082dfd90f31adbf46c496f647d80
 gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35
