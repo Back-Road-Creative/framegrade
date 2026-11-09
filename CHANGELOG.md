@@ -5,6 +5,30 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.57] - 2026-11-09
+
+### Added
+
+- `gomoveshift cleanup <project> --abandoned` reclaims a killed or superseded run's
+  whole `_stages/` dir, which the plain `cleanup` could only skip as "Pipeline not
+  complete". The dir qualifies only when every rule holds — not a symlink, no
+  `no-auto-resume` hold, no run lock held by a live pid, no `gomoveshift drive`
+  running anywhere, old enough for `--min-age` — and the first failing rule is the
+  `SKIP` reason. Dry run by default; `--confirm` re-checks and removes that one dir.
+  A project name is required. Without the flag the incomplete-project `SKIP` line
+  now names `--abandoned`.
+- `gomoveshift drive --from-recipe <path-or-project>` relaunches a drive from its own
+  `<stages>/resume.json`: the recipe's argv and `GMS_INTERMEDIATE_DIR` replace the command
+  line before parsing, so the relaunch reaches the stage dir the run used instead of a fresh
+  one. A bare project name resolves to the one live recipe under the stages root (none or
+  several refuse). Only `--phase`, `--publish`, `--lf-day`, `--lf-publish-date`,
+  `--skip-upload`, `--no-youtube-upload`, `--force` and `--no-tmux` may be added; `--fresh`, a
+  directory, any other flag, a conflicting `GMS_INTERMEDIATE_DIR` in the environment or an
+  unreadable recipe refuses with exit 2.
+- Guide/destination signs ("EXIT 283 Woodstock 1 MILE") are now an advisory `destination` sign claim with the stated distance. The verifier forward-geocodes the place (with an N/W initial variant for OCR misreads) within `sign_verify_destination_max_km` (default 80) of where it was read and may corroborate; it never conflicts and never feeds a label.
+- `--label-dry-run` suggests a sign-derived label for an LF with no GPS county vote: beneath `<no GPS — --per-lf-location override required>` it prints the county label `sign_label.explain_sign_label` allows from the LF's own road signs, with a copyable `--per-lf-location 'INDEX=LABEL'` form, or every rule that refused one (`none (N sign hit(s))`; `unavailable (<error>)` when bucketing failed). Suggest only: nothing is written into the override map or the state, and a GPS-bearing LF keeps its `sign evidence` verifier block instead.
+- The Phase A sign pass logs progress every 50 sampled seconds per day (done/total, hits, elapsed, ETA) and counts the stage each sample reached (sampled / grabbed / region / ocr_text / claims); the counters ride on the day summary and the A6 line and persist as `state.sign_pass_stats`, so a day's `0 hit(s)` can be read as "0 frames decoded" or "0 sign regions" without re-reading the footage.
+
 ## [0.3.56] - 2026-11-08
 
 ### Added
@@ -668,7 +692,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...HEAD
+[0.3.57]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...v0.3.57
 [0.3.56]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.55...v0.3.56
 [0.3.55]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.54...v0.3.55
 [0.3.54]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.53...v0.3.54
