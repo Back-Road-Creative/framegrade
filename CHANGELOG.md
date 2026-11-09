@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.60] - 2026-11-09
+
+### Fixed
+
+- A placeless label may say nothing the footage cannot prove, so `--placeless-label` now refuses any word outside `PLACELESS_NO_CLAIM_WORDS` (scenery, weather, time of day, road kind) at argparse, naming the claiming words, instead of burning it into the OST for a person to catch at the audit gate. A `drive_backlog.yaml` row carrying such a label was skipped silently; `gomoveshift health check` now opens a `placeless_label_unverifiable` incident (row, label, claiming words) for it, open while the yaml carries the label and closed once it does not. The other rows still launch.
+- A corrected `--placeless-label` now replaces the old text on resume. The new label was applied to `state.placeless_label` only, while the checkpoint brought back each LF's old label in `per_lf_locations`, `per_lf_ost_text` and `per_lf_titles` and a Phase-D-only resume reused finals already burned with it (a claiming label such as "Through The Valleys And Ridges" survived its correction to "Somewhere On The Road"). A resume whose label differs from the text any LF carries now rewrites every LF's label, drops `phase_bc_day_first` and `phase_d` so the LFs re-burn and the thumbnails and titles re-render, clears `per_day_completed` and the OST audit confirmations (state pass and hash, system-review records, `ost_audit_<date>.json` and `*.confirmed`), so a confirmation of the old text cannot carry over. An unchanged label is untouched.
+
 ## [0.3.59] - 2026-11-09
 
 ### Added
@@ -704,7 +711,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.59...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.60...HEAD
+[0.3.60]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.59...v0.3.60
 [0.3.59]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.58...v0.3.59
 [0.3.58]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.57...v0.3.58
 [0.3.57]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.56...v0.3.57
