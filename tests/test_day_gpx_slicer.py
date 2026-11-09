@@ -373,3 +373,84 @@ def test_parser_registers_flags():
             ]
         )
     assert ns.day_gpx == "/d.gpx" and ns.camera_utc_offset_hours == -4.0
+
+
+# ---------------------------------------------------------------------------
+# GoPro chapter files (GXccNNNN.MP4): the clock is ffprobe creation_time, UTC
+# ---------------------------------------------------------------------------
+
+G1, G2, G3 = "GX010064.MP4", "GX020064.MP4", "GX030064.MP4"
+G_START = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def gopro(tmp_path):
+    d = tmp_path / "gopro"
+    d.mkdir()
+    for name in (G1, G2, G3):
+        (d / name).write_bytes(b"x")
+    return d
+
+
+@pytest.fixture
+def _gopro_probe():
+    durs = {G1: 1025.0, G2: 1025.0, G3: 400.0}
+    with (
+        patch.object(dgs, "get_clip_duration", side_effect=lambda p: durs[p.name]),
+        patch.object(
+            dgs,
+            "_ffprobe_creation_time",
+            side_effect=lambda p: G_START if p.name == G1 else None,
+        ),
+    ):
+        yield
+
+
+def test_gopro_chapters_sliced_from_first_chapter_creation_time(gopro, day, _gopro_probe):
+    results = slice_day_gpx(day, gopro)
+    starts = {r.sidecar.name: r.start_utc for r in results}
+    assert starts == {
+        "GX010064.gpx": G_START,
+        "GX020064.gpx": G_START + timedelta(seconds=1025),
+        "GX030064.gpx": G_START + timedelta(seconds=2050),
+    }
+    t3 = _times(gopro / "GX030064.gpx")
+    assert t3[0] == G_START + timedelta(seconds=2050 - 15)
+    assert t3[-1] == G_START + timedelta(
+        seconds=2050 + 400 + dgs.tail_pad(400)
+    )  # short last chapter
+    for sidecar in gopro.glob("*.gpx"):
+        assert dgs._is_own(sidecar)
+
+
+def test_gopro_first_chapter_without_creation_time_refused(gopro, day):
+    with (
+        patch.object(dgs, "get_clip_duration", return_value=600.0),
+        patch.object(dgs, "_ffprobe_creation_time", return_value=None),
+    ):
+        with pytest.raises(DayGpxSliceError, match="creation_time"):
+            slice_day_gpx(day, gopro)
+    assert not list(gopro.glob("*.gpx*"))
+
+
+def test_gopro_offset_is_refused_the_container_clock_is_utc(gopro, day, _gopro_probe):
+    with pytest.raises(DayGpxSliceError, match="camera-utc-offset-hours"):
+        slice_day_gpx(day, gopro, utc_offset_hours=-4)
+    assert not list(gopro.glob("*.gpx*"))
+
+
+def test_gopro_chapter_with_a_missing_predecessor_refused(tmp_path, day, _gopro_probe):
+    d = tmp_path / "gap"
+    d.mkdir()
+    for name in (G1, G3):
+        (d / name).write_bytes(b"x")
+    with pytest.raises(DayGpxSliceError, match="chapter"):
+        slice_day_gpx(day, d)
+    assert not list(d.glob("*.gpx*"))
+
+
+def test_mixed_gopro_and_vid_names_refused(gopro, day, _gopro_probe):
+    (gopro / A).write_bytes(b"x")
+    with pytest.raises(DayGpxSliceError, match="mix"):
+        slice_day_gpx(day, gopro, utc_offset_hours=-4)
+    assert not list(gopro.glob("*.gpx*"))

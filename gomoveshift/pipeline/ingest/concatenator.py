@@ -287,6 +287,41 @@ def extract_and_merge_gpx(
             if gpx:
                 gpx_parts.append(gpx)
 
+    # Day-GPX fallback (``--day-gpx`` on a GoPro drive): the slicer wrote a
+    # ``<chapter stem>.gpx`` beside every chapter. When this episode's own
+    # GPMF does not cover every chapter (no lock on some or all of them —
+    # ``nctopa-2026-03-05-rec0063`` had 13 chapters and zero fixes) the
+    # sidecars are its GPS, tagged ``external`` so Phase A runs the
+    # correspondence gate. Footage-clock GPMF parts (``gms_media_s``) cannot
+    # be mixed with wall-clock sidecar points in one track — a journey is
+    # re-timed onto the footage clock only when EVERY point is stamped — so
+    # the episode takes one source or the other, never both.
+    chapters = [
+        c for rec in episode.recordings for c in sorted(rec.chapters, key=lambda c: c.chapter_num)
+    ]
+    sidecars = [c.path.with_suffix(".gpx") for c in chapters]
+    present = [s for s in sidecars if s.exists() and s.stat().st_size > 0]
+    if present and len(gpx_parts) < len(chapters):
+        missing = [s.name for s in sidecars if s not in present]
+        if missing:
+            raise RuntimeError(
+                f"Episode {episode.index}: GPS sidecars cover only some chapters "
+                f"(missing {', '.join(missing)}); a --day-gpx run writes one per chapter, "
+                "so this is a partial or foreign set — refusing to guess which chapters "
+                "the drive was located for"
+            )
+        logger.info(
+            "  Episode %s: GPMF covers %d of %d chapters; taking the %d day-GPX sidecars "
+            "as external GPS instead",
+            episode.index, len(gpx_parts), len(chapters), len(present),
+        )  # fmt: skip
+        for part in gpx_parts:
+            part.unlink(missing_ok=True)
+        merged_path = _merge_sidecar_gpx_files(present, output_dir, episode)
+        episode.gpx_path = merged_path
+        episode.gpx_source = "external"
+        return merged_path
+
     if not gpx_parts:
         logger.warning(f"  Episode {episode.index}: no GPS data extracted")
         return None
@@ -306,6 +341,46 @@ def extract_and_merge_gpx(
         if part.exists() and part != merged_path:
             part.unlink(missing_ok=True)
 
+    return merged_path
+
+
+def _merge_sidecar_gpx_files(sidecars: list[Path], output_dir: Path, episode: Episode) -> Path:
+    """One monotone wall-clock track from per-chapter day-GPX sidecars.
+
+    Each sidecar is padded 15 s before and 120 s past its chapter, so adjacent
+    sidecars repeat the points around every chapter join. The merged track
+    keeps each timestamp once, in time order, so the GPS-gap mask and the
+    journey see one continuous track rather than a segment that jumps back.
+    """
+    import gpxpy
+    import gpxpy.gpx
+
+    by_time = {}
+    for sidecar in sidecars:
+        with open(sidecar, encoding="utf-8") as f:
+            gpx = gpxpy.parse(f)
+        for track in gpx.tracks:
+            for segment in track.segments:
+                for pt in segment.points:
+                    if pt.time is not None:
+                        by_time.setdefault(pt.time, pt)
+    if not by_time:
+        raise RuntimeError(
+            f"Episode {episode.index}: day-GPX sidecars hold no timed trackpoints "
+            f"({', '.join(s.name for s in sidecars)})"
+        )
+    merged = gpxpy.gpx.GPX()
+    track = gpxpy.gpx.GPXTrack()
+    segment = gpxpy.gpx.GPXTrackSegment()
+    segment.points = [by_time[t] for t in sorted(by_time)]
+    track.segments.append(segment)
+    merged.tracks.append(track)
+    merged_path = output_dir / f"episode_{episode.index:02d}_{episode.date}.gpx"
+    atomic_write_text(merged_path, merged.to_xml())
+    logger.info(
+        "  Episode %s: merged %d day-GPX sidecars → %s (%d fixes)",
+        episode.index, len(sidecars), merged_path.name, len(segment.points),
+    )  # fmt: skip
     return merged_path
 
 

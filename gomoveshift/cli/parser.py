@@ -767,14 +767,18 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "--day-gpx",
         default=None,
         metavar="PATH",
-        help="Whole-day GPX to slice into one <stem>.gpx sidecar per VID_*.mp4 "
-        "in the source dir before ingest (generic mode, no-GPMF cameras). "
-        "The camera clock offset is measured from creation_time unless "
-        "--camera-utc-offset-hours is given. Strict filename contract: only "
+        help="Whole-day GPX to slice into one <stem>.gpx sidecar per source file "
+        "before ingest. Generic mode (no-GPMF cameras): only "
         "VID_YYYYMMDD_HHMMSS_NN_NNN.mp4 names are sliced (the clock comes "
-        "from the name); LRV_* proxies are skipped, any other .mp4 is "
-        "refused. Not written under --dry-run. Sidecars it wrote are "
-        "rewritten; an operator's own <stem>.gpx is never overwritten.",
+        "from the name) and the camera clock offset is measured from "
+        "creation_time unless --camera-utc-offset-hours is given; LRV_* "
+        "proxies are skipped, any other .mp4 is refused. GoPro mode "
+        "(GXccNNNN.MP4): the fallback for a GoPro whose GPMF never locked; a "
+        "recording starts at its chapter 01 creation_time (UTC), so no offset "
+        "is taken, and ingest reads the sidecars only for an episode whose "
+        "own GPMF does not cover every chapter. Not written under --dry-run. "
+        "Sidecars it wrote are rewritten; an operator's own <stem>.gpx is "
+        "never overwritten.",
     )
     p.add_argument(
         "--camera-utc-offset-hours",
@@ -782,9 +786,10 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         metavar="N",
         help="Camera clock UTC offset (local = UTC + N; US Eastern DST is -4). "
-        "Optional with --day-gpx: omitted, it is measured per clip from ffprobe "
-        "creation_time and refused when it is inconsistent; given, it must agree "
-        "with creation_time.",
+        "Optional with --day-gpx on VID_ names: omitted, it is measured per clip "
+        "from ffprobe creation_time and refused when it is inconsistent; given, it "
+        "must agree with creation_time. Refused on GoPro names (their "
+        "creation_time is already UTC).",
     )
     p.add_argument(
         "--force-no-rebase",
