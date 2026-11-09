@@ -25,8 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from ..health import heal
-
 logger = logging.getLogger(__name__)
 
 # Intermediate files in _stages/ that are safe to delete once _FINAL.mp4 exists
@@ -74,12 +72,13 @@ class CleanupPlan:
 
 
 # The live-drive probe is heal's — one `pgrep` pattern for the whole codebase. Callers
-# that pass no probe get ``_live_drive_probe``, which looks heal up at call time so a
-# test patching ``gomoveshift.health.heal._pgrep_drive`` is honoured.
-default_drive_running = heal._pgrep_drive
-
-
+# that pass no probe get ``_live_drive_probe``, which imports heal at CALL time: a
+# module-level import cycles (publishing.queue → pipeline/__init__ → this module →
+# health.heal → cadence → publishing.queue, CI #257), and the late lookup also honours
+# a test patching ``gomoveshift.health.heal._pgrep_drive``.
 def _live_drive_probe() -> bool:
+    from ..health import heal
+
     return heal._pgrep_drive()
 
 

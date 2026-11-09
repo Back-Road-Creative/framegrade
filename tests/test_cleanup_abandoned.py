@@ -238,8 +238,31 @@ def test_cli_parser_accepts_the_flag():
 
 
 def test_default_drive_probe_is_the_heal_modules():
-    """The live-drive probe is ``health.heal._pgrep_drive`` — one pattern for the whole codebase."""
-    from gomoveshift.health import heal
+    """The live-drive probe is ``health.heal._pgrep_drive`` — one pattern for the whole codebase,
+    looked up at call time so a patch on heal is honoured."""
     from gomoveshift.pipeline import cleanup as cleanup_mod
 
-    assert cleanup_mod.default_drive_running is heal._pgrep_drive
+    with patch("gomoveshift.health.heal._pgrep_drive", return_value=True) as probe:
+        assert cleanup_mod._live_drive_probe() is True
+    probe.assert_called_once_with()
+
+
+def test_importing_publishing_queue_first_does_not_cycle_through_cleanup():
+    """CI (#257 run 42565899313): ``tests/e2e/conftest.py`` imports ``publishing.queue`` first;
+    queue → pipeline._file_lock → pipeline/__init__ → pipeline.cleanup → health.heal → cadence →
+    publishing.queue (partially initialised) raised ImportError. The heal import stays lazy."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import gomoveshift.publishing.queue; import gomoveshift.pipeline.cleanup",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
