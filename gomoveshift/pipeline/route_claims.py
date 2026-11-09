@@ -614,7 +614,8 @@ class RouteEvidence:
             states = Counter(b.state for b in self.bins if b.county == name and b.state)
             claim["state"] = states.most_common(1)[0][0] if states else None
             if claim["state"] is None:
-                # Which pinned map can prove it (Irish "County Cork"); not a label part.
+                # Which pinned map can prove it (Irish "County Cork"), and the
+                # label's tail ("County Cork, Ireland" — see ``region_label``).
                 countries = {b.country for b in self.bins if b.county == name}
                 claim["country"] = countries.pop() if len(countries) == 1 else None
         if level == "counties":
@@ -1067,8 +1068,11 @@ def region_label(claim: dict) -> str:
     if claim["level"] == "state":
         return name
     state = claim.get("state")  # county or counties
-    if claim["level"] == "counties" and not state and claim.get("country"):
-        return f"{name}, {claim['country']}"  # stateless pair: "County Cork & ..., Ireland"
+    if not state and claim.get("country"):
+        # Stateless country (Ireland): the country is the label's tail, for one
+        # county ("County Cork, Ireland" — the gps_enrichment label) and a pair
+        # ("County Cork & County Kerry, Ireland") alike.
+        return f"{name}, {claim['country']}"
     return f"{name}, {US_STATE_ABBREVS.get(state, state)}" if state else name
 
 

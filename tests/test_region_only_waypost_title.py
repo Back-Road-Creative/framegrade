@@ -80,3 +80,14 @@ def test_stateless_county_with_no_known_country_has_no_region_facts(monkeypatch)
     monkeypatch.delenv("GMS_ALLOW_UNPROVEN_TITLE", raising=False)
     with pytest.raises(PreRenderTitleError, match="facts_unavailable"):
         approve_retained_title("County Cork", _cork_route(NoCountry()), None)
+
+
+def test_stateless_county_label_with_its_country_is_a_waypost_region_decision():
+    """The pipeline labels a stateless county with its country ("County Cork,
+    Ireland" — the gps_enrichment tail), so the pre-render gate must award that
+    label the same region facts as the bare county instead of refusing the
+    encode with ``facts_unavailable``."""
+    decision = approve_retained_title("County Cork, Ireland", _cork_route(), None)
+    assert decision["chosen_title"] == "County Cork, Ireland in 4K"
+    assert decision["reason"] == "insufficient_evidence"
+    assert decision["candidates"][0]["template_id"] == "region_only_lf"

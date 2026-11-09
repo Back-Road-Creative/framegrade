@@ -158,3 +158,10 @@ def test_tail_gap_stays_a_gap_without_a_same_county_fix_past_the_cut(outside):
     assert [g.county for g in ev.gaps] == [None]
     with pytest.raises(RouteClaimRefusedError):
         select_supported_label("County Cork, Ireland", ev)
+
+
+def test_region_label_appends_country_for_a_stateless_single_county():
+    ev = RouteEvidence(60.0, [], [], 0.0, [_Bin(60.0, "County Cork", None, country="Ireland")])
+    claim = ev.region_claim("county")
+    assert claim["state"] is None and claim["country"] == "Ireland"
+    assert region_label(claim) == "County Cork, Ireland"
