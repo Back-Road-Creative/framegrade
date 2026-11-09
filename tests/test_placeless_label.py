@@ -31,7 +31,7 @@ from gomoveshift.pipeline.validation.content_gates import (
     check_specificity_ladder,
 )
 
-GOOD = ["Somewhere Between", "The Unmarked Miles", "Back Country Night"]
+GOOD = ["Somewhere Between", "The Unnamed Miles", "Somewhere On The Road"]
 
 
 def _parser():
@@ -255,3 +255,34 @@ def test_enrichment_burns_the_placeless_label_on_every_lf(monkeypatch):
         1: "Somewhere Between",
         2: "Somewhere Between",
     }
+
+
+# -- argparse: a label that claims anything is refused, not just a place --------------
+# "if we cant verify something then it cant be said": nothing measures a placeless
+# label, so only words from PLACELESS_NO_CLAIM_WORDS get past the parser.
+
+
+@pytest.mark.parametrize(
+    ("label", "words"),
+    [
+        ("Through The Valleys And Ridges", ("Valleys", "Ridges")),
+        ("Back Roads In The Morning Fog", ("Back", "Morning", "Fog")),
+        ("Out Through Open Country", ("Open", "Country")),
+        ("Back Country Night", ("Back", "Country", "Night")),
+    ],
+)
+def test_a_claiming_label_is_refused_naming_the_claims(label, words, capsys):
+    with pytest.raises(SystemExit):
+        _parse("--placeless-label", label)
+    err = capsys.readouterr().err
+    assert all(w in err for w in words)
+    assert "PLACELESS_NO_CLAIM_WORDS" in err and "Somewhere On The Road" in err
+
+
+def test_claim_words_message_is_shared_with_the_launcher():
+    from gomoveshift.health.launch import placeless_label_skip_reason
+    from gomoveshift.pipeline.validation.content_gates import placeless_label_claimed_words
+
+    assert placeless_label_claimed_words("Somewhere Between") == []
+    assert placeless_label_claimed_words("Out Through Open Country") == ["Open", "Country"]
+    assert "Open, Country" in placeless_label_skip_reason("Out Through Open Country")

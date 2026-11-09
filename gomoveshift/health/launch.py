@@ -33,7 +33,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 from .. import run_origin
 from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
 from ..pipeline.validation.content_gates import (
-    PLACELESS_NO_CLAIM_WORDS,
+    placeless_label_claimed_words,
     placeless_label_claims_nothing,
     placeless_label_problem,
 )
@@ -200,7 +200,7 @@ def placeless_label_skip_reason(label: str) -> Optional[str]:
         return f"placeless_label {label!r}: {problem}"
     if placeless_label_claims_nothing(label):
         return None
-    claims = [w for w in label.split() if w.lower() not in PLACELESS_NO_CLAIM_WORDS]
+    claims = placeless_label_claimed_words(label)
     return (
         f"placeless_label {label!r} claims {', '.join(claims)}, which nothing measures on a "
         "GPS-less drive; a backlog row launches only a claim-free label (every word in "
