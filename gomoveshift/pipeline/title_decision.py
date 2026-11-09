@@ -282,13 +282,14 @@ def _region_only_title_facts(label: str, baseline: str, route_evidence, suffix: 
             continue
         name = claim["name"]
         if level != "state" and claim.get("state") is None:
-            # A stateless country (Ireland): the county carries only its country,
-            # and the label is the route gate's own ``region_label`` award.
+            # A stateless country (Ireland): the county carries only its country.
+            # The label is the route gate's own ``region_label`` award ("County
+            # Cork, Ireland", the gps_enrichment form) or the bare county.
             held = set(claim.get("counties") or (name,))
             countries = {b.country for b in route_evidence.bins if b.county in held}
             if len(countries) != 1 or None in countries:
                 continue
-            labels = {region_label(claim)}
+            labels = {name, region_label(claim)}
             evidence_name = name
         elif level != "state":
             state_claim = route_evidence.region_claim("state")
