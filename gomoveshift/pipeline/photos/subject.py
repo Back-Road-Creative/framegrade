@@ -124,6 +124,12 @@ PORTRAIT_FOCAL_MM_MAX = 135.0
 PORTRAIT_APERTURE_MAX = 2.8
 LANDSCAPE_FOCAL_MM_MAX = 35.0
 LANDSCAPE_APERTURE_MIN = 8.0
+#: Far focus in daylight is landscape evidence the wide/stopped-down rule misses
+#: (wide-open or telephoto scenics). Measured on 45 daylight frames off a Nikon
+#: card that read "other": focus 19.63 m or 20.96 m (this body's far-focus
+#: reading) at 18-140 mm, f/4.5-f/10; the one near frame read 5.15 m. 15 m sits
+#: well above any near reading and below the far-focus readings.
+LANDSCAPE_FOCUS_M_MIN = 15.0
 
 # Close-up: "not landscape (within feet) or macro". Focus within ~10 ft, or a
 # macro lens / implied magnification f/(d-f) of a quarter or more.
@@ -416,6 +422,20 @@ def recognise_subject(
             CONFIDENCE_WEAK,
             SOURCE_INFERENCE,
             (f"exif: {focal:g} mm at f/{aperture:g} in daylight — optics only, pixels unread",),
+        )
+
+    focus = optics.focus_distance_m
+    if (
+        focus is not None
+        and math.isfinite(focus)
+        and focus >= LANDSCAPE_FOCUS_M_MIN
+        and _daylight(exif)
+    ):
+        return SubjectReading(
+            SubjectCategory.LANDSCAPE,
+            CONFIDENCE_WEAK,
+            SOURCE_INFERENCE,
+            (f"exif: focus {focus:g} m in daylight — far subject, optics only, pixels unread",),
         )
 
     return UNKNOWN_SUBJECT

@@ -121,6 +121,40 @@ class TestExifIsTheStrongestEvidence:
         assert reading.category is SubjectCategory.LANDSCAPE
         assert reading.confidence < 0.6  # honest: the pixels were never asked
 
+    def test_far_focus_in_daylight_reads_landscape_when_optics_miss_the_wide_rule(self):
+        """Wide open at 52 mm: the optics rule misses, the 19.63 m focus reading says far."""
+        reading = recognise_subject(exif=DAY, optics=CaptureOptics(52.0, 8.0, 19.63))
+        assert reading.category is SubjectCategory.LANDSCAPE
+        assert reading.confidence == 0.45
+        assert reading.evidence == (
+            "exif: focus 19.63 m in daylight — far subject, optics only, pixels unread",
+        )
+
+    def test_far_focus_telephoto_in_daylight_reads_landscape(self):
+        reading = recognise_subject(exif=DAY, optics=CaptureOptics(140.0, 7.1, 20.96))
+        assert reading.category is SubjectCategory.LANDSCAPE
+
+    def test_mid_distance_focus_in_daylight_stays_unknown(self):
+        reading = recognise_subject(exif=DAY, optics=CaptureOptics(54.0, 4.5, 5.15))
+        assert reading.category is SubjectCategory.UNKNOWN
+
+    @pytest.mark.parametrize("focus", [None, float("nan"), float("inf"), 0.0, -1.0])
+    def test_unusable_focus_distance_stays_unknown(self, focus):
+        reading = recognise_subject(exif=DAY, optics=CaptureOptics(52.0, 8.0, focus))
+        assert reading.category is SubjectCategory.UNKNOWN
+
+    def test_far_focus_without_daylight_evidence_stays_unknown(self):
+        reading = recognise_subject(optics=CaptureOptics(52.0, 8.0, 19.63))
+        assert reading.category is SubjectCategory.UNKNOWN
+
+    def test_far_focus_at_night_keeps_the_night_reading(self):
+        reading = recognise_subject(exif=NIGHT, optics=CaptureOptics(24.0, 2.8, 20.96))
+        assert reading.category is SubjectCategory.ASTRO
+
+    def test_far_focus_does_not_displace_portrait(self):
+        reading = recognise_subject(exif=DAY, optics=CaptureOptics(85.0, 1.8, 20.96))
+        assert reading.category is SubjectCategory.PORTRAIT
+
     def test_every_reading_names_the_evidence_it_used(self):
         assert recognise_subject(exif=NIGHT).evidence
 
