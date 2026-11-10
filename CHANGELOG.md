@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.67] - 2026-11-10
+
+### Fixed
+
+- Night stacks now tell real dark-sky frames from lens-cap-on darks. On the 2026-11-09 card the cap-on test had it backwards: every real frame of seven night groups was refused as "lens cap on" ("0 usable of 19"), while the end-of-run darks shot in the same sequences passed as usable. A frame at the sensor's black floor is now judged by how many star-sized bright spots survive an erosion that removes hot pixels: 20-383 on the card's real frames, 0-5 on its darks.
+- Night stacks on sparse star fields now keep frames the old fit threw away. On the 2026-11-09 card, night groups with about 90 stars a frame stacked only 3-4 of their 15-19 good frames: the old 4-number fit (shift, turn, scale) could not follow the lens bending stars near the corners as the sky drifted, so the outer-corner check refused it. Those frames are now fitted with the lens-aware model chunk combining already uses, against the same checks, which are not loosened.
+
 ## [0.3.66] - 2026-11-10
 
 ### Fixed
@@ -818,7 +825,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...HEAD
+[0.3.67]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...v0.3.67
 [0.3.66]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...v0.3.66
 [0.3.65]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...v0.3.65
 [0.3.64]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...v0.3.64
