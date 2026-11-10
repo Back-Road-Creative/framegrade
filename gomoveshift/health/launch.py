@@ -41,6 +41,7 @@ from . import drives as drive_jobs
 from . import resume
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
+from .heal import job_name as heal_job_name
 from .resume import HOLD_NAME, is_held
 
 LEASE_NAME = "gms-backlog-launch"
@@ -435,9 +436,25 @@ def _hold_recipes(stages_root: Path, project: str, reason: str, dry_run: bool) -
     return held
 
 
+#: ``heal.job_name``'s commit suffix: a heal resume is ``gms-heal-<drive job>-<sha7>``.
+_HEAL_SHA = re.compile(r"-[0-9a-f]{7}$")
+
+
+def _is_audit_job(name: Any, project: str) -> bool:
+    """``gms-backlog-<project>`` itself, or a heal resume of it (``heal.job_name``, nested once
+    per resume): the run that holds the audit is whichever of them ran last."""
+    base = f"gms-backlog-{project}"
+    name = str(name or "")
+    while name != base and name.startswith("gms-heal-") and _HEAL_SHA.search(name):
+        inner = name[len("gms-heal-") : -8]
+        if heal_job_name(inner, name[-7:]) != name:
+            return False
+        name = inner
+    return name == base
+
+
 def _newest_audit(jobs_dir: Path, project: str) -> Optional[Dict[str, Any]]:
-    name = f"gms-backlog-{project}"
-    recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
+    recs = [r for r in _job_records(Path(jobs_dir)) if _is_audit_job(r.get("name"), project)]
     return max(recs, key=lambda r: float(r.get("created_at") or 0)) if recs else None
 
 
@@ -450,7 +467,7 @@ def _gate_wait(jobs_dir: Path, rec: Dict[str, Any]) -> Optional[str]:
 
 
 def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
-    """Refusal text when the newest ``gms-backlog-<project>`` job ended in anything but success
+    """Refusal text when the newest ``gms-backlog-<project>`` job (or heal resume of it) ended in anything but success
     or a stop at a human gate (``_ost_gate``).
 
     A failed audit still holds its slot, so without this every later call is a silent noop;

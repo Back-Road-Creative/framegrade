@@ -154,7 +154,8 @@ slot. It is run by an operator or an agent session; no cron calls it. Exit 2 on 
 sorted; every `ready` or `auditing` drive in `schedule.sqlite3` covers one, and the first slot
 left over is the target. An `auditing` drive for the region, or a drive job already running
 (job/1 record with no result, or `pgrep`), is a `noop`: a repeat call never starts a second run.
-An `auditing` drive whose newest `gms-backlog-<project>` job record ended in anything but
+An `auditing` drive whose newest audit job record (`gms-backlog-<project>`, or a `health heal`
+resume of it, `gms-heal-gms-backlog-<project>-<sha7>`, nested once per resume) ended in anything but
 `succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
 code: the failed audit still holds its slot, so the operator relaunches it (the drive resumes
 from its stages) or supersedes it (below); a relaunched job that is running is a `noop` again.
