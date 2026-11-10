@@ -206,14 +206,51 @@ def test_repeat_invocation_after_a_launch_is_a_noop(tmp_path):
     assert len(rig.launches) == 1
 
 
-def job(rig, run_id, project, state, created_at, exit_code=1):
+def job(rig, run_id, project, state, created_at, exit_code=1, name=None):
     """A job-runner record for the backlog drive of ``project``."""
     d = rig.tmp / "jobs" / run_id
     d.mkdir(parents=True)
     result = {"state": state, "exit_code": None if state == "running" else exit_code}
-    rec = {"schema": "job/1", "run_id": run_id, "name": f"gms-backlog-{project}",
+    rec = {"schema": "job/1", "run_id": run_id, "name": name or f"gms-backlog-{project}",
            "created_at": created_at, "result": result}  # fmt: skip
     (d / "job.json").write_text(json.dumps(rec))
+
+
+# 2026-11-10: Clonakilty's backlog job failed 11-08; heal resumed it as
+# gms-heal-gms-backlog-<project>-c4aedcb, which completed 11-10 06:20. Every tick still refused
+# "audit failed ... job 4847741a" (only the gms-backlog- name was read), exit 2, so the region's
+# queue reported a failure while the drive sat audited, waiting for health publish.
+
+
+def test_a_heal_resume_that_succeeded_after_the_failed_audit_clears_the_refusal(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "old", "day-a", "failed", 100.0)
+    job(rig, "heal", "day-a", "succeeded", 200.0, exit_code=0,
+        name="gms-heal-gms-backlog-day-a-c4aedcb")  # fmt: skip
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress" in res["reason"]
+
+
+def test_a_heal_of_a_heal_counts_and_a_failed_one_still_refuses_naming_it(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "old", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "heal2", "day-a", "failed", 300.0,
+        name="gms-heal-gms-heal-gms-backlog-day-a-c4aedcb-49f2171")  # fmt: skip
+    res = rig.run()
+    assert res["action"] == "refused" and "heal2" in res["reason"]
+
+
+def test_another_projects_heal_or_a_longer_project_name_is_not_this_audit(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "old", "day-a", "failed", 100.0)
+    job(rig, "b", "day-a", "succeeded", 200.0, exit_code=0, name="gms-heal-gms-backlog-day-b-c4aedcb")  # fmt: skip
+    job(rig, "c", "day-a", "succeeded", 300.0, exit_code=0, name="gms-backlog-day-a-c4aedcb")
+    job(rig, "d", "day-a", "succeeded", 400.0, exit_code=0, name="gms-heal-gms-backlog-day-a")
+    res = rig.run()
+    assert res["action"] == "refused" and "old" in res["reason"]
 
 
 def test_an_audit_whose_latest_job_failed_is_refused_naming_the_job(tmp_path):
