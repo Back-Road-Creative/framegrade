@@ -9,7 +9,8 @@ drives (none left = covered). A drive whose output dir already holds Phase D upl
 (``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
 (``storage_plan``); the subset dir of symlinks; ``run_preflight``; launch; ``register_ready``
-as ``auditing``. Publication stays the operator's: nothing here uploads or books.
+as ``auditing``. A region drive whose newest audit succeeded is handed to ``publish`` (the
+caller's ``health publish``) instead of a noop; nothing here uploads or books itself.
 
 ``supersede=(project, reason)`` replaces that row's own stale run (an earlier render of the same
 project, e.g. on an older release): its stage root and output dir are moved under
@@ -516,6 +517,27 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple
     )  # fmt: skip
 
 
+def _audit_passed(jobs_dir: Path, project: str) -> bool:
+    rec = _newest_audit(jobs_dir, project)
+    return rec is not None and (rec.get("result") or {}).get("state") == "succeeded"
+
+
+def _publish_audited(res, project: str, publish, dry_run: bool) -> Dict[str, Any]:
+    """``health publish`` for the region's audited drive (its newest audit succeeded). A claim
+    miss (``no claim:``, e.g. ``outside_lead_window``) leaves it ``auditing`` and waits for a
+    later tick; any other refusal is this call's refusal."""
+    out = publish(project, dry_run)
+    res.update(project=project, publish=out)
+    why = str(out.get("reason") or "")
+    if out.get("action") == "launched":
+        return {**res, "action": "launched", "reason": f"published: {why}"}
+    if out.get("action") != "refused":
+        return {**res, "action": out.get("action") or "noop", "reason": why}
+    if why.startswith("no claim:"):
+        return {**res, "reason": f"audit passed: {project} waits for its Waypost slot: {why}"}
+    return {**res, "action": "refused", "reason": f"publish refused: {why}"}
+
+
 def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_dir, dry_run,
                       launcher, installed_version, latest_version):  # fmt: skip
     """Resume a drive whose OST audit was confirmed, from its own recipe, under its backlog job
@@ -622,6 +644,7 @@ def run_backlog(
     installed_version: Callable[[Path], Optional[str]] = default_installed_version,
     latest_version: Callable[[], str] = default_latest_version,
     supersede: Optional[Tuple[str, str]] = None,
+    publish: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
@@ -630,7 +653,7 @@ def run_backlog(
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
                     drive_running, preflight, render_gate, launcher, register, retire, disk,
-                    installed_version, latest_version, supersede)  # fmt: skip
+                    installed_version, latest_version, supersede, publish)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
@@ -638,7 +661,7 @@ def run_backlog(
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
-         launcher, register, retire, disk, installed_version, latest_version, supersede):  # fmt: skip
+         launcher, register, retire, disk, installed_version, latest_version, supersede, publish):  # fmt: skip
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -683,6 +706,13 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             return _resume_confirmed(res, auditing[0], stages_root, output_root, code_root,
                                      jobs_dir, dry_run, launcher, installed_version,
                                      latest_version)  # fmt: skip
+        if (
+            not failed
+            and publish
+            and auditing[0] != target
+            and _audit_passed(jobs_dir, auditing[0])
+        ):
+            return _publish_audited(res, auditing[0], publish, dry_run)
         if not failed:
             return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
         if auditing[0] != target:

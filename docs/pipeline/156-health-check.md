@@ -148,7 +148,7 @@ outcome (`health_heal_outcome`), the latter observed on the next heal pass.
 
 `gomoveshift health backlog --region R --stages-root S --output-root O [--sources-root P]
 [--dry-run] [--json]` launches at most one audit-only drive for the region's next uncovered LF
-slot. It is run by an operator or an agent session; no cron calls it. Exit 2 on `refused`, else 0.
+slot. The hourly `bin/gms-health-cron.sh` tick (workspaces) calls it per region; an operator may too. Exit 2 on `refused`, else 0.
 
 **Selection.** The region's free LF slots in the next 7 days (from `build_schedule_report`) are
 sorted; every `ready` or `auditing` drive in `schedule.sqlite3` covers one, and the first slot
@@ -191,6 +191,16 @@ labels (`per_lf_locations` / `location`) the drive's own `--per-lf-location` rul
 or a held earlier stage whose sources overlap the row's), or every source already staged by an
 earlier run's `resume.json`.
 
+**Publish.** An `auditing` drive whose newest audit job `succeeded` is handed to `health publish`
+(below) by the same call, with the call's own `--stages-root`, `--jobs-dir` and `--code-root` and
+Waypost's default lead window: the hourly tick publishes each audited drive once its slot is inside
+that window. `launched` is `published: <project> for <slot>`. A claim miss (`no claim: ...`, for
+example `outside_lead_window`) is a `noop`, `audit passed: <project> waits for its Waypost slot:
+...`, and the drive stays `auditing` until a later tick. Any other publish refusal (a stale
+checkpoint, no long-form plan, an older `ready` drive) is `refused`, `publish refused: ...`. A
+running audit, one with no job record, a failed one and one at the OST gate are never published;
+`--supersede` of the drive itself is unchanged. `--dry-run` asks `health publish --dry-run`.
+
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one
 free-space figure. Staging needs `max(30 GB, sources × 1.5)` and output 50 GB; free equal to need
 passes. The ×1.5 is the existing preflight contract (`estimate_peak_cache_gb`), not a bound
@@ -223,7 +233,7 @@ other. A row with `per_lf_locations` (footage whose place the camera never recor
 operator's label typed per LF into the row) adds `--per-lf-location <i>=<label>` per entry and
 `--location <label>` when the row sets one, so nothing is typed at launch time; the labels are
 checked against the drive's own rules before any render (`location_labels_skip_reason`) and the
-drive still waits for a person at the OST audit gate, since no GPS gives it a system review. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; publishing still needs the normal approval and re-run.
+drive still waits for a person at the OST audit gate, since no GPS gives it a system review. The `--expect` makes an exit 0 that wrote no fresh shorts `failed-no-output`. Uploads stay off; the publish is a separate Phase D job, launched by a later tick once the audit has passed (**Publish.** above).
 `--dry-run` takes no lease, writes nothing and prints the exact argv, env and storage table.
 
 **Supersede.** `--supersede <project> --reason <text>` replaces that row's own earlier run, for
@@ -251,8 +261,9 @@ old run in place; `--dry-run` prints the planned moves. `_superseded/` is never 
 ## `health publish`: one command to upload an audited drive
 
 `gomoveshift health publish <project> --region R --stages-root S [--jobs-dir J] [--code-root C]
-[--lead-hours N] [--expect-sha SHA] [--dry-run] [--json]` is the single operator approval for
-uploading a drive `health backlog` audited. It goes through Waypost's claim, so the schedule store
+[--lead-hours N] [--expect-sha SHA] [--dry-run] [--json]` is the single approval for
+uploading a drive `health backlog` audited; `health backlog` runs the same call each tick for its
+region's drive whose audit passed. It goes through Waypost's claim, so the schedule store
 never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasses it). Exit 2 on
 `refused`, else 0.
 

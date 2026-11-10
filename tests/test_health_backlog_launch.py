@@ -55,6 +55,8 @@ class Rig:
         self.supersede = None
         self.gate_reason = None
         self.gates: list = []
+        self.publish_result = None  # set -> run_backlog gets a publisher returning it
+        self.publishes: list = []
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -105,7 +107,12 @@ class Rig:
             installed_version=lambda python: self.installed,
             latest_version=lambda: self.latest,
             **({"supersede": self.supersede} if self.supersede else {}),
+            **({"publish": self.publish} if self.publish_result else {}),
         )  # fmt: skip
+
+    def publish(self, project, dry_run):
+        self.publishes.append((project, dry_run))
+        return {"project": project, "steps": [], **self.publish_result}
 
     def run(self, *, dry_run=False, region="usa"):
         return launch.run_backlog(**self.kwargs(dry_run=dry_run, region=region))
@@ -251,6 +258,91 @@ def test_another_projects_heal_or_a_longer_project_name_is_not_this_audit(tmp_pa
     job(rig, "d", "day-a", "succeeded", 400.0, exit_code=0, name="gms-heal-gms-backlog-day-a")
     res = rig.run()
     assert res["action"] == "refused" and "old" in res["reason"]
+
+
+# 2026-11-10: Clonakilty's audit passed at 06:20, then sat ``auditing`` holding Ireland's next
+# slot ("audit in progress") until a person ran ``health publish``, whose first try at 09:39 was
+# refused ``outside_lead_window`` (slot Sun 11-15 2 PM ET, window opens Thu 11-12 2 PM ET). The
+# hourly backlog tick now asks ``health publish`` itself once the newest audit has succeeded.
+
+
+def _audited(rig, **publish_result):
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+    rig.publish_result = publish_result
+
+
+def test_a_succeeded_audit_is_published_by_the_backlog_tick(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="launched", reason="day-a for 2026-10-23T09:00:00-04:00",
+             argv=["python3", "jobrun.py"], slot="2026-10-23T09:00:00-04:00")  # fmt: skip
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)]
+    assert res["action"] == "launched" and res["project"] == "day-a", res
+    assert "published: day-a for 2026-10-23" in res["reason"]
+    assert res["publish"]["slot"] == "2026-10-23T09:00:00-04:00"
+    assert not rig.launches and not rig.registered  # the publisher launched Phase D, not backlog
+    assert launch.exit_code(res) == 0
+
+
+def test_a_slot_outside_the_lead_window_waits_and_is_not_a_failure(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="refused",
+             reason="no claim: outside_lead_window (next slot 2026-11-15T14:00:00-05:00)")  # fmt: skip
+    res = rig.run()
+    assert res["action"] == "noop", res
+    assert "audit passed: day-a waits for its Waypost slot" in res["reason"]
+    assert "outside_lead_window" in res["reason"] and "2026-11-15T14:00" in res["reason"]
+    assert launch.exit_code(res) == 0 and not rig.launches
+
+
+def test_any_other_publish_refusal_is_a_refusal_naming_it(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="refused", reason="day-a's checkpoint is stale under the current code (B re-run)")  # fmt: skip
+    res = rig.run()
+    assert res["action"] == "refused" and res["project"] == "day-a"
+    assert "publish refused: day-a's checkpoint is stale" in res["reason"]
+    assert launch.exit_code(res) == 2
+
+
+def test_a_dry_run_asks_the_publisher_for_its_dry_run(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
+    res = rig.run(dry_run=True)
+    assert rig.publishes == [("day-a", True)]
+    assert res["action"] == "would_publish" and "day-a (dry run" in res["reason"]
+    assert launch.exit_code(res) == 0
+
+
+@pytest.mark.parametrize("state", ["running", None])
+def test_an_audit_still_running_or_with_no_record_is_never_published(tmp_path, state):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    if state:
+        job(rig, "now", "day-a", state, 100.0)
+    rig.publish_result = {"action": "launched", "reason": "x"}
+    res = rig.run()
+    assert rig.publishes == [] and res["action"] == "noop" and "audit in progress" in res["reason"]
+
+
+def test_a_failed_audit_or_one_waiting_at_the_ost_gate_is_never_published(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "bad", "day-a", "failed", 100.0)
+    rig.publish_result = {"action": "launched", "reason": "x"}
+    assert rig.run()["action"] == "refused" and rig.publishes == []
+    job(rig, "gate", "day-a", "failed", 200.0, exit_code=launch.drive_jobs.EXIT_WAITING_AT_GATE)
+    (rig.tmp / "jobs" / "gate" / "output.log").write_text("DRIVE WAITING: OST audit\n")
+    rig.run()
+    assert rig.publishes == []
+
+
+def test_a_running_drive_holds_the_publish_too(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="launched", reason="x")
+    rig.running = True
+    res = rig.run()
+    assert rig.publishes == [] and "running" in res["reason"]
 
 
 def test_an_audit_whose_latest_job_failed_is_refused_naming_the_job(tmp_path):
