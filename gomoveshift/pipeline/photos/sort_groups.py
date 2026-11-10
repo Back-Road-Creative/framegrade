@@ -254,6 +254,7 @@ class Group:
     kind: str
     members: list[str]
     mean_total: float = 0.0
+    outputs: list[str] = field(default_factory=list)  # each member's developed JPEG
 
 
 def groups_from_rows(rows) -> list[Group]:
@@ -266,7 +267,9 @@ def groups_from_rows(rows) -> list[Group]:
     for gid, items in members.items():
         items.sort(key=lambda r: (r.get("capture_time", ""), str(r["source"])))
         mean = sum(max(_score(r), 0.0) for r in items) / len(items)
-        groups.append(Group(gid, gid.rsplit("-", 1)[0], [str(r["source"]) for r in items], mean))
+        sources = [str(r["source"]) for r in items]
+        outputs = [str(r.get("output") or "") for r in items]
+        groups.append(Group(gid, gid.rsplit("-", 1)[0], sources, mean, outputs))
     return groups
 
 
@@ -330,7 +333,9 @@ def _produce(group, ops, paths, main, shown, workers, out_dir) -> None:
     if group.kind == "bracket":
         ops.fuse(paths, main)
     elif group.kind == "pano":
-        ops.stitch(paths, main)
+        # The stitcher reads with cv2.imread, which cannot open a RAW: stitch the
+        # developed JPEGs this run wrote (graded and upright, as the page shows them).
+        ops.stitch([Path(o) for o in group.outputs], main)
     else:
         prepared = ops.prepare(paths, decode_workers=workers, output_dir=out_dir)
         report = ops.stack(prepared, main)
