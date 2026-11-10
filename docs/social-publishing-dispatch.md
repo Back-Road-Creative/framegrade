@@ -28,6 +28,16 @@ record — the row itself carries no payload/media, only queue bookkeeping.
 `instagram`/`facebook`/`tiktok`'s return `bytes` (their adapters take the
 video in memory).
 
+Facebook's CLI route currently supports video only. The concrete
+`MetaPhotoGraphClient` targets the Instagram user and Instagram media endpoints,
+so it must never be wired as a Facebook Page photo client. Facebook photo/carousel
+records fail with `PermanentDeliveryError` before a media loader or adapter runs
+when no Page-specific photo handler is supplied; they cannot fall back to the
+Reels route. This is a visible unsupported-format failure, not a platform post.
+Instagram's existing photo/carousel route and Facebook video delivery remain
+available. A future Facebook Page photo implementation needs its own verified
+client; setting an adapter's platform label is insufficient.
+
 TikTok has no `*ShortsAdapter` class — `tiktok_adapter.py` is a
 free-function toolkit (creator_info, chunk planning, Direct Post
 init/upload/poll). `handlers.make_tiktok_handler` orchestrates those

@@ -779,8 +779,8 @@ def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter")
         # The config's own site_root, not a module-level fallback — so a
         # second brand's config actually reaches the image_url deriver and
         # verifier. With no ``photos.site_root`` configured there is no site
-        # to derive public image URLs from: photo/carousel rows then fall to
-        # ``skipped_no_handler`` while the video routes work unchanged.
+        # to derive public image URLs from: photo adapters stay unconfigured
+        # while the video adapters remain available.
         try:
             site_root = config.photos.resolve_site_root()
         except ConfigError:
@@ -819,22 +819,15 @@ def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter")
                 FacebookReelsAdapter,
                 FacebookShortsAdapter,
             )
-            from ...publishing.photo_adapter import PhotoCarouselAdapter
-            from ...publishing.photo_graph_client import MetaPhotoGraphClient
 
             facebook = (
                 FacebookShortsAdapter(FacebookReelsAdapter(meta), worker_id=worker_id),
                 _read_media,
             )
-            if photos_ready:
-                facebook_photo = (
-                    PhotoCarouselAdapter(
-                        MetaPhotoGraphClient(meta, site_root=site_root),
-                        "facebook",
-                        worker_id=worker_id,
-                    ),
-                    photo_loader,
-                )
+            # MetaPhotoGraphClient targets ig_user_id and Instagram endpoints.
+            # A Facebook label on PhotoCarouselAdapter cannot change that target.
+            # Leave Page photos unrouted until a Page-specific client exists;
+            # build_handlers guards photo rows from falling into the Reel route.
 
     if "tiktok" in routed:
         from ...publishing.handlers import TikTokCredentials

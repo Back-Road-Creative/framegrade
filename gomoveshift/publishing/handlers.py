@@ -258,10 +258,9 @@ def _dispatch_by_format(
     "instagram"/"facebook" regardless of format (``models.RouteSelection``
     only ever names one of ``KNOWN_PLATFORMS``, never a format-qualified
     variant), so ``drain_queue``'s ``handlers`` mapping has room for exactly
-    one handler per platform. Neither ``make_instagram_handler`` nor
-    ``make_facebook_handler`` is touched by this -- when only one of the two
-    handlers is wired, ``build_handlers`` registers it directly (see below),
-    so existing (video-only) callers see no behaviour change at all."""
+    one handler per platform. A missing format-specific handler fails before
+    a media loader or adapter can run; a photo must never fall into a video
+    upload merely because that platform's video handler exists."""
 
     def handler(row: Dict[str, Any]) -> None:
         record = record_loader(row["project_name"], row["short_index"])
@@ -545,11 +544,10 @@ def build_handlers(
     acquiring its lease, until that platform is wired here.
 
     ``instagram_photo``/``facebook_photo`` wire a ``PhotoCarouselAdapter``
-    for that platform's photo/carousel-format records. When BOTH a video and
-    a photo tuple are given for a platform, the registered handler routes on
-    the loaded record's ``format`` (see ``_dispatch_by_format``); when only
-    one is given, that handler is registered directly, unchanged from
-    before this parameter existed."""
+    for that platform's photo/carousel-format records. Facebook always routes
+    by the loaded record's ``format``, including when only a video handler is
+    available. Instagram routes by format when both handlers are supplied;
+    its existing single-handler behavior is unchanged."""
     handlers: Dict[str, Handler] = {}
     if youtube is not None:
         adapter, video_path_loader = youtube
@@ -581,11 +579,7 @@ def build_handlers(
             photo_handler = make_photo_handler(
                 photo_adapter, conn, record_loader, photo_image_url_loader
             )
-        handlers["facebook"] = (
-            _dispatch_by_format(record_loader, video_handler, photo_handler)
-            if video_handler is not None and photo_handler is not None
-            else (photo_handler or video_handler)
-        )
+        handlers["facebook"] = _dispatch_by_format(record_loader, video_handler, photo_handler)
     if tiktok is not None:
         credentials, video_bytes_loader = tiktok
         handlers["tiktok"] = make_tiktok_handler(

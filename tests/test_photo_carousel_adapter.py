@@ -239,3 +239,42 @@ def test_build_handlers_still_routes_shorts_when_photo_not_wired(conn):
     row = _row(conn)
     handlers["instagram"](row)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("format", [FORMAT_PHOTO, FORMAT_CAROUSEL])
+def test_facebook_photos_without_a_page_photo_handler_never_reach_video(conn, format):
+    calls = []
+
+    class VideoAdapter:
+        def publish(self, *args, **kwargs):
+            calls.append("video adapter")
+
+    def video_loader(record):
+        calls.append("video loader")
+        return b"must-not-upload"
+
+    handlers = build_handlers(
+        conn,
+        lambda p, i: _carousel_record() if format == FORMAT_CAROUSEL else _photo_record(),
+        facebook=(VideoAdapter(), video_loader),
+    )
+    with pytest.raises(PermanentDeliveryError, match="no photo handler wired"):
+        handlers["facebook"](_row(conn, "facebook"))
+    assert calls == []
+
+
+@pytest.mark.parametrize("format", [None, FORMAT_SHORT])
+def test_facebook_video_still_routes_without_a_photo_handler(conn, format):
+    calls = []
+
+    class VideoAdapter:
+        def publish(self, record, *, conn, delivery_id, video_bytes, video_state):
+            calls.append((record.format, video_bytes))
+
+    handlers = build_handlers(
+        conn,
+        lambda p, i: dataclasses.replace(_record(), format=format),
+        facebook=(VideoAdapter(), lambda _: b"video bytes"),
+    )
+    handlers["facebook"](_row(conn, "facebook"))
+    assert calls == [(format, b"video bytes")]
