@@ -109,6 +109,29 @@ def abandoned_refusal(
     return None
 
 
+def _superseded_by_record(project_dir: Path) -> bool:
+    """A backlog supersede record naming this project sits in it or its parent (nested layout).
+
+    ``health backlog`` moves a replaced run under ``_superseded/<name>-<stamp>`` and writes the
+    record there, so that run is dead by record and the age gate adds nothing. 2026-11-10: the
+    2-day-old rec0063 copy answered ``Too recent`` and freed nothing while the live run waited.
+    """
+    from ..health.launch import SUPERSEDE_RECORD
+
+    for where in (project_dir, project_dir.parent):
+        try:
+            record = json.loads((where / SUPERSEDE_RECORD).read_text())
+        except (OSError, ValueError):
+            continue
+        if (
+            isinstance(record, dict)
+            and record.get("schema") == "backlog-supersede/1"
+            and record.get("project") == project_dir.name
+        ):
+            return True
+    return False
+
+
 def _tree_size(root: Path) -> int:
     total = 0
     for cur, _dirs, files in os.walk(root, followlinks=False):
@@ -151,7 +174,8 @@ class PipelineCleanup:
       ``cleanup <project> --abandoned``): an INCOMPLETE ``_stages`` dir is
       planned whole when :func:`abandoned_refusal` finds nothing — no hold,
       no run lock held by a live pid, no ``gomoveshift drive`` running
-      anywhere — and it clears the age gate. Without the flag it is skipped
+      anywhere — and it clears the age gate (a run a backlog supersede record
+      names skips that gate). Without the flag it is skipped
       as before, with a hint. The output dir and every other project stay.
     - NEVER touches: Google Drive files, D: drive output, source videos on D:
     """
@@ -301,8 +325,10 @@ class PipelineCleanup:
             state = self._load_pipeline_state(project_dir)
             pipeline_complete = self._is_pipeline_complete(state)
 
-            # Age check
-            if age_days < min_age_days:
+            # Age check (a superseded run is dead by record; --abandoned's other rules still apply)
+            if age_days < min_age_days and not (
+                abandoned and not pipeline_complete and _superseded_by_record(project_dir)
+            ):
                 plan.skipped.append(
                     {
                         "path": str(project_dir),
