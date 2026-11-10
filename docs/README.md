@@ -52,6 +52,7 @@ to read them.
 - [social-publishing-youtube.md](social-publishing-youtube.md): YouTube Shorts adapter.
 - [social-publishing-meta.md](social-publishing-meta.md): Meta credentials and publishing.
 - [social-publishing-facebook.md](social-publishing-facebook.md): Facebook Reels adapter.
+- [facebook-queued-intent.md](facebook-queued-intent.md): publication intent, timing and uncertain-upload recovery.
 - [social-publishing-tiktok.md](social-publishing-tiktok.md): TikTok Direct Post adapter.
 
 ## Social metrics

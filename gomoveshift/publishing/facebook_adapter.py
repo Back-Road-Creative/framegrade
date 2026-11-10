@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -42,6 +42,10 @@ class FacebookAuthBlockedError(FacebookPublishError):
 
 class FacebookRetryableError(FacebookPublishError):
     queue_state = "retry_wait"
+
+
+class FacebookFinishUnknownError(FacebookRetryableError):
+    """The retained upload may have published; retry only its status read."""
 
 
 class FacebookPermanentError(FacebookPublishError):  # message names the recovery action
@@ -95,12 +99,31 @@ def absolute_permalink(url: Optional[str]) -> Optional[str]:
 
 def _validate_schedule_window(scheduled_at: datetime, now: datetime | None = None) -> int:
     """Unix timestamp, or raises ``ScheduleWindowError`` naming the bound."""
+    if not isinstance(scheduled_at, datetime) or scheduled_at.utcoffset() is None:
+        raise ScheduleWindowError("scheduled_publish_time requires a timezone-aware datetime")
     lead = scheduled_at - (now or datetime.now(timezone.utc))
     if lead <= MIN_SCHEDULE_LEAD:
         raise ScheduleWindowError(f"scheduled_publish_time must be more than {MIN_SCHEDULE_LEAD}")
     if lead > MAX_SCHEDULE_LEAD:
         raise ScheduleWindowError(f"scheduled_publish_time must be at most {MAX_SCHEDULE_LEAD}")
     return int(scheduled_at.timestamp())
+
+
+def _validate_finish_intent(
+    video_state: str, scheduled_publish_time: datetime | None
+) -> int | None:
+    """Check the complete request before a caller creates an upload session."""
+    if video_state not in VALID_VIDEO_STATES:
+        raise FacebookPermanentError(
+            f"video_state must be one of {sorted(VALID_VIDEO_STATES)}, got {video_state!r}"
+        )
+    if video_state == "SCHEDULED":
+        if scheduled_publish_time is None:
+            raise ScheduleWindowError("video_state=SCHEDULED requires scheduled_publish_time")
+        return _validate_schedule_window(scheduled_publish_time)
+    if scheduled_publish_time is not None:
+        raise ScheduleWindowError("scheduled_publish_time requires video_state=SCHEDULED")
+    return None
 
 
 class FacebookReelsAdapter:
@@ -171,10 +194,7 @@ class FacebookReelsAdapter:
         video_state: str,
         scheduled_publish_time: datetime | None = None,
     ) -> dict:
-        if video_state not in VALID_VIDEO_STATES:
-            raise FacebookPermanentError(
-                f"video_state must be one of {sorted(VALID_VIDEO_STATES)}, got {video_state!r}"
-            )
+        scheduled_timestamp = _validate_finish_intent(video_state, scheduled_publish_time)
         data = {
             "upload_phase": "finish",
             "video_id": upload.video_id,
@@ -182,10 +202,8 @@ class FacebookReelsAdapter:
             "description": payload.description,
             "access_token": self._access_token,
         }
-        if video_state == "SCHEDULED":
-            if scheduled_publish_time is None:
-                raise ScheduleWindowError("video_state=SCHEDULED requires scheduled_publish_time")
-            data["scheduled_publish_time"] = _validate_schedule_window(scheduled_publish_time)
+        if scheduled_timestamp is not None:
+            data["scheduled_publish_time"] = scheduled_timestamp
         body = self._post(f"{self._base}/{self._page_id}/video_reels", data=data)
         return {
             "video_id": upload.video_id,
@@ -221,6 +239,7 @@ class FacebookReelsAdapter:
 PLATFORM = "facebook"
 STATUS_QUEUED, STATUS_SUBMITTING, STATUS_UPLOADED = "queued", "submitting", "uploaded"
 STATUS_PUBLISHED = "published"
+STATUS_AWAITING_FACEBOOK_RECONCILE = "awaiting_facebook_reconcile"
 
 # Ceiling on a single start-through-finish attempt's worker lease — a
 # worker that dies mid-attempt frees this window for another worker (or
@@ -240,18 +259,21 @@ def due_schedule(record: ShortPublishRecord, now: datetime | None = None) -> "da
     different hour for it, so using the shared slot would publish at a time
     the scheduler deliberately moved this platform off.
 
-    A slot less than ``MIN_SCHEDULE_LEAD`` away is ``None``, not an error. The
-    queue drains AT or just after the slot, so "under ten minutes away" means
-    the moment has arrived and publishing now IS honouring the schedule;
-    handing it to the API instead would raise ``ScheduleWindowError``, which
-    is permanent, on every normal delivery.
+    Only an arrived slot is ``None``. A future slot inside the API's minimum
+    scheduling lead is retryable until it is due, never an early publication.
+    Normal queue drains at or after the slot retain immediate publication.
     """
     schedule = record.schedule
     when = schedule.scheduled_at_utc_by_platform.get(PLATFORM) or schedule.scheduled_at_utc
     if when is None:
         return None
-    if when - (now or datetime.now(timezone.utc)) <= MIN_SCHEDULE_LEAD:
+    if not isinstance(when, datetime) or when.utcoffset() is None:
+        raise ScheduleWindowError("record schedule requires a timezone-aware datetime")
+    lead = when - (now or datetime.now(timezone.utc))
+    if lead <= timedelta(0):
         return None
+    if lead <= MIN_SCHEDULE_LEAD:
+        raise FacebookRetryableError("Facebook schedule is not due; retry at the requested time")
     return when
 
 
@@ -303,9 +325,20 @@ class FacebookShortsAdapter:
         video_state: str = "PUBLISHED",
         scheduled_publish_time: datetime | None = None,
     ) -> FacebookPublishResult:
+        existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
+        if existing and (
+            existing.get("platform_upload_id")
+            or existing.get("platform_post_id")
+            or existing["status"] == STATUS_AWAITING_FACEBOOK_RECONCILE
+        ):
+            return self._reconcile(existing, conn=conn, delivery_id=delivery_id)
         payload = record.payloads.facebook
         if payload is None:
             raise ValueError(f"short_index={record.short_index} carries no Facebook payload")
+        if video_state == "DRAFT":
+            raise FacebookPermanentError(
+                "queued Facebook DRAFT is unsupported; no draft receipt lifecycle exists"
+            )
 
         # The parameters stay an override for a caller that names both; with
         # them at their defaults the record's own slot decides.
@@ -313,99 +346,123 @@ class FacebookShortsAdapter:
             scheduled_publish_time = due_schedule(record)
             if scheduled_publish_time is not None:
                 video_state = "SCHEDULED"
+        _validate_finish_intent(video_state, scheduled_publish_time)
 
-        existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
+        upload_account = _account_of(self._reels)
+        if not isinstance(upload_account, str) or not upload_account.strip():
+            raise FacebookPermanentError("Facebook upload requires a known account identity")
+        upload_account = upload_account.strip()
         current_status = existing["status"] if existing else STATUS_QUEUED
-        video_id, post_id, permalink = (
-            self._reconcile(existing, conn=conn, delivery_id=delivery_id)
-            if existing
-            else (None, None, None)
-        )
-
-        if video_id is None:
-            lease_expires = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SEC)).isoformat()
-            if not acquire_lease(conn, delivery_id, self._worker_id, lease_expires):
-                raise RuntimeError(
-                    f"delivery {delivery_id} is leased by another worker — refusing to "
-                    "risk a duplicate video_reels upload session"
-                )
-            transition(conn, delivery_id, current_status, STATUS_SUBMITTING)
-            handle = self._reels.start_upload()
-            video_id = handle.video_id
-            # Persist BEFORE upload/finish — the start call above put a
-            # live upload session on the platform; this write makes it
-            # recoverable by reconciliation instead of orphaned/duplicated.
-            transition(
-                conn, delivery_id, STATUS_SUBMITTING, STATUS_UPLOADED, platform_upload_id=video_id
+        lease_expires = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SEC)).isoformat()
+        if not acquire_lease(conn, delivery_id, self._worker_id, lease_expires):
+            raise RuntimeError(
+                f"delivery {delivery_id} is leased by another worker — refusing to "
+                "risk a duplicate video_reels upload session"
             )
-            self._reels.upload_video(handle.upload_url, video_bytes)
-            current_status = STATUS_UPLOADED
-        else:
-            current_status = existing["status"]
-
-        if post_id is None:
-            upload = UploadHandle(video_id=video_id, upload_url="")
-            self._reels.finish_upload(upload, payload, video_state, scheduled_publish_time)
-            post_id = video_id  # bare video id — see class docstring
-            permalink = reel_permalink(video_id)
-            # A scheduled reel is ACCEPTED now and published later, so
-            # `platform_confirmed` ("publish call returned success --
-            # seconds") would overstate the evidence by the whole length of
-            # the schedule. The recorded instant is the same value handed to
-            # `finish_upload`, never re-derived, so the receipt and the API
-            # request body cannot disagree. `published_at` is untouched: it
-            # stays the moment THIS queue handed the delivery over.
-            scheduled = video_state == "SCHEDULED" and scheduled_publish_time is not None
-            fields = {
-                "platform_post_id": post_id,
-                "permalink": permalink,
-                "published_at_source": PLATFORM_SCHEDULED if scheduled else PLATFORM_CONFIRMED,
-                # WHERE it landed. `self._page_id` is the value this
-                # adapter published against, taken from the brand's
-                # credentials at construction -- recorded here rather than
-                # re-read later, because credentials can be rotated or
-                # corrected and a derived value would rewrite history to
-                # agree with the present configuration.
-                "destination_account": _account_of(self._reels),
-            }
-            if scheduled:
-                fields["platform_published_at"] = scheduled_publish_time.isoformat()
-            transition(conn, delivery_id, current_status, STATUS_PUBLISHED, **fields)
+        if not transition(
+            conn, delivery_id, current_status, STATUS_SUBMITTING, upload_account=upload_account
+        ):
+            raise FacebookRetryableError("Facebook account checkpoint changed; upload refused")
+        handle = self._reels.start_upload()
+        video_id = handle.video_id
+        # Retain the ID before bytes or finish. An interrupted old upload is
+        # ambiguous too, so subsequent calls reconcile it instead of writing.
+        if not transition(
+            conn, delivery_id, STATUS_SUBMITTING, STATUS_UPLOADED, platform_upload_id=video_id
+        ):
+            raise FacebookFinishUnknownError(
+                "Facebook upload checkpoint changed; outcome unconfirmed"
+            )
+        self._reels.upload_video(handle.upload_url, video_bytes)
+        # Commit BEFORE the irreversible finish call, including if the worker
+        # dies without returning an exception. An uncertain finish is never retried.
+        if not transition(conn, delivery_id, STATUS_UPLOADED, STATUS_AWAITING_FACEBOOK_RECONCILE):
+            raise FacebookFinishUnknownError(
+                "Facebook finish checkpoint changed; outcome unconfirmed"
+            )
+        try:
+            result = self._reels.finish_upload(handle, payload, video_state, scheduled_publish_time)
+        except Exception:
+            raise FacebookFinishUnknownError(
+                "Facebook finish unconfirmed; reconcile retained video ID"
+            ) from None
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise FacebookFinishUnknownError(
+                "Facebook finish unconfirmed; reconcile retained video ID"
+            )
+        current_status = STATUS_AWAITING_FACEBOOK_RECONCILE
+        post_id = video_id  # bare video id — see class docstring
+        permalink = reel_permalink(video_id)
+        # A scheduled reel is ACCEPTED now and published later, so
+        # `platform_confirmed` ("publish call returned success --
+        # seconds") would overstate the evidence by the whole length of
+        # the schedule. The recorded instant is the same value handed to
+        # `finish_upload`, never re-derived, so the receipt and the API
+        # request body cannot disagree. `published_at` is untouched: it
+        # stays the moment THIS queue handed the delivery over.
+        scheduled = video_state == "SCHEDULED" and scheduled_publish_time is not None
+        fields = {
+            "platform_post_id": post_id,
+            "permalink": permalink,
+            "published_at_source": PLATFORM_SCHEDULED if scheduled else PLATFORM_CONFIRMED,
+            # WHERE it landed. `self._page_id` is the value this
+            # adapter published against, taken from the brand's
+            # credentials at construction -- recorded here rather than
+            # re-read later, because credentials can be rotated or
+            # corrected and a derived value would rewrite history to
+            # agree with the present configuration.
+            "destination_account": upload_account,
+        }
+        if scheduled:
+            fields["platform_published_at"] = scheduled_publish_time.isoformat()
+        transition(conn, delivery_id, current_status, STATUS_PUBLISHED, **fields)
 
         return FacebookPublishResult(video_id=post_id, permalink=permalink)
 
-    def _reconcile(
-        self, existing: dict, *, conn, delivery_id: int
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Mirrors ``youtube_adapter.YouTubeShortsAdapter._reconcile``: a
-        finish call has no create-idempotency key, so a timeout after
-        ``upload_phase=finish`` is unknown, never a failure. Checks the
-        persisted video id's live status before ever starting a NEW upload
-        session or re-finishing. Returns ``(video_id, post_id, permalink)``
-        — ``video_id`` set means reuse this session, never call
-        ``start_upload`` again; ``post_id`` set means finish already
-        succeeded, never call ``finish_upload`` again; ``permalink`` is
-        populated only on a live status read."""
+    def _reconcile(self, existing: dict, *, conn, delivery_id: int) -> FacebookPublishResult:
+        """Poll a retained ID only; no negative/unknown answer permits a write.
+
+        Legacy uploaded rows did not checkpoint finish, so their phase is
+        ambiguous. They also enter this read-only state rather than guessing
+        whether an old finish call ran. Only confirmed publication closes it.
+        """
         video_id = existing.get("platform_upload_id")
-        if not video_id:
-            return None, None, None
         if existing.get("platform_post_id"):
-            return video_id, existing["platform_post_id"], None
-        status = self._reels.check_video_status(video_id)
-        if status.get("published"):
-            permalink = status.get("permalink")
-            transition(
-                conn,
-                delivery_id,
-                existing["status"],
-                STATUS_PUBLISHED,
-                platform_post_id=video_id,
-                permalink=permalink,
-                published_at_source=PLATFORM_RECONCILED,
-                # The status read that found this post was made against
-                # `self._page_id`, so that IS the page it is on -- this is
-                # the adapter's own identifier, not a later re-derivation.
-                destination_account=_account_of(self._reels),
+            return FacebookPublishResult(video_id=existing["platform_post_id"], permalink=None)
+        if not video_id:
+            raise FacebookFinishUnknownError(
+                "Facebook finish unconfirmed; retained video ID missing"
             )
-            return video_id, video_id, permalink
-        return video_id, None, None
+        if existing["status"] != STATUS_AWAITING_FACEBOOK_RECONCILE and not transition(
+            conn, delivery_id, existing["status"], STATUS_AWAITING_FACEBOOK_RECONCILE
+        ):
+            raise FacebookFinishUnknownError(
+                "Facebook reconciliation checkpoint changed; outcome unconfirmed"
+            )
+        upload_account = existing.get("upload_account")
+        if not upload_account or upload_account != _account_of(self._reels):
+            raise FacebookFinishUnknownError(
+                "Facebook upload account unknown or changed; hold for account reconciliation"
+            )
+        try:
+            status = self._reels.check_video_status(video_id)
+        except Exception:
+            raise FacebookFinishUnknownError(
+                "Facebook status unconfirmed; retain video ID and retry the read"
+            ) from None
+        if not isinstance(status, dict) or status.get("published") is not True:
+            raise FacebookFinishUnknownError(
+                "Facebook status unconfirmed; retain video ID and retry the read"
+            )
+        permalink = status.get("permalink")
+        transition(
+            conn,
+            delivery_id,
+            STATUS_AWAITING_FACEBOOK_RECONCILE,
+            STATUS_PUBLISHED,
+            platform_post_id=video_id,
+            permalink=permalink,
+            published_at_source=PLATFORM_RECONCILED,
+            destination_account=upload_account,
+        )
+        return FacebookPublishResult(video_id=video_id, permalink=permalink)
