@@ -50,7 +50,8 @@ class Ops:
         self.calls = []
 
     def detect_sequences(self, paths):
-        return [tuple(s) for s in self.sequences if all(p in paths for p in s)]
+        runs = [tuple(p for p in s if p in paths) for s in self.sequences]
+        return [r for r in runs if len(r) >= 2]  # the sequencer sees only the frames it is given
 
     def chunk_sequence(self, run):
         step = self.chunk or len(run)
@@ -522,6 +523,70 @@ def test_lens_cap_darks_are_never_rendered_as_lights(tmp_path, root):
     assert not set(lights) & set(passed)
 
 
+def dark_card(tmp_path, n_lights=26, n_darks=4):
+    """A night run whose last frames are lens-cap darks, one frame a second from 22:00."""
+    names = [f"n{i:02d}" for i in range(n_lights + n_darks)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    return src, seq, seq[:n_lights], seq[n_lights:]
+
+
+def test_lens_cap_darks_get_their_own_folder_and_stay_off_the_page(tmp_path, root):
+    src, seq, lights, darks = dark_card(tmp_path)
+    ops = Ops(sequences=[seq], darks=darks)
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    ranked = rows(result.run_dir / "ranked.csv")
+    by_stem = {Path(r["source"]).stem: r for r in ranked}
+    assert {by_stem[p.stem]["category"] for p in darks} == {sg.DARKS_FOLDER}
+    assert {by_stem[p.stem]["group_id"] for p in darks} == {""}
+    assert {by_stem[p.stem]["category"] for p in lights} == {sg.NIGHT_FOLDER}
+    page = (result.run_dir / "index.html").read_text()
+    assert f'src="{sg.DARKS_FOLDER}/' not in page and f'href="{sg.DARKS_FOLDER}/' not in page
+    assert "4 lens-cap darks kept for calibration, not ranked" in page
+    assert not any(sg.DARKS_FOLDER in line for line in ps._top_lines(ranked))
+
+
+def test_darks_never_form_a_burst_bracket_or_pano():
+    srcs = [f"/card/d{i}.nef" for i in range(4)]
+    ranked = [
+        {"source": s, "category": sg.DARKS_FOLDER, "rank": i + 1, "quality_score": "0.5"}
+        for i, s in enumerate(srcs)
+    ]
+    records = {Path(s): rec(Path(s), second=i) for i, s in enumerate(srcs)}
+    ops = Ops(brackets=[[Path(s) for s in srcs[:3]]])
+    sg.tag_groups(ranked, records, ops.ops(), {s: 0 for s in srcs})
+    assert [r.get("group_id", "") for r in ranked] == [""] * 4
+
+
+def test_session_darks_calibrate_its_trail_and_timelapse(tmp_path, root):
+    src, seq, lights, darks = dark_card(tmp_path)
+    far = jpeg(src / "far.jpg", 99)  # a dark shot an hour later belongs to no session here
+    records = {
+        **night_records(seq),
+        far: CaptureRecord(far, datetime_original="2026:11:09 23:30:00"),
+    }
+    ops = Ops(sequences=[seq], darks=[*darks, far])
+    run(src, root, make_hooks(ops, records=records, readings=night_readings([*seq, far])))
+    assert ops.lapse == [(lights, darks)]
+    assert ops.trails == [(lights, darks)]
+
+
+def test_a_failed_dark_triage_keeps_every_frame_in_the_night_sky(tmp_path, root):
+    src, seq, _lights, darks = dark_card(tmp_path)
+
+    class Boom(Ops):
+        def classify_night(self, paths):
+            raise RuntimeError("decode boom")
+
+    ops = Boom(sequences=[seq], darks=darks)
+    warnings = []
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = ps.run_sort(src, root, ps.SortOptions(), hooks, today=TODAY, say=warnings.append)
+    assert {r["category"] for r in rows(result.run_dir / "ranked.csv")} == {sg.NIGHT_FOLDER}
+    assert any("lens-cap dark check failed" in w for w in warnings)
+
+
 def test_session_with_too_few_usable_lights_is_skipped_quietly(tmp_path, root):
     names = [f"n{i:02d}" for i in range(30)]
     src = card(tmp_path, names)
@@ -619,7 +684,7 @@ def test_night_session_renders_one_star_trail_beside_its_timelapse(tmp_path, roo
     stack, trail = page.index("stacks/night-1.jpg"), page.index("trails/night-1.jpg")
     assert stack < trail < page.index("timelapse/night-1.mp4")
     with Ledger(root / ps.LEDGER_NAME) as ledger:
-        key = sg.group_key("trails", [str(p) for p in seq])
+        key = sg.group_key("trails", [str(p) for p in seq[:-4]])  # darks sit in their own folder
         assert ledger.get_score(key, sg.STACK_MARKER) == 1
 
 
