@@ -5,6 +5,48 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.63] - 2026-11-09
+
+### Added
+
+- `gomoveshift.pipeline.photos.aesthetic`: a local, CPU-by-default aesthetic scorer for judging the most
+  striking photos. CLIP ViT-L/14 (int8 ONNX) plus the LAION aesthetic head, both pinned by size and sha256 and
+  downloaded only by an explicit `fetch_models()`; the head is read without torch through a restricted
+  unpickler. `AestheticScorer.score` returns the raw ~1-10 value, `score_unit` a 0-1 clamp.
+- Photo subject recognition gains `close_up`: a frame focused within 3 m (about 10 ft), or shot on a macro lens or at 0.25x or more implied magnification, reads as a close-up (0.65, 0.75 with a macro signal). It ranks after the astro rules and before wildlife, so a long lens focused near is a close-up, not wildlife. `CaptureOptics` carries `focus_distance_m` and `lens_model`, and `recognise_photos` accepts an `optics` mapping to supply them. Operator subject sidecars accept `close_up`; look routing is unchanged.
+- `gomoveshift/pipeline/photos/quality_order.py`: a per-category quality score for
+  ordering shots inside a category (never for excluding one). It scores the developed
+  image: sharpness and clipping, star count, star sharpness and trailing for a night
+  sky, and a category signal (landscape colour and sky, night-sky darkness and
+  foreground separation, close-up subject isolation). An optional aesthetic score
+  blends in at weight 0.5. The result carries every named component for `ranked.csv`.
+- `gomoveshift photos sort <folder>`: dedupe, classify and develop a whole folder of photos into the fixed `photos.sort_root` (default `/mnt/d/camPics_output`). Renamed or re-offloaded copies and shots seen in an earlier run are listed in `duplicates.csv` instead of being processed again (`--reprocess` overrides); each remaining photo is developed into a category folder (`night-sky`, `landscape`, `close-up`, `wildlife`, `portrait`, `long-exposure`, `hdr-source`, `other`) in capture order, with `run.json`, `ranked.csv`, `skipped.csv` and a static `index.html`. `--dry-run` prints counts and a time estimate and writes nothing; `--index-only` seeds the ledger from folders already sorted by hand. Refuses (exit 2, nothing decoded) when the folder is missing, the output drive is not mounted, or the two paths nest. Takes the shared media admission fence and runs at low priority.
+- Photo duplicate detection building blocks (not yet wired to a command): an exiftool capture reader (body serial, shutter count, focus distance, lens; Pillow fallback with a warning when exiftool is missing) and a dedupe module that collapses renamed or cross-folder copies of one shot by capture identity (RAW kept over JPEG), hashes only frames without an identity, and remembers processed shots in a sqlite ledger across runs.
+- `photos sort` tags scene groups in `ranked.csv` (`group_id`, `group_best_rank`): night
+  sessions, exposure brackets, panorama runs (new detector: same settings, at most 8 s
+  apart, three or more frames) and look-alike bursts inside a category. It then builds
+  `hdr/`, `pano/` and `stacks/` outputs one at a time, best night session first, rewrites
+  `index.html` as each lands, and skips night stacks with `--no-stacks`. A failed group is a
+  `skipped.csv` row. `run_sort(resume=...)` finishes only the unfinished groups.
+- `photos sort --resume <run folder>` finishes an earlier run's unfinished stacks, HDR
+  fuses and panoramas without re-developing or re-scoring.
+- `gomoveshift photos sort` now scores every developed shot and orders each category by quality: technical
+  sharpness and clipping (plus stars for a night sky), a per-category signal, and the local aesthetic model.
+  Files are renamed `NNN-<stem>.jpg` with NNN the quality rank (1 = best); `ranked.csv` carries every
+  component, and `index.html` shows each section in rank order with the total under each thumbnail. The
+  aesthetic pass runs once per run on the CPU (2 threads), caches by source sha256 in the ledger, and
+  never takes the shared GPU lock, so it cannot hold up a GoMoveShift render.
+- `gomoveshift photos fetch-models`: the explicit, hash-checked download of the aesthetic weights.
+
+### Changed
+
+- The bracket route (`--bracket-gpx`) caps the gap between its two fixes per level (`BRACKET_MAX_GAP_H_BY_LEVEL`): a county or state still needs fixes at most 36 h apart, a country at most 48 h. A gap past a level's cap drops the label to the next broader level both fixes agree on, so two day tracks a day apart (≈ 44 h) inside one county name the country instead of being refused. Over 48 h is still refused.
+- Pinned Waypost (`seo-manager`) to `d74f50a` (Back-Road-Creative/waypost#109). A drive backlog row may carry `bracket_gpx: [before, after]`, which the backlog launcher hands to `--bracket-gpx` (#269); before this pin the loader refused the key.
+- `photos sort` drops to the lowest CPU priority (`nice 19`, was 10) so it never slows a
+  GoMoveShift render running on the same machine.
+- `photos sort` no longer has a `--gpu` flag: the aesthetic pass always runs on the CPU and the
+  sort never takes the shared GPU lock, which the GoMoveShift drives hold.
+
 ## [0.3.62] - 2026-11-09
 
 ### Added
@@ -744,7 +786,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.62...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...HEAD
+[0.3.63]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.62...v0.3.63
 [0.3.62]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.61...v0.3.62
 [0.3.61]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.60...v0.3.61
 [0.3.60]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.59...v0.3.60
