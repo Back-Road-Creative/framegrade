@@ -294,7 +294,7 @@ class TestRunPreflight:
 
 class TestRunPreflightIngestComplete:
     """A resume with Phase A already done won't re-create the per-episode
-    concats, so the source×1.5 staging term overstates the real remaining peak.
+    concats, so the source×3.0 staging term overstates the real remaining peak.
     ``ingest_complete=True`` treats the full source as already-staged, dropping
     the gate to its floor (no re-ingest will occur, so the full staging term
     is not needed)."""
