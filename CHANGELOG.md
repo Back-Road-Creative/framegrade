@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.72] - 2026-11-10
+
+### Fixed
+
+- `photos sort` no longer files a dusk sky run as landscape. Without a solar track, "daylight" came from the clock alone (05:00-20:59), so 111 frames shot at 20:26-20:59 at 15 s / ISO 3200 / f/3.8 (EV100 -5.1, the night frames' own exposure) were far-focus "landscape". Subject recognition now reads the exposure: EV100 at or below -2 is night evidence, and daylight needs EV100 5 or more.
+- `photos sort` no longer ranks lens-cap darks as night-sky shots. The night frames go through the stack's light/dark triage once; the darks move to a `lens-cap-darks/` folder, join no group, and show on the page as a count only. Darks shot within 15 minutes of a night session still calibrate its star trail and time-lapse.
+
 ## [0.3.71] - 2026-11-10
 
 ### Added
@@ -863,7 +870,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...HEAD
+[0.3.72]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...v0.3.72
 [0.3.71]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...v0.3.71
 [0.3.70]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...v0.3.70
 [0.3.69]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...v0.3.69
