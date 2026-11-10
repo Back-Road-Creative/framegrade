@@ -55,6 +55,17 @@ _GB = 1_073_741_824  # bytes per gibibyte
 _SUPERLONG_RAW_PLUS_FINAL_FACTOR = 2.0  # raw stream-copied concat + final coexist
 _SUPERLONG_OUTPUT_SAFETY_FACTOR = 1.2  # margin over the sizing estimate itself
 
+# Day-master bytes per raw-source byte for the disk checks, an upper bound.
+# Recorded masters measure 0.63x to 0.89x their source; the old 1.5x rule
+# assumed 0.5x, so a tight volume passed the check and could fill mid-encode.
+MASTER_BYTES_PER_SOURCE_BYTE = 1.0
+# Staging peak per source byte when the per-day master encode starts: the
+# retained episode concats (1x), the day's raw concat (1x) and the master being
+# written. The per-day gate (``day_master_encoder``) asks free space for the
+# last two while the first is already on disk; one constant keeps the upfront
+# estimate from drifting below it again.
+PEAK_CACHE_FACTOR = 2.0 + MASTER_BYTES_PER_SOURCE_BYTE
+
 
 def _virtual_memory():
     """Return object with `.available` bytes. Wrapped for test patchability.
@@ -90,7 +101,7 @@ def _virtual_memory():
 def estimate_peak_cache_gb(
     source_files: Iterable[Path],
     *,
-    safety_factor: float = 1.5,
+    safety_factor: float = PEAK_CACHE_FACTOR,
     floor_gb: float = 30.0,
     completed_source_bytes: float = 0.0,
     superlong_enabled: bool = False,
@@ -98,29 +109,28 @@ def estimate_peak_cache_gb(
     """Estimate TRUE peak intermediate-cache usage in GB from source sizes.
 
     Aligned with the per-day mid-run gate (``day_master_encoder.encode_day_master``,
-    which checks ``day_source_bytes × 1.5`` via ``ffmpeg_runner.check_disk_space``)
-    so preflight catches a shortfall UPFRONT instead of mid-encode on day N
-    (an early check, not a late one). A mid-run ``Insufficient disk space``
-    failure is a LATE gate firing hours in; an under-estimate here (a flat
-    ``source × 1.2``) is how that happens.
+    which asks ``ffmpeg_runner.check_disk_space`` for the day's raw concat plus
+    ``day_source_bytes × MASTER_BYTES_PER_SOURCE_BYTE``) so preflight catches a
+    shortfall UPFRONT instead of mid-encode on day N (an early check, not a
+    late one). A mid-run ``Insufficient disk space`` failure is a LATE gate
+    firing hours in; an under-estimate here is how that happens (rec0063,
+    2026-11-10: a 1.5x estimate cleared, the day gate failed 4 h 20 m in).
 
     The peak the staging FS must hold at the worst moment:
       * ALL retained per-episode concats persist on the staging dir through
         scoring AND the per-day master encode (Phase A routes them to
         ``state.stages_base`` so they fit on ext4, not a v9fs output mount)
         ≈ total source bytes (×1.0), PLUS
-      * the busiest day's master-encode working set — its raw concat +
-        the master being written + work dir ≈ that day's source × ~0.5 on
-        top of the day's own already-counted concat (the per-day gate
-        expresses this same spike as ``day_source × 1.5``).
+      * the busiest day's master-encode working set — its raw concat (×1.0)
+        and the master being written (``MASTER_BYTES_PER_SOURCE_BYTE``).
 
     Preflight runs BEFORE ingest groups recordings into days, so it cannot
     measure the largest single day. The fail-safe bound that always covers
     the per-day gate's worst case — a single-day trip, where largest_day ==
-    total — is ``total_source × 1.5``: it dominates ``total + largest_day×0.5``
-    for any day distribution and reserves conservatively (over-, never
-    under-, estimating a SAFETY gate). Hence the default ``safety_factor=1.5``,
-    matching the per-day formula exactly when the whole trip is one day.
+    total — is ``total_source × PEAK_CACHE_FACTOR``: it dominates
+    ``total + largest_day × (1 + MASTER_BYTES_PER_SOURCE_BYTE)`` for any day
+    distribution and reserves conservatively (over-, never under-, estimating
+    a SAFETY gate).
 
     ``completed_source_bytes`` makes the gate RESUME-AWARE: on a resume
     with N/M day masters already on disk, those days' masters are cached and
@@ -1509,7 +1519,6 @@ def run_preflight(
                     effective_completed = completed_source_bytes
             est_peak_gb = estimate_peak_cache_gb(
                 mp4_files,
-                safety_factor=1.5,
                 floor_gb=min_staging_gb,
                 completed_source_bytes=effective_completed,
                 superlong_enabled=superlong_enabled,

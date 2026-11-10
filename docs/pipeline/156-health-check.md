@@ -202,10 +202,11 @@ running audit, one with no job record, a failed one and one at the OST gate are 
 `--supersede` of the drive itself is unchanged. `--dry-run` asks `health publish --dry-run`.
 
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one
-free-space figure. Staging needs `max(30 GB, sources × 1.5)` and output 50 GB; free equal to need
-passes. The ×1.5 is the existing preflight contract (`estimate_peak_cache_gb`), not a bound
-validated independently of it, and retained artifacts (earlier stages, outputs, the day masters
-they keep) count only through the measured free space. A launch still runs `run_preflight` with
+free-space figure. Staging needs `max(30 GB, sources × 3.0)` and output 50 GB; free equal to need
+passes. The ×3.0 is preflight's `PEAK_CACHE_FACTOR` (`estimate_peak_cache_gb`): the episode
+concats plus the day's raw concat and master that the per-day encode gate asks for, so a drive
+the encode cannot fit is refused here instead of failing hours in. Retained artifacts (earlier
+stages, outputs, the day masters they keep) count only through the measured free space. A launch still runs `run_preflight` with
 the row's own sources before the job starts, under the code root's drive interpreter (a child
 `python -c`, cwd the service dir) so tool checks such as gopro-overlay test the venv that will
 render; its blockers are `refused`, and a crashed child is an error, never a pass.

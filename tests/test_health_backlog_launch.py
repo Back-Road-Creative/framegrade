@@ -811,7 +811,7 @@ def test_staging_boundary_free_equal_to_need_passes(tmp_path, action):
     rig = Rig(tmp_path)
     rig.rows = [rig.row("day-a", 10)]
     need = launch.staging_need_gb(rig.rows[0].sources)
-    assert need == pytest.approx(30.0)  # 10 GB x 1.5 = 15 < the 30 GB floor
+    assert need == pytest.approx(30.0)  # 10 GB x 3.0 = 30, the 30 GB floor
     rig.devices[rig.stages] = (1, need if action == "launched" else need - 0.01)
     res = rig.run()
     assert res["action"] == action, res
@@ -822,25 +822,34 @@ def test_staging_boundary_free_equal_to_need_passes(tmp_path, action):
 def test_staging_need_scales_with_day_source_above_the_floor(tmp_path):
     rig = Rig(tmp_path)
     row = rig.row("big", 40)
-    assert launch.staging_need_gb(row.sources) == pytest.approx(60.0)
+    assert launch.staging_need_gb(row.sources) == pytest.approx(120.0)
+
+
+def test_a_drive_the_master_encode_cannot_fit_is_refused_upfront(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows = [rig.row("rec0063", 138.4)]  # 2026-11-10: launched on 333.8 GB, failed at encode
+    rig.devices[rig.stages] = (1, 333.8)
+    res = rig.run()
+    assert res["action"] == "refused" and "storage" in res["reason"], res
+    assert not rig.launches
 
 
 def test_shared_device_sums_staging_and_output_needs(tmp_path):
     rig = Rig(tmp_path)
-    rig.rows = [rig.row("day-a", 40)]  # staging 60 + output floor 50 = 110 on one device
-    rig.devices = {rig.stages: (7, 109.0), rig.out: (7, 109.0)}
+    rig.rows = [rig.row("day-a", 40)]  # staging 120 + output floor 50 = 170 on one device
+    rig.devices = {rig.stages: (7, 169.0), rig.out: (7, 169.0)}
     res = rig.run()
-    assert res["action"] == "refused" and "110.0" in res["reason"]
+    assert res["action"] == "refused" and "170.0" in res["reason"]
     storage = res["storage"]
-    assert len(storage) == 1 and storage[0]["need_gb"] == pytest.approx(110.0)
-    rig.devices = {rig.stages: (7, 110.0), rig.out: (7, 110.0)}
+    assert len(storage) == 1 and storage[0]["need_gb"] == pytest.approx(170.0)
+    rig.devices = {rig.stages: (7, 170.0), rig.out: (7, 170.0)}
     assert rig.run()["action"] == "launched"
 
 
 def test_distinct_devices_are_checked_separately(tmp_path):
     rig = Rig(tmp_path)
     rig.rows = [rig.row("day-a", 40)]
-    rig.devices = {rig.stages: (1, 60.0), rig.out: (2, 49.0)}
+    rig.devices = {rig.stages: (1, 120.0), rig.out: (2, 49.0)}
     res = rig.run()
     assert res["action"] == "refused"
     by_dev = {s["device"]: s for s in res["storage"]}
@@ -849,7 +858,7 @@ def test_distinct_devices_are_checked_separately(tmp_path):
 
 def test_storage_is_reported_on_dry_run_with_the_bound_named(tmp_path):
     res = Rig(tmp_path).run(dry_run=True)
-    assert res["storage"] and "1.5" in res["storage_bound"]
+    assert res["storage"] and "x 3.0" in res["storage_bound"]
 
 
 def test_preflight_blocked_refuses_without_launching(tmp_path):
