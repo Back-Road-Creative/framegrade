@@ -408,3 +408,24 @@ def test_default_wrappers_run_on_trivial_input(monkeypatch):
 
     monkeypatch.setattr(rawpy, "imread", lambda p: Raw())
     assert sg._megapixels("x.nef") == 12.0
+
+
+def test_pano_stitches_the_developed_jpegs_not_the_raw_sources(tmp_path, root):
+    """The stitcher reads with ``cv2.imread``, which cannot open a camera RAW: on a real
+    card (2026-11-09) every panorama failed "DSC_1876.NEF: could not be read as an image".
+    It must be handed the developed JPEGs this run wrote, in capture order."""
+    src = card(tmp_path, list("abc"))
+    recs = pano_records(src, "abc", (0, 2, 4))
+    seen = []
+    ops = Ops()
+    real_stitch = ops.stitch
+
+    def stitch(paths, out_path):
+        seen.append([Path(p) for p in paths])
+        real_stitch(paths, out_path)
+
+    ops.stitch = stitch
+    result = run(src, root, make_hooks(ops, records=recs))
+    by_source = {Path(r["source"]): Path(r["output"]) for r in rows(result.run_dir / "ranked.csv")}
+    assert seen == [[by_source[p] for p in stems(src, "abc")]]
+    assert all(p.is_relative_to(result.run_dir) for p in seen[0])

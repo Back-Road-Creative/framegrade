@@ -18,7 +18,7 @@
 After the gallery is complete (so the page can be opened while this runs), one group at a time:
 
 1. HDR fusions to `hdr/<group>-<stem>.jpg` (`develop.fuse_bracket`, then the normal develop and JPEG export, graded from the middle frame).
-2. Panoramas to `pano/<group>-<stem>.jpg` (`panorama.stitch_panorama`).
+2. Panoramas to `pano/<group>-<stem>.jpg` (`panorama.stitch_panorama`), stitched from the developed JPEGs this run wrote, never the RAW sources: the stitcher reads with `cv2.imread`, which cannot open a RAW.
 3. Night stacks to `stacks/<group>.tif` (the master) and `stacks/<group>.jpg` (the preview), highest mean total first. The call sequence mirrors `photos astro`: the RAM and disk gate, `prepare_frames` with the run's `--workers`, then `stack_run`. No calibration frames. Stacking does not use the GPU.
 
 `index.html` is rewritten after each output lands: stacks at the top of night-sky, HDR and panoramas as their own sections. `--no-stacks` skips the night stacks only.
