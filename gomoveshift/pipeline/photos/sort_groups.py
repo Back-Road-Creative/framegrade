@@ -4,13 +4,15 @@ A group is a tag: every member stays in its own category at its own rank. Kinds,
 order a shot is claimed: ``night`` (an intervalometer chunk), ``bracket`` (exposure
 bracket), ``pano`` (a fast run of same-settings frames) and ``burst`` (look-alikes inside
 one category). Outputs: ``hdr/`` fusions, ``pano/`` stitches, then ``stacks/`` night stacks,
-one at a time. Then ``timelapse/``: one MP4 (plus a same-stem poster JPEG) per night session
+one at a time. Then, per night session, ``trails/``: one star-trail TIFF master plus a
+same-stem JPEG; and ``timelapse/``: one MP4 (plus a same-stem poster JPEG) per night session
 and per long burst. A failed output is a ``skipped.csv`` row and never touches a member photo.
 
 Resume marker: a group output counts as done only when the output file exists AND the
 ledger holds ``put_score(<group key sha>, "stack:v1", 1)``, written after the output lands.
 A crash between the two leaves no marker, so the half-written output is redone. A time-lapse
-uses the same marker under its own key (``group_key("timelapse", ...)``).
+uses the same marker under its own key (``group_key("timelapse", ...)``); a star trail under
+``group_key("trails", ...)``.
 """
 
 from __future__ import annotations
@@ -37,7 +39,14 @@ TIMELAPSE_SKIP_MARKER = "timelapse-skip:v1"
 #: (``astro_timelapse.TIMELAPSE_FPS``), so 24 frames is one second of video: below that the
 #: clip is a flash, not motion, and the stack already shows the scene.
 TIMELAPSE_MIN_FRAMES = 24
+#: A session too short for a star trail, remembered like ``TIMELAPSE_SKIP_MARKER``.
+TRAILS_SKIP_MARKER = "trails-skip:v1"
+#: Fewest lights worth a star trail: 24 frames at the measured 32 s interval
+#: (``astro_trails``) is about 13 minutes, about 3 degrees of sky rotation. Shorter arcs read
+#: as dots, and the stack already shows that scene.
+TRAILS_MIN_FRAMES = 24
 HDR_DIR, PANO_DIR, STACK_DIR, TIMELAPSE_DIR = "hdr", "pano", "stacks", "timelapse"
+TRAILS_DIR = "trails"
 _TIME_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
 
 
@@ -139,12 +148,24 @@ def _poster(video, poster, frames, fps) -> None:
         raise RuntimeError(f"poster frame failed: exit {done.returncode}: {tail}")
 
 
-def _night_timelapse(lights, darks, out_mp4, out_jpg) -> None:
-    """One session's lights to an MP4 with the night product's fps and height cap. Darks
-    calibrate only when they validate against the lights (same identity check as a stack);
-    a set that does not match is dropped, never subtracted blind."""
+def _validated_darks(lights, darks) -> list:
+    """``darks`` when they validate against the lights (same identity check as a stack); a
+    set that does not match is dropped, never subtracted blind."""
     from .astro_calibrate import AstroCalibrationError
     from .astro_orchestrator import build_validated_master_dark
+
+    if not darks:
+        return []
+    try:
+        build_validated_master_dark(lights[:1], darks)
+    except AstroCalibrationError:
+        return []
+    return list(darks)
+
+
+def _night_timelapse(lights, darks, out_mp4, out_jpg) -> None:
+    """One session's lights to an MP4 with the night product's fps and height cap; darks
+    pass through ``_validated_darks``."""
     from .astro_timelapse import (
         TIMELAPSE_FPS,
         TIMELAPSE_HEIGHT_DEFAULT,
@@ -152,16 +173,26 @@ def _night_timelapse(lights, darks, out_mp4, out_jpg) -> None:
         render_timelapse,
     )
 
-    if darks:
-        try:
-            build_validated_master_dark(lights[:1], darks)
-        except AstroCalibrationError:
-            darks = []
+    darks = _validated_darks(lights, darks)
     preflight_timelapse(out_mp4.parent, megapixels=_megapixels(lights[0]), dark_count=len(darks))
     video, used, _rejected = render_timelapse(
         lights, out_mp4, darks, fps=TIMELAPSE_FPS, scale_height=TIMELAPSE_HEIGHT_DEFAULT
     )
     _poster(video, out_jpg, used, TIMELAPSE_FPS)
+
+
+def _star_trails(lights, darks, out_tif, out_jpg) -> None:
+    """One session's lights to a star-trail master (``astro_trails.render_trail``: unaligned
+    per-pixel maximum) plus a browser JPEG from that master, as the night products export it.
+    Darks pass through ``_validated_darks``; a maximum keeps a hot pixel forever, so an
+    unmatched set is never subtracted."""
+    from .astro_trails import preflight_trail, render_trail
+    from .night_products import render_master_preview
+
+    darks = _validated_darks(lights, darks)
+    preflight_trail(out_tif.parent, megapixels=_megapixels(lights[0]), dark_count=len(darks))
+    master, _used, _rejected = render_trail(lights, out_tif, darks)
+    render_master_preview(Path(master), out_jpg)
 
 
 def _still_timelapse(jpegs, out_mp4, out_jpg) -> None:
@@ -207,6 +238,8 @@ class GroupOps:
     night_timelapse: Callable = _night_timelapse
     #: ``(developed_jpegs_in_capture_order, out_mp4, out_jpg)``: writes the video and poster.
     still_timelapse: Callable = _still_timelapse
+    #: ``(lights, darks, out_tif, out_jpg)``: writes the star-trail master and its JPEG.
+    star_trails: Callable = _star_trails
 
 
 def real_ops() -> GroupOps:
@@ -399,7 +432,7 @@ def group_key(kind: str, members) -> str:
 
 @dataclass
 class Output:
-    kind: str  # "hdr" | "pano" | "stacks" | "timelapse"
+    kind: str  # "hdr" | "pano" | "stacks" | "trails" | "timelapse"
     group_id: str
     rel: str  # path relative to the run folder (the image the page shows)
 
@@ -414,7 +447,8 @@ class StageResult:
 def build_outputs(
     run_dir: Path, rows, ops: GroupOps, ledger, *, workers: int, no_stacks: bool, on_output
 ) -> StageResult:
-    """HDR, panoramas, night stacks (best session first), then time-lapses; one at a time."""
+    """HDR, panoramas, night stacks (best session first), then star trails and time-lapses;
+    one at a time."""
     result = StageResult()
     groups = groups_from_rows(rows)
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
@@ -451,7 +485,8 @@ def build_outputs(
 
 
 def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output) -> None:
-    """One time-lapse per night session (not under ``--no-stacks``) and per long burst."""
+    """Per night session (not under ``--no-stacks``) a star trail then a time-lapse, sharing
+    one light/dark triage; per long burst a time-lapse."""
     units = []  # (id, kind, member sources, developed JPEGs)
     if not no_stacks:
         for session in night_sessions(groups):
@@ -462,6 +497,15 @@ def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output
         if g.kind == "burst" and len(g.members) >= TIMELAPSE_MIN_FRAMES:
             units.append((g.id, "burst", g.members, [o for o in g.outputs if o]))
     for gid, kind, members, jpegs in units:
+        triage: list = []  # the session's (lights, darks), decoded at most once
+
+        def classify(members=members, triage=triage):
+            if not triage:
+                triage.append(ops.classify_night([Path(m) for m in members]))
+            return triage[0]
+
+        if kind == "night":
+            _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output)
         mp4 = run_dir / TIMELAPSE_DIR / f"{gid}.mp4"
         poster = mp4.with_suffix(".jpg")
         key = group_key("timelapse", members)
@@ -472,7 +516,7 @@ def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output
         else:
             try:
                 if kind == "night":
-                    lights, darks = ops.classify_night([Path(m) for m in members])
+                    lights, darks = classify()
                     if len(lights) < TIMELAPSE_MIN_FRAMES:
                         ledger.put_score(key, TIMELAPSE_SKIP_MARKER, 1)
                         continue
@@ -493,6 +537,35 @@ def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output
             result.stats["built"] += 1
         result.outputs.append(Output("timelapse", gid, f"{TIMELAPSE_DIR}/{gid}.mp4"))
         on_output(result.outputs)
+
+
+def _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output) -> None:
+    """One star trail for a night session: resume, skip and failure as a time-lapse."""
+    tif = run_dir / TRAILS_DIR / f"{gid}.tif"
+    jpg = tif.with_suffix(".jpg")
+    key = group_key("trails", members)
+    if tif.is_file() and jpg.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
+        result.stats["resumed"] += 1
+    elif ledger.get_score(key, TRAILS_SKIP_MARKER) == 1:
+        return
+    else:
+        try:
+            lights, darks = classify()
+            if len(lights) < TRAILS_MIN_FRAMES:
+                ledger.put_score(key, TRAILS_SKIP_MARKER, 1)
+                return
+            tif.parent.mkdir(parents=True, exist_ok=True)
+            ops.star_trails(lights, darks, tif, jpg)
+        except Exception as exc:  # a star trail must never abort the run
+            result.skipped.append((f"group:{gid}", f"trails failed: {exc}"))
+            result.stats["failed"] += 1
+            for leftover in (tif, jpg):
+                leftover.unlink(missing_ok=True)
+            return
+        ledger.put_score(key, STACK_MARKER, 1)
+        result.stats["built"] += 1
+    result.outputs.append(Output("trails", gid, f"{TRAILS_DIR}/{gid}.jpg"))
+    on_output(result.outputs)
 
 
 def _produce(group, ops, paths, main, shown, workers, out_dir) -> None:
