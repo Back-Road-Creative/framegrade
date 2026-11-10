@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.69] - 2026-11-10
+
+### Changed
+
+- Waypost is pinned to its 0.6.0 release commit. The previous pin (the `bracket_gpx` commit) still carried version 0.5.0, so an existing install kept the old 0.5.0 code and the backlog refused `bracket_gpx` rows.
+
 ## [0.3.68] - 2026-11-10
 
 ### Fixed
@@ -831,7 +837,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...HEAD
+[0.3.69]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...v0.3.69
 [0.3.68]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...v0.3.68
 [0.3.67]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...v0.3.67
 [0.3.66]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...v0.3.66
