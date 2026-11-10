@@ -37,6 +37,7 @@ import logging
 import math
 import re
 import statistics
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +63,13 @@ REGION_MIN_COVERAGE = 1.0
 #: A Short adds no number: it bins at ``GAP_S``, and any
 #: place, gap or unsettled time at all counts -- there is no floor.
 _SHORT_FLOOR_S = 0.0
+#: Waits before each retry of a lookup that RAISED (the geocoder's own
+#: retries ran out: a timeout, a dropped connection). An outage outlasting those
+#: few seconds would otherwise be unresolved time and refuse a label the GPS
+#: supports (Clonakilty 09-17: one timed-out lookup failed the day after its
+#: encode). A lookup that answers with nothing is not retried.
+LOOKUP_RETRY_WAITS_S = (5.0, 15.0, 45.0)
+_sleep = time.sleep
 _METHOD = "retained_reverse_geocode"
 #: The timeline the record measures on: the phase-A parse of
 #: each episode's ``.gpx`` held in state, not a fresh raw-GPX read -- a verifier
@@ -701,10 +709,24 @@ def _tick(cleaned) -> Optional[float]:
 
 
 def _geocode(geocoder, lat, lon) -> dict:
-    try:
-        return geocoder.reverse_geocode_detailed(lat, lon) or {}
-    except Exception:  # noqa: BLE001 — a failed lookup is unresolved time, never a place
-        return {}
+    for wait in (*LOOKUP_RETRY_WAITS_S, None):
+        try:
+            return geocoder.reverse_geocode_detailed(lat, lon) or {}
+        except Exception as exc:  # noqa: BLE001 — a failed lookup is unresolved time, never a place
+            if wait is None:
+                logger.warning(
+                    "route claim: lookup at %.4f,%.4f failed (%s); unresolved", lat, lon, exc
+                )
+                return {}
+            logger.warning(
+                "route claim: lookup at %.4f,%.4f failed (%s); retrying in %.0f s",
+                lat,
+                lon,
+                exc,
+                wait,
+            )
+            _sleep(wait)
+    return {}
 
 
 def _slot(value) -> Optional[str]:
