@@ -622,6 +622,61 @@ def test_burst_timelapse_needs_the_minimum_member_count(tmp_path, root):
     assert not (result.run_dir / "timelapse" / "burst-2.mp4").exists()
 
 
+def interval_records(paths, gaps):
+    """Capture times from 06:30:00, each frame ``gaps[i]`` seconds after the one before."""
+    from datetime import datetime, timedelta
+
+    when, out = datetime(2026, 9, 22, 6, 30), {}
+    for i, path in enumerate(paths):
+        when += timedelta(seconds=gaps[i - 1] if i else 0)
+        out[path] = CaptureRecord(
+            path=path, datetime_original=when.strftime("%Y:%m:%d %H:%M:%S"), exposure_s=15.0
+        )
+    return out
+
+
+def test_an_intervalometer_run_is_one_sequence_with_a_timelapse(tmp_path, root):
+    names = [f"d{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    readings = {p: SubjectReading(SubjectCategory.LONG_EXPOSURE, 0.9) for p in seq}
+    ops = Ops()
+    ops.phash = lambda rgb: int(rgb[0, 0, 0]) % 2  # look-alikes would split it into two bursts
+    hooks = make_hooks(ops, records=interval_records(seq, [18] * 29), readings=readings)
+    result = run(src, root, hooks)
+    ranked = rows(result.run_dir / "ranked.csv")
+    assert {r["group_id"] for r in ranked} == {"sequence-1"}
+    assert lapse_calls(ops, "still_timelapse") == [("still_timelapse", "sequence-1.mp4")]
+    by_source = {Path(r["source"]): Path(r["output"]) for r in ranked}
+    assert ops.lapse == [([by_source[p] for p in seq], [])]  # capture order
+    page = (result.run_dir / "index.html").read_text()
+    assert "<h3>sequence-1</h3>" in page and "timelapse/sequence-1.mp4" in page
+
+
+@pytest.mark.parametrize(
+    "gaps",
+    [
+        [18] * 22,  # 23 frames: too short for a time-lapse
+        [2, 50] * 15,  # hand-held: no steady cadence
+        [18] * 14 + [90] + [18] * 14,  # a long pause splits it into two short runs
+    ],
+)
+def test_no_sequence_without_a_long_steady_run(gaps):
+    paths = [Path(f"/card/d{i:02d}.nef") for i in range(len(gaps) + 1)]
+    ranked = [
+        {"source": str(p), "category": "long-exposure", "rank": i + 1, "quality_score": "0.5"}
+        for i, p in enumerate(paths)
+    ]
+    sg.tag_groups(ranked, interval_records(paths, gaps), Ops().ops(), {})
+    assert not any(r.get("group_id", "").startswith("sequence") for r in ranked)
+
+
+def test_detect_interval_runs_drops_a_lone_frame_before_the_run():
+    paths = [Path(f"/card/d{i:02d}.nef") for i in range(31)]
+    records = interval_records(paths, [170] + [18] * 29)  # JP's dawn run: one test shot first
+    assert sg.detect_interval_runs(records.values()) == [paths[1:]]
+
+
 def test_resume_skips_finished_timelapse_and_rebuilds_a_missing_one(tmp_path, root):
     names = [f"n{i:02d}" for i in range(30)]
     src = card(tmp_path, names)
