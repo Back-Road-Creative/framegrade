@@ -5,6 +5,22 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-10
+
+### Fixed
+
+- `cleanup <project> --abandoned` now reclaims a run that `health backlog` superseded even when it is younger than `--min-age`. The supersede record (`superseded.json`) already says that run is dead, so the 7-day gate only held its space while the live run waited. The lock, hold and running-drive checks still apply.
+- Facebook photo and carousel queue entries no longer use the Instagram media
+  client or fall through to the Facebook Reels uploader. Unsupported Facebook
+  photo delivery fails before reading media or calling an upload adapter;
+  Instagram photo and Facebook video routes remain available.
+- `photos sort` groups an intervalometer run outside the night sky, such as a dawn sequence, as one `sequence-<n>` with its own time-lapse. Before, look-alike bursts split it into several groups and loose shots. A run needs 24 or more frames of one category, at most 60 s apart, at a steady cadence.
+- The upfront staging estimate (preflight and the hourly backlog) sized a drive at 1.5x its
+  source while the day-master encode asks for the raw concat plus the master on top of the
+  episode concats it keeps, 3x in all. A drive could launch, spend hours on scoring, then stop
+  at the encode for lack of space. Both now read one `PEAK_CACHE_FACTOR` (3.0), so a drive that
+  cannot fit is refused before it starts.
+
 ## [0.3.72] - 2026-11-10
 
 ### Fixed
@@ -870,7 +886,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...HEAD
+[0.3.73]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...v0.3.73
 [0.3.72]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...v0.3.72
 [0.3.71]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...v0.3.71
 [0.3.70]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...v0.3.70
