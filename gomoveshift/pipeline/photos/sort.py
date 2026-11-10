@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 from ... import __version__
 from ..orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, release_gpu_lock
-from . import quality_order
+from . import quality_order, sort_groups
 from .aesthetic import AestheticModelUnavailable
 from .capture_meta import CaptureRecord, read_capture_records
 from .dedupe import Ledger, dedupe, sha256_file
@@ -82,6 +82,8 @@ RANKED_COLUMNS = (
     "aesthetic_score",
     "technical",
     "category_score",
+    "group_id",
+    "group_best_rank",
 )
 
 
@@ -137,6 +139,9 @@ class SortHooks:
     aesthetic_factory: Optional[Callable] = None
     gpu_lock: Callable = acquire_gpu_lock
     gpu_release: Callable = release_gpu_lock
+    #: ``sort_groups.GroupOps``: scene-group tags and HDR / panorama / night-stack outputs;
+    #: ``None`` skips grouping (see ``scoring_hooks``).
+    groups: Optional[sort_groups.GroupOps] = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +177,7 @@ def make_aesthetic_scorer(*, use_gpu: bool = False):
 
 def scoring_hooks(**over) -> SortHooks:
     """The real hooks plus real scoring; the CLI runs with these."""
+    over.setdefault("groups", sort_groups.real_ops())
     return SortHooks(score=score_shot, aesthetic_factory=make_aesthetic_scorer, **over)
 
 
@@ -251,26 +257,45 @@ def _write_csv(path: Path, header, rows) -> None:
         csv.writer(handle).writerows([header, *rows])
 
 
-def _index_html(run_dir: Path, source: Path, ranked) -> str:
+def _thumb(rel: str, label: str, note: str = "") -> str:
+    href = html.escape(quote(rel))
+    return (
+        f'<a href="{href}"><img src="{href}" alt="{html.escape(label)}" loading="lazy" '
+        f'width="240"><span>{html.escape(label)}</span>{note}</a>'
+    )
+
+
+def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
+    best = sort_groups.best_by_group(ranked)
     sections = []
     folders = list(dict.fromkeys(row["category"] for row in ranked))
+    if any(o.kind == "stacks" for o in outputs) and sort_groups.NIGHT_FOLDER not in folders:
+        folders.append(sort_groups.NIGHT_FOLDER)
     for folder in folders:
         items = []
+        if folder == sort_groups.NIGHT_FOLDER:
+            items += [_thumb(o.rel, o.group_id) for o in outputs if o.kind == "stacks"]
         for row in (r for r in ranked if r["category"] == folder):
             name = Path(row["output"]).name
-            rel = html.escape(quote(f"{folder}/{name}"))
-            label = html.escape(name)
             total = row.get("quality_score")
             note = f"<small>{float(total):.2f}</small>" if total not in (None, "") else ""
-            items.append(
-                f'<a href="{rel}"><img src="{rel}" alt="{label}" loading="lazy" '
-                f'width="240"><span>{label}</span>{note}</a>'
-            )
+            gid, top = row.get("group_id"), best.get(row.get("group_id"))
+            if gid and top is not row and top is not None:
+                note += f"<small>same scene as #{int(top['rank']):03d} ({html.escape(gid)})</small>"
+            items.append(_thumb(f"{folder}/{name}", name, note))
         sections.append(
             f"<section><h2>{html.escape(folder)} ({len(items)})</h2>\n"
             + "\n".join(items)
             + "</section>"
         )
+    for kind in ("hdr", "pano"):
+        made = [o for o in outputs if o.kind == kind]
+        if made:
+            sections.append(
+                f"<section><h2>{kind} ({len(made)})</h2>\n"
+                + "\n".join(_thumb(o.rel, o.group_id) for o in made)
+                + "</section>"
+            )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f"<title>{html.escape(run_dir.name)}</title>"
@@ -357,7 +382,7 @@ def _open_aesthetic(hooks, options, warn):
     return None, lock
 
 
-def _score_all(done, records, ledger, hooks, options, warn):
+def _score_all(done, records, ledger, hooks, options, warn, hashes=None):
     """Score each developed JPEG; returns ``({source: ShotScore | None}, stats)``."""
     stats = {
         "aesthetic_cached": 0,
@@ -378,6 +403,11 @@ def _score_all(done, records, ledger, hooks, options, warn):
                 stats["score_failed"] += 1
                 scores[path] = None
                 continue
+            if hashes is not None:
+                try:
+                    hashes[str(path)] = int(hooks.groups.phash(rgb))
+                except Exception:  # a look-alike hash is optional
+                    pass
             aesthetic = _aesthetic_value(scorer, ledger, path, rgb, stats) if scorer else None
             try:
                 scores[path] = hooks.score(
@@ -483,6 +513,7 @@ def run_sort(
     *,
     today: Optional[str] = None,
     say=print,
+    resume=None,
 ) -> SortResult:
     started = time.monotonic()
     folder, root = Path(folder), Path(root)
@@ -490,6 +521,8 @@ def run_sort(
     hooks = hooks or SortHooks()
     workers = clamp_workers(options.workers)
     today = today or date.today().isoformat()
+    if resume is not None:
+        return _resume(resume, folder, root, options, hooks, workers, say)
     timings: dict[str, float] = {}
 
     def lap(name, since):
@@ -578,9 +611,10 @@ def run_sort(
 
         done = _develop_all(plan, run_dir, hooks, workers, skipped)
         mark = lap("develop", mark)
-        scores, stats = {}, None
+        scores, stats, hashes = {}, None, None
         if hooks.score is not None:
-            scores, stats = _score_all(done, records, ledger, hooks, options, warn)
+            hashes = {} if hooks.groups is not None else None
+            scores, stats = _score_all(done, records, ledger, hooks, options, warn, hashes)
             mark = lap("score", mark)
         ordered = _rank_by_quality(done, scores)
         tech_cols, cat_cols = _score_columns(ordered, scores)
@@ -608,6 +642,8 @@ def run_sort(
                 for k, v in sc.category_parts.items():
                     row[f"category.{k}"] = f"{v:.4f}"
             ranked.append(row)
+        if hooks.groups is not None:
+            sort_groups.tag_groups(ranked, records, hooks.groups, hashes or {})
         columns = (*RANKED_COLUMNS, *(f"technical.{k}" for k in tech_cols))
         columns += tuple(f"category.{k}" for k in cat_cols)
         _write_csv(
@@ -625,6 +661,14 @@ def run_sort(
         )
         _write_csv(run_dir / "skipped.csv", ("path", "reason"), [[p, r] for p, r in skipped])
         (run_dir / "index.html").write_text(_index_html(run_dir, folder, ranked), encoding="utf-8")
+        # The gallery is complete and on disk: record the shots now, so a stack that is
+        # interrupted later is resumed with ``resume=`` and never re-developed.
+        ledger.record(run_id, _ledger_rows(result, [d[0][0] for d in done]))
+        if hooks.groups is not None:
+            meta["groups"] = _group_stage(
+                run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say
+            )
+            mark = lap("groups", mark)
         categories = dict(Counter(row["category"] for row in ranked))
         meta.update(
             counts=categories,
@@ -635,7 +679,6 @@ def run_sort(
         if stats is not None:
             meta["scoring"] = stats
         _save_meta(run_dir, meta, timings, started)
-        ledger.record(run_id, _ledger_rows(result, [d[0][0] for d in done]))
         counts = {**categories, "duplicates": len(result.duplicates), "skipped": len(skipped)}
         _summary(say, categories, counts, time.monotonic() - started)
         for line in _top_lines(ranked):
@@ -644,6 +687,62 @@ def run_sort(
     finally:
         if ledger is not None:
             ledger.close()
+
+
+def _group_stage(run_dir, source, ranked, skipped, hooks, options, ledger, workers, say) -> dict:
+    """Write the HDR / panorama / night-stack outputs; the page is rewritten after each lands."""
+
+    def publish(outputs) -> None:
+        (run_dir / "index.html").write_text(
+            _index_html(run_dir, source, ranked, outputs), encoding="utf-8"
+        )
+
+    stage = sort_groups.build_outputs(
+        run_dir,
+        ranked,
+        hooks.groups,
+        ledger,
+        workers=workers,
+        no_stacks=options.no_stacks,
+        on_output=publish,
+    )
+    skipped.extend(stage.skipped)
+    _write_csv(run_dir / "skipped.csv", ("path", "reason"), [[p, r] for p, r in skipped])
+    publish(stage.outputs)
+    say(
+        f"groups: {stage.stats['tagged']} tagged, {stage.stats['built']} built, "
+        f"{stage.stats['resumed']} already done, {stage.stats['failed']} failed"
+    )
+    return dict(stage.stats)
+
+
+def _read_rows(path: Path) -> list[dict]:
+    with open(path, newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _resume(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
+    """Finish the group outputs of an earlier run; nothing is re-developed or re-scored."""
+    run_dir = Path(run_dir)
+    if hooks.groups is None:
+        raise SortRefusalError("--resume needs the group outputs (scoring hooks)")
+    if not (run_dir / "ranked.csv").is_file() or root.resolve() not in run_dir.resolve().parents:
+        raise SortRefusalError(f"{run_dir} is not a run folder under {root}")
+    ranked = _read_rows(run_dir / "ranked.csv")
+    skipped = [
+        (r["path"], r["reason"])
+        for r in _read_rows(run_dir / "skipped.csv")
+        if not r["path"].startswith("group:")
+    ]
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    with Ledger(root / LEDGER_NAME) as ledger:
+        meta["groups"] = _group_stage(
+            run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say
+        )
+    meta["skipped"] = len(skipped)
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    counts = {**meta.get("counts", {}), "duplicates": meta.get("duplicates", 0)}
+    return SortResult(run_dir, {**counts, "skipped": len(skipped)})
 
 
 def _ledger_rows(result, paths):
