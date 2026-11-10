@@ -86,7 +86,9 @@ No-API import for platforms `comments pull` can't reach (TikTok has none here). 
 
 Dry run unless `--confirm`. Scans the output dir (`GMS_OUTPUT_DIR`) **and** the
 drive stage cache (`GMS_INTERMEDIATE_DIR`, default the cache home),
-where drive runs keep `_stages/`. For a drive with `phase_d` done it lists each
+where drive runs keep `_stages/`, as `<base>/<project>/_stages` or, for a drive `health backlog`
+staged, `<base>/<project>/<project>/_stages` (so `GMS_INTERMEDIATE_DIR` is the stages root, e.g.
+`/mnt/c/WorkspacesGMSStages`). For a drive with `phase_d` done it lists each
 `day_*/regular_lfs/lf_NN.mp4` whose LF has a YouTube `video_id` in
 `youtube_uploads`, and the `episode_*.mp4` concat once every LF is uploaded
 and `source_dir` still holds the footage. Once every LF is uploaded it also reclaims the copied sources under the same
