@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.70] - 2026-11-10
+
+### Added
+
+- `photos sort` now makes a time-lapse video (with a poster picture) for every night session and for every burst of 24 or more look-alike shots, into `timelapse/`. Before, a night with hundreds of frames gave one stack per 19 frames and no video. Lens-cap dark frames are never used as lights, and a resumed run builds only the time-lapses that are missing.
+
+### Changed
+
+- The `photos sort` index page now shows one card per sequence (a night session, a long burst) instead of one thumbnail per frame. The card holds the stack or time-lapse, the frame count, the time span and the best frame, with the individual frames folded away. Each section shows its top 6 single shots, the page has a summary strip, and it uses a dark layout.
+
+### Fixed
+
+- `health backlog` reads a `health heal` resume of a backlog drive (`gms-heal-gms-backlog-<project>-<sha7>`) as that drive's newest audit run. Before, only the original `gms-backlog-<project>` job counted, so a drive that heal resumed to success still refused its region every tick ("audit failed", exit 2), naming the old failed run.
+- `photos sort` filed daylight shots focused far away (15 m or more) in `other` when they were shot wide open or with a long lens. They now go in `landscape`, as a weak guess from the camera data alone.
+
 ## [0.3.69] - 2026-11-10
 
 ### Changed
@@ -837,7 +852,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...HEAD
+[0.3.70]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...v0.3.70
 [0.3.69]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...v0.3.69
 [0.3.68]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...v0.3.68
 [0.3.67]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...v0.3.67
