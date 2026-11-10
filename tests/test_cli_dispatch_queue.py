@@ -723,11 +723,8 @@ def test_reconciler_resolves_tiktok_credentials_from_the_brands_own_dir():
     assert get_creds.call_args_list[1].args[0] == Path("/creds/brand-b")
 
 
-def test_routed_handlers_wire_a_photo_adapter_for_first_party_meta_platforms():
-    """A routed Instagram/Facebook platform must also get a
-    ``PhotoCarouselAdapter`` wired via ``instagram_photo``/``facebook_photo``
-    so a ``format=photo``/``format=carousel`` delivery has a handler at all
-    (previously only the video tuple was ever built)."""
+def test_routed_handlers_wire_instagram_photos_but_not_the_wrong_facebook_client():
+    """MetaPhotoGraphClient targets Instagram, even if both Meta routes are enabled."""
     from gomoveshift.cli.handlers.dispatch_queue import _build_routed_handlers
     from gomoveshift.publishing.photo_adapter import PhotoCarouselAdapter
 
@@ -747,23 +744,21 @@ def test_routed_handlers_wire_a_photo_adapter_for_first_party_meta_platforms():
 
     kwargs = build.call_args.kwargs
     assert kwargs["instagram_photo"] is not None
-    assert kwargs["facebook_photo"] is not None
+    assert kwargs["facebook_photo"] is None
+    assert kwargs["facebook"] is not None
     instagram_adapter, instagram_loader = kwargs["instagram_photo"]
-    facebook_adapter, facebook_loader = kwargs["facebook_photo"]
     assert isinstance(instagram_adapter, PhotoCarouselAdapter)
-    assert isinstance(facebook_adapter, PhotoCarouselAdapter)
     assert callable(instagram_loader)
-    assert callable(facebook_loader)
+    assert instagram_adapter._client.account_id == "2"
     # The config's own site_root reaches the client, not
     # photos.selector.default_site_root()'s import-time fallback.
     assert instagram_adapter._client._site_root == Path("/site-a")
-    assert facebook_adapter._client._site_root == Path("/site-a")
 
 
 def test_routed_handlers_skip_photo_adapters_when_no_site_root_is_configured():
     """With ``photos.site_root`` unset there is no site to derive public image
-    URLs from: video routes still get their handlers, photo/carousel routes
-    get none (those rows fall to ``skipped_no_handler``)."""
+    URLs from: video routes still get their handlers and photo/carousel
+    adapters remain unconfigured."""
     from gomoveshift.cli.handlers.dispatch_queue import _build_routed_handlers
     from gomoveshift.config import Config
 
@@ -1525,3 +1520,27 @@ def test_an_unrouted_instagram_never_builds_the_scanner(tmp_path):
     assert rc == 0
     build.assert_not_called()
     rec.assert_not_called()
+
+
+def test_facebook_only_route_never_constructs_instagram_photo_client():
+    from gomoveshift.cli.handlers.dispatch_queue import _build_routed_handlers
+
+    config = SimpleNamespace(
+        seo=SimpleNamespace(credentials_dir="/creds/brand-a"),
+        photos=SimpleNamespace(resolve_site_root=lambda: Path("/site-a")),
+    )
+    with (
+        mock.patch(
+            "gomoveshift.publishing.meta_auth.load_meta_credentials",
+            return_value={"page_access_token": "tok", "page_id": "1"},
+        ),
+        mock.patch(
+            "gomoveshift.publishing.photo_graph_client.MetaPhotoGraphClient"
+        ) as photo_client,
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.build_handlers") as build,
+    ):
+        _build_routed_handlers(None, None, config, ["facebook"], worker_id="w1")
+
+    photo_client.assert_not_called()
+    assert build.call_args.kwargs["facebook_photo"] is None
+    assert build.call_args.kwargs["facebook"] is not None
