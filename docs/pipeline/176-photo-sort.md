@@ -27,7 +27,7 @@ Folders: `night-sky` (astro), `landscape`, `close-up`, `wildlife`, `portrait`, `
 - `ranked.csv`: category, rank, source, output, confidence, evidence, capture time; `quality_score` and `aesthetic_score` stay empty until those stages land.
 - `duplicates.csv`: duplicate, kept, tier, key, reason, seen_run.
 - `skipped.csv`: path, reason.
-- `index.html`: static, no script, one section per non-empty category, lazy thumbnails linking to the full JPEG, relative links, escaped names.
+- `index.html`: static, no script, dark self-contained page with a summary strip (shots per category, number of sequences), one section per non-empty category, lazy thumbnails linking to the full JPEG, relative links, escaped names. A group of 6 or more frames (`SEQUENCE_CARD_MIN_FRAMES`) is one card at the top of its category, with its outputs (stacks first, any `.mp4` as a video player, poster only if the `.jpg` exists) and its frames folded in a `<details>`; night groups less than 15 minutes apart share one card. Each section shows its top 6 single shots and folds the rest.
 
 ## Modes
 - `--dry-run`: inventory, camera facts, dedupe, classify. Prints counts per category, duplicates, skipped and an estimate (`DEVELOP_S_PER_PHOTO_ESTIMATE` = 20 s x photos / workers). Writes nothing, creates no run folder or ledger (an existing ledger is read).
