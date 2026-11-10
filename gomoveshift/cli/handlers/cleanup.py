@@ -33,7 +33,12 @@ def cmd_cleanup(args, config):
         return 1
 
     if args.project:
-        candidates = [output_base / args.project, stage_cache_base / args.project]
+        # <base>/<project>/<project>/_stages is the layout health backlog stages a drive in
+        candidates = [
+            output_base / args.project,
+            stage_cache_base / args.project,
+            stage_cache_base / args.project / args.project,
+        ]
         existing = [p for p in candidates if p.exists()]
         # A published drive has both: its publish records under the output
         # dir and _stages (state + renders) in the stage cache. The one

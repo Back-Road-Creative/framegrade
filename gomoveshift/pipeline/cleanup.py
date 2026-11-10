@@ -176,13 +176,17 @@ class PipelineCleanup:
         self._drive_running_fn = drive_running_fn or _live_drive_probe
 
     def discover_projects(self) -> List[Path]:
-        """Find project directories in the output base and the stage cache."""
+        """Find project directories in the output base and the stage cache: ``<base>/<project>``
+        holding ``_stages``, or ``<base>/<project>/<project>`` (the layout ``health backlog``
+        stages a drive in)."""
         projects: List[Path] = []
         seen: set = set()
         for base in (self.output_base, self.stage_cache_base):
             if base is None or not base.exists():
                 continue
             for entry in sorted(base.iterdir()):
+                if entry.is_dir() and not (entry / "_stages").exists():
+                    entry = entry / entry.name
                 if entry.is_dir() and (entry / "_stages").exists():
                     key = entry.resolve()
                     if key not in seen:

@@ -267,6 +267,47 @@ def test_cli_named_project_resolves_in_the_stage_cache(tmp_path, capsys):
     assert "episode_01_2026-03-05.mp4" in capsys.readouterr().out
 
 
+# 2026-11-10: `cleanup sc-2026-02-24-us64-waterfall-byway --min-age 0` with
+# GMS_INTERMEDIATE_DIR=/mnt/c/WorkspacesGMSStages freed nothing: health backlog stages a drive at
+# <stages root>/<project>/<project>/_stages, one level deeper than the name was looked up, so the
+# 187 GB published drive was never found.
+
+
+def test_cli_named_project_resolves_the_backlog_stage_layout(tmp_path, capsys):
+    cache = tmp_path / "cache"
+    project = _drive(cache / "example-trip-2026-03-05-battlefield")
+    out, stg = tmp_path / "out", tmp_path / "stg"
+    out.mkdir()
+    stg.mkdir()
+    args = SimpleNamespace(project=project.name, confirm=False, min_age=0, archive_base=None)
+    with (
+        patch("gomoveshift.paths.gms_output_dir", return_value=out),
+        patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
+        patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
+    ):
+        rc = cleanup_handler.cmd_cleanup(args, None)
+    text = capsys.readouterr().out
+    assert rc == 0, text
+    assert "lf_01.mp4" in text and "episode_01_2026-03-05.mp4" in text
+
+
+def test_cli_discovers_backlog_staged_drives_under_the_stage_root(tmp_path, capsys):
+    cache = tmp_path / "cache"
+    _drive(cache / "example-trip-2026-03-05-battlefield")
+    out, stg = tmp_path / "out", tmp_path / "stg"
+    out.mkdir()
+    stg.mkdir()
+    args = SimpleNamespace(project=None, confirm=False, min_age=0, archive_base=None)
+    with (
+        patch("gomoveshift.paths.gms_output_dir", return_value=out),
+        patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
+        patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
+    ):
+        rc = cleanup_handler.cmd_cleanup(args, None)
+    assert rc == 0
+    assert "lf_01.mp4" in capsys.readouterr().out
+
+
 def test_intermediate_base_honours_the_env_override(monkeypatch, tmp_path):
     from gomoveshift.paths import gms_intermediate_base
 
