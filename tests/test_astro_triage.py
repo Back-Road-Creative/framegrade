@@ -956,7 +956,7 @@ class TestMeasureFrameExposureClass:
         sampled = measure_frame(tmp_path / "sampled.NEF", luma, detect_meteors=False)
         assert full.exposure_class == sampled.exposure_class == "cap_on"
 
-    def _sparse_stars_on_the_floor(self, shape=(400, 600), count=8, seed=5):
+    def _sparse_stars_on_the_floor(self, shape=(800, 1200), count=20, seed=5):
         """A real dark-sky light as the 2026-11-09 card showed it: the background
         calibrated down onto the black floor (median/spread 0.4-1.7 measured) and
         stars, 2-3 px wide, covering well under 0.1% of the pixels -- so the
@@ -972,8 +972,8 @@ class TestMeasureFrameExposureClass:
         return luma
 
     def test_a_sparse_star_field_on_the_black_floor_is_not_cap_on(self, tmp_path):
-        """The 2026-11-09 run: every frame of six night groups (600-2770 stars each)
-        read cap_on, so each stack refused '0 usable of 19'."""
+        """The 2026-11-09 run: every real light of seven night groups (83-1,371 stars
+        each) read cap_on, so each stack refused '0 usable of 19'."""
         luma = self._sparse_stars_on_the_floor()
         # The old blind spot: the percentile ratios alone still call it a dark.
         assert classify_exposure(*triage_mod._exposure_stats(luma)) == "cap_on"
@@ -983,7 +983,7 @@ class TestMeasureFrameExposureClass:
 
     def test_hot_pixels_on_a_capped_frame_do_not_read_as_stars(self, tmp_path):
         """A dark's hot pixels are single bright pixels (or adjacent pairs); the
-        resolved-star test must not take them for a sky."""
+        resolved-source test must not take them for a sky."""
         luma = self._capped(shape=(400, 600))
         rng = np.random.default_rng(6)
         # 40 of 240,000 pixels: the 0.01-0.02% a real sensor's hot map runs to.
@@ -991,6 +991,35 @@ class TestMeasureFrameExposureClass:
         luma[ys, xs] = rng.uniform(0.01, 1.0, 30).astype(np.float32)
         luma[ys[:10] + 1, xs[:10]] = 0.5
         metrics = measure_frame(tmp_path / "DSC_0031.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class == "cap_on"
+        assert metrics.usable is False
+
+    def test_a_dark_clipped_past_half_its_pixels_stays_cap_on(self, tmp_path):
+        """The 2026-11-09 card's end-of-run darks (DSC_2067-2070, DSC_2162-2172): the
+        pedestal sits below the clip floor, so over half the pixels read exactly 0. A
+        MAD-based star detector then sees zero noise and takes every positive noise
+        bump for a star -- 1,700-5,000 per real dark -- so a star count cannot be the
+        rescue test."""
+        rng = np.random.default_rng(3)
+        luma = np.clip(rng.normal(-0.0003, 0.0009, size=(400, 600)), 0.0, None)
+        luma = luma.astype(np.float32)
+        assert (luma == 0.0).mean() > 0.5
+        metrics = measure_frame(tmp_path / "DSC_2068.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class == "cap_on"
+        assert metrics.usable is False
+
+    def test_a_dark_whose_bright_tail_passes_the_percentile_test_stays_cap_on(self, tmp_path):
+        """The card's darks measured percentile structure 4.8-5.4 -- past
+        ``CAP_ON_STRUCTURE_SPREAD_MAX``, above its real lights' 2.5-4.5 -- so the ratio
+        alone let them through as usable. At the floor the source count decides."""
+        luma = self._capped(shape=(400, 600))
+        rng = np.random.default_rng(8)
+        # 0.2% hot pixels: enough to carry the 99.9th percentile off the noise.
+        n = 480
+        ys, xs = rng.integers(0, 400, n), rng.integers(0, 600, n)
+        luma[ys, xs] = rng.uniform(0.01, 1.0, n).astype(np.float32)
+        assert classify_exposure(*triage_mod._exposure_stats(luma)) == "indeterminate"
+        metrics = measure_frame(tmp_path / "DSC_2181.NEF", luma, detect_meteors=False)
         assert metrics.exposure_class == "cap_on"
         assert metrics.usable is False
 

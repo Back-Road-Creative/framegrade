@@ -98,12 +98,17 @@ CAP_ON_LEVEL_SPREAD_MAX = 2.0  # median / spread at or below this = the frame's 
 # point instead of riding on sky. A half-clipped Gaussian reads 0.67 whatever its noise
 # amplitude (measured 0.0-1.6 across simulated capped frames); overcast sky -- flat, but
 # lit -- reads 10.0, which is what this test is here to tell apart from a cap.
-CAP_ON_HOT_PIXEL_KSIZE_PX = 3  # median filter run before the resolved-star test: a 3x3
-# median erases any feature smaller than 5 of its 9 pixels, so a dark's hot pixels (single
-# pixels, adjacent pairs) vanish while a star (FWHM 2+ px) survives. Measured 2026-11-10 on
-# full-size frames: simulated darks with 0-30,000 hot pixels and 3,000 hot pairs keep 0
-# stars; the 2026-11-09 card's real lights (all nine night groups) keep 64-2,728.
-CAP_ON_RESOLVED_STAR_MIN = MIN_USABLE_STAR_COUNT  # this many resolved stars = sky.
+CAP_ON_SOURCE_ERODE_PX = 2  # erosion run before the resolved-source test: a 2x2 minimum
+# keeps a pixel only if its whole 2x2 block is bright, so a dark's hot pixels (single
+# pixels, adjacent pairs) vanish while a star (FWHM 2+ px) survives.
+CAP_ON_SOURCE_SPREADS = 10.0  # an eroded pixel this many spreads above the median is a source.
+# Measured against the frame's own spread, not a MAD: over half a real dark's pixels sit at
+# the clip floor, which zeroes the MAD (see EXPOSURE_SPREAD_PERCENTILE). detect_stars rides
+# that MAD, which is why a star count cannot be this test -- the 2026-11-09 card's real
+# darks detect 2,339-5,855 "stars".
+CAP_ON_SOURCE_MIN = 10  # this many connected sources = sky. Measured 2026-11-10 on all 170
+# night-group frames of the 2026-11-09 card: its 118 real lights hold 20-383 sources, its 52
+# end-of-run darks (lens cap on, same sequence) 0-5; simulated darks with hot pixels, 0.
 EXPOSURE_STATS_MAX_SAMPLES = 2_000_000  # stride-subsample cap for the two percentiles
 # above: a full-resolution percentile pass costs several times all of triage with the
 # streak scan off. 2e6 samples still leave ~2000 beyond the 99.9th.
@@ -524,7 +529,7 @@ def _exposure_stats(values):
     return float(median), float(spread_level - median), float(bright)
 
 
-def classify_exposure(median, spread, bright_level, resolved_stars=0):
+def classify_exposure(median, spread, bright_level, resolved_sources=None):
     """One frame's exposure class -- "light" / "cap_on" / "indeterminate" -- from the
     three numbers ``_exposure_stats`` measures on the frame itself.
 
@@ -545,12 +550,13 @@ def classify_exposure(median, spread, bright_level, resolved_stars=0):
       ``astro_calibrate``'s postprocess has already moved to zero, so its noise still
       straddles the zero point. Sky -- even thick overcast -- rides well above it.
 
-    - RESOLVED STARS, ``resolved_stars`` (``measure_frame`` counts them after a
-      ``CAP_ON_HOT_PIXEL_KSIZE_PX`` median filter): at least ``CAP_ON_RESOLVED_STAR_MIN``
-      also counts as structure. The percentile test alone misses a real dark-sky light
-      whose stars cover under 0.1% of the pixels -- its p99.9 is still noise. The
-      2026-11-09 card's night groups measured structure 2.5-5.2 on 600-2,770 stars each,
-      so every frame read cap_on and every stack refused "0 usable".
+    - RESOLVED SOURCES, ``resolved_sources`` (``measure_frame`` counts them with
+      ``_resolved_source_count`` on every frame at the floor): when given for a frame
+      at the floor, at least ``CAP_ON_SOURCE_MIN`` sources REPLACES the percentile test
+      as the structure verdict. On real data the percentile test fails both ways
+      there: the 2026-11-09 card's dark-sky lights, stars covering under 0.1% of the
+      pixels, measured structure 2.5-4.5 (cap_on, so every stack refused "0 usable"),
+      while its lens-cap darks measured 4.8-5.4 (and slipped through as usable).
 
     Both on the cap side -> "cap_on". Both on the light side -> "light". Anything else
     is "indeterminate" and is REPORTED, never guessed into a population:
@@ -568,7 +574,8 @@ def classify_exposure(median, spread, bright_level, resolved_stars=0):
     else:
         at_floor = median / spread <= CAP_ON_LEVEL_SPREAD_MAX
         structured = (bright_level - median) / spread > CAP_ON_STRUCTURE_SPREAD_MAX
-    structured = structured or resolved_stars >= CAP_ON_RESOLVED_STAR_MIN
+    if at_floor and resolved_sources is not None:
+        structured = resolved_sources >= CAP_ON_SOURCE_MIN
     if at_floor and not structured:
         return "cap_on"
     if structured and not at_floor:
@@ -576,13 +583,17 @@ def classify_exposure(median, spread, bright_level, resolved_stars=0):
     return "indeterminate"
 
 
-def _resolved_star_count(luma, mask=None):
-    """Stars still detected after a ``CAP_ON_HOT_PIXEL_KSIZE_PX`` median filter -- hot
-    pixels gone, real stars left (see that constant for the measurement)."""
-    filtered = cv2.medianBlur(
-        np.ascontiguousarray(luma, dtype=np.float32), CAP_ON_HOT_PIXEL_KSIZE_PX
-    )
-    return int(detect_stars(filtered, mask=mask).shape[0])
+def _resolved_source_count(luma, median, spread, mask=None):
+    """Connected sources left after a ``CAP_ON_SOURCE_ERODE_PX`` erosion, above
+    ``median + CAP_ON_SOURCE_SPREADS * spread`` -- hot pixels gone, real stars left (see
+    those constants for the measurement)."""
+    kernel = np.ones((CAP_ON_SOURCE_ERODE_PX, CAP_ON_SOURCE_ERODE_PX), dtype=np.uint8)
+    eroded = cv2.erode(np.ascontiguousarray(luma, dtype=np.float32), kernel)
+    bright = eroded > median + CAP_ON_SOURCE_SPREADS * spread
+    if mask is not None:
+        bright &= mask
+    count, _ = cv2.connectedComponents(bright.astype(np.uint8), connectivity=8)
+    return count - 1
 
 
 def measure_frame(
@@ -621,10 +632,14 @@ def measure_frame(
         min_length = STREAK_MIN_LENGTH_PX_FALLBACK
     star_count = int(stars.shape[0])
     exposure_stats = _exposure_stats(valid)
-    exposure_class = classify_exposure(*exposure_stats)
-    if exposure_class == "cap_on":
-        # Only a would-be cap-on frame pays for the second detection pass.
-        exposure_class = classify_exposure(*exposure_stats, _resolved_star_count(luma, mask))
+    median, spread, _ = exposure_stats
+    # Only a frame at the floor pays for the erosion pass; a lit frame keeps the ratios.
+    sources = (
+        _resolved_source_count(luma, median, spread, mask)
+        if spread > 0.0 and median / spread <= CAP_ON_LEVEL_SPREAD_MAX
+        else None
+    )
+    exposure_class = classify_exposure(*exposure_stats, resolved_sources=sources)
     streak_components = (
         detect_streak_components(luma, min_length, mask=mask) if detect_meteors else None
     )
