@@ -22,7 +22,7 @@ from collections import Counter
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import quote
@@ -264,6 +264,19 @@ def _write_csv(path: Path, header, rows) -> None:
         csv.writer(handle).writerows([header, *rows])
 
 
+SEQUENCE_CARD_MIN_FRAMES = 6  # a group this big is one card, not a wall of near-identical frames
+SESSION_GAP_S = 15 * 60  # night groups closer than this are one session
+SECTION_TOP_N = 6  # single shots shown per section; the rest sit behind a <details>
+_PAGE_STYLE = (
+    "body{background:#111;color:#ddd;font-family:sans-serif;margin:1rem}"
+    "a{color:#9cf;text-decoration:none}small,span{display:block;font-size:.75rem}"
+    "section>div,details>div{display:grid;"
+    "grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.5rem}"
+    ".card{background:#1b1b1b;border:1px solid #333;padding:.5rem;margin:.5rem 0}"
+    "img,video{max-width:100%;height:auto}summary{cursor:pointer;margin:.5rem 0}"
+)
+
+
 def _thumb(rel: str, label: str, note: str = "") -> str:
     href = html.escape(quote(rel))
     return (
@@ -272,42 +285,150 @@ def _thumb(rel: str, label: str, note: str = "") -> str:
     )
 
 
+def _output_html(run_dir: Path, o) -> str:
+    """One output: a video player for an ``.mp4``, else a thumbnail."""
+    if not o.rel.endswith(".mp4"):
+        return _thumb(o.rel, o.group_id)
+    href = html.escape(quote(o.rel))
+    poster_rel = o.rel[:-4] + ".jpg"
+    poster = (
+        f' poster="{html.escape(quote(poster_rel))}"' if (run_dir / poster_rel).is_file() else ""
+    )
+    return (
+        f'<figure><video controls preload="none" width="480"{poster} src="{href}"></video>'
+        f"<figcaption>{html.escape(o.group_id)}</figcaption></figure>"
+    )
+
+
+def _capture_dt(row) -> Optional[datetime]:
+    try:
+        return datetime.strptime(str(row.get("capture_time")), "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _sequence_cards(ranked) -> list[dict]:
+    """Groups of >= ``SEQUENCE_CARD_MIN_FRAMES`` rows; contiguous night groups merge."""
+    members: dict[str, list] = {}
+    for row in ranked:
+        if row.get("group_id"):
+            members.setdefault(row["group_id"], []).append(row)
+    big = {g: rows for g, rows in members.items() if len(rows) >= SEQUENCE_CARD_MIN_FRAMES}
+
+    def span(rows):
+        times = [t for t in map(_capture_dt, rows) if t]
+        return (min(times), max(times)) if times else None
+
+    cards: list[dict] = []
+    night = []
+    for gid, rows in big.items():
+        if gid.startswith("night-") and span(rows):
+            night.append((span(rows), gid, rows))
+        else:
+            cards.append({"ids": [gid], "rows": rows})
+    last_end = None
+    for (start, end), gid, rows in sorted(night, key=lambda n: n[0][0]):
+        gap = (start - last_end).total_seconds() if last_end else None
+        if gap is not None and gap <= SESSION_GAP_S:
+            cards[-1]["ids"].append(gid)
+            cards[-1]["rows"] = cards[-1]["rows"] + rows
+        else:
+            cards.append({"ids": [gid], "rows": list(rows)})
+        last_end = max(end, last_end) if gap is not None and gap <= SESSION_GAP_S else end
+    for card in cards:
+        rows = card["rows"]
+        card["category"] = Counter(r["category"] for r in rows).most_common(1)[0][0]
+        card["best"] = min(rows, key=lambda r: int(r["rank"]))
+        times = sorted(t for t in map(_capture_dt, rows) if t)
+        card["span"] = (times[0], times[-1]) if times else None
+    return cards
+
+
+def _frame_item(row) -> str:
+    name = Path(row["output"]).name
+    total = row.get("quality_score")
+    note = f"<small>{float(total):.2f}</small>" if total not in (None, "") else ""
+    return _thumb(f"{row['category']}/{name}", name, note)
+
+
+def _card_html(run_dir: Path, card: dict, outputs) -> str:
+    ids = set(card["ids"])
+    made = sorted((o for o in outputs if o.group_id in ids), key=lambda o: o.kind != "stacks")
+    frames = sorted(card["rows"], key=lambda r: int(r["rank"]))
+    best = card["best"]
+    when = ""
+    if card["span"]:
+        fmt = "%Y:%m:%d %H:%M:%S"
+        when = f"{card['span'][0].strftime(fmt)} - {card['span'][1].strftime(fmt)}"
+    n = len(frames)
+    return (
+        '<article class="card">'
+        f"<h3>{html.escape(', '.join(card['ids']))}</h3>"
+        f"<p>{n} frames {html.escape(when)} best #{int(best['rank']):03d}</p>\n"
+        + "\n".join(_output_html(run_dir, o) for o in made)
+        + f"\n<details><summary>show {n} frames</summary><div>\n"
+        + "\n".join(_frame_item(r) for r in frames)
+        + "</div></details></article>"
+    )
+
+
 def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
     best = sort_groups.best_by_group(ranked)
+    cards = _sequence_cards(ranked)
+    carded = {id(r) for c in cards for r in c["rows"]}
+    carded_ids = {g for c in cards for g in c["ids"]}
+    loose = [o for o in outputs if o.group_id not in carded_ids]
     sections = []
     folders = list(dict.fromkeys(row["category"] for row in ranked))
-    if any(o.kind == "stacks" for o in outputs) and sort_groups.NIGHT_FOLDER not in folders:
+    if any(o.kind == "stacks" for o in loose) and sort_groups.NIGHT_FOLDER not in folders:
         folders.append(sort_groups.NIGHT_FOLDER)
+    counts = []
     for folder in folders:
+        shots = [r for r in ranked if r["category"] == folder]
+        counts.append(f"{html.escape(folder)} {len(shots)}")
+        head = [
+            _output_html(run_dir, o)
+            for o in loose
+            if folder == sort_groups.NIGHT_FOLDER and o.kind == "stacks"
+        ]
+        head += [_card_html(run_dir, c, outputs) for c in cards if c["category"] == folder]
+        singles = sorted((r for r in shots if id(r) not in carded), key=lambda r: int(r["rank"]))
         items = []
-        if folder == sort_groups.NIGHT_FOLDER:
-            items += [_thumb(o.rel, o.group_id) for o in outputs if o.kind == "stacks"]
-        for row in (r for r in ranked if r["category"] == folder):
-            name = Path(row["output"]).name
-            total = row.get("quality_score")
-            note = f"<small>{float(total):.2f}</small>" if total not in (None, "") else ""
+        for row in singles:
+            item = _frame_item(row)
             gid, top = row.get("group_id"), best.get(row.get("group_id"))
             if gid and top is not row and top is not None:
-                note += f"<small>same scene as #{int(top['rank']):03d} ({html.escape(gid)})</small>"
-            items.append(_thumb(f"{folder}/{name}", name, note))
-        sections.append(
-            f"<section><h2>{html.escape(folder)} ({len(items)})</h2>\n"
-            + "\n".join(items)
-            + "</section>"
-        )
+                item = item.replace(
+                    "</a>",
+                    f"<small>same scene as #{int(top['rank']):03d} ({html.escape(gid)})</small></a>",
+                )
+            items.append(item)
+        rest = items[SECTION_TOP_N:]
+        body = "\n".join(head) + "<div>" + "\n".join(items[:SECTION_TOP_N]) + "</div>"
+        if rest:
+            body += (
+                f"<details><summary>show all {len(rest)}</summary><div>\n"
+                + "\n".join(rest)
+                + "</div></details>"
+            )
+        sections.append(f"<section><h2>{html.escape(folder)} ({len(shots)})</h2>\n{body}</section>")
     for kind in ("hdr", "pano"):
-        made = [o for o in outputs if o.kind == kind]
+        made = [o for o in loose if o.kind == kind]
         if made:
             sections.append(
-                f"<section><h2>{kind} ({len(made)})</h2>\n"
-                + "\n".join(_thumb(o.rel, o.group_id) for o in made)
-                + "</section>"
+                f"<section><h2>{kind} ({len(made)})</h2>\n<div>"
+                + "\n".join(_output_html(run_dir, o) for o in made)
+                + "</div></section>"
             )
+    seqs = f"{len(cards)} sequence{'' if len(cards) == 1 else 's'}"
+    summary = " &middot; ".join([*counts, seqs])
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f"<title>{html.escape(run_dir.name)}</title>"
+        f"<style>{_PAGE_STYLE}</style>"
         "</head><body>"
-        f"<h1>{html.escape(run_dir.name)}</h1><p>{html.escape(str(source))}</p>\n"
+        f"<h1>{html.escape(run_dir.name)}</h1>"
+        f'<p class="summary">{summary}</p><p>{html.escape(str(source))}</p>\n'
         + "\n".join(sections)
         + "</body></html>\n"
     )
