@@ -108,6 +108,13 @@ NIGHT_SOLAR_ELEVATION_MAX = -12.0
 #: latitude, season or DST. Hours >= the evening start or <= the morning end.
 NIGHT_HOUR_EVENING_START = 21
 NIGHT_HOUR_MORNING_END = 4
+#: The exposure itself, EV100 = log2(N^2 / t) - log2(ISO / 100), is the no-track evidence
+#: the clock cannot give: measured on the 2026-11-09 Nikon card, its night frames (15 s,
+#: ISO 3200, f/3.8) and a dusk run at 20:26-20:59 the clock called day sat at EV100 -5.1,
+#: dawn tripod frames at 2.1-3.4, and its daylight scenics at 5.9-16.9. At or below the
+#: night ceiling the sky was dark; below the daylight floor it was not day.
+NIGHT_EV100_MAX = -2.0
+DAYLIGHT_EV100_MIN = 5.0
 #: Frames from one session that must agree before a run reads as a sequence.
 ASTRO_SEQUENCE_FRAMES_MIN = 4
 #: Gap that ends a session. Wider than the bracket rule's ``MAX_GAP_S`` (45 s):
@@ -248,12 +255,24 @@ def read_capture_optics(photo_path) -> CaptureOptics:
     )
 
 
-def _night(exif: PhotoExif, scene: SceneProfile | None) -> tuple[bool, bool, str]:
+def _ev100(exif: PhotoExif, aperture: float | None) -> float | None:
+    """The exposure's EV at ISO 100, or ``None`` without a positive shutter, gain and f-number."""
+    if not (exif.exposure_s and exif.exposure_s > 0 and exif.iso and exif.iso > 0):
+        return None
+    if aperture is None or not math.isfinite(aperture) or aperture <= 0:
+        return None
+    return math.log2(aperture * aperture / exif.exposure_s) - math.log2(exif.iso / 100.0)
+
+
+def _night(
+    exif: PhotoExif, scene: SceneProfile | None, aperture: float | None = None
+) -> tuple[bool, bool, str]:
     """``(is_night, tracked, evidence)`` — was the sky dark, and how do we know?
 
     A measured ``solar_elevation_deg`` is authoritative in BOTH directions: with
     the sun 40° up, a long high-ISO exposure is not astro however it meters.
-    Without a track, the local wall clock and a low-key frame are the fallback.
+    Without a track, the local wall clock, a night sky's exposure (EV100 at or
+    below ``NIGHT_EV100_MAX``) and a low-key frame are the fallback.
     """
     if exif.solar_elevation_deg is not None:
         below = exif.solar_elevation_deg <= NIGHT_SOLAR_ELEVATION_MAX
@@ -261,15 +280,22 @@ def _night(exif: PhotoExif, scene: SceneProfile | None) -> tuple[bool, bool, str
     hour = exif.capture_hour
     if hour is not None and (hour >= NIGHT_HOUR_EVENING_START or hour <= NIGHT_HOUR_MORNING_END):
         return True, False, f"capture hour {hour:02d} (camera-local)"
+    ev = _ev100(exif, aperture)
+    if ev is not None and ev <= NIGHT_EV100_MAX:
+        return True, False, f"exif: EV100 {ev:.1f}, a night sky's exposure"
     if scene is not None and scene.exposure_class == "low_key":
         return True, False, "low-key frame, no solar fix"
     return False, False, ""
 
 
-def _daylight(exif: PhotoExif) -> bool:
-    """True only on positive evidence of daylight — an unknown sky is not day."""
+def _daylight(exif: PhotoExif, aperture: float | None = None) -> bool:
+    """True only on positive evidence of daylight — an unknown sky is not day, and
+    without a track an exposure under ``DAYLIGHT_EV100_MIN`` is not day either."""
     if exif.solar_elevation_deg is not None:
         return exif.solar_elevation_deg > 0.0
+    ev = _ev100(exif, aperture)
+    if ev is not None and ev < DAYLIGHT_EV100_MIN:
+        return False
     hour = exif.capture_hour
     return hour is not None and NIGHT_HOUR_MORNING_END < hour < NIGHT_HOUR_EVENING_START
 
@@ -355,7 +381,7 @@ def recognise_subject(
         )
 
     if exif.exposure_s and exif.iso:
-        night, tracked, why = _night(exif, scene)
+        night, tracked, why = _night(exif, scene, optics.f_number)
         if night and exif.exposure_s >= ASTRO_EXPOSURE_S_MIN and exif.iso >= ASTRO_ISO_MIN:
             evidence = [f"exif: {exif.exposure_s:g} s at ISO {exif.iso:g}", why]
             confidence = CONFIDENCE_TRACKED_NIGHT if tracked else CONFIDENCE_MODERATE
@@ -371,7 +397,7 @@ def recognise_subject(
         return close_up
 
     focal, aperture = optics.focal_length_mm, optics.f_number
-    night_now = _night(exif, scene)[0]
+    night_now = _night(exif, scene, aperture)[0]
 
     if focal is not None and focal >= WILDLIFE_FOCAL_MM_MIN and not night_now:
         evidence = [f"exif: {focal:g} mm"]
@@ -415,7 +441,7 @@ def recognise_subject(
         and aperture is not None
         and focal <= LANDSCAPE_FOCAL_MM_MAX
         and aperture >= LANDSCAPE_APERTURE_MIN
-        and _daylight(exif)
+        and _daylight(exif, aperture)
     ):
         return SubjectReading(
             SubjectCategory.LANDSCAPE,
@@ -429,7 +455,7 @@ def recognise_subject(
         focus is not None
         and math.isfinite(focus)
         and focus >= LANDSCAPE_FOCUS_M_MIN
-        and _daylight(exif)
+        and _daylight(exif, aperture)
     ):
         return SubjectReading(
             SubjectCategory.LANDSCAPE,
