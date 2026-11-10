@@ -74,12 +74,15 @@ _STATUS_AWAITING_MANUAL_PUBLISH = "awaiting_manual_publish"
 #: A YouTube row its adapter deferred past the daily upload budget. Local too:
 #: importing ``youtube_adapter`` would pull the uploader into the drain loop.
 _STATUS_DEFERRED = "deferred"
+# Mirrors the adapter checkpoint without importing any platform client here.
+_STATUS_AWAITING_FACEBOOK_RECONCILE = "awaiting_facebook_reconcile"
 #: Where a handler that returns WITHOUT publishing leaves its row. The row's
 #: own wait governs it from there, never this pass's lease.
 _WAITING_STATUSES = (
     _STATUS_AWAITING_MANUAL_PUBLISH,
     _STATUS_DEFERRED,
     STATUS_AWAITING_IG_RECONCILE,
+    _STATUS_AWAITING_FACEBOOK_RECONCILE,
 )
 #: Never selected by the drain whatever their ``next_attempt_at``: each waits
 #: on something other than a retry time (a person; the account scan).
@@ -545,9 +548,10 @@ def reconcile_interrupted_attempts(
     is left strictly alone -- that worker may be mid platform-API call, and
     clearing its lease would let a second worker publish the same short twice.
 
-    This does NOT decide whether the interrupted attempt actually reached the
-    platform; it cannot, and the row is retried blind today either way. What
-    changes is that the retrying now ends.
+    This does NOT decide whether the interrupted attempt reached the platform.
+    Retained Facebook upload IDs have an ambiguous outcome and only retry status
+    reads, with backoff, beyond the usual attempt limit. Other crash loops stop
+    at that limit.
 
     A PAUSED platform's row is selected here (unlike ``_select_due``) because
     the lease itself needs releasing regardless: it is pure bookkeeping about
@@ -597,13 +601,17 @@ def reconcile_interrupted_attempts(
                 status,
             )
             continue
+        row = _checkpoint_facebook_upload(conn, row)
+        if row is None or row["status"] in TERMINAL_STATUSES:
+            continue
+        status = row["status"]
         attempt_count = row["attempt_count"] + 1
         detail = (
             f"worker {row['lease_owner']} held this delivery until "
             f"{row['lease_expires_at']} and never reported an outcome; counted "
-            "as an attempt so a crash loop cannot retry forever"
+            "as an attempt; an ambiguous Facebook upload remains read-only"
         )
-        if attempt_count >= max_attempts:
+        if attempt_count >= max_attempts and not _facebook_unknown(row):
             transition(
                 conn,
                 delivery_id,
@@ -648,10 +656,33 @@ def reconcile_interrupted_attempts(
 
 
 def _live_row(conn, delivery_id: int):
-    """The row's status and attempt count NOW, or ``None`` if it is gone."""
-    return conn.execute(
-        "SELECT status, attempt_count FROM deliveries WHERE id=?", (delivery_id,)
-    ).fetchone()
+    """The live receipt/checkpoint NOW, or ``None`` if it is gone."""
+    row = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _facebook_unknown(row) -> bool:
+    return bool(
+        row is not None
+        and row["platform"] == "facebook"
+        and row["status"] == _STATUS_AWAITING_FACEBOOK_RECONCILE
+        and row["platform_upload_id"]
+        and not row["platform_post_id"]
+    )
+
+
+def _checkpoint_facebook_upload(conn, row):
+    """Old retained IDs have ambiguous finish state too; never exhaust them."""
+    if (
+        row is not None
+        and row["platform"] == "facebook"
+        and row["platform_upload_id"]
+        and not row["platform_post_id"]
+        and row["status"] not in (*TERMINAL_STATUSES, _STATUS_AWAITING_FACEBOOK_RECONCILE)
+    ):
+        transition(conn, row["id"], row["status"], _STATUS_AWAITING_FACEBOOK_RECONCILE)
+        return _live_row(conn, row["id"])
+    return row
 
 
 def _release_own_lease(conn, delivery_id: int, owner: str) -> None:
@@ -785,6 +816,9 @@ def drain_queue(
 
         result.attempted += 1
         try:
+            row = _checkpoint_facebook_upload(conn, row)
+            if row is None or row["status"] in TERMINAL_STATUSES:
+                continue
             handler(row)
         except Exception as exc:  # noqa: BLE001 - classified below; default path is retryable
             # Handlers move the row themselves before they can fail (queued ->
@@ -794,7 +828,7 @@ def drain_queue(
             # got counted (seen with Instagram). Every failure is
             # recorded from the row's LIVE status instead, and only counted
             # when the write actually happened.
-            live = _live_row(conn, delivery_id)
+            live = _checkpoint_facebook_upload(conn, _live_row(conn, delivery_id))
             # A terminal (or vanished) row is never moved: ``transition``
             # would refuse it anyway, but a "retry" of a published row asks it
             # to re-enter 'published', which raises before the refusal.
@@ -805,7 +839,7 @@ def drain_queue(
                 else None
             )
             new_attempt_count = (live["attempt_count"] if live is not None else 0) + 1
-            if isinstance(exc, PermanentDeliveryError):
+            if isinstance(exc, PermanentDeliveryError) and not _facebook_unknown(live):
                 recorded = live_status is not None and transition(
                     conn,
                     delivery_id,
@@ -840,7 +874,7 @@ def drain_queue(
                     result.retried += 1
                     result.throttled += 1
                     result.errors.append(f"{platform}#{delivery_id}: throttled: {exc}")
-            elif isinstance(exc, TransientMediaError):
+            elif isinstance(exc, TransientMediaError) or _facebook_unknown(live):
                 # Same retry mechanics as the ordinary retryable branch below
                 # (backoff, lease release) but NEVER checked against
                 # max_attempts — see the class docstring.
@@ -864,7 +898,10 @@ def drain_queue(
                 )
                 if recorded:
                     result.retried += 1
-                    result.errors.append(f"{platform}#{delivery_id}: transient media: {exc}")
+                    reason = (
+                        "reconciliation pending" if _facebook_unknown(live) else "transient media"
+                    )
+                    result.errors.append(f"{platform}#{delivery_id}: {reason}: {exc}")
             elif new_attempt_count >= max_attempts:
                 recorded = live_status is not None and transition(
                     conn,

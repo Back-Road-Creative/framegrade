@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
     next_attempt_reason TEXT,
     platform_upload_id TEXT, platform_post_id TEXT, permalink TEXT,
+    upload_account TEXT,
     error_class TEXT,
     error_detail TEXT,
     lease_owner TEXT, lease_expires_at TEXT,
@@ -346,6 +347,11 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # rewrite history to agree with the present configuration, which
             # is exactly the question a reader is asking.
             conn.execute("ALTER TABLE deliveries ADD COLUMN destination_account TEXT")
+        if "upload_account" not in cols:
+            # Provenance captured before an upload starts, not a publication
+            # receipt. Legacy IDs have no proven account; never backfill from
+            # present-day credentials or a destination inferred later.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN upload_account TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -686,6 +692,7 @@ def transition(
         "next_attempt_at",
         "next_attempt_reason",
         "platform_upload_id",
+        "upload_account",
         "platform_post_id",
         "permalink",
         "error_class",
@@ -703,6 +710,11 @@ def transition(
     unknown = set(fields) - allowed
     if unknown:
         raise ValueError(f"unknown transition field(s): {sorted(unknown)}")
+    if "upload_account" in fields:
+        account = fields["upload_account"]
+        if not isinstance(account, str) or not account.strip():
+            raise ValueError("upload_account must name an account; omit it when unknown")
+        fields["upload_account"] = account.strip()
     if published_at_source is not None and new_status != "published":
         raise ValueError("published_at_source is only valid on a transition to 'published'")
     if platform_published_at is not None and new_status != "published":
@@ -788,10 +800,15 @@ def transition(
     set_cols = ", ".join(f"{k}=?" for k in fields)
     set_clause = f"status=?, updated_at=?{', ' + set_cols if set_cols else ''}"
     params = [new_status, _now_iso(), *fields.values(), delivery_id, expected_status]
+    account_guard = ""
+    if "upload_account" in fields:
+        # A checkpoint may be repeated but never rebound to rotated credentials.
+        account_guard = " AND (upload_account IS NULL OR upload_account=?)"
+        params.append(fields["upload_account"])
     with conn:  # set_clause: built only from the ``allowed`` allowlist above
         cur = conn.execute(
             f"UPDATE deliveries SET {set_clause} "  # noqa: S608
-            f"WHERE id=? AND status=? AND status NOT IN {_TERMINAL_SQL}",
+            f"WHERE id=? AND status=? AND status NOT IN {_TERMINAL_SQL}{account_guard}",
             params,
         )
         changed = cur.rowcount == 1

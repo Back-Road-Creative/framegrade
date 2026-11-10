@@ -11,6 +11,7 @@ from test_publishing_models import _record
 
 from gomoveshift.publishing.facebook_adapter import (
     FacebookAuthBlockedError,
+    FacebookFinishUnknownError,
     FacebookPermanentError,
     FacebookReelsAdapter,
     FacebookRetryableError,
@@ -248,7 +249,7 @@ def test_finish_timeout_does_not_start_a_second_upload_session(queue_conn):
     record = _record()
     delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
 
-    with pytest.raises(ConnectionError):
+    with pytest.raises(FacebookFinishUnknownError, match="unconfirmed"):
         adapter_first.publish(record, conn=queue_conn, delivery_id=delivery_id, video_bytes=b"x")
     start_calls = [
         c
