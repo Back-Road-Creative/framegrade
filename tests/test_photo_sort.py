@@ -399,3 +399,19 @@ def test_lower_priority_ignores_failure(monkeypatch):
 
     monkeypatch.setattr(ps.os, "nice", boom)
     ps.lower_priority()
+
+
+def test_default_develop_pool_workers_inherit_no_parent_state(monkeypatch):
+    """The parent measures corrections with rawpy (OpenMP) before the pool starts.
+
+    A forked worker inherits that OpenMP lock state and hangs on its first decode
+    (seen 2026-11-09: 452 photos measured, then two workers idle 26 min, 0 written).
+    A spawned worker is a fresh interpreter: it sees none of the parent's runtime
+    state, which a marker set here (and only here) shows.
+    """
+    import pydoc
+
+    monkeypatch.setattr(ps, "_PARENT_ONLY_MARKER", "inherited", raising=False)
+    with ps.SortHooks().executor_factory(1) as pool:
+        seen = pool.submit(pydoc.locate, f"{ps.__name__}._PARENT_ONLY_MARKER")
+        assert seen.result(timeout=120) is None

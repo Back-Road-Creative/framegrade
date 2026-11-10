@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import multiprocessing
 import os
 import time
 from collections import Counter
@@ -121,6 +122,16 @@ def develop_one(task: DevelopTask) -> None:
     export_jpeg(develop(decoded, params, task.cluster_index).rgb, task.out)
 
 
+def spawn_pool(workers: int) -> ProcessPoolExecutor:
+    """The develop pool; its workers are spawned (fresh interpreters), never forked.
+
+    The parent has already decoded every photo with rawpy to measure corrections,
+    which starts OpenMP threads. A forked worker inherits that OpenMP lock state and
+    hangs on its first decode, so the run would stop with nothing developed.
+    """
+    return ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"))
+
+
 @dataclass(frozen=True)
 class SortHooks:
     """Seams for the slow or external stages; defaults are the real ones."""
@@ -129,7 +140,7 @@ class SortHooks:
     recognise: Callable = recognise_photos
     corrections: Callable = compute_batch_corrections
     develop: Callable = develop_one
-    executor_factory: Callable = ProcessPoolExecutor
+    executor_factory: Callable = spawn_pool
     #: ``score(rgb, category, *, aesthetic, path, exposure_s, focal_mm) -> ShotScore``;
     #: ``None`` leaves the category in capture order (see ``scoring_hooks``).
     score: Optional[Callable] = None
