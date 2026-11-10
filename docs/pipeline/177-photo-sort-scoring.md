@@ -15,7 +15,7 @@ The score is read from the developed JPEG, re-read in the parent process after t
 
 Built once per run in the parent process (the model is 307 MB), on the CPU with 2 threads. Each value is cached in `ledger.sqlite` by the source file's sha256 under `aesthetic:v1`, so a re-run (`--reprocess`) skips the model. The dry-run estimate adds `AESTHETIC_S_PER_PHOTO_ESTIMATE` (3 s, a guess to be measured) per photo.
 
-- `--gpu`: takes the shared GPU lock for the aesthetic pass only and releases it afterwards, even on an error. If a GoMoveShift render holds it, the run does not wait: it falls back to the CPU and records a warning. Without `--gpu` the lock is never touched.
+- No GPU: the GoMoveShift drives hold the shared GPU lock, and a waiter that times out fails, so the sort never takes it.
 - Weights missing: the run goes on with no aesthetic score for any shot and one warning, in the terminal and in `run.json`, naming `gomoveshift photos fetch-models`.
 - One image's aesthetic failing leaves that shot's aesthetic blank, counts it in `run.json` (`scoring.aesthetic_failed`), and keeps the shot.
 

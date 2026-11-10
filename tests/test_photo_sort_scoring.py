@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from gomoveshift.pipeline.orchestrator_lock import GpuLockBusyError
+from gomoveshift.pipeline import orchestrator_lock
 from gomoveshift.pipeline.photos import sort as ps
 from gomoveshift.pipeline.photos.aesthetic import AestheticModelUnavailable
 from gomoveshift.pipeline.photos.capture_meta import CaptureRecord
@@ -80,8 +80,6 @@ def make_hooks(score=None, factory=None, records=None, readings=None, **over):
             "executor_factory": lambda workers: ThreadPoolExecutor(max_workers=workers),
             "score": score,
             "aesthetic_factory": factory,
-            "gpu_lock": Mock(side_effect=AssertionError("GPU lock must not be touched")),
-            "gpu_release": Mock(),
             **over,
         }
     )
@@ -265,58 +263,24 @@ def test_cache_hit_skips_the_model_and_miss_writes_the_ledger(folder, root):
     assert meta_of(result)["scoring"]["aesthetic_cached"] == 3
 
 
-def test_gpu_busy_falls_back_to_cpu_with_a_warning(folder, root):
+def test_sort_has_no_gpu_option_or_lock_hooks():
+    assert "gpu" not in ps.SortOptions.__dataclass_fields__
+    assert not {"gpu_lock", "gpu_release"} & set(ps.SortHooks.__dataclass_fields__)
+    assert not hasattr(ps, "acquire_gpu_lock")
+
+
+def test_sort_never_takes_the_gpu_lock(folder, root, monkeypatch):
+    """The GoMoveShift drives own the GPU lock; a photo sort must never contend for it."""
+    taken = Mock(side_effect=AssertionError("photos sort took the GPU lock"))
+    monkeypatch.setattr(orchestrator_lock, "acquire_gpu_lock", taken)
     seen = []
-    lock = Mock(side_effect=GpuLockBusyError("render running"))
-    release = Mock()
     hooks = make_hooks(
         StubScore({"a": 1, "b": 2, "c": 3}),
         lambda *, use_gpu: seen.append(use_gpu) or StubAesthetic(),
-        gpu_lock=lock,
-        gpu_release=release,
     )
-    result = run(folder, root, hooks, ps.SortOptions(gpu=True))
-    assert seen == [False]
-    lock.assert_called_once_with(wait_s=0)
-    release.assert_not_called()
-    assert "GPU lock is busy" in meta_of(result)["warnings"][0]
-
-
-def test_gpu_lock_held_for_the_aesthetic_pass_and_released_on_error(folder, root):
-    seen = []
-    lock = Mock(return_value=(7, Path("/x/gpu.lock")))
-    release = Mock()
-    scorer = StubAesthetic()
-    scorer.score_unit = Mock(side_effect=KeyboardInterrupt)
-    hooks = make_hooks(
-        StubScore({"a": 1, "b": 2, "c": 3}),
-        lambda *, use_gpu: seen.append(use_gpu) or scorer,
-        gpu_lock=lock,
-        gpu_release=release,
-    )
-    with pytest.raises(KeyboardInterrupt):
-        run(folder, root, hooks, ps.SortOptions(gpu=True))
-    assert seen == [True]
-    release.assert_called_once_with(7, Path("/x/gpu.lock"))
-
-
-def test_gpu_lock_released_after_a_clean_run(folder, root):
-    release = Mock()
-    hooks = make_hooks(
-        StubScore({"a": 1, "b": 2, "c": 3}),
-        lambda *, use_gpu: StubAesthetic(),
-        gpu_lock=Mock(return_value=(None, None)),
-        gpu_release=release,
-    )
-    run(folder, root, hooks, ps.SortOptions(gpu=True))
-    release.assert_called_once_with(None, None)
-
-
-def test_without_gpu_the_lock_is_never_touched(folder, root):
-    hooks = make_hooks(StubScore({"a": 1, "b": 2, "c": 3}), lambda *, use_gpu: StubAesthetic())
     run(folder, root, hooks)
-    hooks.gpu_lock.assert_not_called()
-    hooks.gpu_release.assert_not_called()
+    taken.assert_not_called()
+    assert seen == [False]
 
 
 def test_exposure_and_focal_come_from_the_capture_record(folder, root):

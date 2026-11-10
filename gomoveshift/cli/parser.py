@@ -2530,14 +2530,12 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
     sort_p.add_argument(
         "--workers", type=int, default=2, help="Develop processes, 1..4 (default 2)"
     )
+    sort_p.add_argument("--no-stacks", action="store_true", help="Skip the night-sky stacks")
     sort_p.add_argument(
-        "--no-stacks", action="store_true", help="Skip astro stacking (run.json only)"
-    )
-    sort_p.add_argument(
-        "--gpu",
-        action="store_true",
-        help="Run the aesthetic model on the GPU, holding the shared GPU lock for that pass "
-        "(CPU if the lock is busy)",
+        "--resume",
+        metavar="RUN_DIR",
+        help="Finish the unfinished stacks, HDR fuses and panoramas of an earlier run "
+        "(no re-develop, no re-score)",
     )
     photos_sub.add_parser(
         "fetch-models",

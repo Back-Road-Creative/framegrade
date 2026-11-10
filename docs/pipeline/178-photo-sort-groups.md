@@ -27,4 +27,4 @@ After the gallery is complete (so the page can be opened while this runs), one g
 
 A group that fails (too few usable frames, a stitch that fails its seam gate, a RAM refusal) adds a `skipped.csv` row `group:<id>` with the reason and the run goes on.
 
-Resume marker: an output is done when its file exists and the ledger holds `put_score(<sha256 of kind and sorted member paths>, "stack:v1", 1)`, written after the output lands. A crash between the two redoes that group. `run_sort(..., resume=<run folder>)` reads `ranked.csv`, rebuilds the groups from `group_id`, and does only the unfinished ones; it does not re-develop or re-score. The command-line flag is not wired yet (the parser is outside this change).
+Resume marker: an output is done when its file exists and the ledger holds `put_score(<sha256 of kind and sorted member paths>, "stack:v1", 1)`, written after the output lands. A crash between the two redoes that group. `photos sort <folder> --resume <run folder>` (`run_sort(..., resume=)`) reads `ranked.csv`, rebuilds the groups from `group_id`, and does only the unfinished ones; it does not re-develop or re-score.

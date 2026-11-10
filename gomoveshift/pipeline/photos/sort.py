@@ -27,7 +27,6 @@ from typing import Callable, Optional
 from urllib.parse import quote
 
 from ... import __version__
-from ..orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, release_gpu_lock
 from . import quality_order, sort_groups
 from .aesthetic import AestheticModelUnavailable
 from .capture_meta import CaptureRecord, read_capture_records
@@ -56,7 +55,7 @@ FETCH_MODELS_COMMAND = "gomoveshift photos fetch-models"
 #: Paths handed to ``compute_batch_corrections`` at once, to bound memory.
 CORRECTION_CHUNK = 60
 WORKERS_MIN, WORKERS_MAX = 1, 4
-NICE_INCREMENT = 10
+NICE_INCREMENT = 19  # lowest: the GMS drives on this box always win the CPU
 LEDGER_NAME = "ledger.sqlite"
 SIDECAR_SUFFIXES = frozenset({".xmp", ".json", ".pp3", ".dop", ".aae"})
 
@@ -98,7 +97,6 @@ class SortOptions:
     reprocess: bool = False
     workers: int = 2
     no_stacks: bool = False
-    gpu: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,8 +135,6 @@ class SortHooks:
     score: Optional[Callable] = None
     #: ``factory(use_gpu=bool) -> scorer`` with ``score_unit(rgb) -> 0..1``; ``None`` = no aesthetic.
     aesthetic_factory: Optional[Callable] = None
-    gpu_lock: Callable = acquire_gpu_lock
-    gpu_release: Callable = release_gpu_lock
     #: ``sort_groups.GroupOps``: scene-group tags and HDR / panorama / night-stack outputs;
     #: ``None`` skips grouping (see ``scoring_hooks``).
     groups: Optional[sort_groups.GroupOps] = None
@@ -361,17 +357,10 @@ def _aesthetic_value(scorer, ledger, sha_source: Path, rgb, stats) -> Optional[f
         return None
 
 
-def _open_aesthetic(hooks, options, warn):
-    """``(scorer or None, lock or None)``; the GPU lock is taken only for ``--gpu``."""
-    lock, use_gpu = None, False
-    if options.gpu:
-        try:
-            lock = hooks.gpu_lock(wait_s=0)
-            use_gpu = True
-        except (GpuLockBusyError, OSError) as exc:
-            warn(f"--gpu: the GPU lock is busy ({exc}); aesthetic scoring runs on CPU")
+def _open_aesthetic(hooks, warn):
+    """The aesthetic scorer, or ``None``. Always CPU: the GoMoveShift drives own the GPU lock."""
     try:
-        return hooks.aesthetic_factory(use_gpu=use_gpu), lock
+        return hooks.aesthetic_factory(use_gpu=False)
     except AestheticModelUnavailable as exc:
         warn(
             f"aesthetic model unavailable ({exc}); ordering without an aesthetic score. "
@@ -379,10 +368,10 @@ def _open_aesthetic(hooks, options, warn):
         )
     except Exception as exc:  # e.g. onnxruntime cannot load the file
         warn(f"aesthetic model failed to load ({exc}); ordering without an aesthetic score")
-    return None, lock
+    return None
 
 
-def _score_all(done, records, ledger, hooks, options, warn, hashes=None):
+def _score_all(done, records, ledger, hooks, warn, hashes=None):
     """Score each developed JPEG; returns ``({source: ShotScore | None}, stats)``."""
     stats = {
         "aesthetic_cached": 0,
@@ -391,39 +380,35 @@ def _score_all(done, records, ledger, hooks, options, warn, hashes=None):
         "score_failed": 0,
     }
     scores: dict[Path, Optional[ShotScore]] = {}
-    scorer, lock = None, None
-    try:
-        if hooks.aesthetic_factory is not None:
-            scorer, lock = _open_aesthetic(hooks, options, warn)
-        for (path, _name, _rank, reading), out in done:
-            rec = records.get(path) or CaptureRecord(path=path)
+    scorer = None
+    if hooks.aesthetic_factory is not None:
+        scorer = _open_aesthetic(hooks, warn)
+    for (path, _name, _rank, reading), out in done:
+        rec = records.get(path) or CaptureRecord(path=path)
+        try:
+            rgb = _read_rgb(out)
+        except Exception:
+            stats["score_failed"] += 1
+            scores[path] = None
+            continue
+        if hashes is not None:
             try:
-                rgb = _read_rgb(out)
-            except Exception:
-                stats["score_failed"] += 1
-                scores[path] = None
-                continue
-            if hashes is not None:
-                try:
-                    hashes[str(path)] = int(hooks.groups.phash(rgb))
-                except Exception:  # a look-alike hash is optional
-                    pass
-            aesthetic = _aesthetic_value(scorer, ledger, path, rgb, stats) if scorer else None
-            try:
-                scores[path] = hooks.score(
-                    rgb,
-                    reading.category.value,
-                    aesthetic=aesthetic,
-                    path=path,
-                    exposure_s=rec.exposure_s,
-                    focal_mm=rec.focal_length_mm,
-                )
-            except Exception:
-                stats["score_failed"] += 1
-                scores[path] = None
-    finally:
-        if lock is not None:
-            hooks.gpu_release(*lock)
+                hashes[str(path)] = int(hooks.groups.phash(rgb))
+            except Exception:  # a look-alike hash is optional
+                pass
+        aesthetic = _aesthetic_value(scorer, ledger, path, rgb, stats) if scorer else None
+        try:
+            scores[path] = hooks.score(
+                rgb,
+                reading.category.value,
+                aesthetic=aesthetic,
+                path=path,
+                exposure_s=rec.exposure_s,
+                focal_mm=rec.focal_length_mm,
+            )
+        except Exception:
+            stats["score_failed"] += 1
+            scores[path] = None
     for key, label in (
         ("aesthetic_failed", "aesthetic score failed"),
         ("score_failed", "quality score failed"),
@@ -614,7 +599,7 @@ def run_sort(
         scores, stats, hashes = {}, None, None
         if hooks.score is not None:
             hashes = {} if hooks.groups is not None else None
-            scores, stats = _score_all(done, records, ledger, hooks, options, warn, hashes)
+            scores, stats = _score_all(done, records, ledger, hooks, warn, hashes)
             mark = lap("score", mark)
         ordered = _rank_by_quality(done, scores)
         tech_cols, cat_cols = _score_columns(ordered, scores)
