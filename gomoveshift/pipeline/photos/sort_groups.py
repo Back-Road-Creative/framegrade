@@ -2,8 +2,8 @@
 
 A group is a tag: every member stays in its own category at its own rank. Kinds, in the
 order a shot is claimed: ``night`` (an intervalometer chunk), ``bracket`` (exposure
-bracket), ``pano`` (a fast run of same-settings frames) and ``burst`` (look-alikes inside
-one category). Outputs: ``hdr/`` fusions, ``pano/`` stitches, then ``stacks/`` night stacks,
+bracket), ``sequence`` (an intervalometer run outside the night sky), ``pano`` (a fast run
+of same-settings frames) and ``burst`` (look-alikes inside one category). Outputs: ``hdr/`` fusions, ``pano/`` stitches, then ``stacks/`` night stacks,
 one at a time. Then, per night session, ``trails/``: one star-trail TIFF master plus a
 same-stem JPEG; and ``timelapse/``: one MP4 (plus a same-stem poster JPEG) per night session
 and per long burst. A failed output is a ``skipped.csv`` row and never touches a member photo.
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -52,6 +53,14 @@ TRAILS_SKIP_MARKER = "trails-skip:v1"
 TRAILS_MIN_FRAMES = 24
 HDR_DIR, PANO_DIR, STACK_DIR, TIMELAPSE_DIR = "hdr", "pano", "stacks", "timelapse"
 TRAILS_DIR = "trails"
+#: An intervalometer run outside the night sky (a dawn or cloud sequence): at least
+#: ``TIMELAPSE_MIN_FRAMES`` frames of one category, each at most ``SEQUENCE_GAP_S`` after the
+#: last, with most gaps (``SEQUENCE_STEADY_SHARE``) within ``SEQUENCE_CADENCE_SLACK`` of the
+#: median gap. A timer is steady to the second; a hand-held session is not. JP's 2026-09-22
+#: dawn run: 100 frames 18 s apart.
+SEQUENCE_GAP_S = 60.0
+SEQUENCE_CADENCE_SLACK = 0.1  # of the median gap, at least 1 s
+SEQUENCE_STEADY_SHARE = 0.8
 _TIME_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
 
 
@@ -342,6 +351,27 @@ def best_by_group(rows) -> dict[str, dict]:
     return best
 
 
+def detect_interval_runs(records) -> list[list[Path]]:
+    """Runs of frames shot on a timer (see ``SEQUENCE_GAP_S``), each in capture order."""
+    timed = sorted((t, r.path) for r in records if (t := capture_datetime(r)) is not None)
+    runs: list[list] = []
+    for when, path in timed:
+        if runs and (when - runs[-1][-1][0]).total_seconds() <= SEQUENCE_GAP_S:
+            runs[-1].append((when, path))
+        else:
+            runs.append([(when, path)])
+    steady = []
+    for run in runs:
+        if len(run) < TIMELAPSE_MIN_FRAMES:
+            continue
+        gaps = [(b[0] - a[0]).total_seconds() for a, b in zip(run, run[1:])]
+        mid = statistics.median(gaps)
+        slack = max(1.0, SEQUENCE_CADENCE_SLACK * mid)
+        if sum(abs(g - mid) <= slack for g in gaps) >= SEQUENCE_STEADY_SHARE * len(gaps):
+            steady.append([path for _when, path in run])
+    return steady
+
+
 def tag_groups(rows, records, ops: GroupOps, hashes) -> None:
     """Set ``group_id`` / ``group_best_rank`` on ranked-row dicts (in place)."""
     by_src = {str(r["source"]): r for r in rows}
@@ -364,6 +394,16 @@ def tag_groups(rows, records, ops: GroupOps, hashes) -> None:
     free = [Path(s) for s in by_src if s not in claimed]
     for bracket in ops.detect_brackets(free):
         claim("bracket", [str(p) for p in bracket])
+    for category in dict.fromkeys(r["category"] for r in rows):
+        if category == NIGHT_FOLDER:  # night runs are claimed above, chunked for stacking
+            continue
+        pool = [
+            records[p]
+            for p in (Path(s) for s, r in by_src.items() if r["category"] == category)
+            if p in records and str(p) not in claimed
+        ]
+        for run in detect_interval_runs(pool):
+            claim("sequence", [str(p) for p in run])
     free = [records[p] for p in (Path(s) for s in by_src if s not in claimed) if p in records]
     for run in detect_panorama_runs(free):
         claim("pano", [str(p) for p in run])
@@ -527,9 +567,9 @@ def _build_timelapses(
                 near = _session_darks(darks, [c for g in session for c in g.captured])
                 units.append((session[0].id, "night", members, [], near))
     for g in groups:
-        if g.kind == "burst" and len(g.members) >= TIMELAPSE_MIN_FRAMES:
+        if g.kind in ("burst", "sequence") and len(g.members) >= TIMELAPSE_MIN_FRAMES:
             units.append((g.id, "burst", g.members, [o for o in g.outputs if o], []))
-    for gid, kind, members, jpegs, near in units:
+    for gid, kind, members, jpegs, near in units:  # kind: "night" | "burst" | "sequence"
         triage: list = []  # the session's (lights, darks), decoded at most once
 
         def classify(members=members, triage=triage, near=near):
