@@ -4,11 +4,13 @@ A group is a tag: every member stays in its own category at its own rank. Kinds,
 order a shot is claimed: ``night`` (an intervalometer chunk), ``bracket`` (exposure
 bracket), ``pano`` (a fast run of same-settings frames) and ``burst`` (look-alikes inside
 one category). Outputs: ``hdr/`` fusions, ``pano/`` stitches, then ``stacks/`` night stacks,
-one at a time. A failed output is a ``skipped.csv`` row and never touches a member photo.
+one at a time. Then ``timelapse/``: one MP4 (plus a same-stem poster JPEG) per night session
+and per long burst. A failed output is a ``skipped.csv`` row and never touches a member photo.
 
 Resume marker: a group output counts as done only when the output file exists AND the
 ledger holds ``put_score(<group key sha>, "stack:v1", 1)``, written after the output lands.
-A crash between the two leaves no marker, so the half-written output is redone.
+A crash between the two leaves no marker, so the half-written output is redone. A time-lapse
+uses the same marker under its own key (``group_key("timelapse", ...)``).
 """
 
 from __future__ import annotations
@@ -28,7 +30,14 @@ PANO_MIN_FRAMES = 3
 STACK_MARKER = "stack:v1"
 #: Folder name ``sort.CATEGORY_FOLDERS`` gives the night sky (a test pins the match).
 NIGHT_FOLDER = "night-sky"
-HDR_DIR, PANO_DIR, STACK_DIR = "hdr", "pano", "stacks"
+#: A session that left no usable lights for a time-lapse: remembered so ``--resume`` does not
+#: decode the whole session again to reach the same verdict.
+TIMELAPSE_SKIP_MARKER = "timelapse-skip:v1"
+#: Fewest frames worth a time-lapse. The night engine plays 24 fps
+#: (``astro_timelapse.TIMELAPSE_FPS``), so 24 frames is one second of video: below that the
+#: clip is a flash, not motion, and the stack already shows the scene.
+TIMELAPSE_MIN_FRAMES = 24
+HDR_DIR, PANO_DIR, STACK_DIR, TIMELAPSE_DIR = "hdr", "pano", "stacks", "timelapse"
 _TIME_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
 
 
@@ -101,6 +110,85 @@ def _stack(prepared, out_path):
     return stack_run(prepared, out_path)
 
 
+def _classify_night(paths):
+    """Split a night session into ``(lights, lens_cap_darks)`` with the stack's own triage
+    verdict: ``measure_frame``'s ``exposure_class`` (``astro_triage.classify_exposure``, #289)."""
+    from .astro_orchestrator import _luma, decode_with_he_fallback
+    from .astro_triage import measure_frame
+
+    lights, darks = [], []
+    for path in paths:
+        decoded, _ = decode_with_he_fallback(path, None, None)
+        if decoded is None:
+            lights.append(path)  # the renderer names an undecodable frame; it is not a dark
+            continue
+        metric = measure_frame(path, _luma(decoded.rgb), detect_meteors=False)
+        (darks if metric.exposure_class == "cap_on" else lights).append(path)
+    return lights, darks
+
+
+def _poster(video, poster, frames, fps) -> None:
+    """The video's middle frame as a JPEG poster (at most 1080 px tall), via ffmpeg."""
+    import subprocess
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{max(frames, 1) / fps / 2:.3f}"]
+    cmd += ["-i", str(video), "-frames:v", "1", "-vf", "scale=-2:'min(1080,ih)'", str(poster)]
+    done = subprocess.run(cmd, capture_output=True, timeout=300)
+    if done.returncode != 0 or not Path(poster).is_file():
+        tail = done.stderr.decode(errors="replace").strip()[-300:]
+        raise RuntimeError(f"poster frame failed: exit {done.returncode}: {tail}")
+
+
+def _night_timelapse(lights, darks, out_mp4, out_jpg) -> None:
+    """One session's lights to an MP4 with the night product's fps and height cap. Darks
+    calibrate only when they validate against the lights (same identity check as a stack);
+    a set that does not match is dropped, never subtracted blind."""
+    from .astro_calibrate import AstroCalibrationError
+    from .astro_orchestrator import build_validated_master_dark
+    from .astro_timelapse import (
+        TIMELAPSE_FPS,
+        TIMELAPSE_HEIGHT_DEFAULT,
+        preflight_timelapse,
+        render_timelapse,
+    )
+
+    if darks:
+        try:
+            build_validated_master_dark(lights[:1], darks)
+        except AstroCalibrationError:
+            darks = []
+    preflight_timelapse(out_mp4.parent, megapixels=_megapixels(lights[0]), dark_count=len(darks))
+    video, used, _rejected = render_timelapse(
+        lights, out_mp4, darks, fps=TIMELAPSE_FPS, scale_height=TIMELAPSE_HEIGHT_DEFAULT
+    )
+    _poster(video, out_jpg, used, TIMELAPSE_FPS)
+
+
+def _still_timelapse(jpegs, out_mp4, out_jpg) -> None:
+    """A burst's developed JPEGs to an MP4 through the shared still-frame core. The core
+    orders stills by file name and the developed names are rank-first, so the frames go in
+    under sequence-numbered links to keep capture order."""
+    import shutil
+    import tempfile
+
+    from ..timelapse import TIMELAPSE_FPS, render_stills_timelapse
+    from .astro_timelapse import TIMELAPSE_HEIGHT_DEFAULT
+
+    with tempfile.TemporaryDirectory(prefix="sort-lapse-") as tmp:
+        ordered = []
+        for i, jpeg in enumerate(jpegs):
+            link = Path(tmp) / f"{i:06d}.jpg"
+            try:
+                os.symlink(Path(jpeg).resolve(), link)
+            except OSError:
+                shutil.copyfile(jpeg, link)
+            ordered.append(link)
+        video, used, _rejected = render_stills_timelapse(
+            ordered, out_mp4, fps=TIMELAPSE_FPS, scale_height=TIMELAPSE_HEIGHT_DEFAULT
+        )
+    _poster(video, out_jpg, used, TIMELAPSE_FPS)
+
+
 @dataclass(frozen=True)
 class GroupOps:
     """Seams for the slow stages; defaults are the real pipeline calls."""
@@ -113,25 +201,34 @@ class GroupOps:
     stitch: Callable = _stitch
     prepare: Callable = _prepare
     stack: Callable = _stack
+    #: ``(paths) -> (lights, lens_cap_darks)`` for one night session.
+    classify_night: Callable = _classify_night
+    #: ``(lights, darks, out_mp4, out_jpg)``: writes the video and its poster.
+    night_timelapse: Callable = _night_timelapse
+    #: ``(developed_jpegs_in_capture_order, out_mp4, out_jpg)``: writes the video and poster.
+    still_timelapse: Callable = _still_timelapse
 
 
 def real_ops() -> GroupOps:
     return GroupOps()
 
 
-def capture_datetime(rec) -> Optional[datetime]:
-    text = rec.datetime_original
+def _parse_stamp(text) -> Optional[datetime]:
     if not text:
         return None
     for fmt in _TIME_FORMATS:
         try:
-            stamp = datetime.strptime(text[:19], fmt)
+            return datetime.strptime(text[:19], fmt)
         except ValueError:
             continue
-        if rec.subsec and rec.subsec.isdigit():
-            stamp += timedelta(seconds=float(f"0.{rec.subsec}"))
-        return stamp
     return None
+
+
+def capture_datetime(rec) -> Optional[datetime]:
+    stamp = _parse_stamp(rec.datetime_original)
+    if stamp is not None and rec.subsec and rec.subsec.isdigit():
+        stamp += timedelta(seconds=float(f"0.{rec.subsec}"))
+    return stamp
 
 
 def detect_panorama_runs(records) -> list[tuple[Path, ...]]:
@@ -255,6 +352,7 @@ class Group:
     members: list[str]
     mean_total: float = 0.0
     outputs: list[str] = field(default_factory=list)  # each member's developed JPEG
+    captured: list[str] = field(default_factory=list)  # each member's capture_time text
 
 
 def groups_from_rows(rows) -> list[Group]:
@@ -269,8 +367,30 @@ def groups_from_rows(rows) -> list[Group]:
         mean = sum(max(_score(r), 0.0) for r in items) / len(items)
         sources = [str(r["source"]) for r in items]
         outputs = [str(r.get("output") or "") for r in items]
-        groups.append(Group(gid, gid.rsplit("-", 1)[0], sources, mean, outputs))
+        captured = [str(r.get("capture_time") or "") for r in items]
+        groups.append(Group(gid, gid.rsplit("-", 1)[0], sources, mean, outputs, captured))
     return groups
+
+
+def night_sessions(groups) -> list[list[Group]]:
+    """Night groups joined into sessions: chunks of one ``detect_sequences`` run. A run holds
+    frames at most ``MAX_FRAME_GAP_S`` apart, so a chunk that starts inside that gap of the
+    previous chunk's last frame continues its session. Without capture times the chunks stay
+    apart. Rebuilt from the rows alone, so ``--resume`` finds the same sessions."""
+    from .astro_sequence import MAX_FRAME_GAP_S
+
+    night = sorted(
+        (g for g in groups if g.kind == "night"), key=lambda g: int(g.id.rsplit("-", 1)[1])
+    )
+    sessions: list[list[Group]] = []
+    for group in night:
+        last = _parse_stamp(sessions[-1][-1].captured[-1]) if sessions else None
+        first = _parse_stamp(group.captured[0]) if group.captured else None
+        if last and first and 0 <= (first - last).total_seconds() <= MAX_FRAME_GAP_S:
+            sessions[-1].append(group)
+        else:
+            sessions.append([group])
+    return sessions
 
 
 def group_key(kind: str, members) -> str:
@@ -279,7 +399,7 @@ def group_key(kind: str, members) -> str:
 
 @dataclass
 class Output:
-    kind: str  # "hdr" | "pano" | "stacks"
+    kind: str  # "hdr" | "pano" | "stacks" | "timelapse"
     group_id: str
     rel: str  # path relative to the run folder (the image the page shows)
 
@@ -294,7 +414,7 @@ class StageResult:
 def build_outputs(
     run_dir: Path, rows, ops: GroupOps, ledger, *, workers: int, no_stacks: bool, on_output
 ) -> StageResult:
-    """HDR, panoramas, then night stacks (best session first); one output at a time."""
+    """HDR, panoramas, night stacks (best session first), then time-lapses; one at a time."""
     result = StageResult()
     groups = groups_from_rows(rows)
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
@@ -326,7 +446,53 @@ def build_outputs(
         rel = (shown if shown.is_file() else main).relative_to(run_dir).as_posix()
         result.outputs.append(Output({"night": "stacks"}.get(group.kind, folder), group.id, rel))
         on_output(result.outputs)
+    _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output)
     return result
+
+
+def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output) -> None:
+    """One time-lapse per night session (not under ``--no-stacks``) and per long burst."""
+    units = []  # (id, kind, member sources, developed JPEGs)
+    if not no_stacks:
+        for session in night_sessions(groups):
+            members = [m for g in session for m in g.members]
+            if len(members) >= TIMELAPSE_MIN_FRAMES:
+                units.append((session[0].id, "night", members, []))
+    for g in groups:
+        if g.kind == "burst" and len(g.members) >= TIMELAPSE_MIN_FRAMES:
+            units.append((g.id, "burst", g.members, [o for o in g.outputs if o]))
+    for gid, kind, members, jpegs in units:
+        mp4 = run_dir / TIMELAPSE_DIR / f"{gid}.mp4"
+        poster = mp4.with_suffix(".jpg")
+        key = group_key("timelapse", members)
+        if mp4.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
+            result.stats["resumed"] += 1
+        elif ledger.get_score(key, TIMELAPSE_SKIP_MARKER) == 1:
+            continue
+        else:
+            try:
+                if kind == "night":
+                    lights, darks = ops.classify_night([Path(m) for m in members])
+                    if len(lights) < TIMELAPSE_MIN_FRAMES:
+                        ledger.put_score(key, TIMELAPSE_SKIP_MARKER, 1)
+                        continue
+                    mp4.parent.mkdir(parents=True, exist_ok=True)
+                    ops.night_timelapse(lights, darks, mp4, poster)
+                elif len(jpegs) >= TIMELAPSE_MIN_FRAMES:
+                    mp4.parent.mkdir(parents=True, exist_ok=True)
+                    ops.still_timelapse([Path(j) for j in jpegs], mp4, poster)
+                else:
+                    continue
+            except Exception as exc:  # a time-lapse must never abort the run
+                result.skipped.append((f"group:{gid}", f"timelapse failed: {exc}"))
+                result.stats["failed"] += 1
+                for leftover in (mp4, poster):
+                    leftover.unlink(missing_ok=True)
+                continue
+            ledger.put_score(key, STACK_MARKER, 1)
+            result.stats["built"] += 1
+        result.outputs.append(Output("timelapse", gid, f"{TIMELAPSE_DIR}/{gid}.mp4"))
+        on_output(result.outputs)
 
 
 def _produce(group, ops, paths, main, shown, workers, out_dir) -> None:
