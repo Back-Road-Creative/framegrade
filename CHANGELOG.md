@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.71] - 2026-11-10
+
+### Added
+
+- `health backlog` publishes its region's audited drive: when the `auditing` drive's newest audit succeeded, the hourly tick runs `health publish` for it. A slot still outside Waypost's lead window is a noop ("audit passed: ... waits for its Waypost slot"), retried next tick; any other publish refusal is a refusal. Before, an audited drive held its region's slot ("audit in progress") until a person ran `health publish` inside the window.
+- `photos sort` now makes one star-trail picture for every night session of 24 or more usable frames, into `trails/`, shown on the session's card between the stacks and the time-lapse. The session's frames are sorted into lights and lens-cap darks once for both outputs, and a resumed run builds only the trails that are missing.
+
+### Fixed
+
+- `gomoveshift cleanup` finds a drive `health backlog` staged (`<stages root>/<project>/<project>/_stages`), named or discovered. Before, only `<base>/<project>/_stages` was looked up, so cleaning a published backlog drive with `GMS_INTERMEDIATE_DIR=<stages root>` skipped it ("pipeline not complete") and freed nothing.
+
 ## [0.3.70] - 2026-11-10
 
 ### Added
@@ -852,7 +863,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...HEAD
+[0.3.71]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...v0.3.71
 [0.3.70]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.69...v0.3.70
 [0.3.69]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...v0.3.69
 [0.3.68]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...v0.3.68
