@@ -956,6 +956,44 @@ class TestMeasureFrameExposureClass:
         sampled = measure_frame(tmp_path / "sampled.NEF", luma, detect_meteors=False)
         assert full.exposure_class == sampled.exposure_class == "cap_on"
 
+    def _sparse_stars_on_the_floor(self, shape=(400, 600), count=8, seed=5):
+        """A real dark-sky light as the 2026-11-09 card showed it: the background
+        calibrated down onto the black floor (median/spread 0.4-1.7 measured) and
+        stars, 2-3 px wide, covering well under 0.1% of the pixels -- so the
+        brightest 0.1% is still mostly noise and the percentile test reads it flat."""
+        rng = np.random.default_rng(seed)
+        luma = np.clip(rng.normal(0.0003, 0.0009, size=shape), 0.0, None).astype(np.float32)
+        yy, xx = np.mgrid[-3:4, -3:4]
+        psf = np.exp(-(xx**2 + yy**2) / (2 * 1.1**2)).astype(np.float32)
+        for y, x in zip(
+            rng.integers(10, shape[0] - 10, count), rng.integers(10, shape[1] - 10, count)
+        ):
+            luma[y - 3 : y + 4, x - 3 : x + 4] += 0.05 * psf
+        return luma
+
+    def test_a_sparse_star_field_on_the_black_floor_is_not_cap_on(self, tmp_path):
+        """The 2026-11-09 run: every frame of six night groups (600-2770 stars each)
+        read cap_on, so each stack refused '0 usable of 19'."""
+        luma = self._sparse_stars_on_the_floor()
+        # The old blind spot: the percentile ratios alone still call it a dark.
+        assert classify_exposure(*triage_mod._exposure_stats(luma)) == "cap_on"
+        metrics = measure_frame(tmp_path / "DSC_2167.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class != "cap_on"
+        assert metrics.usable is True
+
+    def test_hot_pixels_on_a_capped_frame_do_not_read_as_stars(self, tmp_path):
+        """A dark's hot pixels are single bright pixels (or adjacent pairs); the
+        resolved-star test must not take them for a sky."""
+        luma = self._capped(shape=(400, 600))
+        rng = np.random.default_rng(6)
+        # 40 of 240,000 pixels: the 0.01-0.02% a real sensor's hot map runs to.
+        ys, xs = rng.integers(0, 399, 30), rng.integers(0, 600, 30)
+        luma[ys, xs] = rng.uniform(0.01, 1.0, 30).astype(np.float32)
+        luma[ys[:10] + 1, xs[:10]] = 0.5
+        metrics = measure_frame(tmp_path / "DSC_0031.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class == "cap_on"
+        assert metrics.usable is False
+
 
 def _cap_on_fm(name):
     """A cap-on frame as triage sees it: no stars, no FWHM, at the black floor."""
