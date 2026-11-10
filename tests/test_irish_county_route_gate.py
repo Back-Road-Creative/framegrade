@@ -7,6 +7,8 @@ label form ("County Cork & County Kerry, Ireland") is what is under test.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from gomoveshift.pipeline.route_claims import (
@@ -14,10 +16,13 @@ from gomoveshift.pipeline.route_claims import (
     RouteEvidence,
     RoutePlace,
     RouteWindow,
+    GAP_S,
     _Bin,
+    make_short_route_fn,
     measure_route,
     region_label,
     select_supported_label,
+    short_route_window,
 )
 
 CORK = {"town": "Macroom", "county": "County Cork", "country": "Ireland"}
@@ -165,3 +170,54 @@ def test_region_label_appends_country_for_a_stateless_single_county():
     claim = ev.region_claim("county")
     assert claim["state"] is None and claim["country"] == "Ireland"
     assert region_label(claim) == "County Cork, Ireland"
+
+
+def _short_day(lat_after=51.0):
+    # A Short [0, 38) whose last fix inside is at 33 s and whose next fix is at
+    # 38 s, just past the cut: 33 -> 38 is GAP_S, so no gap, but the last bin
+    # [35, 38) holds no fix of its own (Clonakilty 09-17 rank 2).
+    return [(float(t), 51.0, 9.0) for t in range(34)] + [
+        (float(t), lat_after, 9.0) for t in range(38, 60)
+    ]
+
+
+def test_a_short_window_carries_the_source_fixes_outside_its_cut():
+    w = short_route_window(2, 0.0, 38.0, [(-3.0, 51.0, 9.0), *_short_day()])
+    assert w.prev_fix == (-3.0, 51.0, 9.0) and w.next_fix == (38.0, 51.0, 9.0)
+    assert (w.prev_fix_s, w.next_fix_s) == (-3.0, 38.0)
+
+
+def test_a_fixless_tail_bin_takes_the_county_of_the_next_source_fix():
+    w = short_route_window(2, 0.0, 38.0, _short_day())
+    ev = measure_route([w], _Geo(), bin_s=GAP_S, min_place_s=0.0)
+    assert not ev.gaps
+    assert ev.bins[-1].county == "County Cork" and ev.bins[-1].inferred
+    assert ev.region_claim("county")["samples_outside"] == 0
+
+
+def test_a_countyless_head_bin_takes_the_county_of_the_previous_source_fix():
+    # A head bin cannot be fixless without a gap (bins start at the cut), but its
+    # lookup can resolve nothing; the fix before the cut stands in.
+    pts = [(-1.0, 51.0, 9.0)] + [(float(t), 51.5 if t < 5 else 51.0, 9.0) for t in range(38)]
+    w = short_route_window(2, 0.0, 38.0, pts)
+    ev = measure_route([w], _Geo(), bin_s=GAP_S, min_place_s=0.0)
+    assert ev.bins[0].county == "County Cork" and ev.bins[0].inferred
+
+
+def test_a_short_ending_on_a_fixless_bin_keeps_its_county_label():
+    label, _note = make_short_route_fn(_Geo())(
+        _short_day(), SimpleNamespace(rank=2, start_sec=0.0, end_sec=38.0), "County Cork"
+    )
+    assert label == "County Cork"
+
+
+@pytest.mark.parametrize("lat_after", [52.0, 51.5])
+def test_a_fixless_tail_bin_stays_unresolved_without_a_same_county_fix_past_the_cut(lat_after):
+    # The fix past the cut is in another county, or resolves to none: nothing
+    # shows where the last seconds were, so the county label is still refused.
+    with pytest.raises(RouteClaimRefusedError, match="outside or unresolved"):
+        make_short_route_fn(_Geo())(
+            _short_day(lat_after),
+            SimpleNamespace(rank=2, start_sec=0.0, end_sec=38.0),
+            "County Cork",
+        )

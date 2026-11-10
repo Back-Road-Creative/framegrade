@@ -780,7 +780,10 @@ def _bridge(windows, line, edges=None, notes=None) -> None:
 
     Only stateless counties in one country bridge (``_same_stateless_county``).
     A county-less bin whose nearest county-bearing bins before and after name
-    one county takes that county (``inferred``). A gap takes ``county`` only
+    one county takes that county (``inferred``); with no county-bearing bin on a
+    side, the nearest source fix outside the cut on that side stands in (a
+    Short's last bin can hold no fix of its own when the next fix lands just
+    past the cut). A gap takes ``county`` only
     when the bins immediately on both sides carry a measured county and they
     agree; a gap beside a county-less bin is never bridged. A gap that reaches
     the first or last retained second has no bin on that side; there the
@@ -806,8 +809,19 @@ def _bridge(windows, line, edges=None, notes=None) -> None:
             for rng in (range(k - 1, -1, -1), range(k + 1, len(items))):
                 side.append(next((items[j] for j in rng if measured[j]), None))
             before, after = side
+            edge = (edges or {}).get(owner[k], (None, None))
+            used = []
+            if before is None:
+                before, used = edge[0], [*used, "head"]
+            if after is None:
+                after, used = edge[1], [*used, "tail"]
             if before and after and _same_stateless_county(before, after):
                 item.county, item.inferred = before.county, True
+                if used and notes is not None:
+                    notes.append(
+                        f"{item.where} county-less bin inferred {before.county} from the "
+                        f"{' and '.join(used)} source fix outside the cut"
+                    )
                 item.state = before.state if before.state == after.state else None
                 item.country = before.country if before.country == after.country else None
         else:
@@ -1203,15 +1217,17 @@ def _day_window(segment_id: str, start_s: float, end_s: float, day_points) -> Ro
     valid = sorted(
         (float(t), la, lo) for t, la, lo in (day_points or []) if _valid(la, lo)
     )  # fmt: skip
-    before = [p[0] for p in valid if p[0] < start_s]
-    after = [p[0] for p in valid if p[0] >= end_s]
+    before = [p for p in valid if p[0] < start_s]
+    after = [p for p in valid if p[0] >= end_s]
     return RouteWindow(
         segment_id=segment_id,
         start_s=float(start_s),
         end_s=float(end_s),
         fixes=[p for p in valid if start_s <= p[0] < end_s],
-        prev_fix_s=before[-1] if before else None,
-        next_fix_s=after[0] if after else None,
+        prev_fix_s=before[-1][0] if before else None,
+        next_fix_s=after[0][0] if after else None,
+        prev_fix=before[-1] if before else None,
+        next_fix=after[0] if after else None,
     )
 
 
