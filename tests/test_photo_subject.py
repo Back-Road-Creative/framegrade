@@ -147,6 +147,42 @@ class TestExifIsTheStrongestEvidence:
         reading = recognise_subject(optics=CaptureOptics(52.0, 8.0, 19.63))
         assert reading.category is SubjectCategory.UNKNOWN
 
+    def test_a_dusk_sky_exposure_without_a_solar_fix_reads_astro_not_landscape(self):
+        """Measured on the 2026-11-09 card: 111 frames at 20:26-20:59 camera-local, 15 s at
+        ISO 3200 and f/3.8 (EV100 -5.1, the night frames' own exposure), far focus. The
+        clock calls 20:xx day; the exposure says the sky was dark."""
+        reading = recognise_subject(
+            exif=PhotoExif(iso=3200, exposure_s=15.0, capture_hour=20),
+            optics=CaptureOptics(18.0, 3.8, 20.96),
+        )
+        assert reading.category is SubjectCategory.ASTRO
+        assert any("EV100 -5.1" in e for e in reading.evidence)
+
+    def test_a_dim_exposure_is_not_daylight_whatever_the_clock_says(self):
+        """EV100 4 (f/8, 1/2 s, ISO 800) at noon: below the daylight floor, so far focus
+        alone does not make it a landscape."""
+        reading = recognise_subject(
+            exif=PhotoExif(iso=800, exposure_s=0.5, capture_hour=12),
+            optics=CaptureOptics(52.0, 8.0, 19.63),
+        )
+        assert reading.category is SubjectCategory.UNKNOWN
+
+    def test_a_shaded_daylight_exposure_still_reads_landscape(self):
+        """The card's dimmest real daylight scenic: a forest trail at ISO 3200 (EV100 ~5.9)."""
+        reading = recognise_subject(
+            exif=PhotoExif(iso=3200, exposure_s=1 / 60, capture_hour=12),
+            optics=CaptureOptics(52.0, 5.6, 19.63),
+        )
+        assert reading.category is SubjectCategory.LANDSCAPE
+
+    def test_a_dawn_tripod_frame_stays_long_exposure(self):
+        """06:33 at 15 s, ISO 100, f/8 (EV100 2.1): lit, not night, not daylight."""
+        reading = recognise_subject(
+            exif=PhotoExif(iso=100, exposure_s=15.0, capture_hour=6),
+            optics=CaptureOptics(18.0, 8.0, 20.96),
+        )
+        assert reading.category is SubjectCategory.LONG_EXPOSURE
+
     def test_far_focus_at_night_keeps_the_night_reading(self):
         reading = recognise_subject(exif=NIGHT, optics=CaptureOptics(24.0, 2.8, 20.96))
         assert reading.category is SubjectCategory.ASTRO
