@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.65] - 2026-11-10
+
+### Fixed
+
+- A route-claim reverse lookup that fails (a timeout, a dropped connection) is retried after
+  5, 15 and 45 s before its sample counts as unresolved. One timed-out lookup during a network
+  blip had refused a Short label the GPS supports and failed the whole day after its encode.
+  A lookup that keeps failing is still unresolved, and a lookup that answers with nothing is
+  not retried.
+
 ## [0.3.64] - 2026-11-09
 
 ### Fixed
@@ -794,7 +804,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...HEAD
+[0.3.65]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...v0.3.65
 [0.3.64]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...v0.3.64
 [0.3.63]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.62...v0.3.63
 [0.3.62]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.61...v0.3.62
