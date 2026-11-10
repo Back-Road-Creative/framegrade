@@ -414,6 +414,16 @@ def _make_fake_register(bad_fill):
     return _fake_register
 
 
+def _refuse_lens_fit(luma_ref, stars_ref, luma_frame, stars_frame, sky_mask=None):
+    # The stub frames are too small for a real coarse shift; a frame the 2x3 refuses
+    # here is meant to stay refused by the lens-aware pair fit too.
+    raise RegistrationError("stub: lens refused")
+
+
+#: What ``stack_run`` records for a frame both the 2x3 and the lens pair fit refused.
+_BOTH_REFUSED = "stub: no match; lens-aware pair fit: stub: lens refused"
+
+
 def _stub_stack_capturing(captured):
     def _fake_stack(aligned_frames, unaligned_frames, mask, *, sky_validity=None, **_kwargs):
         captured["aligned"] = list(aligned_frames)
@@ -441,6 +451,7 @@ def _apply_stack_run_stubs(monkeypatch, bad_fill=-1.0, stub_horizon_mask=True):
         )
     monkeypatch.setattr(om, "warp_to_reference", lambda rgb, transform, out_shape: rgb)
     monkeypatch.setattr(om, "register", _make_fake_register(bad_fill))
+    monkeypatch.setattr(om, "fit_lens_aware", _refuse_lens_fit)
     monkeypatch.setattr(om, "develop_stack", lambda rgb, sky_mask=None: _STUB_DEVELOP_RESULT)
     monkeypatch.setattr(om, "classify_streaks", lambda metrics: ())
     monkeypatch.setattr(dm, "export_tiff16", lambda rgb, out_path: Path(out_path))
@@ -471,7 +482,7 @@ def test_reference_carries_no_registration_and_decoder_tag_reflects_survivors(
     # 3 frames survive stacking (ref + frame1 + frame3) -- the tag reflects that, not
     # the 4 frames prepare_frames originally handed over.
     assert captured_payload["decoder"] == "rawpy-linear+astrostack3"
-    assert report.rejected_frames == ((prepared.frames[2].path, "stub: no match"),)
+    assert report.rejected_frames == ((prepared.frames[2].path, _BOTH_REFUSED),)
 
 
 def test_the_sidecar_records_the_darks_the_master_was_built_with(monkeypatch, tmp_path):
@@ -522,7 +533,7 @@ def test_a_registration_failure_is_dropped_without_killing_the_run(monkeypatch, 
     assert len(captured_stack["aligned"]) == len(captured_stack["unaligned"]) == 3
     assert not any(f[0, 0, 0] == 2.0 for f in captured_stack["aligned"])
     assert not any(f[0, 0, 0] == 2.0 for f in captured_stack["unaligned"])
-    assert report.rejected_frames == ((prepared.frames[2].path, "stub: no match"),)
+    assert report.rejected_frames == ((prepared.frames[2].path, _BOTH_REFUSED),)
     # sky_validity is paired with aligned/unaligned -- the rejected frame's own
     # validity never reaches stack(); the reference's is unconditional full coverage.
     assert len(captured_stack["sky_validity"]) == 3
@@ -537,6 +548,7 @@ def test_too_few_registered_frames_raises_instead_of_stacking(monkeypatch, tmp_p
 
     monkeypatch.setattr(om, "detect_stars", _stub_detect_stars)
     monkeypatch.setattr(om, "register", _always_fails)
+    monkeypatch.setattr(om, "fit_lens_aware", _refuse_lens_fit)
 
     with pytest.raises(AstroOrchestratorError):
         stack_run(prepared, tmp_path / "stack.tiff")
@@ -1802,3 +1814,120 @@ def test_linear_artifact_records_which_warp_each_frame_took(monkeypatch, tmp_pat
     assert provenance[1]["warp"]["model"] == "lens_rotation"
     assert provenance[1]["warp"]["held_out_outer_p95_px"]["lens"] == 0.05
     assert provenance[1]["warp"]["held_out_outer_p95_px"]["similarity"] > 0.05
+
+
+# --- a frame the 2x3 refuses on a sparse field is fitted with the lens model --------
+#
+# Measured 2026-11-10 on a real 15-frame night chunk (~90 stars a frame): matching
+# finds 15-18 outer-third pairs on every frame, but the 4-DOF similarity's outer
+# residual grows with time from the reference (17.8 px at 14 frames out, 0.8 px at 1),
+# so `register` refused 11 of 14 frames. The gate is right; the model is wrong -- the
+# same finding note 86 fixed for chunk pairs with `astro_combine.fit_lens_aware`.
+
+_SIMILARITY_REFUSAL = (
+    "fit kept only 3 outer-third inliers, need >= 8 -- this transform only fit "
+    "the frame's centre, not the whole sensor"
+)
+
+
+def _refusing_register(luma_ref, stars_ref, luma_frame, stars_frame, **kwargs):
+    raise RegistrationError(_SIMILARITY_REFUSAL)
+
+
+def _lens_pair_fit(maps, method="lens_rotation"):
+    from gomoveshift.pipeline.photos.astro_combine import LensPairFit
+
+    return LensPairFit(
+        transform=maps,
+        n_matched=49,
+        inlier_fraction=0.9,
+        residual_median_px=0.4,
+        residual_p95_px=1.1,
+        match_yield=0.9,
+        geometry_method=method,
+        held_out_residuals_px={"outer": {"n": 9, "median_px": 0.5, "p95_px": 1.2}},
+    )
+
+
+def _sparse_case(monkeypatch, tmp_path, *lens_fits, n=3):
+    """``_lens_case`` with every non-reference frame refused by the 2x3 and
+    ``fit_lens_aware`` answering each call with the next of ``lens_fits`` (a result,
+    or an exception to raise); the last one repeats."""
+    prepared, warps = _lens_case(monkeypatch, tmp_path, n=n)
+    monkeypatch.setattr(om, "register", _refusing_register)
+    calls = []
+
+    def _fit(luma_ref, stars_ref, luma_frame, stars_frame, sky_mask=None):
+        calls.append(sky_mask)
+        answer = lens_fits[min(len(calls), len(lens_fits)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(om, "fit_lens_aware", _fit)
+    return prepared, warps, calls
+
+
+def test_a_frame_the_2x3_refuses_is_stacked_through_the_lens_pair_fit(monkeypatch, tmp_path):
+    height, width = _LENS_FRAME_SHAPE[:2]
+    xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    prepared, warps, calls = _sparse_case(monkeypatch, tmp_path, _lens_pair_fit((xs + 1, ys)))
+
+    report = stack_run(prepared, tmp_path / "stack.tiff")
+
+    assert report.rejected_frames == ()
+    assert len(calls) == 2 and all(mask is not None for mask in calls)
+    assert len(warps) == 2 and all(_is_remap(t) for t in warps)
+    assert report.geometry["frames_lens_warped"] == 2
+    assert report.geometry["frames_affine_warped"] == 0
+
+
+def test_a_frame_both_models_refuse_is_rejected_with_both_reasons(monkeypatch, tmp_path):
+    from gomoveshift.pipeline.photos.astro_combine import PairFitError
+
+    height, width = _LENS_FRAME_SHAPE[:2]
+    xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    refusal = PairFitError("fit kept only 4 outer-third inliers", geometry_method="lens_rotation")
+    fitted = _lens_pair_fit((xs, ys))
+    prepared, warps, _calls = _sparse_case(monkeypatch, tmp_path, fitted, fitted, refusal, n=4)
+
+    report = stack_run(prepared, tmp_path / "stack.tiff")
+
+    assert len(warps) == 2
+    ((path, reason),) = report.rejected_frames
+    assert path == prepared.frames[3].path
+    assert _SIMILARITY_REFUSAL in reason
+    assert "lens_rotation" in reason and "fit kept only 4 outer-third inliers" in reason
+
+
+def test_the_lens_pair_fit_is_recorded_without_its_full_resolution_maps(monkeypatch, tmp_path):
+    height, width = _LENS_FRAME_SHAPE[:2]
+    xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    prepared, _warps, _calls = _sparse_case(monkeypatch, tmp_path, _lens_pair_fit((xs, ys)))
+    monkeypatch.setattr(om, "read_capture_identity", lambda path: _identity(path=Path(path)))
+    captured = {}
+    monkeypatch.setattr(
+        om,
+        "write_linear_artifact",
+        lambda destination, result, **kwargs: captured.update(kwargs),
+    )
+
+    stack_run(prepared, None, linear_artifact_path=tmp_path / "chunk.linear", linear_only=True)
+
+    frame = captured["registration_provenance"][1]
+    assert frame["transform"] == "remap:lens_rotation"
+    assert frame["warp"]["model"] == "lens_rotation"
+    assert _SIMILARITY_REFUSAL in frame["warp"]["reason"]
+    assert frame["warp"]["held_out_outer_p95_px"]["lens"] == 1.2
+
+
+def test_a_meteor_on_a_lens_fitted_frame_lands_where_the_remap_put_its_pixels():
+    height, width = 40, 60
+    xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    # Reference pixel (x, y) samples the frame at (x + 5, y - 3): the frame point
+    # (15, 7) is the reference point (10, 10).
+    to_reference = om._frame_to_reference_points((xs + 5, ys - 3))
+
+    warped = om._warp_streak((15.0, 7.0, 35.0, 20.0), to_reference)
+
+    assert warped == pytest.approx((10.0, 10.0, 30.0, 23.0), abs=1e-3)
