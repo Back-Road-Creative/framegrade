@@ -5,6 +5,20 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.66] - 2026-11-10
+
+### Fixed
+
+- `photos sort` panoramas no longer fail on RAW cards with "could not be read as an image":
+  the stitcher is now handed the developed JPEGs the run wrote instead of the camera RAWs,
+  which `cv2.imread` cannot open.
+- A Short whose last bin holds no fix of its own (the next fix lands just past
+  the cut, inside `GAP_S`) no longer refuses its county label: a county-less
+  bin with no county-bearing bin on one side takes the nearest source fix
+  outside the cut on that side, the same stand-in a head or tail gap already
+  uses, and only for a stateless county in one country. Short windows now
+  carry those outside fixes (`short_route_window`).
+
 ## [0.3.65] - 2026-11-10
 
 ### Fixed
@@ -804,7 +818,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...HEAD
+[0.3.66]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...v0.3.66
 [0.3.65]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...v0.3.65
 [0.3.64]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...v0.3.64
 [0.3.63]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.62...v0.3.63
