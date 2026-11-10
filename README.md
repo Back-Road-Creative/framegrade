@@ -118,7 +118,9 @@ is the `SKIP` reason: `_stages` is not a symlink; no `no-auto-resume` hold
 (a held run is waiting, not abandoned); the run lock `pipeline_state.lock` is
 absent or its pid is dead; no `gomoveshift drive` process is running anywhere
 (the same `pgrep` the doctor uses — a live drive might be the one about to
-resume it); and the `--min-age` gate passes. A complete project is never
+resume it); and the `--min-age` gate passes, unless a `health backlog`
+supersede record (`superseded.json`, in the project dir or its parent) names
+the project, since that run is dead by record. A complete project is never
 abandoned (the plain rules apply). The dry run prints `WOULD REMOVE ABANDONED
 STAGE DIR: <path> (<GB>)`; `--confirm` re-checks the rules and removes that
 one dir with `rmtree`, the only recursive removal `cleanup` makes. The output

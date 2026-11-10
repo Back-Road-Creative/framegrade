@@ -10,7 +10,8 @@ hand ``rm`` of a path the agent cannot type.
 Rule pinned here: with ``--abandoned`` AND a named project, an incomplete stage
 dir is planned for removal when every rule holds — no completion marker, no run
 lock held by a live pid, no live ``gomoveshift drive`` process anywhere, no
-``no-auto-resume`` hold, old enough for ``--min-age``. The first failing rule is
+``no-auto-resume`` hold, old enough for ``--min-age`` (unless a backlog supersede record names
+the project: that run is dead by record). The first failing rule is
 the skip reason. Without the flag the project is skipped as before, with a hint.
 ``--confirm`` removes the ``_stages`` dir only; the output dir and every other
 project are untouched.
@@ -141,6 +142,51 @@ def test_a_young_run_is_still_too_recent(tmp_path):
     )
     assert plan.abandoned == []
     assert any("Too recent" in s["reason"] for s in plan.skipped)
+
+
+def _supersede_record(where: Path, project: str) -> None:
+    (where / "superseded.json").write_text(
+        json.dumps({"schema": "backlog-supersede/1", "project": project})
+    )
+
+
+def test_a_young_run_the_backlog_superseded_clears_the_age_gate(tmp_path):
+    """2026-11-10: rec0063's superseded run (moved under ``_superseded/<name>-<stamp>``, nested
+    layout) was 2 days old, so ``--abandoned`` answered ``Too recent`` and freed nothing while the
+    live run waited on that 139 GB. The supersede record already says the run is dead."""
+    moved = tmp_path / "cache" / "_superseded" / "nctopa-2026-03-05-rec0063-20261110T160126Z"
+    project = _killed_run(moved)
+    now = int(__import__("time").time())
+    os.utime(project / "_stages", (now, now))
+    _supersede_record(moved, project.name)
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+        [project], min_age_days=7, abandoned=True
+    )
+    assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
+
+
+def test_a_supersede_record_for_another_project_keeps_the_age_gate(tmp_path):
+    moved = tmp_path / "cache" / "_superseded" / "x-20261110T160126Z"
+    project = _killed_run(moved)
+    now = int(__import__("time").time())
+    os.utime(project / "_stages", (now, now))
+    _supersede_record(moved, "some-other-drive")
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+        [project], min_age_days=7, abandoned=True
+    )
+    assert plan.abandoned == []
+    assert any("Too recent" in s["reason"] for s in plan.skipped)
+
+
+def test_a_superseded_run_is_still_refused_while_a_drive_runs(tmp_path):
+    moved = tmp_path / "cache" / "_superseded" / "nctopa-2026-03-05-rec0063-20261110T160126Z"
+    project = _killed_run(moved)
+    _supersede_record(moved, project.name)
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: True).plan_cleanup(
+        [project], min_age_days=7, abandoned=True
+    )
+    assert plan.abandoned == []
+    assert any("running" in s["reason"] for s in plan.skipped)
 
 
 def test_execute_removes_the_stage_dir_only(tmp_path):
