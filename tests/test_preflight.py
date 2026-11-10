@@ -294,7 +294,7 @@ class TestRunPreflight:
 
 class TestRunPreflightIngestComplete:
     """A resume with Phase A already done won't re-create the per-episode
-    concats, so the source×1.5 staging term overstates the real remaining peak.
+    concats, so the source×3.0 staging term overstates the real remaining peak.
     ``ingest_complete=True`` treats the full source as already-staged, dropping
     the gate to its floor (no re-ingest will occur, so the full staging term
     is not needed)."""
@@ -341,9 +341,9 @@ class TestEstimatePeakCacheGb:
     requirement from raw source file sizes.
 
     Episode concats persist on staging through the per-day master encode, so
-    the TRUE peak is total_source (concats) + the busiest day's master
-    working set. The default factor (1.5) is the fail-safe single-day bound
-    that agrees with the per-day mid-run gate's ``day_source × 1.5``. Floor
+    the TRUE peak is total_source (concats) + the busiest day's raw concat
+    and master. The default factor (``PEAK_CACHE_FACTOR``) is the fail-safe
+    single-day bound that covers what the per-day mid-run gate asks. Floor
     enforced so a tiny test trip still reserves the OST/final workspace.
     """
 
@@ -387,10 +387,10 @@ class TestEstimatePeakCacheGb:
         assert est == 0.0
 
     def test_default_covers_per_day_peak(self, tmp_path):
-        """The default factor must size the TRUE peak (≥ the per-day gate's
-        ``day_source × 1.5``), so preflight catches a shortfall the old
-        ``× 1.2`` under-estimated. Worst case (single-day trip): the whole
-        source IS the busiest day, so peak == total × 1.5."""
+        """The default factor must size the TRUE peak, so preflight catches a
+        shortfall the old ``× 1.2`` and ``× 1.5`` under-estimated. Worst case
+        (single-day trip): the whole source IS the busiest day, so peak ==
+        total concats + raw concat + master == total × 3.0."""
         from gomoveshift.pipeline.preflight import estimate_peak_cache_gb
 
         big = tmp_path / "big.mp4"
@@ -404,17 +404,16 @@ class TestEstimatePeakCacheGb:
             patch.object(Path, "is_file", return_value=True),
         ):
             est = estimate_peak_cache_gb([big], floor_gb=0.0)
-        # 123 GB source × 1.5 = 184.5 GB — covers the per-day ``123 × 1.5``
-        # spike that can fire a mid-run low-space failure.
-        assert 184.0 < est < 185.0
-        # The old ``× 1.2`` factor asks for only 147.6 GB, less than the true
-        # 184.5 GB peak.
-        assert est > 123 * 1.2
+        # 123 GB source × 3.0 = 369 GB: the 123 GB concats plus the per-day
+        # gate's raw concat and master, which can fire a mid-run failure.
+        assert 368.0 < est < 370.0
+        # The old ``× 1.2`` and ``× 1.5`` factors ask for less than the true peak.
+        assert est > 123 * 1.5
 
     def test_completed_source_bytes_subtracted_on_resume(self, tmp_path):
         """A resume with completed-day masters subtracts those days' raw
         source bytes BEFORE the safety factor, so the gate no longer demands
-        the full ``source × 1.5`` for work already done."""
+        the full ``source × 3.0`` for work already done."""
         from gomoveshift.pipeline.preflight import estimate_peak_cache_gb
 
         big = tmp_path / "big.mp4"
@@ -429,8 +428,33 @@ class TestEstimatePeakCacheGb:
         ):
             # 60 GB of the 100 GB source is already-encoded days → 40 GB remains.
             est = estimate_peak_cache_gb([big], floor_gb=0.0, completed_source_bytes=60 * self._GB)
-        # (100 − 60) GB × 1.5 = 60 GB, not the fresh 150 GB.
-        assert 59.0 < est < 61.0
+        # (100 − 60) GB × 3.0 = 120 GB, not the fresh 300 GB.
+        assert 119.0 < est < 121.0
+
+    def test_default_covers_what_the_per_day_gate_demands(self, tmp_path):
+        """A single-day trip holds its episode concats (x1.0) when the day's
+        master encode asks ``check_disk_space`` for the raw concat (x1.0) plus
+        the master (``MASTER_BYTES_PER_SOURCE_BYTE``). The default must cover
+        all three, or a drive clears the upfront gate and fails hours in
+        (rec0063, 2026-11-10: 138 GB source, 334 GB free cleared a 208 GB
+        estimate, then the day gate asked 277 GB on top of the 139 GB concat)."""
+        from gomoveshift.pipeline.day_master_encoder import MASTER_BYTES_PER_SOURCE_BYTE
+        from gomoveshift.pipeline.preflight import estimate_peak_cache_gb
+
+        big = tmp_path / "big.mp4"
+        big.write_bytes(b"x")
+        with (
+            patch.object(
+                Path,
+                "stat",
+                return_value=type("S", (), {"st_size": 100 * self._GB, "st_mode": 0o100644})(),
+            ),
+            patch.object(Path, "is_file", return_value=True),
+        ):
+            est = estimate_peak_cache_gb([big], floor_gb=0.0)
+        concats = 100.0
+        day_gate = 100.0 + 100.0 * MASTER_BYTES_PER_SOURCE_BYTE
+        assert est >= concats + day_gate
 
     def test_completed_source_bytes_clamped_not_negative(self, tmp_path):
         """An over-count (stale record summing to more than the live source)

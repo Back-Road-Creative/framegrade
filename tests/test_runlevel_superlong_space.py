@@ -1,5 +1,5 @@
 """Run-level preflight accounts for planned ``--superlong`` output
-space, not just the normal source x1.5 working set.
+space, not just the normal source x3.0 working set.
 
 Before this, the ONLY superlong space check was ``check_superlong_output_space``
 — called PER-DAY, MID-RUN from ``day_pipeline`` once a day master already
@@ -56,11 +56,11 @@ class TestRunLevelSuperlongSpace:
         out = tmp_path / "out"
         staging = tmp_path / "staging"
 
-        # 50 GB source -> normal peak ~75 GB (x1.5); 100 GB free comfortably
+        # 50 GB source -> normal peak 150 GB (x3.0); 200 GB free comfortably
         # covers that alone but NOT the added superlong margin (raw concat +
-        # final coexist x2, x1.2 safety -> +120 GB, total ~195 GB needed).
+        # final coexist x2, x1.2 safety -> +120 GB, total ~270 GB needed).
         with (
-            patch("shutil.disk_usage", side_effect=_fake_disk_usage(staging_free_gb=100)),
+            patch("shutil.disk_usage", side_effect=_fake_disk_usage(staging_free_gb=200)),
             patch.object(Path, "stat", _fake_stat(50)),
         ):
             with pytest.raises(RuntimeError, match="(?i)peak|cache|intermediate"):
@@ -81,11 +81,11 @@ class TestRunLevelSuperlongSpace:
         staging = tmp_path / "staging"
 
         # Same source + same free space, superlong OFF (also the default):
-        # the pre-existing x1.5 estimate alone fits in 100 GB, so the run
+        # the pre-existing x3.0 estimate alone fits in 200 GB, so the run
         # proceeds — proves the new term is additive, not a change to the
         # existing baseline.
         with (
-            patch("shutil.disk_usage", side_effect=_fake_disk_usage(staging_free_gb=100)),
+            patch("shutil.disk_usage", side_effect=_fake_disk_usage(staging_free_gb=200)),
             patch.object(Path, "stat", _fake_stat(50)),
         ):
             run_preflight(

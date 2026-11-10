@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .. import run_origin
-from ..pipeline.preflight import PreflightBlockedError, estimate_peak_cache_gb
+from ..pipeline.preflight import PEAK_CACHE_FACTOR, PreflightBlockedError, estimate_peak_cache_gb
 from ..pipeline.validation.content_gates import (
     placeless_label_claimed_words,
     placeless_label_claims_nothing,
@@ -56,12 +56,13 @@ DEFAULT_LEASE_SCRIPT = Path("bin") / "lease.sh"
 #: ``run_preflight``'s defaults: the staging floor and the output free-space floor.
 STAGING_FLOOR_GB = 30.0
 OUTPUT_FLOOR_GB = 50.0
-STAGING_FACTOR = 1.5
+STAGING_FACTOR = PEAK_CACHE_FACTOR
 STORAGE_BOUND = (
     f"staging = max(day source x {STAGING_FACTOR}, {STAGING_FLOOR_GB:g} GB) "
     f"(preflight.estimate_peak_cache_gb), output = {OUTPUT_FLOOR_GB:g} GB floor; summed per "
-    "device. The x1.5 factor is preflight's existing contract, not an independently validated "
-    "bound; retained artifacts are counted through measured free space."
+    "device. The factor is episode concats + the day's raw concat + its master "
+    "(preflight.PEAK_CACHE_FACTOR, the per-day encode gate's own terms); retained artifacts "
+    "are counted through measured free space."
 )
 
 Disk = Callable[[Path], Tuple[int, float]]

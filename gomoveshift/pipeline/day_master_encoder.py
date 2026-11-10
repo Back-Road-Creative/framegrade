@@ -45,6 +45,7 @@ from .cache import (
 from .color_correction import GRADE_ALGO_VERSION
 from .color_filters import cadence_kwargs
 from .ffmpeg_runner import check_disk_space, run_ffmpeg_retry_enomem
+from .preflight import MASTER_BYTES_PER_SOURCE_BYTE  # shared with the upfront estimate
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,6 @@ logger = logging.getLogger(__name__)
 # failure mode this guard exists for (truncated ingest files) produces under-reports of seconds to
 # minutes — 2.0s is still far below that threshold.
 DURATION_INTEGRITY_TOLERANCE_S = 2.0
-
-# Day-master bytes per raw-source byte for the disk check, an upper bound.
-# Recorded masters measure 0.63x to 0.89x their source; the old 1.5x rule
-# assumed 0.5x, so a tight volume passed the check and could fill mid-encode.
-MASTER_BYTES_PER_SOURCE_BYTE = 1.0
 
 
 # Hand-maintained generation counter for master-encode rule changes that are
