@@ -42,8 +42,10 @@ class Totals:
 class Ops:
     """Fake GroupOps pieces that count calls and write tiny outputs."""
 
-    def __init__(self, sequences=(), brackets=(), fail=(), hashes=None):
+    def __init__(self, sequences=(), brackets=(), fail=(), hashes=None, chunk=None, darks=()):
         self.sequences, self.brackets, self.fail = list(sequences), list(brackets), set(fail)
+        self.chunk, self.darks = chunk, {Path(d) for d in darks}
+        self.lapse = []
         self.hashes = hashes or {}
         self.calls = []
 
@@ -51,7 +53,8 @@ class Ops:
         return [tuple(s) for s in self.sequences if all(p in paths for p in s)]
 
     def chunk_sequence(self, run):
-        return [tuple(run)]
+        step = self.chunk or len(run)
+        return [tuple(run[i : i + step]) for i in range(0, len(run), step)]
 
     def detect_brackets(self, paths):
         return [tuple(b) for b in self.brackets if all(p in paths for p in b)]
@@ -82,6 +85,27 @@ class Ops:
         preview.write_bytes(b"jpg")
         return SimpleNamespace(preview_path=preview)
 
+    def classify_night(self, paths):
+        self.calls.append(("classify_night", len(paths)))
+        return (
+            [p for p in paths if Path(p) not in self.darks],
+            [p for p in paths if Path(p) in self.darks],
+        )
+
+    def night_timelapse(self, lights, darks, out_mp4, out_jpg):
+        self.calls.append(("night_timelapse", out_mp4.name))
+        self.lapse.append((list(lights), list(darks)))
+        out_mp4.write_bytes(b"mp4")
+        if "night_timelapse" in self.fail:
+            raise RuntimeError("lapse boom")
+        out_jpg.write_bytes(b"jpg")
+
+    def still_timelapse(self, jpegs, out_mp4, out_jpg):
+        self.calls.append(("still_timelapse", out_mp4.name))
+        self.lapse.append((list(jpegs), []))
+        out_mp4.write_bytes(b"mp4")
+        out_jpg.write_bytes(b"jpg")
+
     def ops(self):
         return sg.GroupOps(
             detect_sequences=self.detect_sequences,
@@ -92,6 +116,9 @@ class Ops:
             stitch=self.stitch,
             prepare=self.prepare,
             stack=self.stack,
+            classify_night=self.classify_night,
+            night_timelapse=self.night_timelapse,
+            still_timelapse=self.still_timelapse,
         )
 
 
@@ -429,3 +456,220 @@ def test_pano_stitches_the_developed_jpegs_not_the_raw_sources(tmp_path, root):
     by_source = {Path(r["source"]): Path(r["output"]) for r in rows(result.run_dir / "ranked.csv")}
     assert seen == [[by_source[p] for p in stems(src, "abc")]]
     assert all(p.is_relative_to(result.run_dir) for p in seen[0])
+
+
+def night_records(paths, start_minute=0):
+    """One frame a second from ``start_minute``: a run the sequencer would call one session."""
+    return {
+        p: CaptureRecord(
+            path=p, datetime_original=f"2026:11:09 22:{start_minute + i // 60:02d}:{i % 60:02d}"
+        )
+        for i, p in enumerate(paths)
+    }
+
+
+def lapse_calls(ops, name="night_timelapse"):
+    return [c for c in ops.calls if c[0] == name]
+
+
+def test_night_session_of_two_chunks_renders_one_timelapse(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], chunk=15)
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    assert {r["group_id"] for r in rows(result.run_dir / "ranked.csv")} == {"night-1", "night-2"}
+    assert lapse_calls(ops) == [("night_timelapse", "night-1.mp4")]
+    assert ops.lapse == [(seq, [])]  # every light, capture order, one render
+    assert (result.run_dir / "timelapse" / "night-1.mp4").is_file()
+    assert (result.run_dir / "timelapse" / "night-1.jpg").is_file()
+    page = (result.run_dir / "index.html").read_text()
+    assert page  # the page still renders with the new output kind
+    with Ledger(root / ps.LEDGER_NAME) as ledger:
+        key = sg.group_key("timelapse", [str(p) for p in seq])
+        assert ledger.get_score(key, sg.STACK_MARKER) == 1
+
+
+def test_separate_runs_are_separate_sessions(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(50)]
+    src = card(tmp_path, names)
+    one, two = stems(src, names[:25]), stems(src, names[25:])
+    records = {**night_records(one), **night_records(two, start_minute=10)}
+    ops = Ops(sequences=[one, two])
+    run(src, root, make_hooks(ops, records=records, readings=night_readings(one + two)))
+    assert sorted(c[1] for c in lapse_calls(ops)) == ["night-1.mp4", "night-2.mp4"]
+
+
+def test_lens_cap_darks_are_never_rendered_as_lights(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    darks = seq[-4:]
+    ops = Ops(sequences=[seq], chunk=15, darks=darks)
+    run(src, root, make_hooks(ops, records=night_records(seq), readings=night_readings(seq)))
+    lights, passed = ops.lapse[0]
+    assert lights == seq[:-4] and passed == darks
+    assert not set(lights) & set(passed)
+
+
+def test_session_with_too_few_usable_lights_is_skipped_quietly(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], darks=seq[sg.TIMELAPSE_MIN_FRAMES - 6 :])  # 18 lights left
+    result = run(
+        src, root, make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    )
+    assert lapse_calls(ops) == [] and rows(result.run_dir / "skipped.csv") == []
+    assert not (result.run_dir / "timelapse").exists()
+    ops.calls.clear()
+    run(src, root, make_hooks(ops), resume=result.run_dir)  # the verdict is remembered
+    assert lapse_calls(ops, "classify_night") == []
+
+
+def test_burst_timelapse_needs_the_minimum_member_count(tmp_path, root):
+    names = [f"b{i:02d}" for i in range(30)] + [f"c{i}" for i in range(5)]
+    src = card(tmp_path, names)
+    big, small = stems(src, names[:30]), stems(src, names[30:])
+    readings = {p: SubjectReading(SubjectCategory.LANDSCAPE, 0.9) for p in big}
+    ops = Ops()
+    ops.phash = lambda rgb: 0  # every frame looks alike within its category
+    result = run(src, root, make_hooks(ops, readings=readings))
+    ranked = rows(result.run_dir / "ranked.csv")
+    assert {r["group_id"] for r in ranked if r["category"] == "landscape"} == {"burst-1"}
+    assert {r["group_id"] for r in ranked if r["category"] != "landscape"} == {"burst-2"}
+    assert lapse_calls(ops, "still_timelapse") == [("still_timelapse", "burst-1.mp4")]
+    by_source = {Path(r["source"]): Path(r["output"]) for r in ranked}
+    assert ops.lapse == [([by_source[p] for p in big], [])]
+    assert (result.run_dir / "timelapse" / "burst-1.jpg").is_file()
+    assert not (result.run_dir / "timelapse" / "burst-2.mp4").exists()
+
+
+def test_resume_skips_finished_timelapse_and_rebuilds_a_missing_one(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq])
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    first = run(src, root, hooks)
+    ops.calls.clear()
+    run(src, root, hooks, resume=first.run_dir)
+    assert ops.calls == []
+    (first.run_dir / "timelapse" / "night-1.mp4").unlink()
+    run(src, root, hooks, resume=first.run_dir)
+    assert [c[0] for c in ops.calls] == ["classify_night", "night_timelapse"]
+
+
+def test_failed_timelapse_is_a_skipped_row_and_the_run_goes_on(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], fail=["night_timelapse"])
+    result = run(
+        src, root, make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    )
+    skipped = rows(result.run_dir / "skipped.csv")
+    assert [(r["path"], r["reason"]) for r in skipped] == [
+        ("group:night-1", "timelapse failed: lapse boom")
+    ]
+    assert not list((result.run_dir / "timelapse").glob("night-1.*"))
+    assert (result.run_dir / "stacks" / "night-1.tif").is_file()
+    assert json.loads((result.run_dir / "run.json").read_text())["groups"]["failed"] == 1
+
+
+def test_no_stacks_skips_night_timelapses(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq])
+    run(
+        src,
+        root,
+        make_hooks(ops, records=night_records(seq), readings=night_readings(seq)),
+        ps.SortOptions(no_stacks=True),
+    )
+    assert ops.calls == []
+
+
+def test_default_classify_night_splits_cap_on_frames_from_lights(monkeypatch):
+    import gomoveshift.pipeline.photos.astro_orchestrator as ao
+    import gomoveshift.pipeline.photos.astro_triage as at
+
+    frame = SimpleNamespace(rgb=np.zeros((2, 2, 3), dtype=np.float32))
+    monkeypatch.setattr(
+        ao,
+        "decode_with_he_fallback",
+        lambda p, d, h: (None, "bad") if p.name == "bad.nef" else (frame, None),
+    )
+    monkeypatch.setattr(
+        at,
+        "measure_frame",
+        lambda p, luma, **k: SimpleNamespace(
+            exposure_class="cap_on" if p.name.startswith("dark") else "light"
+        ),
+    )
+    paths = [Path(n) for n in ("a.nef", "dark1.nef", "bad.nef", "b.nef")]
+    lights, darks = sg._classify_night(paths)
+    assert [p.name for p in lights] == ["a.nef", "bad.nef", "b.nef"]
+    assert [p.name for p in darks] == ["dark1.nef"]
+
+
+def test_default_timelapse_wrappers_use_the_shared_engines(tmp_path, monkeypatch):
+    import gomoveshift.pipeline.photos.astro_calibrate as ac
+    import gomoveshift.pipeline.photos.astro_orchestrator as ao
+    import gomoveshift.pipeline.photos.astro_timelapse as nt
+    import gomoveshift.pipeline.timelapse as st
+
+    seen = {}
+    monkeypatch.setattr(sg, "_megapixels", lambda p: 20.0)
+    monkeypatch.setattr(sg, "_poster", lambda v, j, used, fps: seen.setdefault("poster", (v, used)))
+    monkeypatch.setattr(nt, "preflight_timelapse", lambda d, **k: seen.update(pre=k))
+
+    def bad_darks(lights, darks):
+        raise ac.AstroCalibrationError("mismatch")
+
+    monkeypatch.setattr(ao, "build_validated_master_dark", bad_darks)
+    monkeypatch.setattr(
+        nt,
+        "render_timelapse",
+        lambda lights, out, darks, **k: (
+            seen.update(night=(list(lights), list(darks), k)) or (out, 7, ())
+        ),
+    )
+    lights = [Path("l1"), Path("l2")]
+    sg._night_timelapse(lights, [Path("d1")], tmp_path / "n.mp4", tmp_path / "n.jpg")
+    assert seen["night"][1] == [] and seen["pre"]["dark_count"] == 0  # unmatched darks dropped
+    assert seen["night"][2] == {
+        "fps": nt.TIMELAPSE_FPS,
+        "scale_height": nt.TIMELAPSE_HEIGHT_DEFAULT,
+    }
+    assert seen["poster"] == (tmp_path / "n.mp4", 7)
+
+    def stills(paths, out, fps, scale_height):
+        seen["stills"] = [Path(p).name for p in paths]
+        seen["targets"] = [Path(p).resolve().name for p in paths]
+        return out, 3, ()
+
+    monkeypatch.setattr(st, "render_stills_timelapse", stills)
+    jpegs = [jpeg(tmp_path / name, i) for i, name in enumerate(["z.jpg", "a.jpg", "m.jpg"])]
+    sg._still_timelapse(jpegs, tmp_path / "s.mp4", tmp_path / "s.jpg")
+    assert seen["stills"] == ["000000.jpg", "000001.jpg", "000002.jpg"]  # capture order kept
+
+
+def test_poster_extracts_the_middle_frame_and_names_a_failure(tmp_path, monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, **k):
+        calls.append(cmd)
+        if cmd[-1].endswith("ok.jpg"):
+            Path(cmd[-1]).write_bytes(b"jpg")
+        return SimpleNamespace(returncode=0 if cmd[-1].endswith("ok.jpg") else 1, stderr=b"nope")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sg._poster(tmp_path / "v.mp4", tmp_path / "ok.jpg", 48, 24)
+    assert calls[0][calls[0].index("-ss") + 1] == "1.000"
+    with pytest.raises(RuntimeError, match="poster frame failed"):
+        sg._poster(tmp_path / "v.mp4", tmp_path / "bad.jpg", 48, 24)
