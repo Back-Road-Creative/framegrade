@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.64] - 2026-11-09
+
+### Fixed
+
+- `photos sort` no longer hangs with nothing developed: its develop workers are now spawned
+  instead of forked, so they do not inherit the OpenMP lock state rawpy left in the parent
+  while measuring corrections.
+
 ## [0.3.63] - 2026-11-09
 
 ### Added
@@ -786,7 +794,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...HEAD
+[0.3.64]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.63...v0.3.64
 [0.3.63]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.62...v0.3.63
 [0.3.62]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.61...v0.3.62
 [0.3.61]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.60...v0.3.61
