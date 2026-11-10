@@ -142,6 +142,40 @@ def test_s5_one_unsettled_bin_refuses(monkeypatch, tmp_path):
         _run(monkeypatch, tmp_path, _fixes(lat_of_t=_pellmere_5s), geo=_UnsettledGeocoder())
 
 
+class _FlakyGeocoder(_BandGeocoder):
+    """Each point's first ``failures`` lookups raise, as a network outage does."""
+
+    def __init__(self, failures=1):
+        super().__init__()
+        self.failures = failures
+        self.seen = {}
+
+    def reverse_geocode_detailed(self, lat, lon):
+        self.seen[(lat, lon)] = self.seen.get((lat, lon), 0) + 1
+        if self.seen[(lat, lon)] <= self.failures:
+            raise RuntimeError("The read operation timed out")
+        return super().reverse_geocode_detailed(lat, lon)
+
+
+def test_a_lookup_that_fails_then_answers_keeps_the_label(monkeypatch, tmp_path):
+    # One timed-out lookup counted as unresolved time refused a label the GPS
+    # supports and failed a whole day after its 18 h encode. A lookup that RAISES
+    # is retried after a wait before it counts as unresolved.
+    waits = []
+    monkeypatch.setattr(rc, "_sleep", waits.append)
+    entries, rendered = _run(monkeypatch, tmp_path, _fixes(), geo=_FlakyGeocoder())
+    assert [e["ost_text"] for e in entries] == ["Harrow"]
+    assert [r["location"] for r in rendered] == ["Harrow"]
+    assert waits and all(w > 0 for w in waits)
+
+
+def test_a_lookup_that_never_answers_is_still_unresolved(monkeypatch, tmp_path):
+    # The retry buys time for an outage to end; it never invents a place.
+    geo = _FlakyGeocoder(failures=len(rc.LOOKUP_RETRY_WAITS_S) + 1)
+    with pytest.raises(RouteClaimRefusedError, match=r"rank 1:(.|\n)*unsettled_seconds 38\.0"):
+        _run(monkeypatch, tmp_path, _fixes(), geo=geo)
+
+
 # S6
 def test_s6_long_form_constants_and_defaults_are_unchanged():
     assert (rc.GAP_S, rc.BIN_S, rc.MIN_PLACE_S, rc.REGION_MIN_COVERAGE) == (5.0, 30.0, 60.0, 1.0)

@@ -214,6 +214,19 @@ def no_graded_raster_disk_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_route_lookup_retry_wait(monkeypatch):
+    """A route-claim lookup that raises is retried after a real wait (a network
+    outage has to end). Tests with a geocoder that is down for good would sit
+    through every wait; they see none. A test that counts the waits patches
+    ``route_claims._sleep`` itself, and its later monkeypatch wins."""
+    if not HAS_GOMOVESHIFT:
+        return
+    from gomoveshift.pipeline import route_claims
+
+    monkeypatch.setattr(route_claims, "_sleep", lambda s: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def auto_approve_ost_gate(monkeypatch):
     """Auto-approve OST gate prompts in tests to prevent stdin reads."""
     if not HAS_GOMOVESHIFT:
