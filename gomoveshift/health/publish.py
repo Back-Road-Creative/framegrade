@@ -243,6 +243,33 @@ def reconcile_publishes(
     return done + retire_uploaded(store)
 
 
+def backlog_publisher(
+    config: Any,
+    *,
+    region: str,
+    stages_root: Path,
+    code_root: Path,
+    jobs_dir: Path,
+    now: datetime,
+    drive_running: Callable[[Path], bool],
+) -> Callable[[str, bool], Dict[str, Any]]:
+    """``publish(project, dry_run)`` for ``health backlog``: ``run_publish`` with the tick's own
+    roots and Waypost's default lead window; the store is opened only when a drive is due."""
+
+    def publish(project: str, dry_run: bool) -> Dict[str, Any]:
+        store, cadence = open_schedule_store(config)
+        if store is None:
+            return {"project": project, "action": "refused", "steps": [],
+                    "reason": "schedule.sqlite3 does not exist; nothing to publish"}  # fmt: skip
+        return run_publish(
+            project=project, region=region, store=store, cadence=cadence, stages_root=stages_root,
+            code_root=code_root, jobs_dir=jobs_dir, now=now, dry_run=dry_run,
+            drive_running=drive_running,
+        )  # fmt: skip
+
+    return publish
+
+
 def open_schedule_store(config: Any, *, create: bool = False):
     """``(store, cadence)`` for ``<seo.storage_path>/schedule.sqlite3``, or ``(None, cadence)``
     when it does not exist (a read never creates it)."""

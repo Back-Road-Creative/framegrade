@@ -113,6 +113,15 @@ def test_the_handler_wires_a_store_retire(tmp_path, wired):
     assert callable(wired["retire"])
 
 
+def test_the_handler_wires_a_publisher_that_refuses_without_a_store(tmp_path, wired):
+    wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo")))
+    assert health.cmd_health(_args(tmp_path), config) == 0
+    out = wired["publish"]("day-a", False)
+    assert out["action"] == "refused" and "schedule.sqlite3 does not exist" in out["reason"]
+    assert not (tmp_path / "seo").exists()
+
+
 def test_supersede_needs_a_reason_at_the_parser(tmp_path, capsys):
     with pytest.raises(SystemExit):
         health.cmd_health(_args(tmp_path, "--supersede", "ire-a"), SimpleNamespace())

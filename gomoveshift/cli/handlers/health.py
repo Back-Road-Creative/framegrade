@@ -133,6 +133,8 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
 def _cmd_backlog(args, config, root, jobs_dir) -> int:
     from datetime import datetime, timezone
 
+    from ...health import publish
+
     if args.supersede and not args.reason:
         raise SystemExit("health backlog: --supersede needs --reason")
 
@@ -152,6 +154,10 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
+        publish=publish.backlog_publisher(
+            config, region=region, stages_root=args.stages_root, code_root=code_root,
+            jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,
+        ),
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
