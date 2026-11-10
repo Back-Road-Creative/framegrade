@@ -358,3 +358,62 @@ def test_permanent_graph_error_leads_with_code_subcode_and_fbtrace():
     with pytest.raises(FacebookPermanentError) as exc_info:
         _raise_for_graph_error(400, body)
     assert str(exc_info.value).startswith("[graph http=400 code=100 subcode=33 fbtrace=SYNTHfb01] ")
+
+
+@pytest.mark.parametrize(
+    "video_state,scheduled",
+    [
+        ("DRAFT", None),
+        ("UNKNOWN", None),
+        ("SCHEDULED", None),
+        ("PUBLISHED", datetime(2030, 1, 1, tzinfo=timezone.utc)),
+        ("DRAFT", datetime(2030, 1, 1, tzinfo=timezone.utc)),
+        ("SCHEDULED", datetime(2030, 1, 1)),
+        ("SCHEDULED", datetime(2030, 1, 1, tzinfo=timezone.utc)),
+    ],
+)
+def test_invalid_queued_intent_is_refused_before_lease_or_upload(
+    queue_conn, video_state, scheduled
+):
+    session = Mock(
+        post=Mock(
+            side_effect=[
+                _resp(200, {"video_id": "v-1", "upload_url": "https://rupload.facebook.com/x"}),
+                _resp(200, {}),
+                _resp(200, {"success": True}),
+            ]
+        ),
+        get=Mock(),
+    )
+    adapter = FacebookShortsAdapter(FacebookReelsAdapter(CREDS, session=session))
+    record = _record()
+    delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+    before = dict(find_delivery(queue_conn, record.project_name, record.short_index, "facebook"))
+    with pytest.raises(FacebookPermanentError):
+        adapter.publish(
+            record,
+            conn=queue_conn,
+            delivery_id=delivery_id,
+            video_bytes=b"x",
+            video_state=video_state,
+            scheduled_publish_time=scheduled,
+        )
+    session.post.assert_not_called()
+    session.get.assert_not_called()
+    assert (
+        dict(find_delivery(queue_conn, record.project_name, record.short_index, "facebook"))
+        == before
+    )
+
+
+@pytest.mark.parametrize("state", ["DRAFT", "PUBLISHED"])
+def test_low_level_refuses_time_on_non_scheduled_finish(state):
+    session = Mock()
+    with pytest.raises(FacebookPermanentError):
+        FacebookReelsAdapter(CREDS, session=session).finish_upload(
+            HANDLE,
+            FacebookPayload(description="x"),
+            state,
+            datetime.now(timezone.utc) + timedelta(hours=2),
+        )
+    session.post.assert_not_called()

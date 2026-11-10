@@ -11,11 +11,9 @@ Two halves of one gap, mirroring the YouTube fix:
    `queue.py` is "publish call returned success -- seconds". Facebook had
    merely accepted a reel it would publish later.
 
-The bound below `MIN_SCHEDULE_LEAD` is deliberate: the queue drains at or
-just after the scheduled instant, so "less than ten minutes away" means the
-moment has arrived and publishing now IS honouring the schedule. Refusing
-those would fail every normal delivery, since `ScheduleWindowError` is
-permanent.
+An arrived slot publishes now. A future slot inside `MIN_SCHEDULE_LEAD`
+must wait until it is due: the API cannot schedule that near-term request,
+and sending it as PUBLISHED would post early. The wait is retryable.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ from test_publishing_models import _record
 from gomoveshift.publishing.facebook_adapter import (
     MIN_SCHEDULE_LEAD,
     FacebookReelsAdapter,
+    FacebookRetryableError,
     FacebookShortsAdapter,
     due_schedule,
 )
@@ -119,9 +118,8 @@ def test_the_platforms_own_slot_wins_over_the_shared_one(queue_conn):
 
 
 def test_a_schedule_that_has_arrived_publishes_now(queue_conn):
-    """The normal case. The queue drains at or just after the slot, so a lead
-    under MIN_SCHEDULE_LEAD means the moment is here."""
-    when = datetime.now(timezone.utc) + (MIN_SCHEDULE_LEAD / 2)
+    """The normal queue drain happens at or just after the requested instant."""
+    when = datetime.now(timezone.utc) - timedelta(seconds=1)
     session = _session()
     reels = FacebookReelsAdapter(CREDS, session=session)
     adapter = FacebookShortsAdapter(reels, worker_id="w1")
@@ -200,3 +198,30 @@ def test_a_record_with_no_schedule_publishes_now(queue_conn):
     assert record.schedule.scheduled_at_utc < datetime.now(timezone.utc)
 
     assert due_schedule(record) is None
+
+
+@pytest.mark.parametrize("lead", [timedelta(seconds=1), timedelta(minutes=5), MIN_SCHEDULE_LEAD])
+def test_future_near_term_slot_is_retryable_without_lease_or_network(queue_conn, lead):
+    when = datetime.now(timezone.utc) + lead
+    session = _session()
+    record = _scheduled_record(when)
+    adapter = FacebookShortsAdapter(FacebookReelsAdapter(CREDS, session=session))
+    delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+    before = dict(find_delivery(queue_conn, record.project_name, record.short_index, "facebook"))
+    with pytest.raises(FacebookRetryableError, match="not due"):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery_id, video_bytes=b"x")
+    session.post.assert_not_called()
+    session.get.assert_not_called()
+    assert (
+        dict(find_delivery(queue_conn, record.project_name, record.short_index, "facebook"))
+        == before
+    )
+
+
+def test_schedule_boundary_keeps_exact_due_and_future_separate():
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    assert due_schedule(_scheduled_record(now), now=now) is None
+    with pytest.raises(FacebookRetryableError, match="not due"):
+        due_schedule(_scheduled_record(now + MIN_SCHEDULE_LEAD), now=now)
+    later = now + MIN_SCHEDULE_LEAD + timedelta(seconds=1)
+    assert due_schedule(_scheduled_record(later), now=now) == later

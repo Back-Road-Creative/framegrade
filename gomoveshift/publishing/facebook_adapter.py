@@ -95,12 +95,31 @@ def absolute_permalink(url: Optional[str]) -> Optional[str]:
 
 def _validate_schedule_window(scheduled_at: datetime, now: datetime | None = None) -> int:
     """Unix timestamp, or raises ``ScheduleWindowError`` naming the bound."""
+    if not isinstance(scheduled_at, datetime) or scheduled_at.utcoffset() is None:
+        raise ScheduleWindowError("scheduled_publish_time requires a timezone-aware datetime")
     lead = scheduled_at - (now or datetime.now(timezone.utc))
     if lead <= MIN_SCHEDULE_LEAD:
         raise ScheduleWindowError(f"scheduled_publish_time must be more than {MIN_SCHEDULE_LEAD}")
     if lead > MAX_SCHEDULE_LEAD:
         raise ScheduleWindowError(f"scheduled_publish_time must be at most {MAX_SCHEDULE_LEAD}")
     return int(scheduled_at.timestamp())
+
+
+def _validate_finish_intent(
+    video_state: str, scheduled_publish_time: datetime | None
+) -> int | None:
+    """Check the complete request before a caller creates an upload session."""
+    if video_state not in VALID_VIDEO_STATES:
+        raise FacebookPermanentError(
+            f"video_state must be one of {sorted(VALID_VIDEO_STATES)}, got {video_state!r}"
+        )
+    if video_state == "SCHEDULED":
+        if scheduled_publish_time is None:
+            raise ScheduleWindowError("video_state=SCHEDULED requires scheduled_publish_time")
+        return _validate_schedule_window(scheduled_publish_time)
+    if scheduled_publish_time is not None:
+        raise ScheduleWindowError("scheduled_publish_time requires video_state=SCHEDULED")
+    return None
 
 
 class FacebookReelsAdapter:
@@ -171,10 +190,7 @@ class FacebookReelsAdapter:
         video_state: str,
         scheduled_publish_time: datetime | None = None,
     ) -> dict:
-        if video_state not in VALID_VIDEO_STATES:
-            raise FacebookPermanentError(
-                f"video_state must be one of {sorted(VALID_VIDEO_STATES)}, got {video_state!r}"
-            )
+        scheduled_timestamp = _validate_finish_intent(video_state, scheduled_publish_time)
         data = {
             "upload_phase": "finish",
             "video_id": upload.video_id,
@@ -182,10 +198,8 @@ class FacebookReelsAdapter:
             "description": payload.description,
             "access_token": self._access_token,
         }
-        if video_state == "SCHEDULED":
-            if scheduled_publish_time is None:
-                raise ScheduleWindowError("video_state=SCHEDULED requires scheduled_publish_time")
-            data["scheduled_publish_time"] = _validate_schedule_window(scheduled_publish_time)
+        if scheduled_timestamp is not None:
+            data["scheduled_publish_time"] = scheduled_timestamp
         body = self._post(f"{self._base}/{self._page_id}/video_reels", data=data)
         return {
             "video_id": upload.video_id,
@@ -240,18 +254,21 @@ def due_schedule(record: ShortPublishRecord, now: datetime | None = None) -> "da
     different hour for it, so using the shared slot would publish at a time
     the scheduler deliberately moved this platform off.
 
-    A slot less than ``MIN_SCHEDULE_LEAD`` away is ``None``, not an error. The
-    queue drains AT or just after the slot, so "under ten minutes away" means
-    the moment has arrived and publishing now IS honouring the schedule;
-    handing it to the API instead would raise ``ScheduleWindowError``, which
-    is permanent, on every normal delivery.
+    Only an arrived slot is ``None``. A future slot inside the API's minimum
+    scheduling lead is retryable until it is due, never an early publication.
+    Normal queue drains at or after the slot retain immediate publication.
     """
     schedule = record.schedule
     when = schedule.scheduled_at_utc_by_platform.get(PLATFORM) or schedule.scheduled_at_utc
     if when is None:
         return None
-    if when - (now or datetime.now(timezone.utc)) <= MIN_SCHEDULE_LEAD:
+    if not isinstance(when, datetime) or when.utcoffset() is None:
+        raise ScheduleWindowError("record schedule requires a timezone-aware datetime")
+    lead = when - (now or datetime.now(timezone.utc))
+    if lead <= timedelta(0):
         return None
+    if lead <= MIN_SCHEDULE_LEAD:
+        raise FacebookRetryableError("Facebook schedule is not due; retry at the requested time")
     return when
 
 
@@ -306,6 +323,10 @@ class FacebookShortsAdapter:
         payload = record.payloads.facebook
         if payload is None:
             raise ValueError(f"short_index={record.short_index} carries no Facebook payload")
+        if video_state == "DRAFT":
+            raise FacebookPermanentError(
+                "queued Facebook DRAFT is unsupported; no draft receipt lifecycle exists"
+            )
 
         # The parameters stay an override for a caller that names both; with
         # them at their defaults the record's own slot decides.
@@ -313,6 +334,7 @@ class FacebookShortsAdapter:
             scheduled_publish_time = due_schedule(record)
             if scheduled_publish_time is not None:
                 video_state = "SCHEDULED"
+        _validate_finish_intent(video_state, scheduled_publish_time)
 
         existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
         current_status = existing["status"] if existing else STATUS_QUEUED
