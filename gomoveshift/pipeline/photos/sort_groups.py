@@ -32,6 +32,11 @@ PANO_MIN_FRAMES = 3
 STACK_MARKER = "stack:v1"
 #: Folder name ``sort.CATEGORY_FOLDERS`` gives the night sky (a test pins the match).
 NIGHT_FOLDER = "night-sky"
+#: Folder for lens-cap darks (``measure_frame`` says ``cap_on``): calibration frames, never
+#: ranked shots. They join no group, and the page shows only their count.
+DARKS_FOLDER = "lens-cap-darks"
+#: Darks shot this close to a night session's first or last light calibrate that session.
+DARKS_WINDOW_S = 15 * 60
 #: A session that left no usable lights for a time-lapse: remembered so ``--resume`` does not
 #: decode the whole session again to reach the same verdict.
 TIMELAPSE_SKIP_MARKER = "timelapse-skip:v1"
@@ -340,7 +345,7 @@ def best_by_group(rows) -> dict[str, dict]:
 def tag_groups(rows, records, ops: GroupOps, hashes) -> None:
     """Set ``group_id`` / ``group_best_rank`` on ranked-row dicts (in place)."""
     by_src = {str(r["source"]): r for r in rows}
-    claimed: set[str] = set()
+    claimed = {s for s, r in by_src.items() if r["category"] == DARKS_FOLDER}  # never grouped
     counts: Counter = Counter()
 
     def claim(kind, members):
@@ -445,10 +450,19 @@ class StageResult:
 
 
 def build_outputs(
-    run_dir: Path, rows, ops: GroupOps, ledger, *, workers: int, no_stacks: bool, on_output
+    run_dir: Path,
+    rows,
+    ops: GroupOps,
+    ledger,
+    *,
+    workers: int,
+    no_stacks: bool,
+    on_output,
+    triaged=frozenset(),
 ) -> StageResult:
     """HDR, panoramas, night stacks (best session first), then star trails and time-lapses;
-    one at a time."""
+    one at a time. ``triaged``: sources this run already cleared as lights (not lens-cap
+    darks), so a session made only of them is not decoded a second time."""
     result = StageResult()
     groups = groups_from_rows(rows)
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
@@ -480,28 +494,52 @@ def build_outputs(
         rel = (shown if shown.is_file() else main).relative_to(run_dir).as_posix()
         result.outputs.append(Output({"night": "stacks"}.get(group.kind, folder), group.id, rel))
         on_output(result.outputs)
-    _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output)
+    darks = sorted(
+        (stamp, str(r["source"]))
+        for r in rows
+        if r["category"] == DARKS_FOLDER and (stamp := _parse_stamp(r.get("capture_time")))
+    )
+    _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output, darks, triaged)
     return result
 
 
-def _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output) -> None:
+def _session_darks(darks, captured) -> list[Path]:
+    """The ``(stamp, source)`` darks shot within ``DARKS_WINDOW_S`` of a session's lights."""
+    stamps = [t for t in map(_parse_stamp, captured) if t]
+    if not stamps:
+        return []
+    window = timedelta(seconds=DARKS_WINDOW_S)
+    lo, hi = min(stamps) - window, max(stamps) + window
+    return [Path(s) for t, s in darks if lo <= t <= hi]
+
+
+def _build_timelapses(
+    run_dir, groups, ops, ledger, result, no_stacks, on_output, darks=(), triaged=frozenset()
+) -> None:
     """Per night session (not under ``--no-stacks``) a star trail then a time-lapse, sharing
-    one light/dark triage; per long burst a time-lapse."""
-    units = []  # (id, kind, member sources, developed JPEGs)
+    one light/dark triage plus the session's ``DARKS_FOLDER`` darks; per long burst a
+    time-lapse."""
+    units = []  # (id, kind, member sources, developed JPEGs, nearby darks)
     if not no_stacks:
         for session in night_sessions(groups):
             members = [m for g in session for m in g.members]
             if len(members) >= TIMELAPSE_MIN_FRAMES:
-                units.append((session[0].id, "night", members, []))
+                near = _session_darks(darks, [c for g in session for c in g.captured])
+                units.append((session[0].id, "night", members, [], near))
     for g in groups:
         if g.kind == "burst" and len(g.members) >= TIMELAPSE_MIN_FRAMES:
-            units.append((g.id, "burst", g.members, [o for o in g.outputs if o]))
-    for gid, kind, members, jpegs in units:
+            units.append((g.id, "burst", g.members, [o for o in g.outputs if o], []))
+    for gid, kind, members, jpegs, near in units:
         triage: list = []  # the session's (lights, darks), decoded at most once
 
-        def classify(members=members, triage=triage):
+        def classify(members=members, triage=triage, near=near):
             if not triage:
-                triage.append(ops.classify_night([Path(m) for m in members]))
+                if all(m in triaged for m in members):  # this run already checked them
+                    lights, found = [Path(m) for m in members], []
+                else:
+                    lights, found = ops.classify_night([Path(m) for m in members])
+                found = list(found)
+                triage.append((lights, found + [d for d in near if d not in found]))
             return triage[0]
 
         if kind == "night":

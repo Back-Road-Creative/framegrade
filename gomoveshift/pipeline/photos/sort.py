@@ -386,6 +386,12 @@ def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
     for folder in folders:
         shots = [r for r in ranked if r["category"] == folder]
         counts.append(f"{html.escape(folder)} {len(shots)}")
+        if folder == sort_groups.DARKS_FOLDER:
+            sections.append(
+                f"<section><h2>{html.escape(folder)} ({len(shots)})</h2>"
+                f"<p>{len(shots)} lens-cap darks kept for calibration, not ranked</p></section>"
+            )
+            continue
         head = [
             _output_html(run_dir, o)
             for o in loose
@@ -594,9 +600,27 @@ def _score_columns(rows, scores):
 _NO_SCORE = ShotScore(0.0, 0.0, None, 0.0, {}, {})
 
 
+def _lens_cap_darks(readings, hooks) -> tuple[set, set, Optional[str]]:
+    """``(darks, checked lights, warning)``: the night frames ``classify_night`` calls
+    lens-cap darks, the lights it cleared (sources, so the group stage need not decode them
+    again) and a warning if the check failed."""
+    night = [
+        p for p, r in readings.items() if CATEGORY_FOLDERS[r.category] == sort_groups.NIGHT_FOLDER
+    ]
+    if hooks.groups is None or not night:
+        return set(), set(), None
+    try:
+        lights, darks = hooks.groups.classify_night(night)
+    except Exception as exc:  # the check is a nicety: every frame stays a night shot
+        return set(), set(), f"lens-cap dark check failed ({exc}); night frames stay in night-sky"
+    return {Path(d) for d in darks}, {str(p) for p in lights}, None
+
+
 def _top_lines(ranked, limit: int = TOP_N) -> list[str]:
     lines = []
     for folder in dict.fromkeys(r["category"] for r in ranked):
+        if folder == sort_groups.DARKS_FOLDER:
+            continue
         top = [r for r in ranked if r["category"] == folder and r.get("quality_score", "") != ""]
         if top:
             lines.append(f"  top {folder}:")
@@ -674,12 +698,16 @@ def run_sort(
                 optics={p: _optics(records[p]) for p in result.unique if p in records},
             )
             mark = lap("classify", mark)
+        darks, triaged, dark_note = set(), set(), None
+        if not options.no_stacks:  # --no-stacks decodes no night frame
+            darks, triaged, dark_note = _lens_cap_darks(readings, hooks)
+            if triaged or dark_note:
+                mark = lap("lens_cap_darks", mark)
         plan_by_folder: dict[str, list] = {}
         for path in result.unique:
             reading = readings.get(path, UNKNOWN_SUBJECT)
-            plan_by_folder.setdefault(CATEGORY_FOLDERS[reading.category], []).append(
-                (path, reading)
-            )
+            name = sort_groups.DARKS_FOLDER if path in darks else CATEGORY_FOLDERS[reading.category]
+            plan_by_folder.setdefault(name, []).append((path, reading))
         plan = []
         for name, members in plan_by_folder.items():
             members.sort(key=lambda m: _capture_key(records.get(m[0]) or CaptureRecord(path=m[0])))
@@ -691,6 +719,9 @@ def run_sort(
         def warn(message: str) -> None:
             warnings.append(message)
             say(f"warning: {message}")
+
+        if dark_note:
+            warn(dark_note)
 
         meta = {
             "source": str(folder),
@@ -783,7 +814,7 @@ def run_sort(
         ledger.record(run_id, _ledger_rows(result, [d[0][0] for d in done]))
         if hooks.groups is not None:
             meta["groups"] = _group_stage(
-                run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say
+                run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say, triaged
             )
             mark = lap("groups", mark)
         categories = dict(Counter(row["category"] for row in ranked))
@@ -806,7 +837,9 @@ def run_sort(
             ledger.close()
 
 
-def _group_stage(run_dir, source, ranked, skipped, hooks, options, ledger, workers, say) -> dict:
+def _group_stage(
+    run_dir, source, ranked, skipped, hooks, options, ledger, workers, say, triaged=frozenset()
+) -> dict:
     """Write the HDR / panorama / night-stack outputs; the page is rewritten after each lands."""
 
     def publish(outputs) -> None:
@@ -822,6 +855,7 @@ def _group_stage(run_dir, source, ranked, skipped, hooks, options, ledger, worke
         workers=workers,
         no_stacks=options.no_stacks,
         on_output=publish,
+        triaged=triaged,
     )
     skipped.extend(stage.skipped)
     _write_csv(run_dir / "skipped.csv", ("path", "reason"), [[p, r] for p, r in skipped])
