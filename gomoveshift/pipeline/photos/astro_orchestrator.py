@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -22,6 +22,7 @@ from .astro_calibrate import (
     read_capture_identity,
     read_raw_mosaic,
 )
+from .astro_combine import fit_lens_aware
 from .astro_develop import (
     AstroDevelopResult,
     chroma_sigma,
@@ -439,11 +440,60 @@ def _warp_streak(streak, transform):
     None`` is the reference frame itself: already reference coordinates, no warp."""
     if transform is None:
         return streak
-    matrix = np.asarray(transform, dtype=np.float64)
     x1, y1, x2, y2 = streak
+    if callable(transform):
+        (rx1, ry1), (rx2, ry2) = transform(np.array([[x1, y1], [x2, y2]], dtype=np.float64))
+        return (float(rx1), float(ry1), float(rx2), float(ry2))
+    matrix = np.asarray(transform, dtype=np.float64)
     p1 = matrix[:, :2] @ np.array([x1, y1]) + matrix[:, 2]
     p2 = matrix[:, :2] @ np.array([x2, y2]) + matrix[:, 2]
     return (float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1]))
+
+
+#: Grid step a lens remap's displacement field is subsampled to once its frame is warped,
+#: so a meteor streak can still be mapped back after the full-resolution maps are freed.
+#: The displacement (remap minus identity) is smooth -- a shift, a rotation and a lens
+#: bend -- so bilinear sampling it every 8 px is far below a pixel of error.
+REMAP_INVERSE_STEP_PX = 8
+REMAP_INVERSE_ITERATIONS = 20
+
+
+def _frame_to_reference_points(maps):
+    """A callable mapping frame xy -> reference xy for a ``(map_x, map_y)`` remap, which
+    itself runs the other way (each reference pixel names the frame position it samples).
+
+    Inverted by fixed-point iteration on the subsampled displacement ``d``: a reference
+    point ``p`` lands at ``p + d(p)``, so ``p = q - d(p)`` -- exact for a translation and
+    converging for any remap whose displacement changes slowly across the sensor.
+    """
+    step = REMAP_INVERSE_STEP_PX
+    map_x, map_y = (np.asarray(plane, dtype=np.float32) for plane in maps)
+    rows = np.arange(0, map_x.shape[0], step, dtype=np.float32)[:, None]
+    cols = np.arange(0, map_x.shape[1], step, dtype=np.float32)[None, :]
+    displacement = (
+        np.ascontiguousarray(map_x[::step, ::step] - cols),
+        np.ascontiguousarray(map_y[::step, ::step] - rows),
+    )
+
+    def _displacement_at(xy):
+        grid = (xy / step).astype(np.float32)
+        gx, gy = np.ascontiguousarray(grid[:, None, 0]), np.ascontiguousarray(grid[:, None, 1])
+        return np.stack(
+            [
+                cv2.remap(plane, gx, gy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)[:, 0]
+                for plane in displacement
+            ],
+            axis=-1,
+        ).astype(np.float64)
+
+    def _to_reference(frame_xy):
+        target = np.asarray(frame_xy, dtype=np.float64).reshape(-1, 2)
+        reference = target.copy()
+        for _ in range(REMAP_INVERSE_ITERATIONS):
+            reference = target - _displacement_at(reference)
+        return reference
+
+    return _to_reference
 
 
 def _resolve_meteor_selection(streaks, policy, aligned_by_index):
@@ -575,6 +625,9 @@ class _PendingWarp:
     scale: float
     ref_xy: np.ndarray
     frame_xy: np.ndarray
+    # Set when the 2x3 refused this frame and ``fit_lens_aware`` registered it instead:
+    # its own remap is the warp, so it sits OUT of the chunk's joint lens fit.
+    similarity_refusal: str | None = None
 
 
 def _lens_payload(lens: LensParams) -> dict:
@@ -713,6 +766,17 @@ def _warp_record(item, solution, frame_shape, chunk_reason):
     }
 
 
+def _lens_pair_record(registration, similarity_refusal) -> dict:
+    """The warp record for a frame ``register`` refused and ``fit_lens_aware`` fitted."""
+    outer = (registration.held_out_residuals_px or {}).get("outer") or {}
+    return {
+        "model": registration.geometry_method,
+        "reason": f"the 2x3 similarity refused this frame ({similarity_refusal}); "
+        "fitted on its own matched stars with the lens-aware pair model",
+        "held_out_outer_p95_px": {"lens": outer.get("p95_px"), "similarity": None},
+    }
+
+
 def _chunk_geometry_payload(solution, seed, chunk_reason, records) -> dict:
     """The chunk-level audit record: which warp this chunk's frames took, and why."""
     models = [record["model"] for record in records.values()]
@@ -721,7 +785,7 @@ def _chunk_geometry_payload(solution, seed, chunk_reason, records) -> dict:
         "lens": None if solution is None else _lens_payload(solution.lens),
         "converged": solution is not None,
         "reason": chunk_reason,
-        "frames_lens_warped": models.count("lens_rotation"),
+        "frames_lens_warped": sum(model.startswith("lens_") for model in models),
         "frames_affine_warped": models.count("similarity"),
     }
 
@@ -859,21 +923,40 @@ def stack_run(
             continue
         luma_frame = _luma(frame.rgb)
         stars_frame = detect_stars(luma_frame, sigma=STAR_DETECT_SIGMA, mask=sky_stars_mask)
+        similarity_refusal = None
         try:
             registration = register(
                 luma_ref, stars_ref, luma_frame, stars_frame, sky_mask=sky_stars_mask
             )
         except RegistrationError as exc:
-            rejected.append((frame.path, str(exc)))
-            continue
+            # The gate is right; the 4-DOF model is what fails on a sparse field as the
+            # sky drifts through the lens (note 86). Same gates, lens-aware model.
+            similarity_refusal = str(exc)
+            try:
+                registration = fit_lens_aware(
+                    luma_ref, stars_ref, luma_frame, stars_frame, sky_mask=sky_stars_mask
+                )
+            except RegistrationError as lens_exc:
+                method = getattr(lens_exc, "geometry_method", "lens-aware")
+                rejected.append(
+                    (frame.path, f"{similarity_refusal}; {method} pair fit: {lens_exc}")
+                )
+                continue
         # photometry, pre-warp, on frame.rgb's own raw pixels (module comment above).
         try:
             offset, scale = _frame_photometry(luma_frame, ref_pedestal, sky_stars_mask)
         except ValueError as exc:
             rejected.append((frame.path, f"photometry: {exc}"))
             continue
-        ref_xy, frame_xy = _matched_star_pairs(stars_ref, stars_frame, registration.transform)
-        pending.append(_PendingWarp(i, frame, registration, offset, scale, ref_xy, frame_xy))
+        if similarity_refusal is None:
+            ref_xy, frame_xy = _matched_star_pairs(stars_ref, stars_frame, registration.transform)
+        else:
+            ref_xy = frame_xy = np.empty((0, 2), dtype=np.float64)
+        pending.append(
+            _PendingWarp(
+                i, frame, registration, offset, scale, ref_xy, frame_xy, similarity_refusal
+            )
+        )
 
     # The chunk's shared lens is fitted across EVERY registered frame at once, so
     # it has to sit between registration and the warp -- no frame can be warped until
@@ -887,11 +970,19 @@ def stack_run(
     warp_records: dict[str, dict] = {}
     for item in pending:
         frame, registration = item.frame, item.registration
-        record = _warp_record(
-            item, frame_solutions.get(str(frame.path)), luma_ref.shape, chunk_reason
+        lens_pair = item.similarity_refusal is not None and isinstance(
+            registration.transform, tuple
         )
+        if lens_pair:
+            record = _lens_pair_record(registration, item.similarity_refusal)
+        else:
+            record = _warp_record(
+                item, frame_solutions.get(str(frame.path)), luma_ref.shape, chunk_reason
+            )
         warp_records[str(frame.path)] = record
-        if record["model"] == "lens_rotation":
+        if lens_pair:
+            warp_transform = registration.transform
+        elif record["model"] == "lens_rotation":
             warp_transform = build_remap(
                 luma_ref.shape,
                 geometry_solution.lens,
@@ -903,14 +994,21 @@ def stack_run(
         corrected = ((aligned.astype(np.float64) - item.offset) * item.scale).astype(np.float32)
         aligned_frames.append(corrected)
         unaligned_frames.append(frame.rgb)
-        used_frames.append(UsedFrame(prepared.metrics[item.index], registration))
         photometry.append(FramePhotometry(frame.path, item.offset, item.scale, 1.0))
         aligned_by_index[item.index] = corrected
-        # Stays the 2x3 whichever warp the image took: its consumer is the meteor
-        # step, which transforms streak ENDPOINT coordinates, not pixels.
-        transform_by_index[item.index] = registration.transform
+        # Its consumer is the meteor step, which maps streak ENDPOINT coordinates, not
+        # pixels: the 2x3 whichever warp the image took, or -- for a frame only the lens
+        # pair model registered -- a point inverse of its own remap.
+        transform_by_index[item.index] = (
+            _frame_to_reference_points(warp_transform) if lens_pair else registration.transform
+        )
         # Validity describes the warp that actually ran, remap or affine.
         sky_validity.append(warp_validity(warp_transform, frame.rgb.shape, luma_ref.shape))
+        if lens_pair:
+            # Free the full-resolution maps (~190 MB at 24 MP) now the warp has run; the
+            # provenance names the model instead of serialising every map pixel.
+            registration = replace(registration, transform=f"remap:{record['model']}")
+        used_frames.append(UsedFrame(prepared.metrics[item.index], registration))
     geometry_payload = _chunk_geometry_payload(
         geometry_solution, seed_lens, chunk_reason, warp_records
     )
@@ -943,7 +1041,7 @@ def stack_run(
                     "frame": str(metrics.path.resolve()),
                     "transform": "identity"
                     if registration is None
-                    else registration.transform.tolist(),
+                    else np.asarray(registration.transform).tolist(),
                     "n_matched": 0 if registration is None else registration.n_matched,
                     "inlier_fraction": 1.0
                     if registration is None
