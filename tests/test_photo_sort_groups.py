@@ -45,7 +45,7 @@ class Ops:
     def __init__(self, sequences=(), brackets=(), fail=(), hashes=None, chunk=None, darks=()):
         self.sequences, self.brackets, self.fail = list(sequences), list(brackets), set(fail)
         self.chunk, self.darks = chunk, {Path(d) for d in darks}
-        self.lapse = []
+        self.lapse, self.trails = [], []
         self.hashes = hashes or {}
         self.calls = []
 
@@ -100,6 +100,14 @@ class Ops:
             raise RuntimeError("lapse boom")
         out_jpg.write_bytes(b"jpg")
 
+    def star_trails(self, lights, darks, out_tif, out_jpg):
+        self.calls.append(("star_trails", out_tif.name))
+        self.trails.append((list(lights), list(darks)))
+        out_tif.write_bytes(b"tif")
+        if "star_trails" in self.fail:
+            raise RuntimeError("trail boom")
+        out_jpg.write_bytes(b"jpg")
+
     def still_timelapse(self, jpegs, out_mp4, out_jpg):
         self.calls.append(("still_timelapse", out_mp4.name))
         self.lapse.append((list(jpegs), []))
@@ -119,6 +127,7 @@ class Ops:
             classify_night=self.classify_night,
             night_timelapse=self.night_timelapse,
             still_timelapse=self.still_timelapse,
+            star_trails=self.star_trails,
         )
 
 
@@ -522,7 +531,9 @@ def test_session_with_too_few_usable_lights_is_skipped_quietly(tmp_path, root):
         src, root, make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
     )
     assert lapse_calls(ops) == [] and rows(result.run_dir / "skipped.csv") == []
+    assert lapse_calls(ops, "star_trails") == []
     assert not (result.run_dir / "timelapse").exists()
+    assert not (result.run_dir / "trails").exists()
     ops.calls.clear()
     run(src, root, make_hooks(ops), resume=result.run_dir)  # the verdict is remembered
     assert lapse_calls(ops, "classify_night") == []
@@ -590,6 +601,90 @@ def test_no_stacks_skips_night_timelapses(tmp_path, root):
         ps.SortOptions(no_stacks=True),
     )
     assert ops.calls == []
+
+
+def test_night_session_renders_one_star_trail_beside_its_timelapse(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], chunk=15, darks=seq[-4:])
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    assert lapse_calls(ops, "star_trails") == [("star_trails", "night-1.tif")]
+    assert ops.trails == [(seq[:-4], seq[-4:])]  # lights in capture order; lens-cap darks apart
+    assert lapse_calls(ops, "classify_night") == [("classify_night", 30)]  # one triage, shared
+    assert (result.run_dir / "trails" / "night-1.tif").is_file()
+    assert (result.run_dir / "trails" / "night-1.jpg").is_file()
+    page = (result.run_dir / "index.html").read_text()
+    stack, trail = page.index("stacks/night-1.jpg"), page.index("trails/night-1.jpg")
+    assert stack < trail < page.index("timelapse/night-1.mp4")
+    with Ledger(root / ps.LEDGER_NAME) as ledger:
+        key = sg.group_key("trails", [str(p) for p in seq])
+        assert ledger.get_score(key, sg.STACK_MARKER) == 1
+
+
+def test_resume_skips_a_finished_trail_and_rebuilds_a_missing_one(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq])
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    first = run(src, root, hooks)
+    ops.calls.clear()
+    run(src, root, hooks, resume=first.run_dir)
+    assert ops.calls == []
+    (first.run_dir / "trails" / "night-1.jpg").unlink()
+    run(src, root, hooks, resume=first.run_dir)
+    assert [c[0] for c in ops.calls] == ["classify_night", "star_trails"]
+
+
+def test_failed_trail_is_a_skipped_row_and_the_timelapse_still_lands(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], fail=["star_trails"])
+    result = run(
+        src, root, make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    )
+    skipped = rows(result.run_dir / "skipped.csv")
+    assert [(r["path"], r["reason"]) for r in skipped] == [
+        ("group:night-1", "trails failed: trail boom")
+    ]
+    assert not list((result.run_dir / "trails").glob("night-1.*"))
+    assert (result.run_dir / "timelapse" / "night-1.mp4").is_file()
+    assert "trails/night-1.jpg" not in (result.run_dir / "index.html").read_text()
+
+
+def test_default_trail_wrapper_uses_the_astro_trail_engine(tmp_path, monkeypatch):
+    import gomoveshift.pipeline.photos.astro_calibrate as ac
+    import gomoveshift.pipeline.photos.astro_orchestrator as ao
+    import gomoveshift.pipeline.photos.astro_trails as at
+    import gomoveshift.pipeline.photos.night_products as npx
+
+    seen = {}
+    monkeypatch.setattr(sg, "_megapixels", lambda p: 20.0)
+    monkeypatch.setattr(at, "preflight_trail", lambda d, **k: seen.update(pre=(d, k)))
+
+    def bad_darks(lights, darks):
+        raise ac.AstroCalibrationError("mismatch")
+
+    monkeypatch.setattr(ao, "build_validated_master_dark", bad_darks)
+    monkeypatch.setattr(
+        at,
+        "render_trail",
+        lambda lights, out, darks: (
+            seen.update(trail=(list(lights), list(darks), out)) or (out, 2, ())
+        ),
+    )
+    monkeypatch.setattr(
+        npx, "render_master_preview", lambda master, out: seen.update(preview=(master, out)) or out
+    )
+    lights = [Path("l1"), Path("l2")]
+    tif, jpg = tmp_path / "t.tif", tmp_path / "t.jpg"
+    sg._star_trails(lights, [Path("d1")], tif, jpg)
+    assert seen["pre"] == (tmp_path, {"megapixels": 20.0, "dark_count": 0})
+    assert seen["trail"] == (lights, [], tif)  # unmatched darks dropped, never subtracted
+    assert seen["preview"] == (tif, jpg)
 
 
 def test_default_classify_night_splits_cap_on_frames_from_lights(monkeypatch):
