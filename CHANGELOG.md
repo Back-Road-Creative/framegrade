@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.68] - 2026-11-10
+
+### Fixed
+
+- The final-text review backs a stateless county's country ("County Cork, Ireland") with the same measured region claim, so an Irish long-form title is no longer refused as `name_unbacked:title:ireland`.
+
 ## [0.3.67] - 2026-11-10
 
 ### Fixed
@@ -825,7 +831,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.68...HEAD
+[0.3.68]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.67...v0.3.68
 [0.3.67]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.66...v0.3.67
 [0.3.66]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.65...v0.3.66
 [0.3.65]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.64...v0.3.65
