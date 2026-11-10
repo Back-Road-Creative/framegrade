@@ -3,7 +3,8 @@ Waypost final-text review bound to its source, plan, route evidence, exact
 title and visible text; GMS's own ``upload_video`` re-verifies it before
 ``videos().insert``.
 
-Synthetic places only ("Harrow", "Pellmere", "Westmark" are invented); no
+Synthetic places only ("Harrow", "Pellmere", "Westmark", "Lornia" and "Vell"
+are invented); no
 production trace, title or coordinate appears here.
 """
 
@@ -460,6 +461,54 @@ class TestStateAbbreviation:
     def test_circular_route_loop_title_agrees(self):
         review = self._verdict("Harrow Loop, SC", lat_of_t=lambda t: 9.5)
         assert review["verdict"] == "agree", review
+
+
+class _IrishGeocoder(_BandGeocoder):
+    """The synthetic towns in a stateless county of an invented country, as an
+    Irish lookup returns them (a county, no state, a country)."""
+
+    def reverse_geocode_detailed(self, lat, lon):
+        hit = super().reverse_geocode_detailed(lat, lon)
+        return {**hit, "county": "County Ashby", "state": None, "country": "Lornia"}
+
+
+def _irish_state(ost):
+    fixes = [(float(t), 9.5 if t < 300 else 10.2, 20.0) for t in range(600)]
+    ev = measure_route([RouteWindow("lf01-s0", 0.0, 600.0, fixes)], _IrishGeocoder())
+    loc = _location()
+    for p in loc["places"]:
+        p["county"], p["state"] = "County Ashby", None
+    return _state(
+        per_lf_ost_text={1: ost},
+        per_lf_location_evidence={1: loc},
+        per_lf_route_record={1: route_record(ev)},
+    )
+
+
+class TestStatelessCountry:
+    """The country a stateless county claim carries ("County Ashby, Lornia",
+    the label ``region_label`` builds) is the same measured claim, as a US
+    state's abbreviation is; any other country is a name nothing backs."""
+
+    def _verdict(self, ost):
+        return _metadata(_irish_state(ost), title=ost + SUFFIX)["final_text_review"]
+
+    def test_county_and_its_country_agree(self):
+        review = self._verdict("County Ashby, Lornia")
+        assert review["verdict"] == "agree", review
+
+    def test_another_country_is_not_agree(self):
+        review = self._verdict("County Ashby, Vell")
+        assert review["verdict"] != "agree"
+        assert "name_unbacked:title:vell" in review["reasons"], review["reasons"]
+
+    def test_a_state_bearing_county_claim_backs_no_country(self):
+        review = _metadata(
+            _carolina_state("Harrow to Pellmere, United States"),
+            title="Harrow to Pellmere, United States" + SUFFIX,
+        )["final_text_review"]
+        assert review["verdict"] != "agree"
+        assert "name_unbacked:title:united" in review["reasons"], review["reasons"]
 
 
 def test_claim_id_missing_from_location_evidence_is_kept_not_crashed():
