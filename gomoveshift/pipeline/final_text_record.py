@@ -279,8 +279,10 @@ def build_final_text_review(state, lf, metadata: dict) -> Optional[dict]:
     regions = []
     for claim in entry.get("region_claims") or []:
         # A US state the title abbreviates ("SC") is the same measured claim,
-        # so the abbreviation is its own region item with the same coverage.
-        names = [claim["name"], US_STATE_ABBREVS.get(claim["name"])]
+        # so the abbreviation is its own region item with the same coverage;
+        # so is a stateless county's country ("County Cork, Ireland").
+        country = None if claim.get("state") else claim.get("country")
+        names = [claim["name"], US_STATE_ABBREVS.get(claim["name"]), country]
         for name in filter(None, names):
             rid = _region_id(claim["level"], name)
             regions.append({"evidence_id": rid, "value": name, "claim": claim})
