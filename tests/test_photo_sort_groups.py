@@ -345,6 +345,53 @@ def test_burst_groups_within_a_category_only(tmp_path, root):
     assert {ranked[s]["group_id"] for s in "bcd"} == {"burst-1"}
 
 
+def _singles(n, category="landscape"):
+    paths = [Path(f"/card/s{i}.nef") for i in range(n)]
+    ranked = [
+        {"source": str(p), "category": category, "rank": i + 1, "quality_score": "0.5"}
+        for i, p in enumerate(paths)
+    ]
+    return paths, ranked
+
+
+@pytest.mark.parametrize(
+    "gap_s, bits, grouped",
+    [
+        (9, 14, True),  # hand-held look-alikes seconds apart (DSC_1900/1901: 9 s, 14 bits)
+        (9, 16, True),  # BURST_HAMMING_THRESHOLD
+        (9, 17, False),
+        (61, 14, False),  # alike but minutes apart: two shots
+        (7200, 3, True),  # a true near-duplicate groups at any distance in time
+    ],
+)
+def test_lookalike_singles_seconds_apart_form_a_burst(gap_s, bits, grouped):
+    paths, ranked = _singles(2)
+    records = interval_records(paths, [gap_s])
+    hashes = {str(paths[0]): 0, str(paths[1]): (1 << bits) - 1}
+    sg.tag_groups(ranked, records, Ops().ops(), hashes)
+    ids = {r.get("group_id", "") for r in ranked}
+    assert ids == ({"burst-1"} if grouped else {""})
+
+
+def test_loose_burst_match_needs_both_capture_times():
+    paths, ranked = _singles(2)
+    records = {paths[0]: rec(paths[0]), paths[1]: CaptureRecord(path=paths[1])}
+    sg.tag_groups(ranked, records, Ops().ops(), {str(paths[0]): 0, str(paths[1]): (1 << 14) - 1})
+    assert {r.get("group_id", "") for r in ranked} == {""}
+
+
+def test_burst_of_two_lookalikes_shows_once_on_the_page(tmp_path):
+    paths, ranked = _singles(2)
+    records = interval_records(paths, [9])
+    sg.tag_groups(ranked, records, Ops().ops(), {str(paths[0]): 0, str(paths[1]): (1 << 14) - 1})
+    for i, row in enumerate(ranked):
+        row.update(output=str(tmp_path / f"landscape/00{i + 1}-s{i}.jpg"), capture_time="")
+    page = ps._index_html(tmp_path, Path("/card"), ranked)
+    assert "burst of 2" in page
+    shown = re.sub(r"<details>.*?</details>", "", page, flags=re.S)
+    assert shown.count("<img") == 1  # the other look-alike is folded behind it
+
+
 def test_resume_does_only_missing_outputs(tmp_path, root):
     src = card(tmp_path, list("abcdefgh"))
     seq = stems(src, "abcde")
@@ -908,50 +955,3 @@ def test_poster_extracts_the_middle_frame_and_names_a_failure(tmp_path, monkeypa
     assert calls[0][calls[0].index("-ss") + 1] == "1.000"
     with pytest.raises(RuntimeError, match="poster frame failed"):
         sg._poster(tmp_path / "v.mp4", tmp_path / "bad.jpg", 48, 24)
-
-
-def _singles(n, category="landscape"):
-    paths = [Path(f"/card/s{i}.nef") for i in range(n)]
-    ranked = [
-        {"source": str(p), "category": category, "rank": i + 1, "quality_score": "0.5"}
-        for i, p in enumerate(paths)
-    ]
-    return paths, ranked
-
-
-@pytest.mark.parametrize(
-    "gap_s, bits, grouped",
-    [
-        (9, 14, True),  # hand-held look-alikes seconds apart (DSC_1900/1901: 9 s, 14 bits)
-        (9, 16, True),  # BURST_HAMMING_THRESHOLD
-        (9, 17, False),
-        (61, 14, False),  # alike but minutes apart: two shots
-        (7200, 3, True),  # a true near-duplicate groups at any distance in time
-    ],
-)
-def test_lookalike_singles_seconds_apart_form_a_burst(gap_s, bits, grouped):
-    paths, ranked = _singles(2)
-    records = interval_records(paths, [gap_s])
-    hashes = {str(paths[0]): 0, str(paths[1]): (1 << bits) - 1}
-    sg.tag_groups(ranked, records, Ops().ops(), hashes)
-    ids = {r.get("group_id", "") for r in ranked}
-    assert ids == ({"burst-1"} if grouped else {""})
-
-
-def test_loose_burst_match_needs_both_capture_times():
-    paths, ranked = _singles(2)
-    records = {paths[0]: rec(paths[0]), paths[1]: CaptureRecord(path=paths[1])}
-    sg.tag_groups(ranked, records, Ops().ops(), {str(paths[0]): 0, str(paths[1]): (1 << 14) - 1})
-    assert {r.get("group_id", "") for r in ranked} == {""}
-
-
-def test_burst_of_two_lookalikes_shows_once_on_the_page(tmp_path):
-    paths, ranked = _singles(2)
-    records = interval_records(paths, [9])
-    sg.tag_groups(ranked, records, Ops().ops(), {str(paths[0]): 0, str(paths[1]): (1 << 14) - 1})
-    for i, row in enumerate(ranked):
-        row.update(output=str(tmp_path / f"landscape/00{i + 1}-s{i}.jpg"), capture_time="")
-    page = ps._index_html(tmp_path, Path("/card"), ranked)
-    assert "burst of 2" in page
-    shown = re.sub(r"<details>.*?</details>", "", page, flags=re.S)
-    assert shown.count("<img") == 1  # the other look-alike is folded behind it
