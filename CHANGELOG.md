@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.75] - 2026-11-11
+
+### Added
+
+- Add an unwired single-Page-photo delivery consumer with a required trusted
+  authorization port, atomic write-ahead attempts and retained-ID reconciliation.
+  Uncertain writes remain held across crashes, retry exhaustion and ordinary
+  cancellation/recovery; exact captions, bytes and Page identity stay bound to
+  the approved item. Production publishing remains disabled pending the real
+  approval consumer and explicit route activation.
+- Add an explicitly injected general-content Reel consumer with exact approved
+  bytes/caption/account binding, fresh authorization before finish, durable
+  attempts and read-only recovery after uncertain writes. Production wiring
+  remains separate.
+
 ## [0.3.74] - 2026-11-10
 
 ### Added
@@ -909,7 +924,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...HEAD
+[0.3.75]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...v0.3.75
 [0.3.74]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...v0.3.74
 [0.3.73]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...v0.3.73
 [0.3.72]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...v0.3.72
