@@ -27,8 +27,11 @@ from .brand_policy import load_brand_policy
 from .ig_media_scan import SCAN_LIMIT, ScanUnprovableError, scan_for_post
 from .queue import (
     _TERMINAL_SQL,
+    FACEBOOK_PHOTO_KIND,
     STATUS_AWAITING_IG_RECONCILE,
     STATUS_MISSING_REMOTE,
+    STATUS_PHOTO_AWAITING_ID,
+    STATUS_PHOTO_RECONCILE,
     TERMINAL_STATUSES,
     acquire_lease,
     get_platform_daily_cap,
@@ -79,6 +82,8 @@ _STATUS_AWAITING_FACEBOOK_RECONCILE = "awaiting_facebook_reconcile"
 #: Where a handler that returns WITHOUT publishing leaves its row. The row's
 #: own wait governs it from there, never this pass's lease.
 _WAITING_STATUSES = (
+    STATUS_PHOTO_AWAITING_ID,
+    STATUS_PHOTO_RECONCILE,
     _STATUS_AWAITING_MANUAL_PUBLISH,
     _STATUS_DEFERRED,
     STATUS_AWAITING_IG_RECONCILE,
@@ -86,7 +91,11 @@ _WAITING_STATUSES = (
 )
 #: Never selected by the drain whatever their ``next_attempt_at``: each waits
 #: on something other than a retry time (a person; the account scan).
-_PARKED_STATUSES = (_STATUS_AWAITING_MANUAL_PUBLISH, STATUS_AWAITING_IG_RECONCILE)
+_PARKED_STATUSES = (
+    _STATUS_AWAITING_MANUAL_PUBLISH,
+    STATUS_AWAITING_IG_RECONCILE,
+    STATUS_PHOTO_AWAITING_ID,
+)
 
 
 #: Every privacy class a publishable short must have VERIFIED.
@@ -347,7 +356,7 @@ def _select_due(
     conditions = [f"status NOT IN {_TERMINAL_SQL}", "shadow = 0"]
     params: List[Any] = []
     if status is None:
-        conditions.append("status NOT IN (?, ?)")
+        conditions.append("status NOT IN (" + ",".join("?" for _ in _PARKED_STATUSES) + ")")
         params.extend(_PARKED_STATUSES)
     else:
         conditions.append("status = ?")
@@ -665,8 +674,13 @@ def _facebook_unknown(row) -> bool:
     return bool(
         row is not None
         and row["platform"] == "facebook"
-        and row["status"] == _STATUS_AWAITING_FACEBOOK_RECONCILE
-        and row["platform_upload_id"]
+        and (
+            (row["status"] == _STATUS_AWAITING_FACEBOOK_RECONCILE and row["platform_upload_id"])
+            or (
+                row["upload_kind"] == FACEBOOK_PHOTO_KIND
+                and row["status"] in (STATUS_PHOTO_AWAITING_ID, STATUS_PHOTO_RECONCILE)
+            )
+        )
         and not row["platform_post_id"]
     )
 
@@ -676,6 +690,7 @@ def _checkpoint_facebook_upload(conn, row):
     if (
         row is not None
         and row["platform"] == "facebook"
+        and row["upload_kind"] != FACEBOOK_PHOTO_KIND
         and row["platform_upload_id"]
         and not row["platform_post_id"]
         and row["status"] not in (*TERMINAL_STATUSES, _STATUS_AWAITING_FACEBOOK_RECONCILE)
@@ -734,6 +749,7 @@ def drain_queue(
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     privacy_attestations: Optional[Callable[[Dict[str, Any]], Optional[Mapping[str, Any]]]] = None,
     held_scopes: Optional[Collection[Tuple[str, str]]] = None,
+    facebook_photo_reconciler: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> DrainResult:
     """One drain pass. Never raises on an empty queue, an unavailable lease,
     or a single handler's exception — all recorded on ``DrainResult`` so one
@@ -748,7 +764,13 @@ def drain_queue(
 
     ``held_scopes`` is the validate gate: ``(platform, project)`` pairs whose
     rows are HELD the same way, because the validator names a problem on that
-    pair. Every other pair drains normally."""
+    pair. Every other pair drains normally.
+
+    ``facebook_photo_reconciler`` is an explicitly trusted read-only port for
+    persisted Page-photo kinds. It runs without current-draft validation or
+    privacy loaders. If absent, those rows stay held instead of falling into
+    legacy handlers. It must never start an upload or invoke fresh authority.
+    """
     now = now or datetime.now(timezone.utc).isoformat()
     owner = owner or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     expires_at = (datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)).isoformat()
@@ -771,7 +793,10 @@ def drain_queue(
         # Confirm a handler exists BEFORE acquiring the lease — otherwise a
         # platform with no adapter wired up locks its rows for the full
         # lease duration for no reason.
-        handler = handlers.get(platform)
+        # A durable photo identity never falls back to current-record routing.
+        # Only this explicit read-only port may bypass pre-publication checks.
+        photo_read = platform == "facebook" and row["upload_kind"] == FACEBOOK_PHOTO_KIND
+        handler = facebook_photo_reconciler if photo_read else handlers.get(platform)
         if handler is None:
             result.skipped_no_handler += 1
             result.skipped_no_handler_by_platform[platform] = (
@@ -780,7 +805,7 @@ def drain_queue(
             logger.warning("dispatch: no handler registered for platform %r", platform)
             continue
 
-        if held_scopes and (platform, row["project_name"]) in held_scopes:
+        if not photo_read and held_scopes and (platform, row["project_name"]) in held_scopes:
             result.held_validate += 1
             result.errors.append(
                 f"{platform}#{delivery_id}: validate hold: {platform}/{row['project_name']} "
@@ -795,7 +820,7 @@ def drain_queue(
         # hold for the full duration. A hold is not a failure — no transition,
         # no attempt bump — so the delivery publishes normally once the model
         # is restored and the day re-run.
-        if privacy_attestations is not None:
+        if not photo_read and privacy_attestations is not None:
             try:
                 hold = privacy_hold_reason(privacy_attestations(row))
             except Exception as exc:  # noqa: BLE001 -- unreadable == unattested

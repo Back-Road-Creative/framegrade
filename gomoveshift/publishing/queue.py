@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT,
     next_attempt_reason TEXT,
     platform_upload_id TEXT, platform_post_id TEXT, permalink TEXT,
-    upload_account TEXT,
+    upload_account TEXT, upload_kind TEXT,
     error_class TEXT,
     error_detail TEXT,
     lease_owner TEXT, lease_expires_at TEXT,
@@ -76,7 +76,18 @@ CREATE TABLE IF NOT EXISTS response_log (
     mode TEXT NOT NULL,
     reason TEXT
 );
+CREATE TABLE IF NOT EXISTS facebook_photo_attempts (
+    delivery_id INTEGER PRIMARY KEY REFERENCES deliveries(id),
+    plan_sha256 TEXT NOT NULL, item_index INTEGER NOT NULL,
+    request_json TEXT NOT NULL, write_started_at TEXT NOT NULL,
+    receipt_json TEXT, story_id TEXT,
+    UNIQUE(plan_sha256, item_index)
+);
 """
+
+FACEBOOK_PHOTO_KIND = "facebook_page_photo"
+STATUS_PHOTO_AWAITING_ID = "awaiting_facebook_photo_id"
+STATUS_PHOTO_RECONCILE = "awaiting_facebook_photo_reconcile"
 #: ``platform_pauses``, ``platform_daily_caps`` and ``response_log`` are all
 #: brand-new tables, unlike the ``ALTER TABLE`` columns below and the
 #: active-delivery index further down: ``CREATE TABLE IF NOT EXISTS`` never
@@ -275,6 +286,146 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def facebook_photo_attempt(conn, delivery_id: int) -> Optional[Dict[str, Any]]:
+    """Read an immutable request snapshot and its separately retained receipt."""
+    row = conn.execute(
+        "SELECT * FROM facebook_photo_attempts WHERE delivery_id=?", (delivery_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["request"] = json.loads(result.pop("request_json"))
+    receipt = result.pop("receipt_json")
+    result["receipt"] = json.loads(receipt) if receipt else None
+    return result
+
+
+def begin_facebook_photo_attempt(conn, delivery_id, owner, request, *, now):
+    """Atomic write-ahead checkpoint, never a permission or safe-retry proof.
+
+    The caller has verified authority and immutable bytes. A duplicate approved
+    item raises IntegrityError and rolls back the delivery change. No nested
+    caller transaction is accepted: returning must mean this is committed.
+    """
+    if conn.in_transaction:
+        raise ValueError("Photo checkpoint requires its own transaction")
+    if request["delivery_id"] != delivery_id or request["published"] is not True:
+        raise ValueError("Photo checkpoint request binding invalid")
+    if request["valid_until"] <= now:
+        return False
+    encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    with conn:
+        changed = conn.execute(
+            "UPDATE deliveries SET status=?, upload_kind=?, upload_account=?, updated_at=? "
+            "WHERE id=? AND platform='facebook' AND status='queued' AND shadow=0 "
+            "AND plan_hash=? AND lease_owner=? AND lease_expires_at>? "
+            "AND (scheduled_at IS NULL OR scheduled_at<=?) "
+            "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+            "AND platform NOT IN (SELECT platform FROM platform_pauses) "
+            "AND upload_kind IS NULL AND upload_account IS NULL "
+            "AND platform_upload_id IS NULL AND platform_post_id IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
+            (
+                STATUS_PHOTO_AWAITING_ID,
+                FACEBOOK_PHOTO_KIND,
+                request["page_id"],
+                now,
+                delivery_id,
+                request["queue_plan_hash"],
+                owner,
+                now,
+                now,
+                now,
+            ),
+        ).rowcount
+        if changed != 1:
+            return False
+        conn.execute(
+            "INSERT INTO facebook_photo_attempts "
+            "(delivery_id,plan_sha256,item_index,request_json,write_started_at) VALUES (?,?,?,?,?)",
+            (delivery_id, request["plan_sha256"], request["item_index"], encoded, now),
+        )
+    return True
+
+
+def retain_facebook_photo_receipt(conn, delivery_id, receipt):
+    """Persist the returned ID and receipt together; never replace a retained ID."""
+    if conn.in_transaction:
+        raise ValueError("Photo receipt requires its own transaction")
+    with conn:
+        changed = conn.execute(
+            "UPDATE deliveries SET status=?, platform_upload_id=?, updated_at=? "
+            "WHERE id=? AND status=? AND upload_kind=? AND upload_account=? "
+            "AND platform_upload_id IS NULL AND platform_post_id IS NULL "
+            "AND EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
+            (
+                STATUS_PHOTO_RECONCILE,
+                receipt["photo_id"],
+                _now_iso(),
+                delivery_id,
+                STATUS_PHOTO_AWAITING_ID,
+                FACEBOOK_PHOTO_KIND,
+                receipt["page_id"],
+            ),
+        ).rowcount
+        if changed != 1:
+            return False
+        if (
+            conn.execute(
+                "UPDATE facebook_photo_attempts SET receipt_json=? "
+                "WHERE delivery_id=? AND receipt_json IS NULL",
+                (json.dumps(receipt, sort_keys=True), delivery_id),
+            ).rowcount
+            != 1
+        ):
+            raise sqlite3.IntegrityError("Photo receipt checkpoint conflict")
+    return True
+
+
+def retain_facebook_photo_story(conn, delivery_id, story_id):
+    with conn:
+        return (
+            conn.execute(
+                "UPDATE facebook_photo_attempts SET story_id=? WHERE delivery_id=? "
+                "AND receipt_json IS NOT NULL AND (story_id IS NULL OR story_id=?)",
+                (story_id, delivery_id, story_id),
+            ).rowcount
+            == 1
+        )
+
+
+def confirm_facebook_photo(conn, delivery_id, photo_id, story_id, account):
+    """Close only a retained identity after the consumer verifies readback."""
+    with conn:
+        changed = (
+            conn.execute(
+                "UPDATE deliveries SET status='published', platform_post_id=?, destination_account=?, "
+                "published_at=?, published_at_source=?, updated_at=?, error_class=NULL, error_detail=NULL, "
+                "lease_owner=NULL, lease_expires_at=NULL, next_attempt_at=NULL, next_attempt_reason=NULL "
+                "WHERE id=? AND status=? AND upload_kind=? AND upload_account=? AND platform_upload_id=? "
+                "AND EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id "
+                "AND story_id=? AND receipt_json IS NOT NULL)",
+                (
+                    story_id,
+                    account,
+                    _now_iso(),
+                    PUBLISHED_AT_PLATFORM_RECONCILED,
+                    _now_iso(),
+                    delivery_id,
+                    STATUS_PHOTO_RECONCILE,
+                    FACEBOOK_PHOTO_KIND,
+                    account,
+                    photo_id,
+                    story_id,
+                ),
+            ).rowcount
+            == 1
+        )
+    if changed:
+        _register_platform_id_best_effort(conn, delivery_id)
+    return changed
+
+
 def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
     """Open/create the spool at ``<storage_path>/social_queue.sqlite3``,
     WAL-enabled, schema applied (``storage_path`` = caller-resolved
@@ -352,6 +503,8 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # receipt. Legacy IDs have no proven account; never backfill from
             # present-day credentials or a destination inferred later.
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_account TEXT")
+        if "upload_kind" not in cols:
+            conn.execute("ALTER TABLE deliveries ADD COLUMN upload_kind TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -581,7 +734,9 @@ def select_due_first_comments(
       ``FIRST_COMMENT_BACKLOG_PER_PASS`` of these per platform per call,
       untried rows first, so one that keeps failing never starves the rest.
 
-    ``platforms`` narrows the set (default: all three).
+    ``platforms`` narrows the set (default: all three). Durable Page-photo
+    attempts are excluded: their exact approval contains no first-comment
+    authorization, including text inherited from enqueue or later backfill.
 
     Each returned dict carries ``comment_target_id``: the YouTube VIDEO id
     (``platform_upload_id`` -- ``platform_post_id`` is the playlist there) or
@@ -595,6 +750,7 @@ def select_due_first_comments(
     delay = f"-{FIRST_COMMENT_DELAY_S} seconds"
     rows = conn.execute(
         f"SELECT * FROM deliveries WHERE platform IN ({marks}) "  # noqa: S608
+        "AND (upload_kind IS NULL OR upload_kind <> ?) "
         "AND first_comment_text IS NOT NULL AND first_comment_text <> '' "
         "AND first_comment_posted_at IS NULL AND first_comment_attempts < ? "
         "AND ((published_at IS NOT NULL AND published_at_source IS NOT NULL "
@@ -603,7 +759,17 @@ def select_due_first_comments(
         "AND datetime(updated_at) <= datetime(?, ?) "
         "AND (scheduled_at IS NULL OR datetime(scheduled_at) <= datetime(?, ?)))) "
         "ORDER BY id",
-        (*wanted, FIRST_COMMENT_MAX_ATTEMPTS, now, delay, now, delay, now, delay),
+        (
+            *wanted,
+            FACEBOOK_PHOTO_KIND,
+            FIRST_COMMENT_MAX_ATTEMPTS,
+            now,
+            delay,
+            now,
+            delay,
+            now,
+            delay,
+        ),
     ).fetchall()
     paused: dict = {}
     due = []
@@ -687,6 +853,20 @@ def transition(
 ) -> bool:
     """Compare-and-set: succeeds only when current status equals
     ``expected_status`` and is not terminal; returns ``True`` iff changed."""
+    # Photo attempts have dedicated atomic identity/receipt operations below.
+    # Generic retries may update bookkeeping, never release an uncertain write.
+    photo_identity_change = new_status != expected_status or set(fields) & {
+        "upload_account",
+        "upload_kind",
+        "platform_upload_id",
+        "platform_post_id",
+        "destination_account",
+        "published_at_source",
+        "platform_published_at",
+        "permalink",
+    }
+    if facebook_photo_attempt(conn, delivery_id) is not None and photo_identity_change:
+        return False
     allowed = {
         "attempt_count",
         "next_attempt_at",
@@ -801,6 +981,11 @@ def transition(
     set_clause = f"status=?, updated_at=?{', ' + set_cols if set_cols else ''}"
     params = [new_status, _now_iso(), *fields.values(), delivery_id, expected_status]
     account_guard = ""
+    photo_guard = (
+        " AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)"
+        if photo_identity_change
+        else ""
+    )
     if "upload_account" in fields:
         # A checkpoint may be repeated but never rebound to rotated credentials.
         account_guard = " AND (upload_account IS NULL OR upload_account=?)"
@@ -808,7 +993,7 @@ def transition(
     with conn:  # set_clause: built only from the ``allowed`` allowlist above
         cur = conn.execute(
             f"UPDATE deliveries SET {set_clause} "  # noqa: S608
-            f"WHERE id=? AND status=? AND status NOT IN {_TERMINAL_SQL}{account_guard}",
+            f"WHERE id=? AND status=? AND status NOT IN {_TERMINAL_SQL}{account_guard}{photo_guard}",
             params,
         )
         changed = cur.rowcount == 1
@@ -868,14 +1053,16 @@ def cancel_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[st
     """Move a non-terminal, non-live-leased row to the terminal ``cancelled``
     status. Returns ``False`` (never raises) on an ordinary refusal --
     already terminal, or held by another worker's live lease, which may
-    already be mid platform-API-call. An expired lease may be cancelled."""
+    already be mid platform-API-call. An expired lease may be cancelled unless
+    a durable photo attempt exists; its uncertain write cannot be replaced."""
     now = now or _now_iso()
-    if _has_live_foreign_lease(conn, delivery_id, now):
+    if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     with conn:
         cur = conn.execute(
             "UPDATE deliveries SET status='cancelled', updated_at=? "  # noqa: S608 -- fixed literal
-            f"WHERE id=? AND status NOT IN {_TERMINAL_SQL}",
+            f"WHERE id=? AND status NOT IN {_TERMINAL_SQL} "
+            "AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
             (_now_iso(), delivery_id),
         )
         return cur.rowcount == 1
@@ -888,6 +1075,8 @@ def reschedule_delivery(
     now: Optional[str] = None,
 ) -> bool:
     """Set a non-terminal, non-live-leased row's ``scheduled_at``.
+
+    A durable photo attempt is immutable even after its lease expires.
 
     Not a ``transition`` field (rescheduling changes no status), so this is
     its own guarded ``UPDATE``. A row waiting on retry backoff carries both
@@ -914,7 +1103,7 @@ def reschedule_delivery(
         raise ValueError(
             f"scheduled_at must be an ISO-8601 timestamp; got {scheduled_at!r}"
         ) from exc
-    if _has_live_foreign_lease(conn, delivery_id, now):
+    if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     with conn:
         row = conn.execute(
@@ -927,13 +1116,15 @@ def reschedule_delivery(
             cur = conn.execute(
                 "UPDATE deliveries SET scheduled_at=?, "  # noqa: S608 -- fixed literal
                 "next_attempt_at=NULL, next_attempt_reason=NULL, updated_at=? "
-                f"WHERE id=? AND status NOT IN {_TERMINAL_SQL}",
+                f"WHERE id=? AND status NOT IN {_TERMINAL_SQL} "
+                "AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
                 (scheduled_at, _now_iso(), delivery_id),
             )
         else:
             cur = conn.execute(
                 "UPDATE deliveries SET scheduled_at=?, updated_at=? "  # noqa: S608 -- fixed literal
-                f"WHERE id=? AND status NOT IN {_TERMINAL_SQL}",
+                f"WHERE id=? AND status NOT IN {_TERMINAL_SQL} "
+                "AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
                 (scheduled_at, _now_iso(), delivery_id),
             )
         return cur.rowcount == 1
@@ -1077,7 +1268,8 @@ def retry_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[str
     terminal row or one held by another worker's live lease, which may
     already be mid platform-API-call. Also refuses -- leaving the row
     untouched -- when ``next_attempt_reason`` says the wait is not this
-    queue's to end: see ``_NEXT_ATTEMPT_REASONS_RETRY_REFUSES``.
+    queue's to end: see ``_NEXT_ATTEMPT_REASONS_RETRY_REFUSES``. Durable photo
+    attempts cannot be manually retried; retained-ID reads use normal backoff.
 
     Deliberately does NOT touch ``attempt_count``: resetting it would let a
     delivery dodge ``dispatch.drain_queue``'s max-attempts ceiling forever
@@ -1085,7 +1277,7 @@ def retry_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[str
     against a call that hasn't actually happened yet. The count only moves
     when the drain loop itself makes (and grades) the next real attempt."""
     now = now or _now_iso()
-    if _has_live_foreign_lease(conn, delivery_id, now):
+    if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     row = conn.execute(
         "SELECT next_attempt_reason FROM deliveries WHERE id=?", (delivery_id,)
@@ -1096,7 +1288,8 @@ def retry_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[str
         cur = conn.execute(
             "UPDATE deliveries SET next_attempt_at=NULL, next_attempt_reason=NULL, "  # noqa: S608
             "updated_at=? "
-            f"WHERE id=? AND status NOT IN {_TERMINAL_SQL}",
+            f"WHERE id=? AND status NOT IN {_TERMINAL_SQL} "
+            "AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)",
             (_now_iso(), delivery_id),
         )
         return cur.rowcount == 1
@@ -1198,6 +1391,8 @@ def check_recoverable(conn: sqlite3.Connection, delivery_id: int) -> sqlite3.Row
     or ``missing_remote`` row not already recovered qualifies. ``retry_delivery``
     refuses terminal rows by design; this is the one audited way past that, and
     it never mutates the row it recovers."""
+    if facebook_photo_attempt(conn, delivery_id):
+        raise RecoveryRefusedError("A recorded photo attempt cannot authorize a replacement upload")
     row = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
     if row is None:
         raise RecoveryRefusedError(f"no delivery with id {delivery_id}")
