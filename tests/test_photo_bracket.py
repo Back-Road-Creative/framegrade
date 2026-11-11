@@ -42,13 +42,14 @@ STEPPED_APERTURES = (10.0, 9.0, 9.0, 8.0, 8.0, 6.0)
 STEPPED_CARD = Path(os.environ.get("GMS_TEST_RAW_CARD_DIR") or "/nonexistent-raw-card")
 
 
-def _frame(tmp_path, name, at, shutter, *, iso=100, day="2026:07:22", aperture=None):
+def _frame(tmp_path, name, at, shutter, *, iso=100, day="2026:07:22", aperture=None, focal=None):
     return _raw(
         tmp_path / name,
         when=f"{day} {at}",
         iso=iso,
         exposure=(1, shutter),
         f_number=None if aperture is None else (round(aperture * 10), 10),
+        focal_length=None if focal is None else (round(focal * 10), 10),
     )
 
 
@@ -92,6 +93,10 @@ class TestTheSteppedShape:
         ]
         assert _names(detect_brackets(paths)) == STEPPED_GROUPING
 
+    def test_a_sweep_at_one_focal_length_still_groups(self, tmp_path):
+        paths = [_frame(tmp_path, *row, focal=24.0) for row in STEPPED_SEQUENCE]
+        assert _names(detect_brackets(paths)) == STEPPED_GROUPING
+
     def test_a_sweep_at_one_aperture_still_groups(self, tmp_path):
         """The textbook shape: aperture held, shutter alone."""
         paths = [_frame(tmp_path, *row, aperture=8.0) for row in STEPPED_SEQUENCE]
@@ -130,6 +135,28 @@ class TestWhatIsNotOneBracket:
     def test_an_iso_change_ends_the_run(self, tmp_path):
         rows = [("a.NEF", "10:15:08", 320), ("b.NEF", "10:15:20", 400), ("c.NEF", "10:15:30", 500)]
         paths = _card(tmp_path, rows) + [_frame(tmp_path, "d.NEF", "10:15:40", 800, iso=200)]
+        assert _names(detect_brackets(paths)) == [("a.NEF", "b.NEF", "c.NEF")]
+
+    def test_a_zoom_ends_the_run(self, tmp_path):
+        """JP's 2026-11-09 card: 56 mm, 59 mm, then 210 mm on a far ridge, the shutter
+        drifting 1/640 to 1/1000 with the meter. A bracket holds its framing; a zoom is a
+        new composition, so these are four single shots, not an HDR set."""
+        rows = [
+            ("DSC_1759.NEF", "17:08:10", 640, 9.0, 56.0),
+            ("DSC_1760.NEF", "17:08:52", 800, 10.0, 59.0),
+            ("DSC_1761.NEF", "17:09:02", 800, 7.1, 210.0),
+            ("DSC_1762.NEF", "17:09:15", 1000, 8.0, 210.0),
+        ]
+        paths = [
+            _frame(tmp_path, name, at, shutter, aperture=f, focal=mm)
+            for name, at, shutter, f, mm in rows
+        ]
+        assert _names(detect_brackets(paths)) == []
+
+    def test_a_frame_missing_the_focal_length_does_not_end_the_run(self, tmp_path):
+        rows = [("a.NEF", "10:15:08", 320), ("b.NEF", "10:15:20", 400), ("c.NEF", "10:15:30", 500)]
+        paths = [_frame(tmp_path, *row, focal=35.0) for row in rows[:2]]
+        paths.append(_frame(tmp_path, *rows[2]))  # no FocalLength tag
         assert _names(detect_brackets(paths)) == [("a.NEF", "b.NEF", "c.NEF")]
 
     def test_a_reversal_ends_the_run(self, tmp_path):

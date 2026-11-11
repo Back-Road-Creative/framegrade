@@ -4,8 +4,8 @@ Pure and deterministic — reads EXIF, returns groups of paths, mutates nothing.
 The merge itself (OpenCV ``MergeMertens``, before the grade) and the user
 flag that turns it on are a separate stage that consumes these groups.
 
-The rule: same capture date, neighbouring frames inside ``MAX_GAP_S``, ISO held
-constant, ``exposure_s`` stepping in ONE direction by at least
+The rule: same capture date, neighbouring frames inside ``MAX_GAP_S``, ISO and
+focal length held constant, ``exposure_s`` stepping in ONE direction by at least
 ``MIN_STEP_RATIO``, the run inside ``MAX_SPAN_S``, at least
 ``MIN_BRACKET_FRAMES`` frames, and — once the run is closed — a total exposure
 that actually MOVED by ``MIN_STEP_RATIO`` across it. A frame repeating its
@@ -38,6 +38,7 @@ from .exif_gps import (
     extract_exif_aperture,
     extract_exif_capture_metadata,
     extract_exif_capture_timestamp,
+    extract_exif_focal_length,
 )
 
 # Every threshold below is tuned against a hand-stepped bracket — a handful of
@@ -70,6 +71,12 @@ MIN_STEP_RATIO = 1.15
 # same-direction steps is a sweep, and a two-frame merge buys the least range.
 MIN_BRACKET_FRAMES = 3
 
+# Focal lengths further apart than this are a zoom, and a zoom is a new composition: a
+# bracket holds its framing. JP's 2026-11-09 card chained 56, 59 and 210 mm frames whose
+# shutter drifted with the meter into one "bracket". Half a millimetre clears EXIF's
+# rational rounding and is under the smallest step a zoom ring stops at.
+MAX_FOCAL_DRIFT_MM = 0.5
+
 
 @dataclass(frozen=True)
 class _Frame:
@@ -80,6 +87,7 @@ class _Frame:
     exposure_s: float
     iso: float
     f_number: float | None
+    focal_mm: float | None = None
 
 
 def _read_frame(photo_path):
@@ -103,6 +111,7 @@ def _read_frame(photo_path):
         float(meta.exposure_s),
         float(meta.iso),
         extract_exif_aperture(photo_path),
+        extract_exif_focal_length(photo_path),
     )
 
 
@@ -122,6 +131,12 @@ def _step(previous: _Frame, frame: _Frame):
         return None
     if frame.iso != previous.iso:
         return None
+    if (
+        frame.focal_mm
+        and previous.focal_mm
+        and abs(frame.focal_mm - previous.focal_mm) > MAX_FOCAL_DRIFT_MM
+    ):
+        return None  # a zoom: a new composition, not another rung (a missing tag can't tell)
     pair = (frame.exposure_s, previous.exposure_s)
     if max(pair) / min(pair) < MIN_STEP_RATIO:
         return 0
