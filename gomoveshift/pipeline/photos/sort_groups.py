@@ -59,6 +59,11 @@ TRAILS_DIR = "trails"
 #: last, with most gaps (``SEQUENCE_STEADY_SHARE``) within ``SEQUENCE_CADENCE_SLACK`` of the
 #: median gap. A timer is steady to the second; a hand-held session is not. JP's 2026-09-22
 #: dawn run: 100 frames 18 s apart.
+# Hand-held look-alikes taken seconds apart differ by ~6-16 pHash bits; unrelated
+# shots a minute or more apart start at ~24 (measured on a real 11-day card, 2026-11-11).
+# The 5-bit near-duplicate cut alone never joined them, so a loose match needs both.
+BURST_HAMMING_THRESHOLD = 16
+BURST_WINDOW_S = 60.0
 SEQUENCE_GAP_S = 60.0
 SEQUENCE_CADENCE_SLACK = 0.1  # of the median gap, at least 1 s
 SEQUENCE_STEADY_SHARE = 0.8
@@ -322,11 +327,26 @@ def detect_panorama_runs(records) -> list[tuple[Path, ...]]:
     return runs
 
 
-def _components(hashes: dict[str, int], threshold: int) -> list[list[str]]:
-    """Connected look-alike sets (2+) from ``cull.group_near_duplicates``."""
-    from .cull import group_near_duplicates
+def _components(hashes: dict[str, int], when: dict[str, datetime]) -> list[list[str]]:
+    """Connected look-alike sets (2+): a near-duplicate pHash at any time apart, or a
+    looser ``BURST_HAMMING_THRESHOLD`` match taken within ``BURST_WINDOW_S`` of each other."""
+    from .cull import NEAR_DUPLICATE_HAMMING_THRESHOLD, hamming_distance
 
-    near = group_near_duplicates(hashes)
+    keys = list(hashes)
+    near: dict[str, list[str]] = {k: [] for k in keys}
+    for i, a in enumerate(keys):
+        for b in keys[i + 1 :]:
+            bits = hamming_distance(hashes[a], hashes[b])
+            close = (
+                a in when
+                and b in when
+                and abs((when[a] - when[b]).total_seconds()) <= BURST_WINDOW_S
+            )
+            if bits <= NEAR_DUPLICATE_HAMMING_THRESHOLD or (
+                close and bits <= BURST_HAMMING_THRESHOLD
+            ):
+                near[a].append(b)
+                near[b].append(a)
     seen, out = set(), []
     for key in hashes:
         if key in seen or not near[key]:
@@ -419,15 +439,18 @@ def tag_groups(rows, records, ops: GroupOps, hashes) -> None:
     free = [records[p] for p in (Path(s) for s in by_src if s not in claimed) if p in records]
     for run in detect_panorama_runs(free):
         claim("pano", [str(p) for p in run])
-    from .cull import NEAR_DUPLICATE_HAMMING_THRESHOLD
-
+    when = {
+        s: t
+        for s in by_src
+        if Path(s) in records and (t := capture_datetime(records[Path(s)])) is not None
+    }
     for category in dict.fromkeys(r["category"] for r in rows):
         pool = {
             s: hashes[s]
             for s, r in by_src.items()
             if r["category"] == category and s not in claimed and s in hashes
         }
-        for comp in _components(pool, NEAR_DUPLICATE_HAMMING_THRESHOLD):
+        for comp in _components(pool, when):
             claim("burst", sorted(comp))
     for gid, best in best_by_group(rows).items():
         for row in rows:
