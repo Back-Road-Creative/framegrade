@@ -111,3 +111,30 @@ def test_without_resume_run_sort_gets_none(tmp_path, monkeypatch):
     monkeypatch.setattr(ps, "run_sort", run_sort)
     assert _run(f"photos sort {tmp_path / 'card'}") == 0
     assert run_sort.call_args.kwargs["resume"] is None
+
+
+def test_resort_flag_parses_reaches_run_sort_and_conflicts_with_resume(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMS_NIGHT_ADMISSION_LOCK", str(tmp_path / "admission.lock"))
+    _use_photos_config(monkeypatch, sort_root=str(tmp_path / "out"))
+    monkeypatch.setattr(ps.os, "nice", Mock())
+    run_sort = Mock()
+    monkeypatch.setattr(ps, "run_sort", run_sort)
+    run_dir = tmp_path / "out" / "2026-11-09-card"
+    assert _run(f"photos sort {tmp_path / 'card'} --resort {run_dir}") == 0
+    assert run_sort.call_args.kwargs["resort"] == run_dir
+    assert run_sort.call_args.kwargs["resume"] is None
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(
+            f"photos sort /tmp/x --resort {run_dir} --resume {run_dir}".split()
+        )
+
+
+def test_reprocess_help_says_re_develop():
+    sort_p = next(
+        a
+        for action in _build_parser()._subparsers._group_actions
+        for a in [action.choices.get("photos")]
+        if a
+    )
+    text = sort_p._subparsers._group_actions[0].choices["sort"].format_help()
+    assert "Re-develop" in text and "--resort" in text
