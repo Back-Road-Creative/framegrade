@@ -632,7 +632,10 @@ def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
                     [run_dir / STACK_DIR / f"{g.id}.linear" for g in built], main, jpg
                 )
             except Exception as exc:  # a session result must never abort the run
-                result.skipped.append((f"group:{sid}", f"session combine failed: {exc}"))
+                chunks = ", ".join(g.id for g in built)
+                result.skipped.append(
+                    (f"group:{sid}-session", f"session combine failed ({chunks}): {exc}")
+                )
                 result.stats["failed"] += 1
                 for leftover in (main, jpg, main.with_suffix(".preview.jpg")):
                     leftover.unlink(missing_ok=True)
