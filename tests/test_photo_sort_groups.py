@@ -928,6 +928,48 @@ def test_session_of_three_chunks_shows_one_stack_and_keeps_the_chunks(tmp_path, 
     assert "stacks/night-1.jpg" not in page
 
 
+class Usable(Totals):
+    """Totals whose ``technical.usable`` part is 0 for the named frames, 1 otherwise."""
+
+    def __init__(self, starless):
+        super().__init__({})
+        self.starless = set(starless)
+
+    def __call__(self, rgb, category, *, aesthetic, path, exposure_s, focal_mm):
+        u = 0.0 if path.stem in self.starless else 1.0
+        return ps.ShotScore(0.5, 0.5, aesthetic, 0.5, {"usable": u}, {})
+
+
+def starless_night(tmp_path, root, starless):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], chunk=10)
+    hooks = make_hooks(
+        ops, Usable(starless), records=night_records(seq), readings=night_readings(seq)
+    )
+    return ops, run(src, root, hooks)
+
+
+def test_chunk_with_no_usable_frame_is_skipped_before_stacking(tmp_path, root):
+    ops, result = starless_night(tmp_path, root, [f"n{i:02d}" for i in range(10)])
+    assert [c[1] for c in ops.calls if c[0] == "stack"] == ["night-2.tif", "night-3.tif"]
+    assert ops.combined == ["night-2.linear", "night-3.linear"]
+    reasons = {r["path"]: r["reason"] for r in rows(result.run_dir / "skipped.csv")}
+    assert reasons["group:night-1"] == "bright sky: no stars measured in 10 frames"
+    assert "stacks/night-1-session.jpg" in (result.run_dir / "index.html").read_text()
+
+
+def test_chunk_with_one_usable_frame_still_stacks(tmp_path, root):
+    ops, result = starless_night(tmp_path, root, [f"n{i:02d}" for i in range(9)])
+    assert [c[1] for c in ops.calls if c[0] == "stack"] == [
+        "night-1.tif",
+        "night-2.tif",
+        "night-3.tif",
+    ]
+    assert not any(r["path"] == "group:night-1" for r in rows(result.run_dir / "skipped.csv"))
+
+
 def test_failed_session_combine_falls_back_to_the_best_chunk(tmp_path, root):
     names = [f"n{i:02d}" for i in range(30)]
     src = card(tmp_path, names)
