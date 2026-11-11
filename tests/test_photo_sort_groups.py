@@ -221,7 +221,7 @@ def test_night_session_tags_best_rank_and_builds_stack(tmp_path, root):
     assert {r["group_id"] for r in ranked} == {"night-1"}
     assert {r["group_best_rank"] for r in ranked} == {"1"}
     page = (result.run_dir / "index.html").read_text()
-    assert "same scene as #001" in page
+    assert "same scene as" not in page
     assert (result.run_dir / "stacks" / "night-1.jpg").is_file()
     assert (result.run_dir / "stacks" / "night-1.tif").is_file()
     assert all(Path(r["output"]).is_file() for r in ranked)
@@ -233,7 +233,7 @@ def test_index_shows_stacks_first_in_night_sky(tmp_path, root):
     seq = stems(src, "abcde")
     result = run(src, root, make_hooks(Ops(sequences=[seq]), readings=night_readings(seq)))
     page = (result.run_dir / "index.html").read_text()
-    section = page.split("<h2>night-sky")[1]
+    section = page.split("<h3>Night sky")[1]
     assert section.index("stacks/night-1.jpg") < section.index("001-")
 
 
@@ -246,7 +246,22 @@ def test_bracket_fused_into_hdr_and_members_stay(tmp_path, root):
     ranked = rows(result.run_dir / "ranked.csv")
     assert len(ranked) == 3 and {r["category"] for r in ranked} == {"other"}
     assert {r["group_id"] for r in ranked} == {"bracket-1"}
-    assert "<h2>hdr (1)" in (result.run_dir / "index.html").read_text()
+    page = (result.run_dir / "index.html").read_text()
+    assert "<h3>Unsorted (3 shots)" in page and "<h3>HDR" not in page
+    assert page.count('class="card"') == 1 and "same scene as" not in page
+
+
+def test_bracket_frames_and_fuse_share_the_hdr_folder(tmp_path, root):
+    src = card(tmp_path, list("abc"))
+    seq = stems(src, "abc")
+    readings = {p: SubjectReading(SubjectCategory.EXPOSURE_BRACKET, 0.9) for p in seq}
+    result = run(src, root, make_hooks(Ops(brackets=[seq]), readings=readings))
+    names = sorted(p.name for p in (result.run_dir / "hdr").iterdir())
+    assert len(names) == 4 and "bracket-1-a.jpg" in names
+    assert sum(n[:3].isdigit() for n in names) == 3
+    assert not (result.run_dir / "hdr-source").exists()
+    page = (result.run_dir / "index.html").read_text()
+    assert page.count("HDR ·") == 1 and page.count('class="card"') == 1
 
 
 def pano_records(src, names, seconds, **kw):
@@ -281,7 +296,9 @@ def test_pano_built_and_stitch_failure_goes_to_skipped(tmp_path, root):
     ops = Ops()
     result = run(src, root, make_hooks(ops, records=recs))
     assert (result.run_dir / "pano" / "pano-1-a.jpg").is_file()
-    assert "<h2>pano (1)" in (result.run_dir / "index.html").read_text()
+    page = (result.run_dir / "index.html").read_text()
+    assert "<h2>pano" not in page and page.count('class="card"') == 1
+    assert page.index("pano/pano-1-a.jpg") < page.index("<details")
     root2 = tmp_path / "out2"
     bad = Ops(fail=["stitch"])
     result = run(src, root2, make_hooks(bad, records=recs))
@@ -290,6 +307,8 @@ def test_pano_built_and_stitch_failure_goes_to_skipped(tmp_path, root):
         ("group:pano-1", "pano failed: seam gate")
     ]
     assert not list((result.run_dir / "pano").glob("*.jpg"))
+    page = (result.run_dir / "index.html").read_text()
+    assert "burst of 3" in page and "same scene as" not in page
     assert len(rows(result.run_dir / "ranked.csv")) == 3
 
 
@@ -559,7 +578,7 @@ def test_lens_cap_darks_get_their_own_folder_and_stay_off_the_page(tmp_path, roo
     assert {by_stem[p.stem]["category"] for p in lights} == {sg.NIGHT_FOLDER}
     page = (result.run_dir / "index.html").read_text()
     assert f'src="{sg.DARKS_FOLDER}/' not in page and f'href="{sg.DARKS_FOLDER}/' not in page
-    assert "4 lens-cap darks kept for calibration, not ranked" in page
+    assert "4 calibration frames (lens cap on), used for the stacks, not shown" in page
     assert not any(sg.DARKS_FOLDER in line for line in ps._top_lines(ranked))
 
 
@@ -709,7 +728,7 @@ def test_an_intervalometer_run_is_one_sequence_with_a_timelapse(tmp_path, root):
     by_source = {Path(r["source"]): Path(r["output"]) for r in ranked}
     assert ops.lapse == [([by_source[p] for p in seq], [])]  # capture order
     page = (result.run_dir / "index.html").read_text()
-    assert "<h3>sequence-1</h3>" in page and "timelapse/sequence-1.mp4" in page
+    assert "<h4>Time-lapse ·" in page and "timelapse/sequence-1.mp4" in page
 
 
 @pytest.mark.parametrize(
