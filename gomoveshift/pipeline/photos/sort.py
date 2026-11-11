@@ -67,7 +67,7 @@ CATEGORY_FOLDERS = {
     SubjectCategory.WILDLIFE: "wildlife",
     SubjectCategory.PORTRAIT: "portrait",
     SubjectCategory.LONG_EXPOSURE: "long-exposure",
-    SubjectCategory.EXPOSURE_BRACKET: "hdr-source",
+    SubjectCategory.EXPOSURE_BRACKET: "hdr",
     SubjectCategory.UNKNOWN: "other",
 }
 RANKED_COLUMNS = (
@@ -307,13 +307,16 @@ def _capture_dt(row) -> Optional[datetime]:
         return None
 
 
-def _sequence_cards(ranked) -> list[dict]:
-    """Groups of >= ``SEQUENCE_CARD_MIN_FRAMES`` rows; contiguous night groups merge."""
+def _sequence_cards(ranked, outputs=()) -> list[dict]:
+    """Groups with a built output or >= ``SEQUENCE_CARD_MIN_FRAMES`` rows; night groups merge."""
     members: dict[str, list] = {}
     for row in ranked:
         if row.get("group_id"):
             members.setdefault(row["group_id"], []).append(row)
-    big = {g: rows for g, rows in members.items() if len(rows) >= SEQUENCE_CARD_MIN_FRAMES}
+    made = {o.group_id for o in outputs}
+    big = {
+        g: rows for g, rows in members.items() if g in made or len(rows) >= SEQUENCE_CARD_MIN_FRAMES
+    }
 
     def span(rows):
         times = [t for t in map(_capture_dt, rows) if t]
@@ -351,6 +354,18 @@ def _frame_item(row) -> str:
     return _thumb(f"{row['category']}/{name}", name, note)
 
 
+def _burst_html(best_row, rows) -> str:
+    """A small group with no output: its best frame, the rest folded behind it."""
+    n = len(rows)
+    item = _frame_item(best_row).replace("</a>", f"<small>burst of {n}</small></a>")
+    others = sorted((r for r in rows if r is not best_row), key=lambda r: int(r["rank"]))
+    return (
+        f"{item}<details><summary>show {n} frames</summary><div>\n"
+        + "\n".join(_frame_item(r) for r in others)
+        + "</div></details>"
+    )
+
+
 def _card_html(run_dir: Path, card: dict, outputs) -> str:
     ids = set(card["ids"])
     made = sorted((o for o in outputs if o.group_id in ids), key=lambda o: o.kind != "stacks")
@@ -374,10 +389,14 @@ def _card_html(run_dir: Path, card: dict, outputs) -> str:
 
 def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
     best = sort_groups.best_by_group(ranked)
-    cards = _sequence_cards(ranked)
+    cards = _sequence_cards(ranked, outputs)
     carded = {id(r) for c in cards for r in c["rows"]}
     carded_ids = {g for c in cards for g in c["ids"]}
     loose = [o for o in outputs if o.group_id not in carded_ids]
+    bursts: dict[str, list] = {}
+    for row in ranked:
+        if row.get("group_id") and id(row) not in carded:
+            bursts.setdefault(row["group_id"], []).append(row)
     sections = []
     folders = list(dict.fromkeys(row["category"] for row in ranked))
     if any(o.kind == "stacks" for o in loose) and sort_groups.NIGHT_FOLDER not in folders:
@@ -401,14 +420,14 @@ def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
         singles = sorted((r for r in shots if id(r) not in carded), key=lambda r: int(r["rank"]))
         items = []
         for row in singles:
-            item = _frame_item(row)
-            gid, top = row.get("group_id"), best.get(row.get("group_id"))
-            if gid and top is not row and top is not None:
-                item = item.replace(
-                    "</a>",
-                    f"<small>same scene as #{int(top['rank']):03d} ({html.escape(gid)})</small></a>",
-                )
-            items.append(item)
+            gid = row.get("group_id")
+            top = best.get(gid) if gid else None
+            if top is not None and top is not row:
+                continue  # folded under its group's best frame below
+            if top is not None and len(bursts[gid]) > 1:
+                items.append(_burst_html(row, bursts[gid]))
+            else:
+                items.append(_frame_item(row))
         rest = items[SECTION_TOP_N:]
         body = "\n".join(head) + "<div>" + "\n".join(items[:SECTION_TOP_N]) + "</div>"
         if rest:
@@ -418,14 +437,6 @@ def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
                 + "</div></details>"
             )
         sections.append(f"<section><h2>{html.escape(folder)} ({len(shots)})</h2>\n{body}</section>")
-    for kind in ("hdr", "pano"):
-        made = [o for o in loose if o.kind == kind]
-        if made:
-            sections.append(
-                f"<section><h2>{kind} ({len(made)})</h2>\n<div>"
-                + "\n".join(_output_html(run_dir, o) for o in made)
-                + "</div></section>"
-            )
     seqs = f"{len(cards)} sequence{'' if len(cards) == 1 else 's'}"
     summary = " &middot; ".join([*counts, seqs])
     return (

@@ -66,7 +66,37 @@ def test_small_burst_stays_in_grid(tmp_path):
     html = page(tmp_path, ranked)
     assert 'class="card"' not in html
     assert "other/001-f.jpg" in outside_details(html)
-    assert "same scene as #001 (burst-1)" in html
+    assert "same scene as" not in html
+    assert "burst of 2" in html
+
+
+def test_bracket_with_hdr_output_is_one_card_no_second_heading(tmp_path):
+    ranked = frames("bracket-1", 1, 3, T0, "hdr")
+    html = page(tmp_path, ranked, [Output("hdr", "bracket-1", "hdr/bracket-1-f.jpg")])
+    assert html.count('class="card"') == 1
+    assert html.count("<h2>hdr") == 1 and html.count("<section") == 1
+    assert "hdr/bracket-1-f.jpg" in outside_details(html)
+    assert "hdr/001-f.jpg" not in outside_details(html) and "hdr/001-f.jpg" in html
+    assert html.index("hdr/bracket-1-f.jpg") < html.index("<details")
+    assert "same scene as" not in html
+
+
+def test_pano_with_output_is_one_card_in_its_frames_category(tmp_path):
+    ranked = frames("pano-1", 1, 3, T0, "wildlife")
+    html = page(tmp_path, ranked, [Output("pano", "pano-1", "pano/pano-1-f.jpg")])
+    assert html.count('class="card"') == 1
+    assert "<h2>pano" not in html and html.count("<h2>wildlife (3)</h2>") == 1
+    assert html.index("<h2>wildlife") < html.index("pano/pano-1-f.jpg") < html.index("<details")
+
+
+def test_small_group_without_output_shows_best_frame_as_burst(tmp_path):
+    ranked = frames("bracket-1", 1, 3, T0, "hdr")
+    html = page(tmp_path, ranked)
+    shown = outside_details(html)
+    assert "same scene as" not in html and "burst of 3" in shown
+    assert "hdr/001-f.jpg" in shown
+    assert "hdr/002-f.jpg" not in shown and "hdr/003-f.jpg" not in shown
+    assert "hdr/002-f.jpg" in html and 'class="card"' not in html
 
 
 def test_big_burst_of_any_kind_is_a_card_in_its_category(tmp_path):

@@ -142,9 +142,9 @@ def test_every_unique_photo_in_one_category_and_one_row(folder, root):
     run_dir = result.run_dir
     assert (run_dir / "night-sky" / "001-a.jpg").is_file()
     assert (run_dir / "close-up" / "001-b.jpg").is_file()
-    assert (run_dir / "hdr-source" / "001-c.jpg").is_file()
+    assert (run_dir / "hdr" / "001-c.jpg").is_file()
     ranked = rows(run_dir / "ranked.csv")
-    assert sorted(r["category"] for r in ranked) == ["close-up", "hdr-source", "night-sky"]
+    assert sorted(r["category"] for r in ranked) == ["close-up", "hdr", "night-sky"]
     close = next(r for r in ranked if r["category"] == "close-up")
     assert close["rank"] == "1" and close["evidence"] == "near"
     assert close["source"] == str(folder / "b.jpg") and close["output"].endswith("001-b.jpg")
@@ -154,7 +154,7 @@ def test_every_unique_photo_in_one_category_and_one_row(folder, root):
     assert by_stem["c"].style == "matte_shoulder"
     assert by_stem["b"].style is None
     meta = json.loads((run_dir / "run.json").read_text())
-    assert meta["counts"] == {"night-sky": 1, "close-up": 1, "hdr-source": 1}
+    assert meta["counts"] == {"night-sky": 1, "close-up": 1, "hdr": 1}
     assert meta["framegrade_version"] and meta["source"] == str(folder)
 
 
