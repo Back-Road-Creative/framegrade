@@ -5,6 +5,29 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.74] - 2026-11-10
+
+### Added
+
+- Add an unwired Facebook Page-photo byte client with explicit publication intent,
+  immutable JPEG hash binding and exact Photo/story/Page readback. Unknown writes
+  are reported without retrying; readback failures retain known IDs. Public
+  requests are tested offline only; production approval and durable queue wiring
+  remain separate prerequisites.
+
+### Fixed
+
+- Checkpoint Facebook Reels finish before sending it, require literal confirmed
+  success, and keep ambiguous results for read-only status reconciliation of the
+  retained video ID. Queue recovery preserves unknown outcomes with backoff beyond
+  normal retry limits instead of falsely declaring publication or permanent failure.
+- Bind new uploads to their original Facebook Page before sending them. Legacy
+  unknown accounts and changed credentials remain held without rewriting provenance.
+- Facebook queued publishing now refuses unsupported drafts and incompatible
+  state/time requests before acquiring an upload lease or contacting Meta.
+  Future slots within the minimum scheduling lead wait until due instead of
+  publishing early; at/after-slot drains keep their existing behavior.
+
 ## [0.3.73] - 2026-11-10
 
 ### Fixed
@@ -886,7 +909,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...HEAD
+[0.3.74]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...v0.3.74
 [0.3.73]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...v0.3.73
 [0.3.72]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.71...v0.3.72
 [0.3.71]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.70...v0.3.71
