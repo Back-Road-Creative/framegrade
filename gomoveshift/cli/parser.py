@@ -2525,17 +2525,26 @@ def _add_photos_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     sort_p.add_argument("--index-only", action="store_true", help="Record shots in the ledger only")
     sort_p.add_argument(
-        "--reprocess", action="store_true", help="Develop shots already in the ledger"
+        "--reprocess",
+        action="store_true",
+        help="Re-develop shots already in the ledger (to re-sort a finished run use --resort)",
     )
     sort_p.add_argument(
         "--workers", type=int, default=2, help="Develop processes, 1..4 (default 2)"
     )
     sort_p.add_argument("--no-stacks", action="store_true", help="Skip the night-sky stacks")
-    sort_p.add_argument(
+    sort_mode = sort_p.add_mutually_exclusive_group()
+    sort_mode.add_argument(
         "--resume",
         metavar="RUN_DIR",
         help="Finish the unfinished stacks, HDR fuses and panoramas of an earlier run "
         "(no re-develop, no re-score)",
+    )
+    sort_mode.add_argument(
+        "--resort",
+        metavar="RUN_DIR",
+        help="Re-classify an earlier run and move its JPEGs to their new folders, reusing "
+        "finished group outputs (no re-develop, no re-score)",
     )
     photos_sub.add_parser(
         "fetch-models",

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -130,7 +131,16 @@ def _prepare(paths, *, decode_workers, output_dir):
 def _stack(prepared, out_path):
     from .astro_orchestrator import stack_run
 
-    return stack_run(prepared, out_path)
+    # The chunk's linear artifact (beside its master) is what the session combine reads.
+    return stack_run(prepared, out_path, linear_artifact_path=Path(out_path).with_suffix(".linear"))
+
+
+def _combine_session(linears, out_tif, out_jpg) -> None:
+    """The deep combine ``photos astro`` runs over chunk artifacts, plus its browser JPEG."""
+    from .night_products import _render_deep, render_master_preview
+
+    _render_deep([Path(p) for p in linears], Path(out_tif))
+    render_master_preview(Path(out_tif), Path(out_jpg))
 
 
 def _classify_night(paths):
@@ -246,6 +256,8 @@ class GroupOps:
     stitch: Callable = _stitch
     prepare: Callable = _prepare
     stack: Callable = _stack
+    #: ``(chunk_linear_dirs, out_tif, out_jpg)``: deep-combines one night session's chunks.
+    combine_session: Callable = _combine_session
     #: ``(paths) -> (lights, lens_cap_darks)`` for one night session.
     classify_night: Callable = _classify_night
     #: ``(lights, darks, out_mp4, out_jpg)``: writes the video and its poster.
@@ -534,6 +546,8 @@ def build_outputs(
         rel = (shown if shown.is_file() else main).relative_to(run_dir).as_posix()
         result.outputs.append(Output({"night": "stacks"}.get(group.kind, folder), group.id, rel))
         on_output(result.outputs)
+    if not no_stacks:
+        _combine_sessions(run_dir, groups, ops, ledger, result, on_output)
     darks = sorted(
         (stamp, str(r["source"]))
         for r in rows
@@ -541,6 +555,50 @@ def build_outputs(
     )
     _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output, darks, triaged)
     return result
+
+
+def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
+    """One page result per night session of two or more built chunks: the deep combine of
+    their linear artifacts, ``stacks/<first-id>-session.tif``. The chunk stacks stay on disk
+    as intermediates and leave the page; their ``.linear`` inputs are removed once the
+    session result is built. A failed combine keeps only the session's best chunk (highest
+    mean total) on the page, and keeps the inputs so a resume can retry."""
+    for session in night_sessions(groups):
+        shown = {o.group_id: o for o in result.outputs if o.kind == "stacks"}
+        built = [g for g in session if g.id in shown]
+        if len(built) < 2:
+            continue
+        sid = session[0].id
+        main = run_dir / STACK_DIR / f"{sid}-session.tif"
+        jpg = main.with_suffix(".jpg")
+        key = group_key("session", [m for g in built for m in g.members])
+        if main.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
+            result.stats["resumed"] += 1
+            keep = Output(
+                "stacks", sid, (jpg if jpg.is_file() else main).relative_to(run_dir).as_posix()
+            )
+        else:
+            try:
+                ops.combine_session(
+                    [run_dir / STACK_DIR / f"{g.id}.linear" for g in built], main, jpg
+                )
+            except Exception as exc:  # a session result must never abort the run
+                result.skipped.append((f"group:{sid}", f"session combine failed: {exc}"))
+                result.stats["failed"] += 1
+                for leftover in (main, jpg, main.with_suffix(".preview.jpg")):
+                    leftover.unlink(missing_ok=True)
+                keep = shown[max(built, key=lambda g: g.mean_total).id]
+            else:
+                ledger.put_score(key, STACK_MARKER, 1)
+                result.stats["built"] += 1
+                for g in built:  # spent combine inputs, ~0.7 GB each at 24 MP
+                    shutil.rmtree(run_dir / STACK_DIR / f"{g.id}.linear", ignore_errors=True)
+                keep = Output(
+                    "stacks", sid, (jpg if jpg.is_file() else main).relative_to(run_dir).as_posix()
+                )
+        drop = {id(shown[g.id]) for g in built}
+        result.outputs[:] = [o for o in result.outputs if id(o) not in drop] + [keep]
+        on_output(result.outputs)
 
 
 def _session_darks(darks, captured) -> list[Path]:

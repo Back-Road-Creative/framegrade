@@ -43,6 +43,7 @@ from .models import FORMAT_CAROUSEL, FORMAT_PHOTO, MediaFingerprint, ShortPublis
 from .photo_adapter import PhotoAuthBlockedError, PhotoCarouselAdapter, PhotoPermanentError
 from .queue import (
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
+    FACEBOOK_PHOTO_KIND,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
     STATUS_AWAITING_IG_RECONCILE,
     STATUS_AWAITING_MANUAL_PUBLISH,
@@ -263,6 +264,10 @@ def _dispatch_by_format(
     upload merely because that platform's video handler exists."""
 
     def handler(row: Dict[str, Any]) -> None:
+        if row.get("upload_kind") == FACEBOOK_PHOTO_KIND:
+            raise PermanentDeliveryError(
+                "Durable Page photo requires its explicit read-only reconciler"
+            )
         record = record_loader(row["project_name"], row["short_index"])
         if record.format in (FORMAT_PHOTO, FORMAT_CAROUSEL):
             if photo_handler is None:
@@ -280,6 +285,15 @@ def _dispatch_by_format(
             video_handler(row)
 
     return handler
+
+
+def make_facebook_page_photo_handler(delivery) -> Handler:
+    """Explicit integration seam only; no default factory constructs delivery.
+
+    The consumer authorizes every new byte snapshot through its trusted port.
+    Existing attempts bypass mutable record/media loaders inside the consumer.
+    """
+    return delivery.deliver
 
 
 @dataclass(frozen=True, slots=True)
