@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.76] - 2026-11-11
+
+### Fixed
+
+- Confirming an approved Page photo no longer opens or updates driving-short
+  tracking records. Its platform identity remains in the publication queue.
+
 ## [0.3.75] - 2026-11-11
 
 ### Added
@@ -924,7 +931,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...HEAD
+[0.3.76]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...v0.3.76
 [0.3.75]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...v0.3.75
 [0.3.74]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...v0.3.74
 [0.3.73]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.72...v0.3.73
