@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
@@ -559,8 +560,9 @@ def build_outputs(
 def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
     """One page result per night session of two or more built chunks: the deep combine of
     their linear artifacts, ``stacks/<first-id>-session.tif``. The chunk stacks stay on disk
-    as intermediates and leave the page. A failed combine keeps only the session's best
-    chunk (highest mean total) on the page."""
+    as intermediates and leave the page; their ``.linear`` inputs are removed once the
+    session result is built. A failed combine keeps only the session's best chunk (highest
+    mean total) on the page, and keeps the inputs so a resume can retry."""
     for session in night_sessions(groups):
         shown = {o.group_id: o for o in result.outputs if o.kind == "stacks"}
         built = [g for g in session if g.id in shown]
@@ -589,6 +591,8 @@ def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
             else:
                 ledger.put_score(key, STACK_MARKER, 1)
                 result.stats["built"] += 1
+                for g in built:  # spent combine inputs, ~0.7 GB each at 24 MP
+                    shutil.rmtree(run_dir / STACK_DIR / f"{g.id}.linear", ignore_errors=True)
                 keep = Output(
                     "stacks", sid, (jpg if jpg.is_file() else main).relative_to(run_dir).as_posix()
                 )

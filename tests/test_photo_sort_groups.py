@@ -82,6 +82,7 @@ class Ops:
     def stack(self, prepared, out_path):
         self.calls.append(("stack", out_path.name))
         out_path.write_bytes(b"tif")
+        out_path.with_suffix(".linear").mkdir(exist_ok=True)  # the real stack_run writes one
         preview = out_path.with_suffix(".preview.jpg")
         preview.write_bytes(b"jpg")
         return SimpleNamespace(preview_path=preview)
@@ -918,8 +919,9 @@ def test_session_of_three_chunks_shows_one_stack_and_keeps_the_chunks(tmp_path, 
     assert [c[1] for c in ops.calls if c[0] == "combine_session"] == ["night-1-session.tif"]
     assert ops.combined == ["night-1.linear", "night-2.linear", "night-3.linear"]
     assert (stacks / "night-1-session.tif").is_file() and (stacks / "night-1-session.jpg").is_file()
-    for n in (1, 2, 3):  # intermediates stay on disk
+    for n in (1, 2, 3):  # intermediates stay on disk; their linear inputs are spent
         assert (stacks / f"night-{n}.tif").is_file()
+        assert not (stacks / f"night-{n}.linear").exists()
     page = (result.run_dir / "index.html").read_text()
     assert "stacks/night-1-session.jpg" in page
     assert "stacks/night-2.jpg" not in page and "stacks/night-3.jpg" not in page
@@ -939,6 +941,8 @@ def test_failed_session_combine_falls_back_to_the_best_chunk(tmp_path, root):
     assert "stacks/night-1.jpg" not in page and "stacks/night-3.jpg" not in page
     assert "session-1" not in page and "-session." not in page
     assert not (result.run_dir / "stacks" / "night-1-session.tif").exists()
+    for n in (1, 2, 3):  # kept so a resume can retry the combine
+        assert (result.run_dir / "stacks" / f"night-{n}.linear").is_dir()
     skipped = rows(result.run_dir / "skipped.csv")
     assert any("session combine failed: combine boom" in r["reason"] for r in skipped)
 
