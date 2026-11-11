@@ -41,7 +41,15 @@ from .develop import (
 )
 from .exif_gps import extract_exif_capture_metadata
 from .ingest import _dedupe_raw_pairs, discover
-from .subject import UNKNOWN_SUBJECT, CaptureOptics, SubjectCategory, recognise_photos
+from .subject import (
+    CONFIDENCE_WEAK,
+    SOURCE_OPERATOR,
+    UNKNOWN_SUBJECT,
+    CaptureOptics,
+    SubjectCategory,
+    SubjectReading,
+    recognise_photos,
+)
 
 #: Rough seconds to develop one photo on one worker; only feeds the dry-run estimate.
 DEVELOP_S_PER_PHOTO_ESTIMATE = 20.0
@@ -790,6 +798,39 @@ def _score_columns(rows, scores):
 _NO_SCORE = ShotScore(0.0, 0.0, None, 0.0, {}, {})
 
 
+def _wildlife_needs_a_subject(readings, hooks) -> tuple[dict, Optional[str]]:
+    """``(readings, warning)``: an inferred wildlife reading whose pixels carry too little
+    fine detail (``sort_groups.WILDLIFE_DETAIL_FLOOR``) is filed landscape — a long lens on a
+    cloud or a hazy ridge is not wildlife. An operator's correction is never second-guessed;
+    a failed read keeps the frame in wildlife and warns."""
+    wild = [
+        p
+        for p, r in readings.items()
+        if r.category is SubjectCategory.WILDLIFE and r.source != SOURCE_OPERATOR
+    ]
+    if hooks.groups is None or not wild:
+        return readings, None
+    out, failed = dict(readings), []
+    for path in wild:
+        try:
+            share = hooks.groups.subject_detail(path)
+        except Exception as exc:  # the check is a nicety: the EXIF reading stands
+            failed.append(f"{Path(path).name} ({exc})")
+            continue
+        if share < sort_groups.WILDLIFE_DETAIL_FLOOR:
+            why = f"pixels: {share:.0%} of the frame carries fine detail — no subject"
+            out[path] = SubjectReading(
+                SubjectCategory.LANDSCAPE,
+                CONFIDENCE_WEAK,
+                readings[path].source,
+                (*readings[path].evidence, why),
+            )
+    note = None
+    if failed:
+        note = f"wildlife subject check failed for {', '.join(failed)}; they stay in wildlife"
+    return out, note
+
+
 def _lens_cap_darks(readings, hooks) -> tuple[set, set, Optional[str]]:
     """``(darks, checked lights, warning)``: the night frames ``classify_night`` calls
     lens-cap darks, the lights it cleared (sources, so the group stage need not decode them
@@ -909,12 +950,13 @@ def run_sort(
             run_id = run_id or run_dir.name
             run_dir.mkdir(parents=True)
 
-        readings = {}
+        readings, wild_note = {}, None
         if not options.index_only:
             readings = hooks.recognise(
                 list(result.unique),
                 optics={p: _optics(records[p]) for p in result.unique if p in records},
             )
+            readings, wild_note = _wildlife_needs_a_subject(readings, hooks)
             mark = lap("classify", mark)
         darks, triaged, dark_note = set(), set(), None
         if not options.no_stacks:  # --no-stacks decodes no night frame
@@ -938,8 +980,9 @@ def run_sort(
             warnings.append(message)
             say(f"warning: {message}")
 
-        if dark_note:
-            warn(dark_note)
+        for note in (wild_note, dark_note):
+            if note:
+                warn(note)
 
         meta = {
             "source": str(folder),
@@ -1143,12 +1186,14 @@ def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
     readings = hooks.recognise(
         sources, optics={p: _optics(records[p]) for p in sources if p in records}
     )
+    readings, wild_note = _wildlife_needs_a_subject(readings, hooks)
     darks, triaged, dark_note = set(), set(), None
     if not options.no_stacks:
         darks, triaged, dark_note = _resort_darks(run_dir, old_rows, readings, hooks)
-    warnings = list(warnings) + ([dark_note] if dark_note else [])
-    if dark_note:
-        say(f"warning: {dark_note}")
+    notes = [n for n in (wild_note, dark_note) if n]
+    warnings = list(warnings) + notes
+    for note in notes:
+        say(f"warning: {note}")
     by_folder: dict[str, list] = {}
     for row in old_rows:
         path = Path(row["source"])

@@ -43,9 +43,12 @@ class Totals:
 class Ops:
     """Fake GroupOps pieces that count calls and write tiny outputs."""
 
-    def __init__(self, sequences=(), brackets=(), fail=(), hashes=None, chunk=None, darks=()):
+    def __init__(
+        self, sequences=(), brackets=(), fail=(), hashes=None, chunk=None, darks=(), detail=None
+    ):
         self.sequences, self.brackets, self.fail = list(sequences), list(brackets), set(fail)
         self.chunk, self.darks = chunk, {Path(d) for d in darks}
+        self.detail = {Path(k): v for k, v in (detail or {}).items()}
         self.lapse, self.trails = [], []
         self.hashes = hashes or {}
         self.calls = []
@@ -105,6 +108,12 @@ class Ops:
             [p for p in paths if Path(p) in self.darks],
         )
 
+    def subject_detail(self, path):
+        self.calls.append(("subject_detail", Path(path).stem))
+        if "subject_detail" in self.fail:
+            raise RuntimeError("preview boom")
+        return self.detail.get(Path(path), 0.9)
+
     def night_timelapse(self, lights, darks, out_mp4, out_jpg):
         self.calls.append(("night_timelapse", out_mp4.name))
         self.lapse.append((list(lights), list(darks)))
@@ -139,6 +148,7 @@ class Ops:
             stack=self.stack,
             combine_session=self.combine_session,
             classify_night=self.classify_night,
+            subject_detail=self.subject_detail,
             night_timelapse=self.night_timelapse,
             still_timelapse=self.still_timelapse,
             star_trails=self.star_trails,
@@ -1129,3 +1139,74 @@ def test_resume_reuses_a_built_session_result(tmp_path, root):
     run(tmp_path / "card", root, hooks, resume=first.run_dir)
     assert [c for c in again.calls if c[0] in ("stack", "combine_session")] == []
     assert "stacks/night-1-session.jpg" in (first.run_dir / "index.html").read_text()
+
+
+def wildlife_readings(paths, source=None):
+    extra = {"source": source} if source else {}
+    return {
+        p: SubjectReading(SubjectCategory.WILDLIFE, 0.65, evidence=("exif: 250 mm",), **extra)
+        for p in paths
+    }
+
+
+def test_a_wildlife_reading_with_no_subject_in_its_pixels_is_filed_landscape(tmp_path, root):
+    src = card(tmp_path, ["cloud", "deer", "lake"])
+    cloud, deer, lake = stems(src, ["cloud", "deer", "lake"])
+    ops = Ops(detail={cloud: 0.08, deer: 0.95, lake: 0.01})
+    readings = {
+        **wildlife_readings([cloud, deer]),
+        lake: SubjectReading(SubjectCategory.LANDSCAPE, 0.45),
+    }
+    result = run(src, root, make_hooks(ops, readings=readings))
+    by_stem = {Path(r["source"]).stem: r for r in rows(result.run_dir / "ranked.csv")}
+    assert by_stem["cloud"]["category"] == "landscape"
+    assert by_stem["cloud"]["evidence"] == (
+        "exif: 250 mm; pixels: 8% of the frame carries fine detail — no subject"
+    )
+    assert by_stem["deer"]["category"] == "wildlife"
+    assert sorted(c[1] for c in lapse_calls(ops, "subject_detail")) == ["cloud", "deer"]
+
+
+def test_an_operator_wildlife_correction_is_never_overruled_by_pixels(tmp_path, root):
+    src = card(tmp_path, ["bird"])
+    (bird,) = stems(src, ["bird"])
+    ops = Ops(detail={bird: 0.02})
+    readings = {bird: SubjectReading(SubjectCategory.WILDLIFE, 1.0, source="operator")}
+    result = run(src, root, make_hooks(ops, readings=readings))
+    assert [r["category"] for r in rows(result.run_dir / "ranked.csv")] == ["wildlife"]
+    assert lapse_calls(ops, "subject_detail") == []
+
+
+def test_a_failed_subject_check_keeps_wildlife_and_warns(tmp_path, root):
+    src = card(tmp_path, ["deer"])
+    (deer,) = stems(src, ["deer"])
+    ops = Ops(fail=["subject_detail"])
+    warnings = []
+    hooks = make_hooks(ops, readings=wildlife_readings([deer]))
+    result = ps.run_sort(src, root, ps.SortOptions(), hooks, today=TODAY, say=warnings.append)
+    assert [r["category"] for r in rows(result.run_dir / "ranked.csv")] == ["wildlife"]
+    assert any("wildlife subject check failed" in w for w in warnings)
+
+
+def test_resort_refiles_a_wildlife_reading_with_no_subject(tmp_path, root):
+    src = card(tmp_path, ["cloud", "deer"])
+    cloud, deer = stems(src, ["cloud", "deer"])
+    readings = wildlife_readings([cloud, deer])
+    result = run(src, root, make_hooks(Ops(), readings=readings))
+    assert {r["category"] for r in rows(result.run_dir / "ranked.csv")} == {"wildlife"}
+    ops = Ops(detail={cloud: 0.08})
+    run(src, root, make_hooks(ops, readings=readings), resort=result.run_dir)
+    by_stem = {Path(r["source"]).stem: r for r in rows(result.run_dir / "ranked.csv")}
+    assert by_stem["cloud"]["category"] == "landscape"
+    assert by_stem["deer"]["category"] == "wildlife"
+
+
+def test_default_subject_detail_reads_a_flat_sky_low_and_a_textured_frame_high(tmp_path):
+    sky = tmp_path / "sky.jpg"
+    ramp = np.linspace(90, 200, 960, dtype=np.float32)[:, None].repeat(1440, axis=1)
+    Image.fromarray(np.dstack([ramp] * 3).astype(np.uint8), "RGB").save(sky, quality=95)
+    fur = tmp_path / "fur.jpg"
+    rng = np.random.default_rng(3)
+    Image.fromarray(rng.integers(0, 255, (960, 1440, 3), dtype=np.uint8), "RGB").save(fur)
+    assert sg._subject_detail(sky) < sg.WILDLIFE_DETAIL_FLOOR
+    assert sg._subject_detail(fur) > sg.WILDLIFE_DETAIL_FLOOR

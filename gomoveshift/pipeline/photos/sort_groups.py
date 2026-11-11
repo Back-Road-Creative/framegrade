@@ -69,6 +69,16 @@ BURST_WINDOW_S = 60.0
 SEQUENCE_GAP_S = 60.0
 SEQUENCE_CADENCE_SLACK = 0.1  # of the median gap, at least 1 s
 SEQUENCE_STEADY_SHARE = 0.8
+#: Wildlife needs a subject in its pixels, not just a long lens: the share of
+#: ``DETAIL_BLOCK_PX`` blocks (frame at ``DETAIL_LONG_EDGE`` px) whose Laplacian variance
+#: exceeds ``DETAIL_VARIANCE_MIN``. Measured on the camera's embedded previews of JP's
+#: 2026-11-09 card: deer and turkeys 0.91-1.00, a 250 mm cloud 0.08, a 210 mm haze 0.14.
+#: Below the floor the frame is filed landscape. Known limit: a lone bird against open sky
+#: fills too little of the frame and reads landscape too.
+WILDLIFE_DETAIL_FLOOR = 0.5
+DETAIL_LONG_EDGE = 1024
+DETAIL_BLOCK_PX = 32
+DETAIL_VARIANCE_MIN = 50.0
 _TIME_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
 
 
@@ -165,6 +175,44 @@ def _classify_night(paths):
         metric = measure_frame(path, _luma(decoded.rgb), detect_meteors=False)
         (darks if metric.exposure_class == "cap_on" else lights).append(path)
     return lights, darks
+
+
+def _subject_detail(path) -> float:
+    """Share (0..1) of the frame carrying fine detail (see ``WILDLIFE_DETAIL_FLOOR``). A raw
+    is read through its embedded JPEG preview, so nothing is developed; raises when there
+    is nothing to read."""
+    import io
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    from .dedupe import RAW_EXTENSIONS
+
+    path = Path(path)
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        import rawpy
+
+        with rawpy.imread(str(path)) as raw:
+            thumb = raw.extract_thumb()
+        if thumb.format != rawpy.ThumbFormat.JPEG:
+            raise ValueError(f"{path}: no embedded JPEG preview")
+        source = io.BytesIO(thumb.data)
+    else:
+        source = path
+    with Image.open(source) as img:
+        img.draft("L", (DETAIL_LONG_EDGE, DETAIL_LONG_EDGE))
+        gray = np.asarray(img.convert("L"))
+    scale = DETAIL_LONG_EDGE / max(gray.shape)
+    if scale < 1:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    lap = cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F)
+    b = DETAIL_BLOCK_PX
+    h, w = lap.shape[0] // b * b, lap.shape[1] // b * b
+    if not h or not w:
+        raise ValueError(f"{path}: frame smaller than one {b}-px block")
+    blocks = lap[:h, :w].reshape(h // b, b, w // b, b).var(axis=(1, 3))
+    return float(np.mean(blocks > DETAIL_VARIANCE_MIN))
 
 
 def _poster(video, poster, frames, fps) -> None:
@@ -267,6 +315,8 @@ class GroupOps:
     combine_session: Callable = _combine_session
     #: ``(paths) -> (lights, lens_cap_darks)`` for one night session.
     classify_night: Callable = _classify_night
+    #: ``(path) -> 0..1`` share of the frame carrying fine detail; wildlife needs a subject.
+    subject_detail: Callable = _subject_detail
     #: ``(lights, darks, out_mp4, out_jpg)``: writes the video and its poster.
     night_timelapse: Callable = _night_timelapse
     #: ``(developed_jpegs_in_capture_order, out_mp4, out_jpg)``: writes the video and poster.
