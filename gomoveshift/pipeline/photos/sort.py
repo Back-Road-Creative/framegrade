@@ -270,11 +270,92 @@ SECTION_TOP_N = 6  # single shots shown per section; the rest sit behind a <deta
 _PAGE_STYLE = (
     "body{background:#111;color:#ddd;font-family:sans-serif;margin:1rem}"
     "a{color:#9cf;text-decoration:none}small,span{display:block;font-size:.75rem}"
-    "section>div,details>div{display:grid;"
+    ".grid,details>div{display:grid;"
     "grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.5rem}"
     ".card{background:#1b1b1b;border:1px solid #333;padding:.5rem;margin:.5rem 0}"
+    "nav.days a{display:inline-block;margin:0 .75rem .25rem 0}"
+    "h2{border-top:1px solid #333;padding-top:.75rem}.calib{color:#999;font-size:.8rem}"
     "img,video{max-width:100%;height:auto}summary{cursor:pointer;margin:.5rem 0}"
 )
+#: Category order inside a day; anything else follows alphabetically.
+CATEGORY_ORDER = (
+    "night-sky",
+    "time-lapse",
+    "landscape",
+    "wildlife",
+    "close-up",
+    "long-exposure",
+    "hdr",
+    "pano",
+    "other",
+)
+_DISPLAY_NAMES = {
+    "hdr": "HDR",
+    "other": "Unsorted",
+    "pano": "Panorama",
+    "close-up": "Close-up",
+    "time-lapse": "Time-lapse",
+}
+_KIND_LABELS = {
+    "stacks": "Stack",
+    "trails": "Star trail",
+    "timelapse": "Time-lapse",
+    "hdr": "HDR",
+    "pano": "Panorama",
+}
+_KIND_CATEGORY = {"stacks": "night-sky", "trails": "night-sky", "timelapse": "time-lapse"}
+
+
+def _category_key(category: str) -> str:
+    return "time-lapse" if category == "timelapse" else category
+
+
+def _display_name(category: str) -> str:
+    key = _category_key(category)
+    return _DISPLAY_NAMES.get(key) or key.replace("-", " ").capitalize()
+
+
+def _category_sort(category: str):
+    key = _category_key(category)
+    if key in CATEGORY_ORDER:
+        return (0, CATEGORY_ORDER.index(key), "")
+    return (1, 0, key)
+
+
+def _md(t: datetime) -> str:
+    return f"{t:%b} {t.day}"
+
+
+def _clock(t: datetime) -> tuple[str, str]:
+    return f"{t.hour % 12 or 12}:{t:%M}", "AM" if t.hour < 12 else "PM"
+
+
+def _time_range(start: datetime, end: datetime) -> str:
+    (sa, ma), (sb, mb) = _clock(start), _clock(end)
+    if start.date() != end.date():
+        return f"{_md(start)} {sa} {ma} – {_md(end)} {sb} {mb}"
+    if (sa, ma) == (sb, mb):
+        return f"{sa} {ma}"
+    return f"{sa}–{sb} {mb}" if ma == mb else f"{sa} {ma}–{sb} {mb}"
+
+
+def _day_heading(day: date) -> str:
+    return f"{day:%a} {day:%b} {day.day} {day.year}"
+
+
+def _date_range(times) -> str:
+    if not times:
+        return ""
+    lo, hi = min(times), max(times)
+    if lo.date() == hi.date():
+        return f"{_md(lo)} {lo.year}"
+    if lo.year == hi.year:
+        return f"{_md(lo)} – {_md(hi)} {hi.year}"
+    return f"{_md(lo)} {lo.year} – {_md(hi)} {hi.year}"
+
+
+def _plural(n: int, one: str, many: str = "") -> str:
+    return f"{n} {one if n == 1 else many or one + 's'}"
 
 
 def _thumb(rel: str, label: str, note: str = "") -> str:
@@ -285,10 +366,11 @@ def _thumb(rel: str, label: str, note: str = "") -> str:
     )
 
 
-def _output_html(run_dir: Path, o) -> str:
+def _output_html(run_dir: Path, o, label: str = "") -> str:
     """One output: a video player for an ``.mp4``, else a thumbnail."""
+    label = label or _KIND_LABELS.get(o.kind, o.kind)
     if not o.rel.endswith(".mp4"):
-        return _thumb(o.rel, o.group_id)
+        return _thumb(o.rel, label)
     href = html.escape(quote(o.rel))
     poster_rel = o.rel[:-4] + ".jpg"
     poster = (
@@ -296,7 +378,7 @@ def _output_html(run_dir: Path, o) -> str:
     )
     return (
         f'<figure><video controls preload="none" width="480"{poster} src="{href}"></video>'
-        f"<figcaption>{html.escape(o.group_id)}</figcaption></figure>"
+        f"<figcaption>{html.escape(label)}</figcaption></figure>"
     )
 
 
@@ -349,8 +431,15 @@ def _sequence_cards(ranked, outputs=()) -> list[dict]:
 
 def _frame_item(row) -> str:
     name = Path(row["output"]).name
-    total = row.get("quality_score")
-    note = f"<small>{float(total):.2f}</small>" if total not in (None, "") else ""
+    bits = []
+    when = _capture_dt(row)
+    if when:
+        bits.append(f"{_md(when)}, {' '.join(_clock(when))}")
+    try:
+        bits.append(f"quality {round(float(row['quality_score']) * 100)}")
+    except (TypeError, ValueError, KeyError):
+        pass
+    note = f"<small>{html.escape(' · '.join(bits))}</small>" if bits else ""
     return _thumb(f"{row['category']}/{name}", name, note)
 
 
@@ -366,88 +455,178 @@ def _burst_html(best_row, rows) -> str:
     )
 
 
-def _card_html(run_dir: Path, card: dict, outputs) -> str:
+def _span(rows):
+    times = sorted(t for t in map(_capture_dt, rows) if t)
+    return (times[0], times[-1]) if times else None
+
+
+def _output_labels(card: dict, made) -> list[tuple]:
+    """``(output, label)`` pairs: stacks first by start time, then the rest as built."""
+    members: dict[str, list] = {}
+    for row in card["rows"]:
+        members.setdefault(row.get("group_id"), []).append(row)
+    labelled = []
+    for o in made:
+        label = _KIND_LABELS.get(o.kind, o.kind)
+        start = None
+        if o.kind == "stacks":
+            rows = members.get(o.group_id) or (
+                card["rows"] if o.group_id.endswith("-session") else []
+            )
+            span = _span(rows)
+            if span:
+                start = span[0]
+                label += f" · {_time_range(*span)} · {_plural(len(rows), 'frame')}"
+        labelled.append((o, label, start))
+    labelled.sort(key=lambda x: (x[0].kind != "stacks", x[2] is None, x[2] or datetime.min))
+    return [(o, label) for o, label, _ in labelled]
+
+
+def _card_category(card: dict, made) -> str:
+    kinds = {o.kind for o in made}
+    return "time-lapse" if "timelapse" in kinds and "stacks" not in kinds else card["category"]
+
+
+def _card_html(run_dir: Path, card: dict, outputs, category: str = "") -> str:
     ids = set(card["ids"])
-    made = sorted((o for o in outputs if o.group_id in ids), key=lambda o: o.kind != "stacks")
+    made = [o for o in outputs if o.group_id in ids]
     frames = sorted(card["rows"], key=lambda r: int(r["rank"]))
-    best = card["best"]
-    when = ""
-    if card["span"]:
-        fmt = "%Y:%m:%d %H:%M:%S"
-        when = f"{card['span'][0].strftime(fmt)} - {card['span'][1].strftime(fmt)}"
     n = len(frames)
+    parts = [_display_name(category or _card_category(card, made))]
+    if card["span"]:
+        parts += [_md(card["span"][0]), _time_range(*card["span"])]
+    parts.append(_plural(n, "frame"))
     return (
         '<article class="card">'
-        f"<h3>{html.escape(', '.join(card['ids']))}</h3>"
-        f"<p>{n} frames {html.escape(when)} best #{int(best['rank']):03d}</p>\n"
-        + "\n".join(_output_html(run_dir, o) for o in made)
+        f"<h4>{html.escape(' · '.join(parts))}</h4>\n"
+        + "\n".join(_output_html(run_dir, o, label) for o, label in _output_labels(card, made))
         + f"\n<details><summary>show {n} frames</summary><div>\n"
         + "\n".join(_frame_item(r) for r in frames)
         + "</div></details></article>"
     )
 
 
+def _singles_html(items: list[str]) -> str:
+    rest = items[SECTION_TOP_N:]
+    if len(rest) <= 2:  # folding one or two shots hides more than it saves
+        return '<div class="grid">' + "\n".join(items) + "</div>"
+    return (
+        '<div class="grid">'
+        + "\n".join(items[:SECTION_TOP_N])
+        + f"</div><details><summary>show {len(rest)} more</summary><div>\n"
+        + "\n".join(rest)
+        + "</div></details>"
+    )
+
+
+def _summary_line(lit, cards, outputs, loose) -> str:
+    per_cat = Counter(_category_key(r["category"]) for r in lit)
+    shots = [f"{_display_name(c)} {per_cat[c]}" for c in sorted(per_cat, key=_category_sort)]
+    kinds = Counter(o.kind for o in loose)
+    sessions = sum(
+        1 for c in cards if any(o.kind == "stacks" and o.group_id in c["ids"] for o in outputs)
+    )
+    for card in cards:
+        for kind in {o.kind for o in outputs if o.group_id in card["ids"]} - {"stacks"}:
+            kinds[kind] += sum(1 for o in outputs if o.kind == kind and o.group_id in card["ids"])
+    sessions += kinds.pop("stacks", 0)
+    counts = [
+        (sessions, "night session", ""),
+        (kinds["timelapse"], "time-lapse", ""),
+        (kinds["trails"], "star trail", ""),
+        (kinds["hdr"], "HDR", "HDR"),
+        (kinds["pano"], "panorama", ""),
+    ]
+    built = [_plural(n, one, many) for n, one, many in counts if n]
+    return " &middot; ".join(html.escape(x) for x in [*shots, ", ".join(built)] if x)
+
+
 def _index_html(run_dir: Path, source: Path, ranked, outputs=()) -> str:
-    best = sort_groups.best_by_group(ranked)
-    cards = _sequence_cards(ranked, outputs)
+    darks = [r for r in ranked if r["category"] == sort_groups.DARKS_FOLDER]
+    lit = [r for r in ranked if r["category"] != sort_groups.DARKS_FOLDER]
+    best = sort_groups.best_by_group(lit)
+    cards = _sequence_cards(lit, outputs)
     carded = {id(r) for c in cards for r in c["rows"]}
     carded_ids = {g for c in cards for g in c["ids"]}
     loose = [o for o in outputs if o.group_id not in carded_ids]
     bursts: dict[str, list] = {}
-    for row in ranked:
+    for row in lit:
         if row.get("group_id") and id(row) not in carded:
             bursts.setdefault(row["group_id"], []).append(row)
-    sections = []
-    folders = list(dict.fromkeys(row["category"] for row in ranked))
-    if any(o.kind == "stacks" for o in loose) and sort_groups.NIGHT_FOLDER not in folders:
-        folders.append(sort_groups.NIGHT_FOLDER)
-    counts = []
-    for folder in folders:
-        shots = [r for r in ranked if r["category"] == folder]
-        counts.append(f"{html.escape(folder)} {len(shots)}")
-        if folder == sort_groups.DARKS_FOLDER:
-            sections.append(
-                f"<section><h2>{html.escape(folder)} ({len(shots)})</h2>"
-                f"<p>{len(shots)} lens-cap darks kept for calibration, not ranked</p></section>"
+
+    def day_of(t):
+        return t.date() if t else None
+
+    days: dict = {}
+
+    def bucket(day, category):
+        cats = days.setdefault(day, {})
+        return cats.setdefault(_category_key(category), {"n": 0, "cards": [], "items": []})
+
+    for card in sorted(cards, key=lambda c: (c["span"] is None, c["span"] or ())):
+        made = [o for o in outputs if o.group_id in set(card["ids"])]
+        cat = _card_category(card, made)
+        b = bucket(day_of(card["span"][0]) if card["span"] else None, cat)
+        b["n"] += len(card["rows"])
+        b["cards"].append(_card_html(run_dir, card, outputs, cat))
+    for o in loose:
+        cat = _KIND_CATEGORY.get(o.kind, o.kind)
+        bucket(None, cat)["cards"].append(_output_html(run_dir, o))
+    for row in sorted((r for r in lit if id(r) not in carded), key=lambda r: int(r["rank"])):
+        b = bucket(day_of(_capture_dt(row)), row["category"])
+        b["n"] += 1
+        gid = row.get("group_id")
+        top = best.get(gid) if gid else None
+        if top is not None and top is not row:
+            continue  # folded under its group's best frame
+        if top is not None and len(bursts[gid]) > 1:
+            b["items"].append(_burst_html(row, bursts[gid]))
+        else:
+            b["items"].append(_frame_item(row))
+    dark_days = Counter(day_of(_capture_dt(r)) for r in darks)
+    for day in dark_days:
+        days.setdefault(day, {})
+
+    nav, sections = [], []
+    for day in sorted(days, key=lambda d: (d is None, d or date.min)):
+        anchor = f"day-{day.isoformat()}" if day else "undated"
+        heading = _day_heading(day) if day else "Undated"
+        nav.append(f'<a href="#{anchor}">{html.escape(heading)}</a>')
+        body = []
+        if dark_days.get(day):
+            n = dark_days[day]
+            body.append(
+                f'<p class="calib">{_plural(n, "calibration frame")} (lens cap on), '
+                "used for the stacks, not shown</p>"
             )
-            continue
-        head = [
-            _output_html(run_dir, o)
-            for o in loose
-            if folder == sort_groups.NIGHT_FOLDER and o.kind == "stacks"
-        ]
-        head += [_card_html(run_dir, c, outputs) for c in cards if c["category"] == folder]
-        singles = sorted((r for r in shots if id(r) not in carded), key=lambda r: int(r["rank"]))
-        items = []
-        for row in singles:
-            gid = row.get("group_id")
-            top = best.get(gid) if gid else None
-            if top is not None and top is not row:
-                continue  # folded under its group's best frame below
-            if top is not None and len(bursts[gid]) > 1:
-                items.append(_burst_html(row, bursts[gid]))
-            else:
-                items.append(_frame_item(row))
-        rest = items[SECTION_TOP_N:]
-        body = "\n".join(head) + "<div>" + "\n".join(items[:SECTION_TOP_N]) + "</div>"
-        if rest:
-            body += (
-                f"<details><summary>show all {len(rest)}</summary><div>\n"
-                + "\n".join(rest)
-                + "</div></details>"
+        for cat in sorted(days[day], key=_category_sort):
+            b = days[day][cat]
+            inner = "\n".join(b["cards"])
+            if b["items"]:
+                inner += _singles_html(b["items"])
+            n = _plural(b["n"], "shot") if b["n"] else ""
+            body.append(
+                f'<div class="cat"><h3>{html.escape(_display_name(cat))}'
+                f"{f' ({n})' if n else ''}</h3>\n{inner}</div>"
             )
-        sections.append(f"<section><h2>{html.escape(folder)} ({len(shots)})</h2>\n{body}</section>")
-    seqs = f"{len(cards)} sequence{'' if len(cards) == 1 else 's'}"
-    summary = " &middot; ".join([*counts, seqs])
+        sections.append(
+            f'<section id="{anchor}"><h2>{html.escape(heading)}</h2>\n'
+            + "\n".join(body)
+            + "</section>"
+        )
+    times = [t for t in map(_capture_dt, lit) if t]
+    title = f"{source.name} — {_plural(len(lit), 'photo')}"
+    if times:
+        title += f", {_date_range(times)}"
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-        f"<title>{html.escape(run_dir.name)}</title>"
+        f"<title>{html.escape(title)}</title>"
         f"<style>{_PAGE_STYLE}</style>"
         "</head><body>"
-        f"<h1>{html.escape(run_dir.name)}</h1>"
-        f'<p class="summary">{summary}</p><p>{html.escape(str(source))}</p>\n'
-        + "\n".join(sections)
-        + "</body></html>\n"
+        f"<h1>{html.escape(title)}</h1>"
+        f'<p class="summary">{_summary_line(lit, cards, outputs, loose)}</p>'
+        f"<p>{html.escape(str(source))}</p>\n"
+        f'<nav class="days">{"".join(nav)}</nav>\n' + "\n".join(sections) + "</body></html>\n"
     )
 
 

@@ -339,8 +339,8 @@ def test_index_html_sections_in_rank_order_with_total(folder, root):
     result = run(folder, root, make_hooks(score, readings=readings))
     page = (result.run_dir / "index.html").read_text()
     assert page.index("001-c.jpg") < page.index("002-b.jpg")
-    assert "<small>0.90</small>" in page and "<small>0.20</small>" in page
-    assert page.count("<section") == 2
+    assert "quality 90" in page and "quality 20" in page
+    assert "<h3>Night sky" in page and "<h3>Unsorted" in page
 
 
 def test_summary_lists_top_five_per_category(tmp_path, root):
