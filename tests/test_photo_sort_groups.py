@@ -219,7 +219,7 @@ def test_night_session_tags_best_rank_and_builds_stack(tmp_path, root):
     assert {r["group_id"] for r in ranked} == {"night-1"}
     assert {r["group_best_rank"] for r in ranked} == {"1"}
     page = (result.run_dir / "index.html").read_text()
-    assert "same scene as #001" in page
+    assert "same scene as" not in page
     assert (result.run_dir / "stacks" / "night-1.jpg").is_file()
     assert (result.run_dir / "stacks" / "night-1.tif").is_file()
     assert all(Path(r["output"]).is_file() for r in ranked)
@@ -244,7 +244,22 @@ def test_bracket_fused_into_hdr_and_members_stay(tmp_path, root):
     ranked = rows(result.run_dir / "ranked.csv")
     assert len(ranked) == 3 and {r["category"] for r in ranked} == {"other"}
     assert {r["group_id"] for r in ranked} == {"bracket-1"}
-    assert "<h2>hdr (1)" in (result.run_dir / "index.html").read_text()
+    page = (result.run_dir / "index.html").read_text()
+    assert "<h2>other (3)" in page and "<h2>hdr" not in page
+    assert page.count('class="card"') == 1 and "same scene as" not in page
+
+
+def test_bracket_frames_and_fuse_share_the_hdr_folder(tmp_path, root):
+    src = card(tmp_path, list("abc"))
+    seq = stems(src, "abc")
+    readings = {p: SubjectReading(SubjectCategory.EXPOSURE_BRACKET, 0.9) for p in seq}
+    result = run(src, root, make_hooks(Ops(brackets=[seq]), readings=readings))
+    names = sorted(p.name for p in (result.run_dir / "hdr").iterdir())
+    assert len(names) == 4 and "bracket-1-a.jpg" in names
+    assert sum(n[:3].isdigit() for n in names) == 3
+    assert not (result.run_dir / "hdr-source").exists()
+    page = (result.run_dir / "index.html").read_text()
+    assert page.count("<h2>hdr") == 1 and page.count('class="card"') == 1
 
 
 def pano_records(src, names, seconds, **kw):
@@ -279,7 +294,9 @@ def test_pano_built_and_stitch_failure_goes_to_skipped(tmp_path, root):
     ops = Ops()
     result = run(src, root, make_hooks(ops, records=recs))
     assert (result.run_dir / "pano" / "pano-1-a.jpg").is_file()
-    assert "<h2>pano (1)" in (result.run_dir / "index.html").read_text()
+    page = (result.run_dir / "index.html").read_text()
+    assert "<h2>pano" not in page and page.count('class="card"') == 1
+    assert page.index("pano/pano-1-a.jpg") < page.index("<details")
     root2 = tmp_path / "out2"
     bad = Ops(fail=["stitch"])
     result = run(src, root2, make_hooks(bad, records=recs))
@@ -288,6 +305,8 @@ def test_pano_built_and_stitch_failure_goes_to_skipped(tmp_path, root):
         ("group:pano-1", "pano failed: seam gate")
     ]
     assert not list((result.run_dir / "pano").glob("*.jpg"))
+    page = (result.run_dir / "index.html").read_text()
+    assert "burst of 3" in page and "same scene as" not in page
     assert len(rows(result.run_dir / "ranked.csv")) == 3
 
 
