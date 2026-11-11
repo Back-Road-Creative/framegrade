@@ -520,6 +520,7 @@ def build_outputs(
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
     queue += sorted((g for g in groups if g.kind == "night"), key=lambda g: -g.mean_total)
     result.stats.update(tagged=len(groups))
+    by_src = {str(r["source"]): r for r in rows}
     for group in queue:
         if group.kind == "night" and no_stacks:
             continue
@@ -531,6 +532,12 @@ def build_outputs(
         key = group_key(group.kind, group.members)
         if main.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
             result.stats["resumed"] += 1
+        elif group.kind == "night" and _starless(group, by_src):
+            result.skipped.append(
+                (f"group:{group.id}", f"bright sky: no stars measured in {len(paths)} frames")
+            )
+            result.stats["starless"] += 1
+            continue
         else:
             main.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -555,6 +562,14 @@ def build_outputs(
     )
     _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output, darks, triaged)
     return result
+
+
+def _starless(group, by_src) -> bool:
+    """Every frame of a night chunk measured ``technical.usable`` 0 (a moonlit or twilight
+    sky with no stars to register), so stacking it would only fail after a long decode. A
+    frame with no measurement keeps the chunk."""
+    marks = [by_src.get(m, {}).get("technical.usable") for m in group.members]
+    return bool(marks) and all(m not in (None, "") and float(m) == 0 for m in marks)
 
 
 def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
