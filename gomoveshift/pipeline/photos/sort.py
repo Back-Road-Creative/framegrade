@@ -666,6 +666,7 @@ def run_sort(
     today: Optional[str] = None,
     say=print,
     resume=None,
+    resort=None,
 ) -> SortResult:
     started = time.monotonic()
     folder, root = Path(folder), Path(root)
@@ -673,6 +674,12 @@ def run_sort(
     hooks = hooks or SortHooks()
     workers = clamp_workers(options.workers)
     today = today or date.today().isoformat()
+    if resort is not None:
+        if resume is not None or options.index_only or options.dry_run:
+            raise SortRefusalError(
+                "--resort cannot be combined with --resume/--index-only/--dry-run"
+            )
+        return _resort(resort, folder, root, options, hooks, workers, say)
     if resume is not None:
         return _resume(resume, folder, root, options, hooks, workers, say)
     timings: dict[str, float] = {}
@@ -905,6 +912,95 @@ def _resume(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
     (run_dir / "run.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     counts = {**meta.get("counts", {}), "duplicates": meta.get("duplicates", 0)}
     return SortResult(run_dir, {**counts, "skipped": len(skipped)})
+
+
+def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
+    """Re-classify an existing run and move its developed JPEGs; never develops or re-scores."""
+    run_dir = Path(run_dir)
+    if hooks.groups is None:
+        raise SortRefusalError("--resort needs the group outputs (scoring hooks)")
+    if not (run_dir / "ranked.csv").is_file() or root.resolve() not in run_dir.resolve().parents:
+        raise SortRefusalError(f"{run_dir} is not a run folder under {root}")
+    with open(run_dir / "ranked.csv", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        old_rows, columns = list(reader), list(reader.fieldnames or ())
+    for row in old_rows:
+        if not Path(row["output"]).is_file():
+            raise SortRefusalError(f"{row['output']} (named in ranked.csv) is missing on disk")
+    sources = [Path(r["source"]) for r in old_rows]
+    records, warnings = hooks.read_records(sources)
+    readings = hooks.recognise(
+        sources, optics={p: _optics(records[p]) for p in sources if p in records}
+    )
+    darks, triaged, dark_note = set(), set(), None
+    if not options.no_stacks:
+        darks, triaged, dark_note = _lens_cap_darks(readings, hooks)
+    warnings = list(warnings) + ([dark_note] if dark_note else [])
+    if dark_note:
+        say(f"warning: {dark_note}")
+    by_folder: dict[str, list] = {}
+    for row in old_rows:
+        path = Path(row["source"])
+        reading = readings.get(path, UNKNOWN_SUBJECT)
+        name = sort_groups.DARKS_FOLDER if path in darks else CATEGORY_FOLDERS[reading.category]
+        by_folder.setdefault(name, []).append((row, path, reading))
+    ranked, renames, hashes = [], [], {}
+    for name, members in by_folder.items():
+        members.sort(key=lambda m: _capture_key(records.get(m[1]) or CaptureRecord(path=m[1])))
+        scored = [m for m in members if m[0].get("quality_score", "") != ""]
+        unscored = [m for m in members if m[0].get("quality_score", "") == ""]
+        scored.sort(key=lambda m: (-float(m[0]["quality_score"]), str(m[1])))
+        for rank, (row, path, reading) in enumerate(scored + unscored, 1):
+            final = run_dir / name / f"{rank:03d}-{path.stem}.jpg"
+            final.parent.mkdir(exist_ok=True)
+            renames.append((Path(row["output"]), final))
+            ranked.append(
+                {
+                    **row,
+                    "category": name,
+                    "rank": rank,
+                    "output": str(final),
+                    "confidence": f"{reading.confidence:g}",
+                    "evidence": "; ".join(reading.evidence),
+                    "group_id": "",
+                    "group_best_rank": "",
+                }
+            )
+    _renumber(renames)
+    for old, _new in renames:
+        try:
+            old.parent.rmdir()  # a category the run no longer uses
+        except OSError:
+            pass
+    for row in ranked:
+        try:
+            hashes[row["source"]] = int(hooks.groups.phash(_read_rgb(Path(row["output"]))))
+        except Exception:  # a look-alike hash is optional
+            pass
+    sort_groups.tag_groups(ranked, records, hooks.groups, hashes)
+    _write_csv(
+        run_dir / "ranked.csv", columns, [[row.get(col, "") for col in columns] for row in ranked]
+    )
+    skipped = [
+        (r["path"], r["reason"])
+        for r in _read_rows(run_dir / "skipped.csv")
+        if not r["path"].startswith("group:")
+    ]
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    meta["resort_of"] = str(run_dir)
+    meta["args"] = {**meta.get("args", {}), "resort_of": str(run_dir)}
+    meta["warnings"] = [*meta.get("warnings", []), *warnings]
+    (run_dir / "index.html").write_text(_index_html(run_dir, folder, ranked), encoding="utf-8")
+    with Ledger(root / LEDGER_NAME) as ledger:
+        meta["groups"] = _group_stage(
+            run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say, triaged
+        )
+    categories = dict(Counter(row["category"] for row in ranked))
+    meta.update(counts=categories, skipped=len(skipped))
+    (run_dir / "run.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    counts = {**categories, "duplicates": meta.get("duplicates", 0), "skipped": len(skipped)}
+    _summary(say, categories, counts, 0.0)
+    return SortResult(run_dir, counts)
 
 
 def _ledger_rows(result, paths):
