@@ -806,12 +806,21 @@ def _lens_cap_darks(readings, hooks) -> tuple[set, set, Optional[str]]:
     return {Path(d) for d in darks}, {str(p) for p in lights}, None
 
 
+def _dark_check_version() -> int:
+    """``astro_triage.EXPOSURE_CLASS_VERSION``, imported lazily like the check itself."""
+    from .astro_triage import EXPOSURE_CLASS_VERSION
+
+    return EXPOSURE_CLASS_VERSION
+
+
 def _resort_darks(run_dir, old_rows, readings, hooks) -> tuple[set, set, Optional[str]]:
     """``_lens_cap_darks`` for a re-sort: a night frame the first run already checked keeps
     its verdict (its ``lens-cap-darks`` or ``night-sky`` folder), so only frames that newly
-    read as night are decoded. A first run whose check failed checked nothing."""
+    read as night are decoded. A first run whose check failed checked nothing, and one
+    whose ``dark_check_version`` is not the current check's is checked again in full."""
     meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     failed = any("lens-cap dark check failed" in w for w in meta.get("warnings", []))
+    failed = failed or meta.get("dark_check_version") != _dark_check_version()
     night = sort_groups.NIGHT_FOLDER
     seen = {}
     for r in [] if failed else old_rows:
@@ -947,6 +956,7 @@ def run_sort(
             "run_id": run_id,
             "args": {**asdict(options), "workers": workers},
             "warnings": warnings,
+            "dark_check_version": _dark_check_version(),
         }
         estimate = len(plan) * DEVELOP_S_PER_PHOTO_ESTIMATE / workers
         if hooks.aesthetic_factory is not None:
@@ -1201,6 +1211,8 @@ def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
     meta["resort_of"] = str(run_dir)
     meta["args"] = {**meta.get("args", {}), "resort_of": str(run_dir)}
     meta["warnings"] = [*meta.get("warnings", []), *warnings]
+    if not options.no_stacks:
+        meta["dark_check_version"] = _dark_check_version()
     (run_dir / "index.html").write_text(_index_html(run_dir, folder, ranked), encoding="utf-8")
     with Ledger(root / LEDGER_NAME) as ledger:
         meta["groups"] = _group_stage(

@@ -80,6 +80,10 @@ CLOUD_BASELINE_FRAME_COUNT = 3  # Clearest frames defining the cloud baseline.
 DEW_FWHM_INFLATION_RATIO = 1.5  # fwhm_px over this * run-start baseline -> dew.
 FWHM_BASELINE_FRAME_COUNT = 3  # Opening frames defining the dew baseline.
 
+EXPOSURE_CLASS_VERSION = 2  # bump whenever classify_exposure's cap-on verdict can change:
+# photo sort records it in run.json and a re-sort reuses an older run's dark verdicts only
+# when it matches. 2 = the scene-contrast test (dusk lights over a treeline are not darks).
+
 # Cap-on classification (PROVISIONAL): see ``classify_exposure`` for what each encodes.
 # Both tests are ratios against the frame's OWN pixel distribution, so neither carries a
 # black level, an ISO, an exposure time or a sensor in it.
@@ -109,6 +113,15 @@ CAP_ON_SOURCE_SPREADS = 10.0  # an eroded pixel this many spreads above the medi
 CAP_ON_SOURCE_MIN = 10  # this many connected sources = sky. Measured 2026-11-10 on all 170
 # night-group frames of the 2026-11-09 card: its 118 real lights hold 20-383 sources, its 52
 # end-of-run darks (lens cap on, same sequence) 0-5; simulated darks with hot pixels, 0.
+CAP_ON_SCENE_BLOCK_PX = 64  # block size for the scene-contrast test: large enough that
+# noise averages out of each block mean, small enough that a treeline spans many blocks.
+CAP_ON_SCENE_CONTRAST_MAX = 1.0  # (p95 - p5) of the eroded frame's block means, over its
+# spread, above this = a lit scene, not the black floor. A dusk frame over a black treeline
+# has its median near one spread -- the sky/tree split, not noise, sets the spread -- and a
+# bright sky drowns the stars, so level and source count both call it a dark. Measured
+# 2026-11-11 on the 2026-11-09 card: its real darks 0.18-0.22, the dusk lights it had filed
+# as darks (DSC_1903-1957) 2.74-2.79, a dark-sky light 2.69. A lit frame can read lower
+# (DSC_2161, a dim star field: 0.81), but one that dim holds its stars (337 sources).
 EXPOSURE_STATS_MAX_SAMPLES = 2_000_000  # stride-subsample cap for the two percentiles
 # above: a full-resolution percentile pass costs several times all of triage with the
 # streak scan off. 2e6 samples still leave ~2000 beyond the 99.9th.
@@ -529,7 +542,7 @@ def _exposure_stats(values):
     return float(median), float(spread_level - median), float(bright)
 
 
-def classify_exposure(median, spread, bright_level, resolved_sources=None):
+def classify_exposure(median, spread, bright_level, resolved_sources=None, scene_contrast=None):
     """One frame's exposure class -- "light" / "cap_on" / "indeterminate" -- from the
     three numbers ``_exposure_stats`` measures on the frame itself.
 
@@ -558,6 +571,15 @@ def classify_exposure(median, spread, bright_level, resolved_sources=None):
       pixels, measured structure 2.5-4.5 (cap_on, so every stack refused "0 usable"),
       while its lens-cap darks measured 4.8-5.4 (and slipped through as usable).
 
+    - SCENE CONTRAST, ``scene_contrast`` (``measure_frame`` measures it with
+      ``_scene_contrast`` on every frame at the floor): above
+      ``CAP_ON_SCENE_CONTRAST_MAX`` the frame is NOT at the floor, whatever its level.
+      A dusk frame over a black treeline breaks LEVEL: the sky/tree split sets the
+      spread, so the median sits about one spread up, and the bright sky drowns every
+      star the source count would find. The 2026-11-09 card filed 54 such lights as
+      darks. A dark is flat at large scale (amp glow and banding at most); a lit scene
+      is not.
+
     Both on the cap side -> "cap_on". Both on the light side -> "light". Anything else
     is "indeterminate" and is REPORTED, never guessed into a population:
 
@@ -574,6 +596,8 @@ def classify_exposure(median, spread, bright_level, resolved_sources=None):
     else:
         at_floor = median / spread <= CAP_ON_LEVEL_SPREAD_MAX
         structured = (bright_level - median) / spread > CAP_ON_STRUCTURE_SPREAD_MAX
+    if at_floor and scene_contrast is not None and scene_contrast > CAP_ON_SCENE_CONTRAST_MAX:
+        at_floor = False
     if at_floor and resolved_sources is not None:
         structured = resolved_sources >= CAP_ON_SOURCE_MIN
     if at_floor and not structured:
@@ -583,17 +607,47 @@ def classify_exposure(median, spread, bright_level, resolved_sources=None):
     return "indeterminate"
 
 
-def _resolved_source_count(luma, median, spread, mask=None):
+def _erode_hot_pixels(luma):
+    """A ``CAP_ON_SOURCE_ERODE_PX`` erosion: a dark's hot pixels gone, stars and scene kept."""
+    kernel = np.ones((CAP_ON_SOURCE_ERODE_PX, CAP_ON_SOURCE_ERODE_PX), dtype=np.uint8)
+    return cv2.erode(np.ascontiguousarray(luma, dtype=np.float32), kernel)
+
+
+def _resolved_source_count(luma, median, spread, mask=None, eroded=None):
     """Connected sources left after a ``CAP_ON_SOURCE_ERODE_PX`` erosion, above
     ``median + CAP_ON_SOURCE_SPREADS * spread`` -- hot pixels gone, real stars left (see
-    those constants for the measurement)."""
-    kernel = np.ones((CAP_ON_SOURCE_ERODE_PX, CAP_ON_SOURCE_ERODE_PX), dtype=np.uint8)
-    eroded = cv2.erode(np.ascontiguousarray(luma, dtype=np.float32), kernel)
+    those constants for the measurement). ``eroded`` reuses an erosion already run."""
+    if eroded is None:
+        eroded = _erode_hot_pixels(luma)
     bright = eroded > median + CAP_ON_SOURCE_SPREADS * spread
     if mask is not None:
         bright &= mask
     count, _ = cv2.connectedComponents(bright.astype(np.uint8), connectivity=8)
     return count - 1
+
+
+def _scene_contrast(eroded, spread, mask=None):
+    """(p95 - p5) of the ``CAP_ON_SCENE_BLOCK_PX`` block means of ``eroded``, over
+    ``spread``; ``None`` when the frame holds no whole block. With a mask, only blocks
+    at least half inside it count (see ``CAP_ON_SCENE_CONTRAST_MAX``)."""
+    b = CAP_ON_SCENE_BLOCK_PX
+    h, w = eroded.shape[0] // b * b, eroded.shape[1] // b * b
+    if h == 0 or w == 0 or spread <= 0.0:
+        return None
+
+    def block_sums(img):
+        return img[:h, :w].reshape(h // b, b, w // b, b).sum(axis=(1, 3), dtype=np.float64)
+
+    if mask is None:
+        means = (block_sums(eroded) / (b * b)).ravel()
+    else:
+        counts = block_sums(mask.astype(np.float32))
+        keep = counts >= 0.5 * b * b
+        if not keep.any():
+            return None
+        means = block_sums(np.where(mask, eroded, 0.0).astype(np.float32))[keep] / counts[keep]
+    p5, p95 = np.percentile(means, [5.0, 95.0])
+    return float((p95 - p5) / spread)
 
 
 def measure_frame(
@@ -634,12 +688,14 @@ def measure_frame(
     exposure_stats = _exposure_stats(valid)
     median, spread, _ = exposure_stats
     # Only a frame at the floor pays for the erosion pass; a lit frame keeps the ratios.
-    sources = (
-        _resolved_source_count(luma, median, spread, mask)
-        if spread > 0.0 and median / spread <= CAP_ON_LEVEL_SPREAD_MAX
-        else None
+    sources = scene_contrast = None
+    if spread > 0.0 and median / spread <= CAP_ON_LEVEL_SPREAD_MAX:
+        eroded = _erode_hot_pixels(luma)
+        sources = _resolved_source_count(luma, median, spread, mask, eroded=eroded)
+        scene_contrast = _scene_contrast(eroded, spread, mask)
+    exposure_class = classify_exposure(
+        *exposure_stats, resolved_sources=sources, scene_contrast=scene_contrast
     )
-    exposure_class = classify_exposure(*exposure_stats, resolved_sources=sources)
     streak_components = (
         detect_streak_components(luma, min_length, mask=mask) if detect_meteors else None
     )
