@@ -60,6 +60,11 @@ the story ID in `platform_post_id`, Page in `destination_account`, and source
 `platform_reconciled`; it does not fabricate a platform publication timestamp.
 False, unreadable, conflicting or malformed evidence remains unknown.
 
+Confirmation updates only the publication queue and its retained attempt. General
+phone photos have no driving-short tracking record, so this path never opens or
+updates `TrackingStore`. Ordinary driving-short queue transitions keep their
+existing tracking integration.
+
 ## Retry and mutation protection
 
 No-ID attempts are nonterminal and excluded from normal selection. Expired

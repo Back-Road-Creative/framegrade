@@ -113,6 +113,18 @@ def test_success_checkpoints_before_network_and_preserves_caption(setup, tmp_pat
     assert client.upload_photo.call_count == 1 and authorize.call_count == 1
 
 
+def test_general_photo_confirmation_does_not_open_driving_tracking_store(setup, monkeypatch):
+    from gomoveshift import tracking
+
+    registry = Mock()
+    monkeypatch.setattr(tracking, "TrackingStore", registry)
+    db, identifier, _, _, _, delivery = setup
+    delivery.deliver(row(db, identifier))
+    delivery.deliver(row(db, identifier))
+    assert row(db, identifier)["status"] == "published"
+    registry.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "change",
     [
