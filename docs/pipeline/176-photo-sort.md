@@ -32,6 +32,8 @@ Folders: `night-sky` (astro), `landscape`, `close-up`, `wildlife`, `portrait`, `
 ## Modes
 - `--dry-run`: inventory, camera facts, dedupe, classify. Prints counts per category, duplicates, skipped and an estimate (`DEVELOP_S_PER_PHOTO_ESTIMATE` = 20 s x photos / workers). Writes nothing, creates no run folder or ledger (an existing ledger is read).
 - `--index-only`: inventory, camera facts and `ledger.record` under run id `index:<folder name>:<date>`; no decode. The run folder holds only `run.json`. Use it once over folders that were already sorted by hand.
+- `--resume RUN_DIR`: finish the unfinished group outputs of an earlier run; nothing is re-developed or re-scored.
+- `--resort RUN_DIR`: re-run classify (`hooks.recognise`) and the lens-cap dark check over an existing run folder, move each developed JPEG already on disk to its new `<folder>/<NNN>-<stem>.jpg` (rank follows the `quality_score` already in `ranked.csv`), rewrite `ranked.csv`, `run.json` (`resort_of`, `args.resort_of`) and `index.html`, then re-run the group stage. Finished group outputs are reused through the ledger `STACK_MARKER` check; only groups whose membership changed are rebuilt. It never develops and never re-scores. Refuses a directory outside the sort root, one without `ranked.csv`, or a JPEG named in `ranked.csv` that is missing; it cannot be combined with `--resume`, `--index-only` or `--dry-run`. `--reprocess` is not a re-sort: it re-develops shots already in the ledger.
 
 ## Verification
 

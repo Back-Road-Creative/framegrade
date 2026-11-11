@@ -1938,6 +1938,7 @@ def _cmd_photos_sort(args) -> int:
             options,
             sort.scoring_hooks(),
             resume=Path(args.resume) if getattr(args, "resume", None) else None,
+            resort=Path(args.resort) if getattr(args, "resort", None) else None,
         )
     except sort.SortRefusalError as exc:
         print(f"photos sort refused: {exc}", file=sys.stderr)
