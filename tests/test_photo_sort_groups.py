@@ -1097,8 +1097,12 @@ def test_failed_session_combine_falls_back_to_the_best_chunk(tmp_path, root):
     assert not (result.run_dir / "stacks" / "night-1-session.tif").exists()
     for n in (1, 2, 3):  # kept so a resume can retry the combine
         assert (result.run_dir / "stacks" / f"night-{n}.linear").is_dir()
-    skipped = rows(result.run_dir / "skipped.csv")
-    assert any("session combine failed: combine boom" in r["reason"] for r in skipped)
+    skipped = {r["path"]: r["reason"] for r in rows(result.run_dir / "skipped.csv")}
+    # the session row is labelled as the session, never as its first chunk
+    assert skipped["group:night-1-session"] == (
+        "session combine failed (night-1, night-2, night-3): combine boom"
+    )
+    assert "group:night-1" not in skipped
 
 
 def test_single_chunk_session_is_unchanged(tmp_path, root):
