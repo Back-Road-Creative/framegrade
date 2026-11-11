@@ -929,6 +929,21 @@ class TestClassifyExposure:
     def test_a_flat_frame_above_the_zero_point_is_not_cap_on(self):
         assert classify_exposure(0.05, 0.0, 0.05) == "indeterminate"
 
+    def test_a_twilight_frame_over_a_treeline_is_not_cap_on(self):
+        """DSC_1903 of the 2026-11-09 card, as measured: lit sky over black trees puts
+        the median near the spread (level 1.08), no star shows through the bright sky
+        (0 sources) -- and its eroded 64-px block means span 2.78 spreads, where every
+        real dark on the card measured 0.18-0.22."""
+        median, spread = 0.14455, 0.13330
+        stats = (median, spread, median + 3.18 * spread)
+        assert classify_exposure(*stats, resolved_sources=0) == "cap_on"
+        assert classify_exposure(*stats, resolved_sources=0, scene_contrast=2.78) != "cap_on"
+
+    def test_a_dark_with_the_cards_block_contrast_stays_cap_on(self):
+        """DSC_2067: a real end-of-run dark, block contrast 0.21."""
+        stats = (0.00023, 0.00058, 0.00023 + 5.29 * 0.00058)
+        assert classify_exposure(*stats, resolved_sources=1, scene_contrast=0.21) == "cap_on"
+
 
 class TestMeasureFrameExposureClass:
     def _capped(self, shape=(160, 160)):
@@ -1020,6 +1035,41 @@ class TestMeasureFrameExposureClass:
         luma[ys, xs] = rng.uniform(0.01, 1.0, n).astype(np.float32)
         assert classify_exposure(*triage_mod._exposure_stats(luma)) == "indeterminate"
         metrics = measure_frame(tmp_path / "DSC_2181.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class == "cap_on"
+        assert metrics.usable is False
+
+    def _twilight_over_trees(self, shape=(640, 960), seed=9):
+        """A dusk frame as the 2026-11-09 card showed it (DSC_1903-1957): a lit sky,
+        brighter overhead, over a black treeline -- and no star yet bright enough to
+        show through. The sky/tree split, not noise, sets the upper half-width, so the
+        median sits near one spread and the frame reads 'at the floor'."""
+        rng = np.random.default_rng(seed)
+        h, w = shape
+        horizon = int(h * 0.65)
+        luma = np.empty(shape, dtype=np.float32)
+        luma[:horizon] = np.linspace(0.30, 0.12, horizon, dtype=np.float32)[:, None]
+        luma[horizon:] = 0.005
+        luma += rng.normal(0.0, 0.004, size=shape).astype(np.float32)
+        return np.clip(luma, 0.0, None)
+
+    def test_a_twilight_frame_over_a_treeline_is_not_cap_on(self, tmp_path):
+        """54 of the card's dusk lights (DSC_1903-1957) were filed as lens-cap darks."""
+        luma = self._twilight_over_trees()
+        # The old blind spot: level, structure and source count all call it a dark.
+        median, spread, bright = triage_mod._exposure_stats(luma)
+        sources = triage_mod._resolved_source_count(luma, median, spread)
+        assert classify_exposure(median, spread, bright, resolved_sources=sources) == "cap_on"
+        metrics = measure_frame(tmp_path / "DSC_1903.NEF", luma, detect_meteors=False)
+        assert metrics.exposure_class != "cap_on"
+
+    def test_a_dark_with_amp_glow_stays_cap_on(self, tmp_path):
+        """A real dark is not perfectly flat: amp glow lifts one corner. The card's
+        darks measured 64-px block contrast 0.18-0.22 spreads and must stay darks."""
+        luma = self._capped(shape=(640, 960))
+        yy, xx = np.mgrid[0:640, 0:960]
+        glow = 0.0004 * np.exp(-((xx - 960) ** 2 + yy**2) / (2 * 150.0**2))
+        luma = (luma + glow).astype(np.float32)
+        metrics = measure_frame(tmp_path / "DSC_2067.NEF", luma, detect_meteors=False)
         assert metrics.exposure_class == "cap_on"
         assert metrics.usable is False
 

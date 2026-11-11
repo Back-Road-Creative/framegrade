@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from gomoveshift.pipeline.photos import astro_triage as triage
 from gomoveshift.pipeline.photos import sort as ps
 from gomoveshift.pipeline.photos import sort_groups as sg
 from gomoveshift.pipeline.photos.capture_meta import CaptureRecord
@@ -666,6 +667,26 @@ def test_resort_reuses_the_first_runs_lens_cap_verdict(tmp_path, root):
     by_stem = {Path(r["source"]).stem: r for r in rows(result.run_dir / "ranked.csv")}
     assert {by_stem[p.stem]["category"] for p in darks} == {sg.DARKS_FOLDER}
     assert {by_stem[p.stem]["category"] for p in lights} == {sg.NIGHT_FOLDER}
+
+
+def test_resort_rechecks_every_dark_when_the_dark_check_changed(tmp_path, root):
+    """The 2026-11-09 card's first run filed 54 dusk lights as lens-cap darks; a fixed
+    check must reach them on re-sort, not reuse the old verdict."""
+    src, seq, lights, darks = dark_card(tmp_path)
+    ops = Ops(sequences=[seq], darks=darks)
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    meta_path = result.run_dir / "run.json"
+    meta = json.loads(meta_path.read_text())
+    assert meta["dark_check_version"] == triage.EXPOSURE_CLASS_VERSION
+    del meta["dark_check_version"]  # a run made before the version was recorded
+    meta_path.write_text(json.dumps(meta))
+    ops.calls.clear()
+    run(src, root, hooks, resort=result.run_dir)
+    assert lapse_calls(ops, "classify_night") == [("classify_night", len(seq))]
+    assert json.loads(meta_path.read_text())["dark_check_version"] == (
+        triage.EXPOSURE_CLASS_VERSION
+    )
 
 
 def test_resort_checks_only_frames_that_newly_read_as_night(tmp_path, root):
