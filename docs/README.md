@@ -54,6 +54,7 @@ to read them.
 - [social-publishing-facebook.md](social-publishing-facebook.md): Facebook Reels adapter.
 - [facebook-queued-intent.md](facebook-queued-intent.md): publication intent, timing and uncertain-upload recovery.
 - [facebook-page-photo-client.md](facebook-page-photo-client.md): unwired private-byte Page photo transport and qualification limits.
+- [facebook-page-photo-delivery.md](facebook-page-photo-delivery.md): durable photo attempts, trusted authority and read-only recovery.
 - [social-publishing-tiktok.md](social-publishing-tiktok.md): TikTok Direct Post adapter.
 
 ## Social metrics
