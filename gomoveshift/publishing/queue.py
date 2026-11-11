@@ -421,8 +421,8 @@ def confirm_facebook_photo(conn, delivery_id, photo_id, story_id, account):
             ).rowcount
             == 1
         )
-    if changed:
-        _register_platform_id_best_effort(conn, delivery_id)
+    # General photos have no driving-short tracking record. Their confirmed
+    # platform identity belongs to this delivery and its durable attempt only.
     return changed
 
 
