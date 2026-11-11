@@ -82,6 +82,8 @@ class Ops:
 
     def stack(self, prepared, out_path):
         self.calls.append(("stack", out_path.name))
+        if "stack" in self.fail:
+            raise RuntimeError("stack boom")
         out_path.write_bytes(b"tif")
         out_path.with_suffix(".linear").mkdir(exist_ok=True)  # the real stack_run writes one
         preview = out_path.with_suffix(".preview.jpg")
@@ -651,6 +653,49 @@ def test_session_darks_calibrate_its_trail_and_timelapse(tmp_path, root):
     run(src, root, make_hooks(ops, records=records, readings=night_readings([*seq, far])))
     assert ops.lapse == [(lights, darks)]
     assert ops.trails == [(lights, darks)]
+
+
+def test_resort_reuses_the_first_runs_lens_cap_verdict(tmp_path, root):
+    src, seq, lights, darks = dark_card(tmp_path)
+    ops = Ops(sequences=[seq], darks=darks)
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    ops.calls.clear()
+    run(src, root, hooks, resort=result.run_dir)
+    assert lapse_calls(ops, "classify_night") == []
+    by_stem = {Path(r["source"]).stem: r for r in rows(result.run_dir / "ranked.csv")}
+    assert {by_stem[p.stem]["category"] for p in darks} == {sg.DARKS_FOLDER}
+    assert {by_stem[p.stem]["category"] for p in lights} == {sg.NIGHT_FOLDER}
+
+
+def test_resort_checks_only_frames_that_newly_read_as_night(tmp_path, root):
+    src, seq, _lights, darks = dark_card(tmp_path)
+    ops = Ops(sequences=[seq], darks=darks)
+    first = make_hooks(ops, records=night_records(seq), readings=night_readings(seq[:-1]))
+    result = run(src, root, first)
+    ops.calls.clear()
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    run(src, root, hooks, resort=result.run_dir)
+    assert lapse_calls(ops, "classify_night") == [("classify_night", 1)]
+    by_stem = {Path(r["source"]).stem: r for r in rows(result.run_dir / "ranked.csv")}
+    assert by_stem[seq[-1].stem]["category"] == sg.DARKS_FOLDER
+
+
+def test_resort_does_not_retry_a_stack_that_already_failed(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(10)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], fail=["stack"])
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    ops.calls.clear()
+    run(src, root, hooks, resort=result.run_dir)
+    assert [c for c in ops.calls if c[0] in ("prepare", "stack")] == []
+    reasons = {r["path"]: r["reason"] for r in rows(result.run_dir / "skipped.csv")}
+    assert reasons["group:night-1"] == "night failed in an earlier run; --resume retries it"
+    ops.calls.clear()
+    run(src, root, hooks, resume=result.run_dir)
+    assert [c[1] for c in ops.calls if c[0] == "stack"] == ["night-1.tif"]
 
 
 def test_a_failed_dark_triage_keeps_every_frame_in_the_night_sky(tmp_path, root):

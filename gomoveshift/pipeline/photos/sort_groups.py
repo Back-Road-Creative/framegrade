@@ -48,6 +48,8 @@ TIMELAPSE_SKIP_MARKER = "timelapse-skip:v1"
 TIMELAPSE_MIN_FRAMES = 24
 #: A session too short for a star trail, remembered like ``TIMELAPSE_SKIP_MARKER``.
 TRAILS_SKIP_MARKER = "trails-skip:v1"
+#: A group output that raised, under its ``group_key``; ``--resort`` does not retry it.
+FAILED_MARKER = "stack-failed:v1"
 #: Fewest lights worth a star trail: 24 frames at the measured 32 s interval
 #: (``astro_trails``) is about 13 minutes, about 3 degrees of sky rotation. Shorter arcs read
 #: as dots, and the stack already shows that scene.
@@ -534,10 +536,13 @@ def build_outputs(
     no_stacks: bool,
     on_output,
     triaged=frozenset(),
+    retry_failed=True,
 ) -> StageResult:
     """HDR, panoramas, night stacks (best session first), then star trails and time-lapses;
     one at a time. ``triaged``: sources this run already cleared as lights (not lens-cap
-    darks), so a session made only of them is not decoded a second time."""
+    darks), so a session made only of them is not decoded a second time. Without
+    ``retry_failed`` (``--resort``) a group that failed before with the same members is
+    skipped; ``--resume`` retries it."""
     result = StageResult()
     groups = groups_from_rows(rows)
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
@@ -561,6 +566,11 @@ def build_outputs(
             )
             result.stats["starless"] += 1
             continue
+        elif not retry_failed and ledger.get_score(key, FAILED_MARKER) == 1:
+            reason = f"{group.kind} failed in an earlier run; --resume retries it"
+            result.skipped.append((f"group:{group.id}", reason))
+            result.stats["failed"] += 1
+            continue
         else:
             main.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -568,6 +578,7 @@ def build_outputs(
             except Exception as exc:  # a group output must never abort the run
                 result.skipped.append((f"group:{group.id}", f"{group.kind} failed: {exc}"))
                 result.stats["failed"] += 1
+                ledger.put_score(key, FAILED_MARKER, 1)
                 for leftover in (main, shown, main.with_suffix(".preview.jpg")):
                     leftover.unlink(missing_ok=True)
                 continue
