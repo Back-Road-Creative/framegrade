@@ -53,6 +53,7 @@ to read them.
 - [social-publishing-meta.md](social-publishing-meta.md): Meta credentials and publishing.
 - [social-publishing-facebook.md](social-publishing-facebook.md): Facebook Reels adapter.
 - [facebook-queued-intent.md](facebook-queued-intent.md): publication intent, timing and uncertain-upload recovery.
+- [facebook-page-photo-client.md](facebook-page-photo-client.md): unwired private-byte Page photo transport and qualification limits.
 - [social-publishing-tiktok.md](social-publishing-tiktok.md): TikTok Direct Post adapter.
 
 ## Social metrics
