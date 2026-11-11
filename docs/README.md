@@ -55,6 +55,7 @@ to read them.
 - [facebook-queued-intent.md](facebook-queued-intent.md): publication intent, timing and uncertain-upload recovery.
 - [facebook-page-photo-client.md](facebook-page-photo-client.md): unwired private-byte Page photo transport and qualification limits.
 - [facebook-page-photo-delivery.md](facebook-page-photo-delivery.md): durable photo attempts, trusted authority and read-only recovery.
+- [facebook-reel-delivery.md](facebook-reel-delivery.md): exact approved video delivery, execution windows and durable uncertain-write recovery.
 - [social-publishing-tiktok.md](social-publishing-tiktok.md): TikTok Direct Post adapter.
 
 ## Social metrics
