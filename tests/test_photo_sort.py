@@ -415,3 +415,132 @@ def test_default_develop_pool_workers_inherit_no_parent_state(monkeypatch):
     with ps.SortHooks().executor_factory(1) as pool:
         seen = pool.submit(pydoc.locate, f"{ps.__name__}._PARENT_ONLY_MARKER")
         assert seen.result(timeout=120) is None
+
+
+# --- --resort: re-classify an existing run folder, never develop or score again ---------
+
+
+class CopySpy(Spy):
+    """Develop that writes a real JPEG (a copy of the source) so scoring can read it."""
+
+    def __call__(self, task):
+        self.tasks.append(task)
+        task.out.write_bytes(task.source.read_bytes())
+
+
+class FuseSpy:
+    """Fake group ops: brackets are fixed, fuse writes a stub and is counted."""
+
+    def __init__(self, brackets=()):
+        self.brackets, self.fused = [tuple(b) for b in brackets], []
+
+    def ops(self):
+        def fuse(paths, out_path):
+            self.fused.append(out_path.name)
+            out_path.write_bytes(b"hdr")
+
+        return ps.sort_groups.GroupOps(
+            detect_sequences=lambda paths: [],
+            chunk_sequence=lambda run: [tuple(run)],
+            detect_brackets=lambda paths: [b for b in self.brackets if all(p in paths for p in b)],
+            phash=lambda rgb: 0,
+            fuse=fuse,
+            classify_night=lambda paths: (list(paths), []),
+        )
+
+
+def _score(rgb, category, *, aesthetic, path, exposure_s, focal_mm):
+    t = {"a": 0.9, "b": 0.5, "c": 0.7, "d": 0.8}.get(path.stem, 0.1)
+    return ps.ShotScore(t, t, aesthetic, t, {}, {})
+
+
+def grouped(spy, fuse, **kw):
+    return hooks(spy, **{"score": _score, "groups": fuse.ops(), **kw})
+
+
+def resort(folder, root, run_dir, hk, options=None):
+    return ps.run_sort(
+        folder,
+        root,
+        options or opts(),
+        hk,
+        today=TODAY,
+        say=lambda *_: None,
+        resort=run_dir,
+    )
+
+
+@pytest.fixture
+def first_run(folder, root):
+    fuse = FuseSpy(brackets=[(folder / "a.jpg", folder / "b.jpg", folder / "c.jpg")])
+    jpeg(folder / "d.jpg", 4)
+    result = ps.run_sort(
+        folder, root, opts(), grouped(CopySpy(), fuse), today=TODAY, say=lambda *_: None
+    )
+    return result.run_dir, fuse
+
+
+def test_resort_moves_a_changed_shot_and_rewrites_csv_and_page(folder, root, first_run):
+    run_dir, fuse = first_run
+    assert (run_dir / "other" / "001-a.jpg").is_file()
+    readings = {folder / "d.jpg": SubjectReading(SubjectCategory.LANDSCAPE, 0.8)}
+    result = resort(folder, root, run_dir, grouped(Spy(), fuse, readings=readings))
+    assert (run_dir / "landscape" / "001-d.jpg").is_file()
+    assert not list(run_dir.glob("other/*-d.jpg"))
+    by_stem = {Path(r["source"]).stem: r for r in rows(run_dir / "ranked.csv")}
+    assert by_stem["d"]["category"] == "landscape"
+    assert by_stem["d"]["output"] == str(run_dir / "landscape" / "001-d.jpg")
+    assert by_stem["d"]["quality_score"] == "0.8000"  # reused, not re-scored
+    assert [by_stem[s]["rank"] for s in "acb"] == ["1", "2", "3"]  # quality order kept
+    assert "landscape/001-d.jpg" in (run_dir / "index.html").read_text(encoding="utf-8")
+    meta = json.loads((run_dir / "run.json").read_text())
+    assert meta["resort_of"] == str(run_dir) and meta["args"]["resort_of"] == str(run_dir)
+    assert result.counts["landscape"] == 1 and result.counts["other"] == 3
+
+
+def test_resort_never_develops_or_scores(folder, root, first_run):
+    run_dir, fuse = first_run
+    spy = Spy()
+
+    def no_score(*a, **k):
+        raise AssertionError("scored")
+
+    resort(folder, root, run_dir, grouped(spy, fuse, score=no_score))
+    assert spy.tasks == []
+
+
+def test_resort_reuses_a_finished_group_output(folder, root, first_run):
+    run_dir, fuse = first_run
+    assert len(fuse.fused) == 1
+    resort(folder, root, run_dir, grouped(Spy(), fuse))
+    assert len(fuse.fused) == 1  # STACK_MARKER in the ledger: not rebuilt
+    assert json.loads((run_dir / "run.json").read_text())["groups"]["resumed"] == 1
+
+
+def test_resort_refuses_a_foreign_dir_and_a_dir_without_ranked_csv(
+    tmp_path, folder, root, first_run
+):
+    run_dir, fuse = first_run
+    hk = grouped(Spy(), fuse)
+    bare = root / "bare"
+    bare.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "ranked.csv").write_text("category\n")
+    for bad in (bare, elsewhere):
+        with pytest.raises(ps.SortRefusalError):
+            resort(folder, root, bad, hk)
+    with pytest.raises(ps.SortRefusalError):
+        resort(folder, root, run_dir, ps.SortHooks())  # no group hooks
+    (run_dir / "other" / "001-a.jpg").unlink()
+    with pytest.raises(ps.SortRefusalError):  # a JPEG named in ranked.csv is gone
+        resort(folder, root, run_dir, hk)
+
+
+def test_resort_refuses_with_resume_index_only_or_dry_run(folder, root, first_run):
+    run_dir, fuse = first_run
+    for options in (opts(index_only=True), opts(dry_run=True)):
+        with pytest.raises(ps.SortRefusalError):
+            resort(folder, root, run_dir, grouped(Spy(), fuse), options)
+    with pytest.raises(ps.SortRefusalError):
+        ps.run_sort(folder, root, opts(), grouped(Spy(), fuse), resume=run_dir, resort=run_dir)
