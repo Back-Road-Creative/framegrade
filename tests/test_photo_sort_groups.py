@@ -82,9 +82,18 @@ class Ops:
     def stack(self, prepared, out_path):
         self.calls.append(("stack", out_path.name))
         out_path.write_bytes(b"tif")
+        out_path.with_suffix(".linear").mkdir(exist_ok=True)  # the real stack_run writes one
         preview = out_path.with_suffix(".preview.jpg")
         preview.write_bytes(b"jpg")
         return SimpleNamespace(preview_path=preview)
+
+    def combine_session(self, linears, out_tif, out_jpg):
+        self.calls.append(("combine_session", out_tif.name))
+        self.combined = [Path(p).name for p in linears]
+        if "combine" in self.fail:
+            raise RuntimeError("combine boom")
+        out_tif.write_bytes(b"deep")
+        out_jpg.write_bytes(b"jpg")
 
     def classify_night(self, paths):
         self.calls.append(("classify_night", len(paths)))
@@ -125,6 +134,7 @@ class Ops:
             stitch=self.stitch,
             prepare=self.prepare,
             stack=self.stack,
+            combine_session=self.combine_session,
             classify_night=self.classify_night,
             night_timelapse=self.night_timelapse,
             still_timelapse=self.still_timelapse,
@@ -414,7 +424,9 @@ def test_real_ops_call_the_pipeline_seams(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ao, "prepare_frames", lambda paths, **k: seen.append(("prep", k["decode_workers"])) or "P"
     )
-    monkeypatch.setattr(ao, "stack_run", lambda prepared, out: seen.append(("stack", prepared)))
+    monkeypatch.setattr(
+        ao, "stack_run", lambda prepared, out, **k: seen.append(("stack", prepared, k))
+    )
     monkeypatch.setattr(sg, "_megapixels", lambda path: 20.0)
     ops = sg.real_ops()
     paths = [Path("a"), Path("b"), Path("c")]
@@ -423,7 +435,9 @@ def test_real_ops_call_the_pipeline_seams(tmp_path, monkeypatch):
     prepared = ops.prepare(paths, decode_workers=4, output_dir=tmp_path)
     ops.stack(prepared, tmp_path / "s.tif")
     assert ("stitch", 3) in seen and ("develop", "decoded", "params", 3) in seen
-    assert ("prep", 1) in seen and ("stack", "P") in seen
+    assert ("prep", 1) in seen
+    # each chunk stack keeps its linear artifact: the session combine's input
+    assert ("stack", "P", {"linear_artifact_path": tmp_path / "s.linear"}) in seen
 
 
 def test_default_wrappers_run_on_trivial_input(monkeypatch):
@@ -736,7 +750,7 @@ def test_night_session_renders_one_star_trail_beside_its_timelapse(tmp_path, roo
     assert (result.run_dir / "trails" / "night-1.tif").is_file()
     assert (result.run_dir / "trails" / "night-1.jpg").is_file()
     page = (result.run_dir / "index.html").read_text()
-    stack, trail = page.index("stacks/night-1.jpg"), page.index("trails/night-1.jpg")
+    stack, trail = page.index("stacks/night-1-session.jpg"), page.index("trails/night-1.jpg")
     assert stack < trail < page.index("timelapse/night-1.mp4")
     with Ledger(root / ps.LEDGER_NAME) as ledger:
         key = sg.group_key("trails", [str(p) for p in seq[:-4]])  # darks sit in their own folder
@@ -888,3 +902,72 @@ def test_poster_extracts_the_middle_frame_and_names_a_failure(tmp_path, monkeypa
     assert calls[0][calls[0].index("-ss") + 1] == "1.000"
     with pytest.raises(RuntimeError, match="poster frame failed"):
         sg._poster(tmp_path / "v.mp4", tmp_path / "bad.jpg", 48, 24)
+
+
+def three_chunk_night(tmp_path, root, **ops_kw):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], chunk=10, **ops_kw)
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    return ops, run(src, root, hooks)
+
+
+def test_session_of_three_chunks_shows_one_stack_and_keeps_the_chunks(tmp_path, root):
+    ops, result = three_chunk_night(tmp_path, root)
+    stacks = result.run_dir / "stacks"
+    assert [c[1] for c in ops.calls if c[0] == "combine_session"] == ["night-1-session.tif"]
+    assert ops.combined == ["night-1.linear", "night-2.linear", "night-3.linear"]
+    assert (stacks / "night-1-session.tif").is_file() and (stacks / "night-1-session.jpg").is_file()
+    for n in (1, 2, 3):  # intermediates stay on disk; their linear inputs are spent
+        assert (stacks / f"night-{n}.tif").is_file()
+        assert not (stacks / f"night-{n}.linear").exists()
+    page = (result.run_dir / "index.html").read_text()
+    assert "stacks/night-1-session.jpg" in page
+    assert "stacks/night-2.jpg" not in page and "stacks/night-3.jpg" not in page
+    assert "stacks/night-1.jpg" not in page
+
+
+def test_failed_session_combine_falls_back_to_the_best_chunk(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(sequences=[seq], chunk=10, fail=["combine"])
+    totals = Totals({n: (0.9 if 10 <= i < 20 else 0.2) for i, n in enumerate(names)})
+    hooks = make_hooks(ops, totals, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    page = (result.run_dir / "index.html").read_text()
+    assert "stacks/night-2.jpg" in page
+    assert "stacks/night-1.jpg" not in page and "stacks/night-3.jpg" not in page
+    assert "session-1" not in page and "-session." not in page
+    assert not (result.run_dir / "stacks" / "night-1-session.tif").exists()
+    for n in (1, 2, 3):  # kept so a resume can retry the combine
+        assert (result.run_dir / "stacks" / f"night-{n}.linear").is_dir()
+    skipped = rows(result.run_dir / "skipped.csv")
+    assert any("session combine failed: combine boom" in r["reason"] for r in skipped)
+
+
+def test_single_chunk_session_is_unchanged(tmp_path, root):
+    src = card(tmp_path, list("abcde"))
+    seq = stems(src, "abcde")
+    ops = Ops(sequences=[seq])
+    result = run(src, root, make_hooks(ops, readings=night_readings(seq)))
+    assert [c for c in ops.calls if c[0] == "combine_session"] == []
+    assert not list((result.run_dir / "stacks").glob("*-session*"))
+    assert "stacks/night-1.jpg" in (result.run_dir / "index.html").read_text()
+
+
+def test_resume_reuses_a_built_session_result(tmp_path, root):
+    ops, first = three_chunk_night(tmp_path, root)
+    with Ledger(root / ps.LEDGER_NAME) as ledger:
+        members = [str(p) for p in stems(tmp_path / "card", [f"n{i:02d}" for i in range(30)])]
+        assert ledger.get_score(sg.group_key("session", members), sg.STACK_MARKER) == 1
+    again = Ops(sequences=ops.sequences, chunk=10)
+    hooks = make_hooks(
+        again,
+        records=night_records(ops.sequences[0]),
+        readings=night_readings(ops.sequences[0]),
+    )
+    run(tmp_path / "card", root, hooks, resume=first.run_dir)
+    assert [c for c in again.calls if c[0] in ("stack", "combine_session")] == []
+    assert "stacks/night-1-session.jpg" in (first.run_dir / "index.html").read_text()
