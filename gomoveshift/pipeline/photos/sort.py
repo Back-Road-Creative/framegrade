@@ -616,6 +616,27 @@ def _lens_cap_darks(readings, hooks) -> tuple[set, set, Optional[str]]:
     return {Path(d) for d in darks}, {str(p) for p in lights}, None
 
 
+def _resort_darks(run_dir, old_rows, readings, hooks) -> tuple[set, set, Optional[str]]:
+    """``_lens_cap_darks`` for a re-sort: a night frame the first run already checked keeps
+    its verdict (its ``lens-cap-darks`` or ``night-sky`` folder), so only frames that newly
+    read as night are decoded. A first run whose check failed checked nothing."""
+    meta = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    failed = any("lens-cap dark check failed" in w for w in meta.get("warnings", []))
+    night = sort_groups.NIGHT_FOLDER
+    seen = {}
+    for r in [] if failed else old_rows:
+        path = Path(r["source"])
+        still_night = CATEGORY_FOLDERS[readings.get(path, UNKNOWN_SUBJECT).category] == night
+        if still_night and r["category"] in (sort_groups.DARKS_FOLDER, night):
+            seen[path] = r["category"]
+    darks, lights, note = _lens_cap_darks(
+        {p: r for p, r in readings.items() if p not in seen}, hooks
+    )
+    darks |= {p for p, c in seen.items() if c == sort_groups.DARKS_FOLDER}
+    lights |= {str(p) for p, c in seen.items() if c == sort_groups.NIGHT_FOLDER}
+    return darks, lights, note
+
+
 def _top_lines(ranked, limit: int = TOP_N) -> list[str]:
     lines = []
     for folder in dict.fromkeys(r["category"] for r in ranked):
@@ -845,7 +866,17 @@ def run_sort(
 
 
 def _group_stage(
-    run_dir, source, ranked, skipped, hooks, options, ledger, workers, say, triaged=frozenset()
+    run_dir,
+    source,
+    ranked,
+    skipped,
+    hooks,
+    options,
+    ledger,
+    workers,
+    say,
+    triaged=frozenset(),
+    retry_failed=True,
 ) -> dict:
     """Write the HDR / panorama / night-stack outputs; the page is rewritten after each lands."""
 
@@ -863,6 +894,7 @@ def _group_stage(
         no_stacks=options.no_stacks,
         on_output=publish,
         triaged=triaged,
+        retry_failed=retry_failed,
     )
     skipped.extend(stage.skipped)
     _write_csv(run_dir / "skipped.csv", ("path", "reason"), [[p, r] for p, r in skipped])
@@ -923,7 +955,7 @@ def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
     )
     darks, triaged, dark_note = set(), set(), None
     if not options.no_stacks:
-        darks, triaged, dark_note = _lens_cap_darks(readings, hooks)
+        darks, triaged, dark_note = _resort_darks(run_dir, old_rows, readings, hooks)
     warnings = list(warnings) + ([dark_note] if dark_note else [])
     if dark_note:
         say(f"warning: {dark_note}")
@@ -982,7 +1014,17 @@ def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
     (run_dir / "index.html").write_text(_index_html(run_dir, folder, ranked), encoding="utf-8")
     with Ledger(root / LEDGER_NAME) as ledger:
         meta["groups"] = _group_stage(
-            run_dir, folder, ranked, skipped, hooks, options, ledger, workers, say, triaged
+            run_dir,
+            folder,
+            ranked,
+            skipped,
+            hooks,
+            options,
+            ledger,
+            workers,
+            say,
+            triaged,
+            retry_failed=False,
         )
     categories = dict(Counter(row["category"] for row in ranked))
     meta.update(counts=categories, skipped=len(skipped))
