@@ -349,9 +349,28 @@ def check_lf_work_space(
             f"{needed_gb - free_gb:.1f} GB) - its {share_bytes / _GB:.1f} GB share of "
             f"the day master x {_LF_WORK_FACTOR} (stream copy + montage copy + final "
             f"coexist) x {safety_factor} margin. Free space on the cache volume "
-            f"(`gomoveshift cleanup <published-project> --confirm`), then resume: "
+            f"({_cleanup_hint(Path(output_dir))}), then resume: "
             f"finished long-forms are kept."
         )
+
+
+def _cleanup_hint(output_dir: Path) -> str:
+    """The ``cleanup`` line that searches the stage root *output_dir* sits under.
+
+    ``cleanup <project>`` looks under ``GMS_INTERMEDIATE_DIR`` (default: the cache home), so a
+    drive staged elsewhere (``health backlog``'s ``--stages-root``) is ``Project not found``
+    without it. The root is the dir above ``<project>/_stages`` or ``<project>/<project>/_stages``.
+    """
+    stages = next((p for p in (output_dir, *output_dir.parents) if p.name == "_stages"), None)
+    if stages is None:
+        return "`gomoveshift cleanup <published-project> --confirm`"
+    project = stages.parent
+    root = project.parent.parent if project.parent.name == project.name else project.parent
+    env = f"GMS_INTERMEDIATE_DIR={root}"
+    return (
+        f"`{env} gomoveshift cleanup <published-project> --confirm`; a killed or given-up run: "
+        f"`{env} gomoveshift cleanup <project> --abandoned --confirm`"
+    )
 
 
 _WSL_HOST_MIN_FREE_GB = 25.0  # absolute floor for the host volume even on resume
