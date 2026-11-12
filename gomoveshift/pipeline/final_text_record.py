@@ -451,7 +451,7 @@ def check_final_text(
             source_fingerprint=context["source_fingerprint"],
             plan_fingerprint=context["plan_fingerprint"],
             policy_version=context["policy_version"],
-            text_policy=GMS_TEXT_POLICY,
+            text_policy=context.get("text_policy", GMS_TEXT_POLICY),
             **bound,
         )
     except FinalTextReviewRefused as exc:

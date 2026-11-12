@@ -132,6 +132,9 @@ class TestParityWithRealPlan:
                 rec.pop(key)
             rec["payloads"]["youtube"].pop("description")
             rec.pop("media")
+            # the review hash is derived from the description (parent link) and media
+            # popped above, so it differs exactly where those do
+            rec.pop("reviewed_plan_hash")
         assert prev == real
 
     def test_real_description_body_kept_with_synthetic_link(self, tmp_path):

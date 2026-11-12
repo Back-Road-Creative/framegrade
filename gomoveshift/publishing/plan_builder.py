@@ -16,6 +16,7 @@ from gomoveshift.pipeline.text_format import (
     split_trailing_hashtags,
 )
 from gomoveshift.pipeline.title_decision import require_title_decision
+from gomoveshift.publishing.asset_plan import review_hash
 from gomoveshift.publishing.models import (
     FORMAT_SHORT,
     TIKTOK_PRIVACY_LEVELS,
@@ -257,7 +258,15 @@ def build_publish_plan(
                     parent_lf_publish_at=parent_publish_at,
                     payloads=payloads,
                     consent_hash=consent_hash,
-                    reviewed_plan_hash=reviewed_plan_hash,
+                    # Never left empty: the Short review needs an approval marker, so
+                    # a caller with none gets the hash of the text this record sends.
+                    reviewed_plan_hash=reviewed_plan_hash
+                    or review_hash(
+                        payloads.youtube.title,
+                        payloads.youtube.description,
+                        payloads.youtube.tags,
+                        media.sha256,
+                    ),
                     routes=routes,
                     # This builder only ever produces shorts -- say so
                     # explicitly rather than leaving format unstated.

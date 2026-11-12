@@ -27,11 +27,13 @@ from ..pipeline.final_text_record import (
 from ..pipeline.location_evidence import _evidence_id
 from ..pipeline.playlist_resolver import resolve_playlist, short_region
 from ..pipeline.title_decision import decide_title, short_place_facts
+from .asset_plan import review_hash
 from .models import ShortPublishRecord, YouTubePayload
 from .queue import NEXT_ATTEMPT_PLATFORM_DEFERRAL as PLATFORM_DEFERRAL
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from .queue import PUBLISHED_AT_PLATFORM_SCHEDULED as PLATFORM_SCHEDULED
 from .queue import acquire_lease, find_delivery, mark_missing_remote, transition
+from .short_title_review import short_text_policy
 from .youtube_uploads_listing import list_uploads
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,9 @@ def short_final_text_context(record: ShortPublishRecord) -> dict:
             ],
         ),
         "policy_version": str(decision["policy_version"]),
+        # The words the record backs in this Short's own title; ``check_final_text``
+        # verifies the review against this same policy.
+        "text_policy": short_text_policy(record),
     }
 
 
@@ -191,7 +196,10 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
 
     The place the title names must be one of the clip's region votes; a title
     naming anything else, or no place, comes back not ``agree``. The approval
-    marker is the plan's ``reviewed_plan_hash``; an empty one is refused."""
+    marker is the plan's ``reviewed_plan_hash``; a plan written without one (every
+    plan before the builder filled it) is marked with the content hash of what the
+    Short sends -- title, description, tags and media -- the same hash the asset
+    door's ``--confirm`` binds, so the marker always names exactly this text."""
     from seo_manager.analytics.final_text_review import (
         RECORD_VERSION,
         review_final_text,
@@ -224,7 +232,8 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
     seconds = float(record.media.duration_seconds)
     approved = {
         "record_version": RECORD_VERSION,
-        "approval_hash": record.reviewed_plan_hash,
+        "approval_hash": record.reviewed_plan_hash
+        or review_hash(payload.title, payload.description, payload.tags, record.media.sha256),
         "title": payload.title,
         "recording_date": record.recording_date,
         "date_evidence_id": date_id,
@@ -264,8 +273,28 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
             }
         ]
     )
-    review = review_final_text(approved, decision, evidence, GMS_TEXT_POLICY)
+    review = review_final_text(approved, decision, evidence, context["text_policy"])
     return review_to_dict(review)
+
+
+def short_review_refusal(record: ShortPublishRecord) -> Optional[str]:
+    """Why the Short as it would be sent now is refused, or ``None`` when its
+    final-text review agrees. The review ``publish`` runs, minus the upload: no
+    lease, no queue write, no network. A GPS-less Short has no review to refuse."""
+    if not record.sampled_regions:
+        return None
+    try:
+        review = build_short_final_text_review(record)
+        check_final_text(
+            review,
+            short_final_text_context(record),
+            record.payloads.youtube.title,
+            description=compose_description(review["surfaces"]),
+            tags=list(record.payloads.youtube.tags),
+        )
+    except FinalTextReviewError as exc:
+        return str(exc).partition("; next:")[0]
+    return None
 
 
 class AmbiguousUploadMatchError(RuntimeError):

@@ -75,7 +75,13 @@ than re-implementing its upload/retry/token/quota handling.
   the lease and the `submitting` mark, so a refused Short never holds a lease.
   A review carried on the record (`final_text_review`) is re-verified against a
   context recomputed at publish time. The approval marker is the plan's
-  `reviewed_plan_hash`, and an empty one is refused. The review then goes to
+  `reviewed_plan_hash`; a plan written before the builder filled it carries
+  none, and the review then uses the content hash of what the Short sends
+  (`asset_plan.review_hash`). The generator's own title words are backed by the
+  record (`publishing/short_title_review.py`): the stamp ("Feb 24, 2nd stretch")
+  only when it is the one `recording_date` makes, a weekday only when it is that
+  date's, and a hashtag only from the generator's tag lists or the clip's own
+  region votes. Any other word is still refused as `name_unbacked`. The review then goes to
   `upload_video` (`final_text_review` / `final_text_context`) and binds the
   title, description and tag bytes; the description sent is the one the review
   composed, not a second build of it. With the constant off, `publish()` holds

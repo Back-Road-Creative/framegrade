@@ -34,6 +34,13 @@ e. privacy, exactly as above;
 c. the channel's recent uploads carry no video with the plan's exact title. An
    empty listing is refused: it cannot prove absence.
 
+A YouTube ``failed_permanent`` row recovers too when the final-text review
+refused it (``error_class`` ``FinalTextReview``): it was refused before the
+lease, so it never reached ``videos.insert``. Its gates are the ones above plus
+(a') the row holds no upload id, and (g) the review of the Short as the sidecar
+would send it today now agrees (``youtube_adapter.short_review_refusal``; a
+refusal names its reasons). Gate (b) does not apply: there is no old video.
+
 A recovery row resolves the ``missing_remote`` validate problem; until one
 exists that problem names this command.
 """
@@ -122,6 +129,8 @@ class RecoveryDeps:
     record_loader: Callable[[str, int], Any]
     privacy_loader: Callable[[Any], Optional[Dict]]
     rendition_path: Callable[[Any], Path]
+    #: record -> why the Short's final-text review still refuses it, else None.
+    review_check: Optional[Callable[[Any], Optional[str]]] = None
 
 
 def recover_terminal(
@@ -145,12 +154,15 @@ def recover_terminal(
         raise RecoveryRefusedError(
             f"recover-terminal supports instagram and youtube, not {platform!r}"
         )
-    if row["status"] != _RECOVERS_FROM[platform]:
+    final_text = _is_final_text_refusal(row)
+    if row["status"] != _RECOVERS_FROM[platform] and not final_text:
         raise RecoveryRefusedError(
             f"{platform} recovers {_RECOVERS_FROM[platform]} only; "
             f"delivery {delivery_id} is {row['status']!r}"
         )
-    gates = _youtube_gates if platform == "youtube" else _instagram_gates
+    gates = _instagram_gates
+    if platform == "youtube":
+        gates = _youtube_final_text_gates if final_text else _youtube_gates
     evidence = gates(row, deps, now or datetime.now(timezone.utc).isoformat())
     if not apply:
         return None
@@ -161,6 +173,15 @@ def recover_terminal(
 
 #: The one terminal status each platform recovers from.
 _RECOVERS_FROM = {"instagram": "failed_permanent", "youtube": "missing_remote"}
+
+
+def _is_final_text_refusal(row) -> bool:
+    """A YouTube row the final-text review refused before any upload."""
+    return (
+        row["platform"] == "youtube"
+        and row["status"] == "failed_permanent"
+        and "FinalTextReview" in (row["error_class"] or "")
+    )
 
 
 def _loaded_media(row, deps: RecoveryDeps):
@@ -185,6 +206,17 @@ def _privacy_gate(row, deps: RecoveryDeps) -> None:
         raise RecoveryRefusedError(f"privacy hold: {held}")
 
 
+def _youtube_final_text_gates(row, deps: RecoveryDeps, now: str) -> Dict[str, Any]:
+    """The review-refused row: no old video to check, but the review must agree now."""
+    if row["platform_upload_id"]:
+        raise RecoveryRefusedError(
+            f"delivery {row['id']} holds an upload id ({row['platform_upload_id']}); "
+            "a refused Short never uploads, so this row is not a review refusal"
+        )
+    evidence: Dict[str, Any] = {"status": row["status"], "error_class": row["error_class"]}
+    return _youtube_common_gates(row, deps, now, evidence)
+
+
 def _youtube_gates(row, deps: RecoveryDeps, now: str) -> Dict[str, Any]:
     evidence: Dict[str, Any] = {"status": row["status"]}
     video_id = row["platform_upload_id"]
@@ -198,8 +230,20 @@ def _youtube_gates(row, deps: RecoveryDeps, now: str) -> Dict[str, Any]:
             f"YouTube returns {video_id} again; it is not missing -- nothing to recover"
         )
     evidence["old_video"] = {"id": video_id, "returned": False}
+    return _youtube_common_gates(row, deps, now, evidence)
 
+
+def _youtube_common_gates(
+    row, deps: RecoveryDeps, now: str, evidence: Dict[str, Any]
+) -> Dict[str, Any]:
     record, media = _loaded_media(row, deps)  # (d)
+    if _is_final_text_refusal(row):  # (g) the review agrees with what would be sent now
+        if deps.review_check is None:
+            raise RecoveryRefusedError("no final-text review check supplied")
+        refusal = deps.review_check(record)
+        if refusal:
+            raise RecoveryRefusedError(f"final-text review still refuses the Short: {refusal}")
+        evidence["final_text_review"] = "agree"
     # (f) the slot is still ahead
     slot = record.schedule.scheduled_at_utc
     if _parse_utc(slot) <= _parse_utc(now):
@@ -277,12 +321,14 @@ def _build_real_deps(conn, config, sidecar_dir: Path, platform: str) -> Recovery
 
     if platform == "youtube":
         from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
+        from ...publishing.youtube_adapter import short_review_refusal
 
         return RecoveryDeps(
             graph=YouTubeRecoveryReader(YouTubeUploader()._build_service()),
             record_loader=SidecarRecordLoader(sidecar_dir, conn=conn),
             privacy_loader=PrivacyAttestationLoader(sidecar_dir),
             rendition_path=_media_path,
+            review_check=short_review_refusal,
         )
     from ...publishing.instagram_adapter import InstagramReelsAdapter
     from ...publishing.meta_auth import load_meta_credentials

@@ -58,8 +58,11 @@ never fails the run.
 - `route_selected` (defaulted) feeds `RouteSelection`. Metricool is retired —
   there is no rollback publisher and no `route_rollback` parameter; a
   platform not in `route_selected` simply ships nothing (`off`).
-- `consent_hash` / `reviewed_plan_hash` — threaded through as given, not
-  computed here (no dispatcher/review-gate wiring yet).
+- `consent_hash` — threaded through as given, not computed here.
+  `reviewed_plan_hash` — threaded through as given; a caller that passes none
+  gets, per Short, the content hash of what the record sends (title, description,
+  tags, media sha256: `asset_plan.review_hash`), because the Short's final-text
+  review refuses a record with no approval marker.
 
 ## Payload composition (per the mapping doc)
 
