@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.79] - 2026-11-12
+
+### Fixed
+
+- Every Facebook/Instagram Graph request now carries a `(10, 120)` s timeout unless its caller sets one; a dead connection hung `dispatch-queue --apply` for 21 h.
+
 ## [0.3.78] - 2026-11-12
 
 ### Fixed
@@ -953,7 +959,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...HEAD
+[0.3.79]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...v0.3.79
 [0.3.78]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...v0.3.78
 [0.3.77]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...v0.3.77
 [0.3.76]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...v0.3.76
