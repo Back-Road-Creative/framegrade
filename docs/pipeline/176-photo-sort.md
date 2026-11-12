@@ -38,3 +38,5 @@ Folders: `night-sky` (astro), `landscape`, `close-up`, `wildlife`, `portrait`, `
 ## Verification
 
 `tests/test_photo_sort.py` (fake hooks plus real runs on tiny JPEGs) and `tests/test_photo_sort_cli.py` (parser, config, admission fence, CLI dry-run).
+
+Deterministic: the same folder sorts the same way every time. Input order is the sorted path list, rank ties break on path, the develop grain and glitch are seeded, the aesthetic scorer is a fixed local model on the CPU (same output on 1, 2 or 4 threads), and nothing in the sort calls an LLM. `test_the_same_folder_sorts_the_same_way_twice` sorts one folder twice with real develop, scoring and group detection in the spawn pool and asserts every output file matches byte for byte; only `run.json` `timings` may differ.
