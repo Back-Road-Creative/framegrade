@@ -19,6 +19,13 @@ from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION
 #: when the response is a Graph error; a return from it is never expected.
 GraphErrorHook = Callable[[int, dict], None]
 
+#: ``(connect, read)`` seconds for every Graph request that names none.
+#: requests waits forever by default: on 2026-11-11 one Graph read hung
+#: ``dispatch-queue --apply`` 21 h on a dead connection, holding the dispatch
+#: lock. The read bound covers a reel's byte upload, which sends in chunks
+#: that each have to make progress within it.
+GRAPH_TIMEOUT = (10, 120)
+
 
 def graph_base_url(graph_version: Optional[str] = None) -> str:
     """``https://graph.facebook.com/<version>``; the default version applies
@@ -43,10 +50,13 @@ def _graph_json(response: Any, raise_for_error: GraphErrorHook) -> Dict[str, Any
 
 def graph_post(session: Any, url: str, raise_for_error: GraphErrorHook, **kwargs) -> Dict[str, Any]:
     """POST through ``session`` and return the decoded body, or let
-    ``raise_for_error`` raise the platform error."""
+    ``raise_for_error`` raise the platform error. ``GRAPH_TIMEOUT`` applies
+    unless the caller passes its own ``timeout``."""
+    kwargs.setdefault("timeout", GRAPH_TIMEOUT)
     return _graph_json(session.post(url, **kwargs), raise_for_error)
 
 
 def graph_get(session: Any, url: str, raise_for_error: GraphErrorHook, **kwargs) -> Dict[str, Any]:
     """GET through ``session``; same contract as ``graph_post``."""
+    kwargs.setdefault("timeout", GRAPH_TIMEOUT)
     return _graph_json(session.get(url, **kwargs), raise_for_error)
