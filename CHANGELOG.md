@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.77] - 2026-11-11
+
+### Changed
+
+- redactcam pinned to `1937312`: each sampled frame now letterboxes its detection
+  tiles once for the face and plate models, and runs the COCO model once for the
+  vehicle and person detectors (both specs resolve to the same model, sha
+  `5ad2aa77f7f6`). Detected boxes are byte-identical. Measured on a 20 s 4K clip
+  under load: 4.82/3.64 fps before, 4.94/3.95 fps after.
+
 ## [0.3.76] - 2026-11-11
 
 ### Fixed
@@ -931,7 +941,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...HEAD
+[0.3.77]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...v0.3.77
 [0.3.76]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...v0.3.76
 [0.3.75]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...v0.3.75
 [0.3.74]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.73...v0.3.74
