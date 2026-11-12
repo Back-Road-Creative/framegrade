@@ -1119,9 +1119,10 @@ def _group_stage(
     workers,
     say,
     triaged=frozenset(),
-    retry_failed=True,
+    build=True,
 ) -> dict:
-    """Write the HDR / panorama / night-stack outputs; the page is rewritten after each lands."""
+    """Write the HDR / panorama / night-stack outputs; the page is rewritten after each lands.
+    Without ``build`` (``--resort``) nothing is rendered; unfinished outputs are listed."""
 
     def publish(outputs) -> None:
         (run_dir / "index.html").write_text(
@@ -1137,7 +1138,7 @@ def _group_stage(
         no_stacks=options.no_stacks,
         on_output=publish,
         triaged=triaged,
-        retry_failed=retry_failed,
+        build=build,
     )
     skipped.extend(stage.skipped)
     _write_csv(run_dir / "skipped.csv", ("path", "reason"), [[p, r] for p, r in skipped])
@@ -1145,6 +1146,7 @@ def _group_stage(
     say(
         f"groups: {stage.stats['tagged']} tagged, {stage.stats['built']} built, "
         f"{stage.stats['resumed']} already done, {stage.stats['failed']} failed"
+        + (f", {stage.stats['unbuilt']} not built (--resume builds them)" if not build else "")
     )
     return dict(stage.stats)
 
@@ -1271,7 +1273,7 @@ def _resort(run_dir, folder, root, options, hooks, workers, say) -> SortResult:
             workers,
             say,
             triaged,
-            retry_failed=False,
+            build=False,
         )
     categories = dict(Counter(row["category"] for row in ranked))
     meta.update(counts=categories, skipped=len(skipped))
