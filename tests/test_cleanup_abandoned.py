@@ -10,8 +10,9 @@ hand ``rm`` of a path the agent cannot type.
 Rule pinned here: with ``--abandoned`` AND a named project, an incomplete stage
 dir is planned for removal when every rule holds — no completion marker, no run
 lock held by a live pid, no live ``gomoveshift drive`` process anywhere, no
-``no-auto-resume`` hold, old enough for ``--min-age`` (unless a backlog supersede record names
-the project: that run is dead by record). The first failing rule is
+``no-auto-resume`` hold other than health backlog's own give-up, old enough for ``--min-age``
+(unless a backlog supersede record names the project or health backlog gave it up: that run is
+dead by record). The first failing rule is
 the skip reason. Without the flag the project is skipped as before, with a hint.
 ``--confirm`` removes the ``_stages`` dir only; the output dir and every other
 project are untouched.
@@ -25,7 +26,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from gomoveshift.cli.handlers import cleanup as cleanup_handler
+from gomoveshift.health import launch
 from gomoveshift.health.resume import HOLD_NAME
 from gomoveshift.pipeline.cleanup import PipelineCleanup
 
@@ -187,6 +191,45 @@ def test_a_superseded_run_is_still_refused_while_a_drive_runs(tmp_path):
     )
     assert plan.abandoned == []
     assert any("running" in s["reason"] for s in plan.skipped)
+
+
+@pytest.mark.parametrize(
+    "reason", [launch.RETIRED_HOLD_PREFIX + "audit job exited 1", launch.GAVE_UP_HOLD]
+)
+def test_a_young_run_health_backlog_gave_up_is_dead_by_record(tmp_path, reason):
+    """2026-11-12: rec0063 needed 27.6 GB more on C: while the given-up rec0060-0061 run (57 GB,
+    4 days old) sat beside it. Its ``no-auto-resume`` hold was health backlog's own give-up, yet
+    ``--abandoned`` read it as an operator's "waiting" hold and the age gate refused it too."""
+    project = _killed_run(tmp_path / "cache", "nctopa-2026-03-04-rec0060-0061")
+    now = int(__import__("time").time())
+    os.utime(project / "_stages", (now, now))
+    assert launch._hold_recipes(tmp_path / "cache", project.name, reason, dry_run=False)
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+        [project], min_age_days=7, abandoned=True
+    )
+    assert plan.skipped == []
+    assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
+
+
+def test_a_given_up_run_is_still_refused_while_a_drive_runs(tmp_path):
+    project = _killed_run(tmp_path / "cache")
+    launch._hold_recipes(tmp_path / "cache", project.name, launch.GAVE_UP_HOLD, dry_run=False)
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: True).plan_cleanup(
+        [project], min_age_days=0, abandoned=True
+    )
+    assert plan.abandoned == []
+    assert any("running" in s["reason"] for s in plan.skipped)
+
+
+def test_an_operator_hold_mentioning_health_backlog_still_waits(tmp_path):
+    project = _killed_run(tmp_path / "cache")
+    (project / "_stages" / HOLD_NAME).write_text("hold: ask health backlog later\n")
+    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+        [project], min_age_days=0, abandoned=True
+    )
+    assert plan.abandoned == []
+    (skip,) = plan.skipped
+    assert HOLD_NAME in skip["reason"]
 
 
 def test_execute_removes_the_stage_dir_only(tmp_path):
