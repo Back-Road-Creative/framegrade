@@ -50,6 +50,8 @@ TIMELAPSE_MIN_FRAMES = 24
 TRAILS_SKIP_MARKER = "trails-skip:v1"
 #: A group output that raised, under its ``group_key``; ``--resort`` does not retry it.
 FAILED_MARKER = "stack-failed:v1"
+# ``--resort`` only re-files photos; a group output it would have to render waits for --resume.
+UNBUILT_REASON = "not built: --resort never renders; a run with --resume builds it"
 #: Fewest lights worth a star trail: 24 frames at the measured 32 s interval
 #: (``astro_trails``) is about 13 minutes, about 3 degrees of sky rotation. Shorter arcs read
 #: as dots, and the stack already shows that scene.
@@ -586,13 +588,14 @@ def build_outputs(
     no_stacks: bool,
     on_output,
     triaged=frozenset(),
-    retry_failed=True,
+    build=True,
 ) -> StageResult:
     """HDR, panoramas, night stacks (best session first), then star trails and time-lapses;
     one at a time. ``triaged``: sources this run already cleared as lights (not lens-cap
-    darks), so a session made only of them is not decoded a second time. Without
-    ``retry_failed`` (``--resort``) a group that failed before with the same members is
-    skipped; ``--resume`` retries it."""
+    darks), so a session made only of them is not decoded a second time. Without ``build``
+    (``--resort``) nothing is rendered or decoded: a finished output whose members are
+    unchanged stays on the page, and every other group becomes a ``skipped.csv`` row
+    (``UNBUILT_REASON``, or the earlier failure) that ``--resume`` builds."""
     result = StageResult()
     groups = groups_from_rows(rows)
     queue = [g for g in groups if g.kind == "bracket"] + [g for g in groups if g.kind == "pano"]
@@ -616,10 +619,10 @@ def build_outputs(
             )
             result.stats["starless"] += 1
             continue
-        elif not retry_failed and ledger.get_score(key, FAILED_MARKER) == 1:
-            reason = f"{group.kind} failed in an earlier run; --resume retries it"
-            result.skipped.append((f"group:{group.id}", reason))
-            result.stats["failed"] += 1
+        elif not build:
+            _unbuilt(
+                result, f"group:{group.id}", ledger.get_score(key, FAILED_MARKER) == 1, group.kind
+            )
             continue
         else:
             main.parent.mkdir(parents=True, exist_ok=True)
@@ -638,14 +641,26 @@ def build_outputs(
         result.outputs.append(Output({"night": "stacks"}.get(group.kind, folder), group.id, rel))
         on_output(result.outputs)
     if not no_stacks:
-        _combine_sessions(run_dir, groups, ops, ledger, result, on_output)
+        _combine_sessions(run_dir, groups, ops, ledger, result, on_output, build)
     darks = sorted(
         (stamp, str(r["source"]))
         for r in rows
         if r["category"] == DARKS_FOLDER and (stamp := _parse_stamp(r.get("capture_time")))
     )
-    _build_timelapses(run_dir, groups, ops, ledger, result, no_stacks, on_output, darks, triaged)
+    _build_timelapses(
+        run_dir, groups, ops, ledger, result, no_stacks, on_output, darks, triaged, build
+    )
     return result
+
+
+def _unbuilt(result, path, failed=False, kind="") -> None:
+    """A ``--resort`` row for an output it may not render; ``--resume`` builds it."""
+    if failed:
+        result.skipped.append((path, f"{kind} failed in an earlier run; --resume retries it"))
+        result.stats["failed"] += 1
+    else:
+        result.skipped.append((path, UNBUILT_REASON))
+        result.stats["unbuilt"] += 1
 
 
 def _starless(group, by_src) -> bool:
@@ -656,7 +671,7 @@ def _starless(group, by_src) -> bool:
     return bool(marks) and all(m not in (None, "") and float(m) == 0 for m in marks)
 
 
-def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
+def _combine_sessions(run_dir, groups, ops, ledger, result, on_output, build=True) -> None:
     """One page result per night session of two or more built chunks: the deep combine of
     their linear artifacts, ``stacks/<first-id>-session.tif``. The chunk stacks stay on disk
     as intermediates and leave the page; their ``.linear`` inputs are removed once the
@@ -676,6 +691,9 @@ def _combine_sessions(run_dir, groups, ops, ledger, result, on_output) -> None:
             keep = Output(
                 "stacks", sid, (jpg if jpg.is_file() else main).relative_to(run_dir).as_posix()
             )
+        elif not build:
+            _unbuilt(result, f"group:{sid}-session")
+            continue
         else:
             try:
                 ops.combine_session(
@@ -714,7 +732,16 @@ def _session_darks(darks, captured) -> list[Path]:
 
 
 def _build_timelapses(
-    run_dir, groups, ops, ledger, result, no_stacks, on_output, darks=(), triaged=frozenset()
+    run_dir,
+    groups,
+    ops,
+    ledger,
+    result,
+    no_stacks,
+    on_output,
+    darks=(),
+    triaged=frozenset(),
+    build=True,
 ) -> None:
     """Per night session (not under ``--no-stacks``) a star trail then a time-lapse, sharing
     one light/dark triage plus the session's ``DARKS_FOLDER`` darks; per long burst a
@@ -743,13 +770,16 @@ def _build_timelapses(
             return triage[0]
 
         if kind == "night":
-            _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output)
+            _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output, build)
         mp4 = run_dir / TIMELAPSE_DIR / f"{gid}.mp4"
         poster = mp4.with_suffix(".jpg")
         key = group_key("timelapse", members)
         if mp4.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
             result.stats["resumed"] += 1
         elif ledger.get_score(key, TIMELAPSE_SKIP_MARKER) == 1:
+            continue
+        elif not build:
+            _unbuilt(result, f"group:{gid}-timelapse")
             continue
         else:
             try:
@@ -777,7 +807,9 @@ def _build_timelapses(
         on_output(result.outputs)
 
 
-def _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output) -> None:
+def _build_trail(
+    run_dir, gid, members, classify, ops, ledger, result, on_output, build=True
+) -> None:
     """One star trail for a night session: resume, skip and failure as a time-lapse."""
     tif = run_dir / TRAILS_DIR / f"{gid}.tif"
     jpg = tif.with_suffix(".jpg")
@@ -785,6 +817,9 @@ def _build_trail(run_dir, gid, members, classify, ops, ledger, result, on_output
     if tif.is_file() and jpg.is_file() and ledger.get_score(key, STACK_MARKER) == 1:
         result.stats["resumed"] += 1
     elif ledger.get_score(key, TRAILS_SKIP_MARKER) == 1:
+        return
+    elif not build:
+        _unbuilt(result, f"group:{gid}-trails")
         return
     else:
         try:

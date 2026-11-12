@@ -729,6 +729,43 @@ def test_resort_does_not_retry_a_stack_that_already_failed(tmp_path, root):
     assert [c[1] for c in ops.calls if c[0] == "stack"] == ["night-1.tif"]
 
 
+BUILDS = (
+    "fuse",
+    "stitch",
+    "prepare",
+    "stack",
+    "combine_session",
+    "classify_night",
+    "star_trails",
+    "night_timelapse",
+    "still_timelapse",
+)
+
+
+def test_resort_never_renders_a_group_whose_members_changed(tmp_path, root):
+    names = [f"n{i:02d}" for i in range(30)]
+    src = card(tmp_path, names)
+    seq = stems(src, names)
+    ops = Ops(chunk=15)  # first run: no sequence, so no group outputs
+    lines = []
+    hooks = make_hooks(ops, records=night_records(seq), readings=night_readings(seq))
+    result = run(src, root, hooks)
+    ops.sequences, ops.calls = [seq], []  # the re-sort now groups the frames
+    ps.run_sort(
+        src, root, ps.SortOptions(), hooks, today=TODAY, say=lines.append, resort=result.run_dir
+    )
+    assert [c for c in ops.calls if c[0] in BUILDS] == []
+    ranked = rows(result.run_dir / "ranked.csv")
+    assert {r["group_id"] for r in ranked} >= {"night-1", "night-2"}
+    reasons = {r["path"]: r["reason"] for r in rows(result.run_dir / "skipped.csv")}
+    unbuilt = "not built: --resort never renders; a run with --resume builds it"
+    assert reasons["group:night-1"] == reasons["group:night-2"] == unbuilt
+    assert any("not built" in str(line) for line in lines)
+    ops.calls.clear()
+    run(src, root, hooks, resume=result.run_dir)
+    assert {c[0] for c in ops.calls} >= {"stack", "combine_session", "night_timelapse"}
+
+
 def test_a_failed_dark_triage_keeps_every_frame_in_the_night_sky(tmp_path, root):
     src, seq, _lights, darks = dark_card(tmp_path)
 
