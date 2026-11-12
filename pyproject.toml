@@ -116,7 +116,7 @@ dependencies = [
     # redactcam ≥0.2 ships onnxruntime only through its ``[cpu]``/``[gpu]``
     # extras, so the ``[gpu]`` extra keeps this project and redactcam asking for
     # the same onnxruntime wheel.
-    "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam@ce6a1c288ee0421188ed46470cf968ab14cad7fe",
+    "redactcam[gpu] @ git+https://github.com/Back-Road-Creative/redactcam@1937312690e9326d21f8a6bf1da702f3bec323fc",
     # Windows has no IANA time-zone database; zoneinfo reads it from tzdata.
     "tzdata>=2024.1; sys_platform == \"win32\"",
 ]
