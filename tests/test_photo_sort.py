@@ -1,6 +1,7 @@
 """photos sort: dedupe, classify and develop a folder into a fixed output home."""
 
 import csv
+import dataclasses
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -386,6 +387,60 @@ def test_real_default_hooks_end_to_end(folder, root):
     )
     assert len(rows(result.run_dir / "ranked.csv")) == 3
     assert len(list((result.run_dir / "other").glob("*.jpg"))) == 3
+
+
+def _run_tree(run_dir):
+    """Every file in a run, with the run's own folder name masked out of text files."""
+    out = {}
+    for p in sorted(run_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        data = p.read_bytes()
+        if p.suffix in (".csv", ".json", ".html"):
+            data = data.replace(str(run_dir).encode(), b"<RUN>")
+            data = data.replace(run_dir.name.encode(), b"<RUN>")
+        out[str(p.relative_to(run_dir))] = data
+    return out
+
+
+def test_the_same_folder_sorts_the_same_way_twice(tmp_path):
+    """Two sorts of one folder agree byte for byte: categories, ranks, scores, JPEGs, page.
+
+    Real develop in the spawn pool, real scoring and real group detection; only the
+    camera-file reader and the subject reading are fixed. ``run.json``'s stage
+    timings are the one thing allowed to differ.
+    """
+    src = tmp_path / "card" / "trip"
+    cats = [
+        SubjectReading(SubjectCategory.ASTRO, 0.9),
+        SubjectReading(SubjectCategory.LANDSCAPE, 0.9),
+    ]
+    readings = {}
+    for i in range(9):
+        path = jpeg(src / f"img{i}.jpg", 100 + i)
+        readings[path] = cats[i % 2]
+    runs = []
+    for n in (1, 2):
+        hk = dataclasses.replace(
+            ps.scoring_hooks(
+                read_records=lambda p: ({x: CaptureRecord(path=x) for x in p}, []),
+                recognise=lambda paths, optics=None: {p: readings[p] for p in paths},
+            ),
+            aesthetic_factory=None,
+        )
+        result = ps.run_sort(
+            src, tmp_path / f"out{n}", opts(workers=2), hk, today=TODAY, say=lambda *_: None
+        )
+        runs.append(_run_tree(result.run_dir))
+    assert sorted(runs[0]) == sorted(runs[1])
+    metas = [json.loads(r.pop("run.json")) for r in runs]
+    differ = [name for name in runs[0] if runs[0][name] != runs[1][name]]
+    assert differ == []
+    # run.json records how long each stage took; nothing else in it may differ.
+    assert [k for k in metas[0] if metas[0][k] != metas[1].get(k)] == ["timings"]
+    ranked = list(csv.DictReader(runs[0]["ranked.csv"].decode().splitlines()))
+    assert {r["category"] for r in ranked} == {"night-sky", "landscape"}
+    assert len(ranked) == 9 and all(r["quality_score"] for r in ranked)
 
 
 def test_lower_priority_ignores_failure(monkeypatch):
