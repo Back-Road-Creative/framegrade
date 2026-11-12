@@ -1699,6 +1699,14 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     o.add_argument("--id", type=int, default=None, help="Only this delivery id.")
     o.add_argument("--apply", action="store_true", help="Move the rows (default: dry run).")
+    y = actions.add_parser(
+        "reslot-overdue-youtube",
+        help="Move each queued YouTube Short whose slot has passed (and that holds no upload "
+        "id) to the region's next free Waypost shorts time, in the row and the sidecar "
+        "publishAt. Dry run unless --apply; writes nothing to YouTube",
+    )
+    y.add_argument("--id", type=int, default=None, help="Only this delivery id.")
+    y.add_argument("--apply", action="store_true", help="Move the rows (default: dry run).")
 
 
 def _add_catalog_inventory_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -1418,6 +1418,7 @@ def recover_terminal_delivery(
     authorized_by: str,
     evidence: Dict[str, Any],
     now: Optional[str] = None,
+    scheduled_at: Optional[str] = None,
 ) -> int:
     """Insert ONE new ``queued`` delivery for the same short/platform, linked
     to the terminal row by ``recovers_delivery_id``; returns its
@@ -1425,7 +1426,8 @@ def recover_terminal_delivery(
     touched. The caller is responsible for the gates (see
     ``cli/handlers/queue_recover.py``); this re-checks status and
     single-recovery inside the write so a stale caller cannot double-insert.
-    Also appends an audit row to ``response_log``."""
+    Also appends an audit row to ``response_log``. The new row is due ``now`` unless
+    ``scheduled_at`` names its slot (a re-slotted YouTube Short books its new time)."""
     if not (authorized_by or "").strip():
         raise RecoveryRefusedError("--authorized-by must be a non-empty statement")
     now = now or _now_iso()
@@ -1447,7 +1449,7 @@ def recover_terminal_delivery(
                     f"{old['plan_hash']}{RECOVERY_PLAN_HASH_TAG}{delivery_id}",
                     old["shadow"],
                     old["sidecar_path"],
-                    now,
+                    scheduled_at or now,
                     old["first_comment_text"],
                     delivery_id,
                     authorized_by.strip(),
