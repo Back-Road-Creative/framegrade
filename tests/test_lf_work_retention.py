@@ -140,7 +140,15 @@ def test_purge_lf_intermediates_keeps_everything_without_a_final(tmp_path, final
 
 class TestLfWorkSpace:
     def _check(
-        self, tmp_path, *, free_gb, lf_sec=3600.0, master_gb=60, master_sec=7200.0, later=()
+        self,
+        tmp_path,
+        *,
+        free_gb,
+        lf_sec=3600.0,
+        master_gb=60,
+        master_sec=7200.0,
+        later=(),
+        output_dir=None,
     ):
         from gomoveshift.pipeline.preflight import check_lf_work_space
 
@@ -151,8 +159,31 @@ class TestLfWorkSpace:
             patch("shutil.disk_usage", return_value=SimpleNamespace(free=free_gb * _GB)),
         ):
             check_lf_work_space(
-                master, tmp_path, lf_sec, master_sec, lf_index=2, later_lf_secs=later
+                master, output_dir or tmp_path, lf_sec, master_sec, lf_index=2, later_lf_secs=later
             )
+
+    @pytest.mark.parametrize("nested", [True, False])
+    def test_the_hint_names_the_stage_root_cleanup_must_search(self, tmp_path, nested):
+        """2026-11-12: rec0063 failed this gate under ``/mnt/c/WorkspacesGMSStages``. The hint's
+        bare ``gomoveshift cleanup <project>`` searches the default stage cache, so every project
+        there answered ``Project not found``: the hint has to carry the root it reports."""
+        root = tmp_path / "stages"
+        project = root / "rec0063" / "rec0063" if nested else root / "rec0063"
+        lfs = project / "_stages" / "day_2026-03-05" / "regular_lfs"
+        with pytest.raises(RuntimeError) as exc:
+            self._check(tmp_path, free_gb=70, output_dir=lfs)
+        msg = str(exc.value)
+        assert (
+            f"GMS_INTERMEDIATE_DIR={root} gomoveshift cleanup <published-project> --confirm" in msg
+        )
+        assert "--abandoned" in msg
+
+    def test_outside_a_stage_dir_the_hint_stays_bare(self, tmp_path):
+        with pytest.raises(RuntimeError) as exc:
+            self._check(tmp_path, free_gb=70)
+        msg = str(exc.value)
+        assert "`gomoveshift cleanup <published-project> --confirm`" in msg
+        assert "GMS_INTERMEDIATE_DIR" not in msg
 
     def test_a_later_lf_is_priced_on_top_of_this_lfs_final(self, tmp_path):
         """Each final stays on the cache volume, so the next LF burns beside it:
