@@ -64,6 +64,10 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("cli/handlers/queue_recover.py", "instagram_adapter"): RECOVER,
     ("cli/handlers/queue_recover.py", "meta_auth"): RECOVER,
     ("cli/handlers/queue_recover.py", "youtube_uploads_listing"): UPLOADS_READ,
+    ("cli/handlers/queue_recover.py", "youtube_adapter"): (
+        "the `queue recover-terminal` CLI re-runs a failed Short's pre-upload final-text "
+        "review (`short_review_refusal`) before it re-arms the row; it uploads nothing"
+    ),
     ("pipeline/content_ledger.py", "youtube_uploads_listing"): UPLOADS_READ,
     ("tracking/channel_enrol.py", "youtube_uploads_listing"): UPLOADS_READ,
     ("tracking/collector.py", "meta_auth"): METRICS_AUTH,

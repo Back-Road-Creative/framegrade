@@ -22,15 +22,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from datetime import date
 from typing import Iterable
 
 from ..pipeline.final_text_record import GMS_TEXT_POLICY
 from ..pipeline.social_generator import (
-    _WEEKDAYS,
     GENERIC_HASHTAGS,
     TERRAIN_HASHTAGS,
     title_stamp,
+    weekday_name,
 )
 from ..pipeline.text_format import split_trailing_hashtags
 
@@ -80,7 +79,7 @@ def short_title_filler(title: str, recording_date: str, regions: Iterable[str]) 
     if not stamp_ok:
         return tuple(sorted(backed))
     backed |= _words(match["stamp"])
-    weekday = _WEEKDAYS[date.fromisoformat(recording_date).weekday()]
+    weekday = weekday_name(recording_date)
     rest = match["body"]
     seconds = _SECONDS_BODY.match(rest)
     if seconds is not None:
