@@ -1964,6 +1964,17 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
         )
 
 
+def _label_awarded_by_ladder(state, idx: int) -> bool:
+    """True when ``per_lf_tier_evidence`` records LF ``idx``'s label as the
+    ladder's own award (bracket route or placeless operator label)."""
+    from .bracket_route import BRACKET_TIER_REASON
+    from .drive_phases.phase_bc_day_first import PLACELESS_TIER_REASON
+
+    evidence = (state.get("per_lf_tier_evidence") if state is not None else None) or {}
+    record = evidence.get(idx) or evidence.get(str(idx)) or {}
+    return record.get("tier_reason") in (BRACKET_TIER_REASON, PLACELESS_TIER_REASON)
+
+
 def _lf_plan_seconds(segments) -> float:
     """Summed length of an LF plan's segments (what its concat holds)."""
     return sum(
@@ -2594,11 +2605,15 @@ def run_day_pipeline(
         # that pass only ``location`` are unaffected. The robust-by-
         # construction CLI gate in phase_bc_day_first already refused
         # to enter encoding when an LF lacks GPS + an override, so this
-        # is cheap defense-in-depth.
+        # is cheap defense-in-depth. A label the specificity ladder awarded
+        # on its own evidence (a bracket route that only proves the country,
+        # a placeless operator label) can be the drive-wide words verbatim;
+        # its ``per_lf_tier_evidence`` record says so, and it is not a leak.
         if (
             per_lf_supplied
             and (location or "").strip()
             and (lf_location or "").strip() == (location or "").strip()
+            and not _label_awarded_by_ladder(state, idx)
         ):
             raise RuntimeError(
                 f"OST-burn contract violation: LF {idx} per-LF label "
