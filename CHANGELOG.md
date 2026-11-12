@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.80] - 2026-11-12
+
+### Fixed
+
+- `gomoveshift cleanup <project> --abandoned` now reclaims a run that `health backlog` gave up. Its `no-auto-resume` hold was read as an operator's "waiting" hold, and the age gate refused it too, so the 57 GB of a given-up drive stayed on the stage volume while the next drive failed the work-space gate 27.6 GB short. An operator's own hold still refuses.
+- The LF work-space gate's "free space" hint now names the stage root it reports (`GMS_INTERMEDIATE_DIR=<root> gomoveshift cleanup …`) and the `--abandoned` form for a killed or given-up run. The bare `gomoveshift cleanup <project>` it printed searched the default stage cache, so a drive staged by `health backlog` under another root answered `Project not found`.
+
 ## [0.3.79] - 2026-11-12
 
 ### Fixed
@@ -959,7 +966,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...HEAD
+[0.3.80]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...v0.3.80
 [0.3.79]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...v0.3.79
 [0.3.78]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...v0.3.78
 [0.3.77]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...v0.3.77
