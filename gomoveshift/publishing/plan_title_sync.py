@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -103,6 +104,46 @@ def _write_youtube_field(
     for short in raw["shorts"]:
         if short["project_name"] == project_name and short["short_index"] == short_index:
             short["payloads"]["youtube"][field] = value
+            break
+    else:
+        raise ValueError(f"{sidecar}: no short {project_name}#{short_index}")
+    tmp = sidecar.with_name(sidecar.name + ".sync-tmp")
+    tmp.write_text(json.dumps(raw, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    try:
+        load_publish_plan(tmp)
+    except Exception:
+        tmp.unlink()
+        raise
+    if apply:
+        os.replace(tmp, sidecar)
+    else:
+        tmp.unlink()
+
+
+def write_plan_slot(
+    sidecar: Path, project_name: str, short_index: int, slot: datetime, *, apply: bool = True
+) -> None:
+    """Move one short's shared publish time (``schedule.scheduled_at_utc``, the YouTube
+    ``publishAt``) to ``slot``, a FUTURE UTC time.
+
+    A platform on the shared slot with no ``scheduled_at_utc_by_platform`` entry of its
+    own would follow it, so each other routed platform is pinned to the slot it had:
+    only YouTube moves. Parsed by ``load_publish_plan`` before it replaces the file, and
+    the same parse runs without ``apply``, exactly as ``_write_youtube_field``."""
+    if slot.tzinfo is None or slot <= datetime.now(timezone.utc):
+        raise ValueError(f"publishAt must be a future UTC time; got {slot.isoformat()}")
+    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    for short in raw["shorts"]:
+        if short["project_name"] == project_name and short["short_index"] == short_index:
+            schedule = short["schedule"]
+            old = schedule["scheduled_at_utc"]
+            by_platform = dict(schedule.get("scheduled_at_utc_by_platform") or {})
+            for platform in short["routes"]["selected"]:
+                if platform != "youtube":
+                    by_platform.setdefault(platform, old)
+            by_platform.pop("youtube", None)
+            schedule["scheduled_at_utc_by_platform"] = by_platform
+            schedule["scheduled_at_utc"] = slot.astimezone(timezone.utc).isoformat()
             break
     else:
         raise ValueError(f"{sidecar}: no short {project_name}#{short_index}")

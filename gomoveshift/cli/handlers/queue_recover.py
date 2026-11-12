@@ -40,6 +40,11 @@ lease, so it never reached ``videos.insert``. Its gates are the ones above plus
 (a') the row holds no upload id, and (g) the review of the Short as the sidecar
 would send it today now agrees (``youtube_adapter.short_review_refusal``; a
 refusal names its reasons). Gate (b) does not apply: there is no old video.
+Gate (f) differs for this row kind only: a passed slot is not a refusal but is
+replaced by the region's next free Waypost slot (the allocator behind
+``reslot-overdue-youtube``), written to the sidecar's ``publishAt`` and booked on
+the new row; with no allocator supplied it refuses as before. A dry run names
+the slot and writes nothing.
 
 A recovery row resolves the ``missing_remote`` validate problem; until one
 exists that problem names this command.
@@ -131,6 +136,11 @@ class RecoveryDeps:
     rendition_path: Callable[[Any], Path]
     #: record -> why the Short's final-text review still refuses it, else None.
     review_check: Optional[Callable[[Any], Optional[str]]] = None
+    #: (row, record, now) -> the next free future slot; set only where a review-refused
+    #: row with a passed slot may be re-slotted. Raises ``RecoveryRefusedError``.
+    slot_allocator: Optional[Callable[[Any, Any, datetime], datetime]] = None
+    #: (row, record, slot) -> writes the slot into the sidecar's ``publishAt``.
+    slot_writer: Optional[Callable[[Any, Any, datetime], None]] = None
 
 
 def recover_terminal(
@@ -166,8 +176,23 @@ def recover_terminal(
     evidence = gates(row, deps, now or datetime.now(timezone.utc).isoformat())
     if not apply:
         return None
+    reslot = evidence.get("reslot")
+    if reslot:
+        # Sidecar first, so the row never queues ahead of a still-past publishAt.
+        try:
+            record = deps.record_loader(row["project_name"], row["short_index"])
+            deps.slot_writer(row, record, _parse_utc(reslot["to"]))
+        except (OSError, ValueError, KeyError) as exc:
+            raise RecoveryRefusedError(
+                f"could not write the new slot to the sidecar: {exc}"
+            ) from exc
     return recover_terminal_delivery(
-        conn, delivery_id, authorized_by=authorized_by, evidence=evidence, now=now
+        conn,
+        delivery_id,
+        authorized_by=authorized_by,
+        evidence=evidence,
+        now=now,
+        scheduled_at=reslot["to"] if reslot else None,
     )
 
 
@@ -244,12 +269,18 @@ def _youtube_common_gates(
         if refusal:
             raise RecoveryRefusedError(f"final-text review still refuses the Short: {refusal}")
         evidence["final_text_review"] = "agree"
-    # (f) the slot is still ahead
+    # (f) the slot is still ahead; only a review-refused row is given a new one
     slot = record.schedule.scheduled_at_utc
     if _parse_utc(slot) <= _parse_utc(now):
-        raise RecoveryRefusedError(
-            f"slot {slot} has passed; a re-upload would never go public -- re-slot first"
-        )
+        if not (_is_final_text_refusal(row) and deps.slot_allocator and deps.slot_writer):
+            raise RecoveryRefusedError(
+                f"slot {_iso(slot)} has passed; a re-upload would never go public -- re-slot first"
+            )
+        new = deps.slot_allocator(row, record, _parse_utc(now))
+        if new <= _parse_utc(now):  # the allocator is trusted, the publishAt rule is not delegated
+            raise RecoveryRefusedError(f"re-slotted time {new.isoformat()} is not in the future")
+        evidence["reslot"] = {"from": _iso(slot), "to": new.isoformat()}
+        slot = new.isoformat()
     evidence["slot"] = slot
     evidence["rendition_path"] = str(media)
 
@@ -268,7 +299,14 @@ def _youtube_common_gates(
     return evidence
 
 
-def _parse_utc(stamp: str) -> datetime:
+def _iso(stamp) -> str:
+    return stamp.isoformat() if isinstance(stamp, datetime) else str(stamp)
+
+
+def _parse_utc(stamp) -> datetime:
+    """A slot as UTC: a sidecar record carries a datetime, a test or row a string."""
+    if isinstance(stamp, datetime):
+        return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
     parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
@@ -322,6 +360,7 @@ def _build_real_deps(conn, config, sidecar_dir: Path, platform: str) -> Recovery
     if platform == "youtube":
         from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
         from ...publishing.youtube_adapter import short_review_refusal
+        from .queue_reslot import write_youtube_slot, youtube_slot_allocator
 
         return RecoveryDeps(
             graph=YouTubeRecoveryReader(YouTubeUploader()._build_service()),
@@ -329,6 +368,8 @@ def _build_real_deps(conn, config, sidecar_dir: Path, platform: str) -> Recovery
             privacy_loader=PrivacyAttestationLoader(sidecar_dir),
             rendition_path=_media_path,
             review_check=short_review_refusal,
+            slot_allocator=youtube_slot_allocator(conn, config),
+            slot_writer=write_youtube_slot,
         )
     from ...publishing.instagram_adapter import InstagramReelsAdapter
     from ...publishing.meta_auth import load_meta_credentials
@@ -484,6 +525,7 @@ def cmd_queue(args, config) -> int:
         "sync-plan-titles",
         "sync-plan-tags",
         "reslot-overdue-manual",
+        "reslot-overdue-youtube",
     ):
         print(f"Error: unknown queue action {args.queue_action!r}", file=sys.stderr)
         return 2
@@ -504,6 +546,10 @@ def cmd_queue(args, config) -> int:
         from .queue_reslot import cmd_reslot_overdue_manual
 
         return cmd_reslot_overdue_manual(args, config)
+    if args.queue_action == "reslot-overdue-youtube":
+        from .queue_reslot import cmd_reslot_overdue_youtube
+
+        return cmd_reslot_overdue_youtube(args, config)
     sidecar_dir = Path(args.sidecar_dir) if args.sidecar_dir else Path(config.seo.storage_path)
     conn = open_queue_db(config.seo.storage_path)
     try:

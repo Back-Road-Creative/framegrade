@@ -484,6 +484,14 @@ For a YouTube `missing_remote` row it refuses unless all hold, in order:
 The recovered row is a fresh `queued` delivery with no upload id, so the next drain makes one
 `videos.insert` and the post-upload verify runs on it like any other upload.
 
+A YouTube `failed_permanent` row the final-text review refused (`error_class` contains
+`FinalTextReview`, no upload id) recovers through the same gates plus one more: the review of the
+Short as the sidecar would send it now must agree. Gate 4 differs for this row kind only: when its
+slot has passed, recovery does not refuse but assigns the region's next free Waypost shorts slot
+(below), writes it to the sidecar's `schedule.scheduled_at_utc` (the upload's `publishAt`, always
+a future time) and books it as the new row's `scheduled_at`. A dry run names the slot and writes
+nothing. A `missing_remote` row with a passed slot still refuses.
+
 ## Overdue manual TikTok slots (`queue reslot-overdue-manual`)
 
 A TikTok row still `awaiting_manual_publish` more than 24 h past its slot is named by
@@ -494,6 +502,21 @@ moves it with `reschedule_delivery`. In pack mode it first appends a `RESLOTTED`
 pack's `captions.txt` (`docs/social-publishing-tiktok.md`). Operator-only: the drain never
 calls it, it posts nothing and renames no file. A refused row prints
 `REFUSED: <id>: <reason>` and the exit code is 1; the others are still processed.
+
+## Overdue YouTube Shorts (`queue reslot-overdue-youtube`)
+
+A `queued` YouTube row with no upload id whose `scheduled_at` has passed would upload with a
+past `publishAt` and never go public. `gomoveshift queue reslot-overdue-youtube [--id N]
+[--apply]` lists each with its old slot and the proposed one: the next time in the region's
+Waypost shorts list (`seo_slots.shorts_pool`, the allocator `reslot-overdue-manual` uses) at least
+an hour ahead of now and not held by another YouTube row (any status except `cancelled`,
+`failed_permanent`, `missing_remote`; a `published` row is a scheduled-private upload and keeps
+its slot). `--apply` writes the sidecar's `scheduled_at_utc` first, then the row
+(`reschedule_delivery`); every other routed platform keeps the slot it had
+(`scheduled_at_utc_by_platform` is pinned). It is a dry run by default, operator-only, never
+called by the drain, and writes nothing to YouTube. `recover-terminal` uses the same allocator
+for a review-refused row (previous section). A refused row prints `REFUSED: <id>: <reason>` and
+the exit code is 1; the others are still processed.
 
 ## A YouTube short the channel does not return (`missing_remote`)
 
