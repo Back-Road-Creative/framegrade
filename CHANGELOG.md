@@ -5,6 +5,32 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.81] - 2026-11-12
+
+### Added
+
+- `gomoveshift queue reslot-overdue-youtube` moves a `queued` YouTube Short whose slot has
+  passed to the region's next free Waypost shorts slot (the allocator `reslot-overdue-manual`
+  uses), in the queue row and in the sidecar's `publishAt`, never to a time already past and
+  never onto a slot another YouTube row holds. Dry run unless `--apply`.
+
+### Fixed
+
+- A YouTube Short no longer fails the pre-upload final-text review on its own
+  generated title. The stamp ("Feb 24, 2nd stretch"), a weekday, "seconds" and
+  the closing hashtags are now backed by the record (`recording_date`, the
+  generator's tag lists, the clip's own region votes); any other word is still
+  refused. The plan builder fills `reviewed_plan_hash` with the content hash of
+  what the Short sends, and the review uses the same hash for plans written
+  without one (`missing_field:approval_hash`).
+- `gomoveshift queue recover-terminal` re-queues a YouTube `failed_permanent` row
+  the final-text review refused (it never uploaded), once the review agrees with
+  the Short as the sidecar would send it now, behind the same duplicate-scan,
+  slot and privacy gates.
+- `gomoveshift queue recover-terminal` no longer refuses a final-text-review `failed_permanent`
+  YouTube row for a passed slot: it assigns the next free Waypost slot through the same
+  allocator. Every other gate, and gate (f) for every other row kind, is unchanged.
+
 ## [0.3.80] - 2026-11-12
 
 ### Fixed
@@ -966,7 +992,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...HEAD
+[0.3.81]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...v0.3.81
 [0.3.80]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...v0.3.80
 [0.3.79]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...v0.3.79
 [0.3.78]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...v0.3.78
