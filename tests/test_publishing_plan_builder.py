@@ -276,3 +276,17 @@ def test_youtube_title_never_repeats_a_hashtag_it_already_carries():
     )
     record = _build(posts=[post]).shorts[0]
     assert record.payloads.youtube.title == "Kerry back roads #CountyKerry #Shorts"
+
+
+def test_every_short_carries_the_review_hash_of_what_it_sends():
+    from gomoveshift.publishing.asset_plan import review_hash
+
+    record = _build().shorts[0]
+    yt = record.payloads.youtube
+    assert record.reviewed_plan_hash == review_hash(
+        yt.title, yt.description, yt.tags, record.media.sha256
+    )
+
+
+def test_a_review_hash_the_caller_passes_is_kept():
+    assert _build(reviewed_plan_hash="f" * 64).shorts[0].reviewed_plan_hash == "f" * 64

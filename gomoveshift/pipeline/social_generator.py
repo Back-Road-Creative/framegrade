@@ -481,6 +481,11 @@ def _parse_iso_date(date_iso: str) -> datetime:
     return datetime.strptime(date_iso, "%Y-%m-%d")
 
 
+def weekday_name(date_iso: str) -> str:
+    """The weekday word a Short's title says for ``date_iso`` ("Tuesday")."""
+    return _WEEKDAYS[_parse_iso_date(date_iso).weekday()]
+
+
 @dataclass(frozen=True)
 class TitleFacts:
     """Per-short facts a stamped title is composed from (all read from the day
@@ -1075,7 +1080,7 @@ class SocialGenerator:
             str,
             location=self.location_short if named else "",
             secs=str(facts.secs),
-            weekday=_WEEKDAYS[_parse_iso_date(facts.date).weekday()],
+            weekday=weekday_name(facts.date),
         )
         bodies = STAMPED_BODY_TEMPLATES if named else STAMPED_PLACE_FREE_TEMPLATES
         start = (facts.ordinal + self._project_seed(seed_suffix)) % len(bodies)
