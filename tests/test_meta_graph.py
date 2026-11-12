@@ -74,7 +74,27 @@ def test_success_returns_body_and_forwards_kwargs(method):
     session = _Session(_Response(200, {"id": "9"}))
     body = getattr(meta_graph, f"graph_{method}")(session, "https://x/y", _hook, data={"a": 1})
     assert body == {"id": "9"}
-    assert session.calls == [(method, "https://x/y", {"data": {"a": 1}})]
+    assert session.calls == [
+        (method, "https://x/y", {"data": {"a": 1}, "timeout": meta_graph.GRAPH_TIMEOUT})
+    ]
+
+
+@pytest.mark.parametrize("method", ["post", "get"])
+def test_every_request_carries_a_finite_timeout(method):
+    """A Graph call with no timeout blocks on a dead connection forever: on
+    2026-11-11 one hung `dispatch-queue --apply` 21 h, held the dispatch lock
+    (no social post went out) and deferred every staging sync behind it."""
+    session = _Session(_Response(200, {"id": "9"}))
+    getattr(meta_graph, f"graph_{method}")(session, "u", _hook)
+    connect, read = session.calls[0][2]["timeout"]
+    assert 0 < connect <= 30 and 0 < read <= 300
+
+
+@pytest.mark.parametrize("method", ["post", "get"])
+def test_caller_timeout_wins(method):
+    session = _Session(_Response(200, {"id": "9"}))
+    getattr(meta_graph, f"graph_{method}")(session, "u", _hook, timeout=5)
+    assert session.calls[0][2]["timeout"] == 5
 
 
 @pytest.mark.parametrize("method", ["post", "get"])
@@ -145,3 +165,11 @@ def test_each_client_maps_graph_errors_to_its_own_error_type(
         client = make(_Session(_Response(status, body)))
         with pytest.raises(expected):
             getattr(client, verb)("https://x/y")
+
+
+@pytest.mark.parametrize("make", [p[0] for p in _PLATFORMS])
+@pytest.mark.parametrize("verb", ["_post", "_get"])
+def test_each_client_request_carries_a_timeout(make, verb):
+    session = _Session(_Response(200, {"id": "9"}))
+    getattr(make(session), verb)("https://x/y")
+    assert session.calls[0][2]["timeout"] == meta_graph.GRAPH_TIMEOUT
