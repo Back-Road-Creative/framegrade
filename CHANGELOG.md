@@ -5,6 +5,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.78] - 2026-11-12
+
+### Fixed
+
+- A GPS-less drive whose bracket route only proves the country no longer fails
+  at the long-form burn. The OST-burn contract check refused any per-LF label
+  equal to the drive-wide `--location`, so a bracket label of "United States"
+  on a `--region usa` drive stopped the day after its master encode. The check
+  now lets through an LF whose `per_lf_tier_evidence` records the label as the
+  ladder's own award (bracket route or placeless operator label), and still
+  refuses every other LF.
+
 ## [0.3.77] - 2026-11-11
 
 ### Changed
@@ -941,7 +953,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...HEAD
+[0.3.78]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.77...v0.3.78
 [0.3.77]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.76...v0.3.77
 [0.3.76]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.75...v0.3.76
 [0.3.75]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.74...v0.3.75
