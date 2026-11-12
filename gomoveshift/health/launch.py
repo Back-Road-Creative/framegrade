@@ -50,6 +50,10 @@ LEASE_NAME = "gms-backlog-launch"
 #: move is a rename on one device); ``staged_sources`` never reads under it.
 SUPERSEDED_DIR = "_superseded"
 SUPERSEDE_RECORD = "superseded.json"
+#: The two ``no-auto-resume`` texts health backlog writes when it gives a drive up (``_hold_recipes``):
+#: that run is dead by record, so ``cleanup --abandoned`` reclaims it as it does a superseded one.
+RETIRED_HOLD_PREFIX = "retired by health backlog: "
+GAVE_UP_HOLD = "store row failed and no backlog row; health backlog gave it up"
 #: Names the lease script (``acquire NAME TTL WHAT`` / ``release NAME``; exit 3 = held).
 LEASE_SCRIPT_ENV = "GMS_LEASE_SCRIPT"
 DEFAULT_LEASE_SCRIPT = Path("bin") / "lease.sh"
@@ -678,7 +682,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             if not dry_run:
                 retire(project)
             res.setdefault("retired", []).append({"project": project, "reason": failed})
-            gone = f"retired by health backlog: {failed}"
+            gone = RETIRED_HOLD_PREFIX + str(failed)
             held = _hold_recipes(stages_root, project, gone, dry_run)
             if held:
                 res.setdefault("held", []).extend(held)
@@ -686,8 +690,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             mine = [d for d in mine if d.project != project]
     for project in sorted({d.project for d in mine if d.status == "failed"} - listed):
         # a drive retired before holds existed, or set ``failed`` by hand, is never retired again
-        gone = "store row failed and no backlog row; health backlog gave it up"
-        held = _hold_recipes(stages_root, project, gone, dry_run)
+        held = _hold_recipes(stages_root, project, GAVE_UP_HOLD, dry_run)
         if held:
             res.setdefault("held", []).extend(held)
     # retiring and holding launch nothing, so they run even while a drive does: heal's own

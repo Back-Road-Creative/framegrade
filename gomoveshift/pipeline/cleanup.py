@@ -89,7 +89,7 @@ def abandoned_refusal(
 
     An abandoned run is one a relaunch or a kill left behind: nothing holds its run lock, no
     drive is running anywhere (a live drive could be the one about to resume it), and no
-    operator hold says it is waiting. The first failing rule is the reason, so the dry-run
+    operator hold says it is waiting (health backlog's own give-up hold says the opposite). The first failing rule is the reason, so the dry-run
     says what to clear. 2026-11-08: nctopa-2026-03-05-rec0063 relaunched under a different
     ``GMS_INTERMEDIATE_DIR`` left 139 GB that ``cleanup`` could only skip.
     """
@@ -97,7 +97,7 @@ def abandoned_refusal(
 
     if stages_dir.is_symlink():
         return "stage dir is a symlink — never followed"
-    if (stages_dir / _HOLD_NAME).exists():
+    if (stages_dir / _HOLD_NAME).exists() and not _given_up_by_record(stages_dir):
         return f"under a {_HOLD_NAME} hold — the run is waiting, not abandoned"
     lock = stages_dir / _RUN_LOCK_NAME
     if lock.exists():
@@ -107,6 +107,22 @@ def abandoned_refusal(
     if (drive_running_fn or _live_drive_probe)():
         return "a gomoveshift drive is running — abandoned runs are reclaimed only when none is"
     return None
+
+
+def _given_up_by_record(stages_dir: Path) -> bool:
+    """The ``no-auto-resume`` hold here is health backlog's own give-up, not an operator's.
+
+    ``health backlog`` holds a drive it retires so heal never resumes it; nothing will, so the
+    hold says the run is dead. 2026-11-12: rec0060-0061's 57 GB, held that way, stayed while
+    rec0063 waited 27.6 GB short on the same volume.
+    """
+    from ..health.launch import GAVE_UP_HOLD, RETIRED_HOLD_PREFIX
+
+    try:
+        text = (stages_dir / _HOLD_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return text == GAVE_UP_HOLD or text.startswith(RETIRED_HOLD_PREFIX)
 
 
 def _superseded_by_record(project_dir: Path) -> bool:
@@ -325,9 +341,14 @@ class PipelineCleanup:
             state = self._load_pipeline_state(project_dir)
             pipeline_complete = self._is_pipeline_complete(state)
 
-            # Age check (a superseded run is dead by record; --abandoned's other rules still apply)
+            # Age check (a superseded or given-up run is dead by record; --abandoned's other rules apply)
             if age_days < min_age_days and not (
-                abandoned and not pipeline_complete and _superseded_by_record(project_dir)
+                abandoned
+                and not pipeline_complete
+                and (
+                    _superseded_by_record(project_dir)
+                    or _given_up_by_record(project_dir / "_stages")
+                )
             ):
                 plan.skipped.append(
                     {
@@ -348,7 +369,7 @@ class PipelineCleanup:
                         {
                             "path": str(stages_dir),
                             "size": _tree_size(stages_dir),
-                            "reason": "abandoned run (incomplete, unlocked, unheld, no drive running)",
+                            "reason": "abandoned run (incomplete, unlocked, unheld or given up, no drive running)",
                         }
                     )
                 continue
