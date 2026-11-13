@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.86] - 2026-11-13
+
+### Fixed
+
+- A label changed on resume (bracket relabel or a corrected `--placeless-label`) now re-burns the day's long-forms and Shorts. The relabel cleared the day's completion record, but the recovery hook re-added it from the files on disk seconds later, so the day was skipped and every final kept the old burned text (rec0063: 3 long-forms and 21 Shorts still read "United States"). Such days are now recorded in `state.reburn_days` until they complete again, and the Shorts audit confirmation of the old text is cleared too.
+
 ## [0.3.85] - 2026-11-13
 
 ### Fixed
@@ -1045,7 +1051,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...HEAD
+[0.3.86]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...v0.3.86
 [0.3.85]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...v0.3.85
 [0.3.84]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...v0.3.84
 [0.3.83]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...v0.3.83
