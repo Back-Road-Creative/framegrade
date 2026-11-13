@@ -1707,6 +1707,21 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     y.add_argument("--id", type=int, default=None, help="Only this delivery id.")
     y.add_argument("--apply", action="store_true", help="Move the rows (default: dry run).")
+    rm = actions.add_parser(
+        "remeasure-short-route",
+        help="Re-derive the route 'bins' a Short's publish-plan sidecar lacks (planned before "
+        "the place gate), from the day's persisted GPS points and the clip range. Dry run "
+        "unless --apply; writes only the sidecar's route_record, never YouTube. Refuses when "
+        "the source is gone or does not match the media",
+    )
+    rm.add_argument("--id", type=int, required=True, help="Delivery id of the Short.")
+    rm.add_argument(
+        "--stages-dir",
+        type=Path,
+        required=True,
+        help="The run's _stages directory (gps_points_<date>.json, shorts_ost_audit_<date>.json).",
+    )
+    rm.add_argument("--apply", action="store_true", help="Write the sidecar (default: dry run).")
 
 
 def _add_catalog_inventory_parser(subparsers: argparse._SubParsersAction) -> None:
