@@ -527,6 +527,7 @@ def cmd_queue(args, config) -> int:
         "reslot-overdue-manual",
         "reslot-overdue-youtube",
         "remeasure-short-route",
+        "edit-facebook-caption",
     ):
         print(f"Error: unknown queue action {args.queue_action!r}", file=sys.stderr)
         return 2
@@ -555,6 +556,10 @@ def cmd_queue(args, config) -> int:
         from .queue_remeasure import cmd_remeasure_short_route
 
         return cmd_remeasure_short_route(args, config)
+    if args.queue_action == "edit-facebook-caption":
+        from .queue_facebook_caption import cmd_edit_facebook_caption
+
+        return cmd_edit_facebook_caption(args, config)
     sidecar_dir = Path(args.sidecar_dir) if args.sidecar_dir else Path(config.seo.storage_path)
     conn = open_queue_db(config.seo.storage_path)
     try:

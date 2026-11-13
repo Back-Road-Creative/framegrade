@@ -532,6 +532,31 @@ GPS fix, or the record already has `bins`. Dry run by default; `--apply` writes 
 sidecar's `route_record` (never the queue, never YouTube). The place gate and
 `recover-terminal`'s other gates then decide as usual.
 
+## Rewriting a published Facebook Reel's caption (`queue edit-facebook-caption`)
+
+`gomoveshift queue edit-facebook-caption --id N [--text "..."] [--apply]` changes the description
+of a Reel that already published, keeping the post. It refuses, writing nothing, unless the row
+exists, is `facebook`, is `published` and holds a `platform_upload_id`.
+
+The caption comes from what the Short's sidecar record can back
+(`publishing/facebook_caption_edit.py`):
+
+- **One measured county** in the Short's `sampled_regions` (a `"<Name> County, <State>"` label):
+  the caption is built, never typed: `Passing through <county>. Filmed <Month Year>.` plus
+  hashtags made from the county and state. `--text` is refused, so a Short with a measured place
+  can get neither an unbacked place name nor a placeless label.
+- **Two or more measured counties**: refused; one caption cannot name them.
+- **No measured county** (a GPS-less Short): `--text` is required and must pass
+  `placeless_label_claims_nothing`: claim-free placeless words only (for example `Somewhere On
+  The Road`).
+
+Dry run by default: it prints the upload id, the current caption from the sidecar, the new text
+and its basis, with no network call. `--apply` loads the Meta credentials the way the dispatcher
+does, `POST`s `description` to the video node (`FacebookReelsAdapter.update_description`, Page
+token with `pages_manage_posts`), reads the description back, and only when it equals the new
+text rewrites the sidecar's facebook payload atomically. A read-back mismatch exits 1 and leaves
+the sidecar unchanged. It never changes the queue row and never deletes the post.
+
 ## A YouTube short the channel does not return (`missing_remote`)
 
 `missing_remote` is a **terminal** status for a YouTube row the queue holds an upload id for

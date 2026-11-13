@@ -211,6 +211,17 @@ class FacebookReelsAdapter:
             "post_id": body.get("post_id"),
         }
 
+    def update_description(self, video_id: str, text: str) -> dict:
+        """Rewrite a published Reel's description, then read it back.
+
+        ``POST /<video-id>`` with ``description`` (Page token, ``pages_manage_posts``);
+        the GET with ``fields=description`` returns what is live so the caller can
+        confirm the edit landed before it records anything."""
+        url = f"{self._base}/{video_id}"
+        self._post(url, data={"description": text, "access_token": self._access_token})
+        body = self._get(url, params={"fields": "description", "access_token": self._access_token})
+        return {"video_id": video_id, "description": body.get("description")}
+
     def check_video_status(self, video_id: str) -> dict:
         """Live read of a Reel's publish state — used to reconcile after a
         ``upload_phase=finish`` timeout, an unknown outcome, never a
