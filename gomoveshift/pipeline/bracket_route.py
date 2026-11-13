@@ -7,8 +7,9 @@ so a drive whose camera recorded no fix could carry only a claim-free placeless 
 
 The label is never typed. It is the narrowest region that BOTH bracketing fixes
 reverse-geocode to -- same county → ``"County, State"`` (or ``"County, Country"`` where
-there is no state), else same state → the state, else same country → the country,
-else refused. The two fixes must be in time order and every footage recording date must
+there is no state), else same state → the state, else two states of one country →
+``"State A to State B"`` in travel order (the leg between two measured fixes, level
+``states``), else same country → the country, else refused. The two fixes must be in time order and every footage recording date must
 fall between them. How far apart they may be depends on the level claimed
 (:data:`BRACKET_MAX_GAP_H_BY_LEVEL`): a county or state needs a tight bracket, a country
 survives a longer one, and a gap past a level's cap drops the claim to the next broader
@@ -32,7 +33,9 @@ from gomoveshift.pipeline.gps_enrichment import region_label
 #: morning after proves a county; a day off the track between two tracks (≈ 44 h) can no
 #: longer prove a county, but a road trip does not leave the country in two days. A gap past
 #: a level's cap names only a broader level the two fixes agree on.
-BRACKET_MAX_GAP_H_BY_LEVEL = {"county": 36.0, "state": 36.0, "country": 48.0}
+BRACKET_MAX_GAP_H_BY_LEVEL = {"county": 36.0, "state": 36.0, "states": 36.0, "country": 48.0}
+#: Level of a two-state leg label; it is claimed under the ``state`` cap.
+STATES_LEVEL = "states"
 #: Longest gap that brackets anything at all; past it the bracket is refused.
 BRACKET_MAX_GAP_H = max(BRACKET_MAX_GAP_H_BY_LEVEL.values())
 #: ``tier_reason`` recorded on an LF whose label is the bracket label.
@@ -40,7 +43,7 @@ BRACKET_TIER_REASON = "bracket_route"
 #: Ladder tier awarded per common-region level: a county agreed by both fixes is the one
 #: corroboration tier 3 asks for; a bare state (or a country, which is broader) is the
 #: ladder's "state only -- bracket route alone" tier 4.
-BRACKET_LEVEL_TIER = {"county": 3, "state": 4, "country": 4}
+BRACKET_LEVEL_TIER = {"county": 3, "state": 4, "states": 4, "country": 4}
 _PLACE_KEYS = ("county", "state", "country")
 _UNRESOLVED = {"", "none", "null", "unknown"}
 _GPX_SUFFIXES = {".gpx"}
@@ -125,7 +128,9 @@ def common_region(
     """``(level, label)``: the narrowest region in ``levels`` both geocodes agree on.
 
     county → :func:`region_label` (``"County, State"``; a stateless county carries its
-    country, the same tail the per-LF model uses); state → the state; country → the
+    country, the same tail the per-LF model uses); state → the state; two different
+    states of one country → ``"<before state> to <after state>"`` (level ``states``:
+    the leg between the two fixes, 2026-11-13 rec0063 "United States"); country → the
     country. Unresolved slots never match each other. A level left out of ``levels``
     (its gap cap is exceeded) is never claimed.
     """
@@ -147,6 +152,8 @@ def common_region(
         return "county", str(label)
     if "state" in allowed and same["state"] and same["country"]:
         return "state", b["state"]
+    if "state" in allowed and same["country"] and b["state"] and a["state"]:
+        return STATES_LEVEL, f"{b['state']} to {a['state']}"
     if "country" in allowed and same["country"]:
         return "country", b["country"]
     raise BracketRouteRefusedError(
@@ -218,7 +225,7 @@ def resolve_bracket_route(
         )
     gap_h = (after.ts - before.ts) / 3600.0
     caps = dict(max_gap_h_by_level or BRACKET_MAX_GAP_H_BY_LEVEL)
-    levels = tuple(k for k in _PLACE_KEYS if gap_h <= float(caps.get(k, 0.0)))
+    levels = _levels_within(gap_h, caps)
     if not levels:
         raise BracketRouteRefusedError(
             f"bracket fixes are {gap_h:.1f} h apart (> {max(caps.values()):g} h): "
@@ -251,17 +258,42 @@ def resolve_bracket_route(
     )
 
 
+def _levels_within(gap_h: float, caps: dict) -> tuple:
+    """The place levels whose gap cap ``gap_h`` is inside."""
+    return tuple(k for k in _PLACE_KEYS if gap_h <= float(caps.get(k, 0.0)))
+
+
+def recomputed_region(record: Optional[dict]) -> Optional[tuple[str, str]]:
+    """``(level, label)`` a stored record's own geocoded fixes earn under the CURRENT
+    rules (no geocoder, no fix files), or ``None`` for a record that is unreadable or
+    earns nothing. A resumed drive compares it with the label the record was burned
+    under (``drive_orchestrator.relabel_bracket_on_resume``)."""
+    try:
+        levels = _levels_within(float(record["gap_h"]), BRACKET_MAX_GAP_H_BY_LEVEL)
+        return common_region(record["before_place"], record["after_place"], levels)
+    except (KeyError, TypeError, ValueError, AttributeError, BracketRouteRefusedError):
+        return None
+
+
 def bracket_outcome(record: dict) -> dict:
     """An agreeing OST-system-review outcome for a label that is the bracket label:
     the reason names both fixes, their gap and the common region, so the record
     carries the whole basis of the claim."""
     before, after = record.get("before") or {}, record.get("after") or {}
+    if record.get("level") == STATES_LEVEL:
+        ends = (
+            f"geocode to {_slot(record.get('before_place'), 'state')!r} and "
+            f"{_slot(record.get('after_place'), 'state')!r}, the two ends of the leg "
+            f"{record.get('label')!r} ({STATES_LEVEL} level)"
+        )
+    else:
+        ends = f"both geocode to {record.get('label')!r} ({record.get('level')} level)"
     return {
         "refused": False,
         "label_requested": record.get("label"),
         "reason": (
             f"bracket route: last fix before the footage {before.get('time')} and first fix "
-            f"after {after.get('time')} ({float(record.get('gap_h') or 0):.1f} h apart) both "
-            f"geocode to {record.get('label')!r} ({record.get('level')} level)"
+            f"after {after.get('time')} ({float(record.get('gap_h') or 0):.1f} h apart) "
+            f"{ends}"
         ),
     }
