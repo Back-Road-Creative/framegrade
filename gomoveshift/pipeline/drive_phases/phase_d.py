@@ -496,6 +496,7 @@ from .phase_d_scheduling import (  # noqa: E402,F401
     _maybe_rebase_drive_schedule,
     _reresolve_passed_lf_slots,
     assert_all_places_verified,
+    place_evidence,
 )
 
 
@@ -1306,6 +1307,7 @@ class PhaseD:
         assert_all_places_verified(
             {lf.index: list(shorts_per_lf.get(lf.index, [])) for lf in drive_plan.regular_lfs},
             enforce=bool(state.youtube_upload),
+            evidence=place_evidence(state),
         )
 
         source_dir = Path(state.source_dir)
@@ -1441,6 +1443,7 @@ class PhaseD:
             # A --per-lf-location correction on a Phase-D-only resume reaches
             # shorts whose burned label was inherited from the parent LF.
             per_lf_overrides=state.per_lf_overrides,
+            evidence=place_evidence(state),
         )
         # Prefix check on the REAL titles (a titles.yaml override is the only
         # thing that can collide -- composed stamps are unique by construction),

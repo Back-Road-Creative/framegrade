@@ -764,7 +764,7 @@ def _load_day_sidecar_entries(sidecar: Path, cache: dict) -> list:
     return cache[("entries", sidecar)]
 
 
-def _per_short_title_facts(lf_shorts: list) -> list:
+def _per_short_title_facts(lf_shorts: list, evidence=None) -> list:
     """Per-short :class:`TitleFacts` (or ``None``) PARALLEL to ``lf_shorts``.
 
     Date comes from the short's own day dir, the ordinal from its rank's position
@@ -791,20 +791,46 @@ def _per_short_title_facts(lf_shorts: list) -> list:
                 date=date,
                 ordinal=cache[("ordinals", sidecar)][rank],
                 secs=secs,
-                place_ok=not _unverified_reasons(label, regions, source),
+                place_ok=not _unverified_reasons(label, regions, source, evidence),
             )
         except (KeyError, TypeError, ValueError, StopIteration):
             continue
     return out
 
 
-def _unverified_reasons(label, regions, source) -> list[str]:
+def place_evidence(state) -> dict:
+    """The evidence that lets an unmeasured place source verify: the state's
+    ``bracket_route`` record and ``placeless_label`` (``None`` when absent)."""
+    from ..ost_system_review import _field
+
+    return {k: _field(state, k) for k in ("bracket_route", "placeless_label")}
+
+
+def _unverified_reasons(label, regions, source, evidence=None) -> list[str]:
     """Why a short's sidecar entry does NOT prove its label is its own clip's place.
 
     A short may name only the place its own clip's GPS verified: it needs a
     sidecar label, non-empty clip-GPS ``regions`` and ``place_source ==
     "clip_gps"`` (the label IS the clip's own vote). Empty list = verified.
+
+    A GPS-less short (no regions) also verifies when its source is
+    ``bracket_route`` or ``placeless_label`` AND ``evidence`` (see
+    :func:`place_evidence`) re-proves it now: the text is exactly a valid bracket
+    record's label, or a claim-free placeless label. The string is never trusted.
     """
+    from ..ost_system_review import (
+        BRACKET_SOURCE,
+        PLACELESS_SOURCE,
+        unmeasured_place_source,
+    )
+
+    if (
+        label
+        and not regions
+        and source in (BRACKET_SOURCE, PLACELESS_SOURCE)
+        and unmeasured_place_source(evidence, label) == source
+    ):
+        return []
     reasons = []
     if not label:
         reasons.append("no sidecar label")
@@ -815,7 +841,7 @@ def _unverified_reasons(label, regions, source) -> list[str]:
     return reasons
 
 
-def unverified_place_shorts(shorts_per_lf: dict) -> list[str]:
+def unverified_place_shorts(shorts_per_lf: dict, evidence=None) -> list[str]:
     """Offender descriptions for every short whose place is unverified.
 
     Pure (no logging, no raise): ``shorts_per_lf`` is ``{lf_index: [short
@@ -827,11 +853,11 @@ def unverified_place_shorts(shorts_per_lf: dict) -> list[str]:
     """
     problems: list[str] = []
     for lf_index, lf_shorts in shorts_per_lf.items():
-        facts = _per_short_title_facts(lf_shorts)
+        facts = _per_short_title_facts(lf_shorts, evidence)
         for pos, (short, entry, tf) in enumerate(
             zip(lf_shorts, _per_short_sidecar_labels(lf_shorts), facts), 1
         ):
-            reasons = _unverified_reasons(*entry)
+            reasons = _unverified_reasons(*entry, evidence)
             if not reasons and tf is None:
                 reasons = ["no title facts (date/ordinal/duration unreadable from the day sidecar)"]
             if reasons:
@@ -841,7 +867,9 @@ def unverified_place_shorts(shorts_per_lf: dict) -> list[str]:
     return problems
 
 
-def assert_all_places_verified(shorts_per_lf: dict, *, enforce: bool = True) -> list[str]:
+def assert_all_places_verified(
+    shorts_per_lf: dict, *, enforce: bool = True, evidence=None
+) -> list[str]:
     """Refuse (publish) or warn (audit) on every short whose place is unverified.
 
     Runs upstream of chapters and scheduling. ``shorts_per_lf`` is
@@ -852,7 +880,7 @@ def assert_all_places_verified(shorts_per_lf: dict, *, enforce: bool = True) -> 
     audit pass) logs one ``UNVERIFIED-PLACES`` WARNING naming them and returns.
     Returns the offender descriptions (empty when every place is verified).
     """
-    problems = unverified_place_shorts(shorts_per_lf)
+    problems = unverified_place_shorts(shorts_per_lf, evidence)
     if not problems:
         return problems
     body = (
@@ -882,6 +910,7 @@ def _build_social_posts_per_lf(
     short_global_index: dict | None = None,
     require_verified_places: bool = False,
     per_lf_overrides: dict | None = None,
+    evidence: dict | None = None,
 ) -> dict:
     """Generate the per-LF ``SocialPost`` list, write ``social_posts.json``.
 
@@ -966,7 +995,7 @@ def _build_social_posts_per_lf(
         offenders = [
             f"short {i} ({Path(str(p)).name}): " + ", ".join(reasons)
             for i, (p, entry, live) in enumerate(zip(lf_shorts, sidecar, posted), 1)
-            if live and (reasons := _unverified_reasons(*entry))
+            if live and (reasons := _unverified_reasons(*entry, evidence))
         ]
         if offenders:
             raise RuntimeError(
@@ -1016,7 +1045,7 @@ def _build_social_posts_per_lf(
                 missing,
                 lf_location,
             )
-        title_facts = _per_short_title_facts(lf_shorts)
+        title_facts = _per_short_title_facts(lf_shorts, evidence)
         social_gen = social_gen_cls(
             location=lf_location,
             project_name=project_name,

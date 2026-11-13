@@ -570,6 +570,7 @@ def _build_metadata_per_lf(
             recording_date=lf_recording_date,
             insert_count=len(lf_inserts.get(lf.index, [])),
             us=is_us_region(lf_location, resolved=lf_resolved),
+            bracket_route=getattr(state, "bracket_route", None),
         )
         metadata["final_text_review"] = build_final_text_review(state, lf, metadata)
         metadata.setdefault("location", lf_location)

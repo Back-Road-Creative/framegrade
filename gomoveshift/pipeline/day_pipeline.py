@@ -118,7 +118,7 @@ from .ost_audit_sidecar import (
     write_shorts_ost_audit,
     write_system_review_copy,
 )
-from .ost_system_review import record_surface_reviews
+from .ost_system_review import record_surface_reviews, unmeasured_place_source
 from .ost_validator import validate_ost
 from .preflight import check_lf_work_space, check_superlong_output_space
 from .regular_lf_planner import (
@@ -1384,7 +1384,12 @@ def _render_day_shorts(
                 "roads": list(getattr(_clip_regions, "roads", None) or []),
                 "route_record": _short_route_records.get(rank),
                 "median_speed_mps": _median_speed,
-                "place_source": "clip_gps" if _ost_from_clip_vote else "lf_label",
+                "place_source": (
+                    "clip_gps"
+                    if _ost_from_clip_vote
+                    else (not _clip_regions and unmeasured_place_source(state, short_ost_text))
+                    or "lf_label"
+                ),
             }
         )
         # Defer the irreversible burn — collect the render spec so the
