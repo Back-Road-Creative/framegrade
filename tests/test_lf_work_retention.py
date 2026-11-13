@@ -385,3 +385,60 @@ def test_a_space_shortfall_stops_the_day_before_the_concat(tmp_path):
     lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
     assert (lf_dir / "lf_01.mp4").exists()
     assert not (lf_dir / "lf_02_segments.mp4").exists()
+
+
+def _stale_lf1_final(tmp_path) -> Path:
+    """An LF 1 final with no fingerprint beside it: the day burns it again."""
+    lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
+    lf_dir.mkdir(parents=True)
+    stale = lf_dir / "lf_01.mp4"
+    stale.write_bytes(b"old label")
+    return stale
+
+
+def test_a_shortfall_gives_back_the_stale_final_the_burn_replaces(tmp_path):
+    """A re-burn's old final sits on the same volume as its work files. When
+    the gate is short only because of it, the day drops that final and burns
+    (2026-11-13, nctopa-2026-03-05-rec0063: 14.5 GB short beside a 44 GB final
+    of the old label)."""
+    stale = _stale_lf1_final(tmp_path)
+
+    def _space(lf_index):
+        if lf_index == 1 and stale.exists() and stale.read_bytes() == b"old label":
+            raise RuntimeError("Insufficient work space for LF 1")
+
+    artifacts, lf_dir, trace = _two_lf_day(
+        tmp_path, state=make_state(ost_audit_confirmed=True), space=_space
+    )
+
+    assert artifacts is not None and len(artifacts.regular_lf_paths) == 2
+    assert (lf_dir / "lf_01.mp4").read_bytes() != b"old label"
+    lf1 = [e[0] for e in trace if e[0] in ("space", "assemble") and e[1] == 1]
+    assert lf1 == ["space", "space", "assemble"]
+
+
+def test_a_fitting_reburn_keeps_the_stale_final_until_it_is_replaced(tmp_path):
+    stale = _stale_lf1_final(tmp_path)
+    seen: dict = {}
+
+    def _on_assemble(idx, lf_dir):
+        if idx == 1:
+            seen["stale_at_concat"] = stale.read_bytes()
+
+    _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True), on_assemble=_on_assemble)
+
+    assert seen == {"stale_at_concat": b"old label"}
+
+
+def test_a_shortfall_the_stale_final_cannot_cover_still_stops_the_day(tmp_path):
+    _stale_lf1_final(tmp_path)
+
+    def _space(lf_index):
+        if lf_index == 1:
+            raise RuntimeError("Insufficient work space for LF 1")
+
+    with pytest.raises(RuntimeError, match="work space for LF 1"):
+        _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True), space=_space)
+
+    lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
+    assert not (lf_dir / "lf_01_segments.mp4").exists()
