@@ -538,6 +538,13 @@ def _day_row(
     day_dir = stages_dir / f"day_{date}"
     label = f"Day {date}"
 
+    reburn = getattr(state, "reburn_days", None) if state is not None else None
+    if isinstance(reburn, dict) and date in reburn:
+        return PlanRow(
+            label=label,
+            status="RUN",
+            reason=f"re-burn: {reburn[date]} (finals carry the old text)",
+        )
     if master_path_str and Path(master_path_str).exists():
         return PlanRow(
             label=label,

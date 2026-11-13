@@ -126,6 +126,7 @@ __all__ = [
     "_compute_per_lf_speed",
     "_compute_per_lf_trim_ratio",
     "_day_dir_has_finals",
+    "day_needs_reburn",
     "_derive_per_lf_recording_date_from_paths",
     "_derive_per_lf_trim_ratio_from_paths",
     "_enrich_per_lf_gps",
@@ -1305,6 +1306,16 @@ class PhaseBCDayFirst:
             entry = recorded.get(batch.date) if isinstance(recorded, dict) else None
             master_path_str = (entry or {}).get("master_path") if entry else None
             day_dir = stages_dir / f"day_{batch.date}"
+
+            if day_needs_reburn(state, batch.date):
+                logger.warning(
+                    "  day-first: day %s finals were burned with a label that has "
+                    "since changed — re-running it (unchanged finals are reused by "
+                    "their burned-text fingerprint)",
+                    batch.date,
+                )
+                remaining_batches.append(batch)
+                continue
 
             if superlong_required and not day_superlong_complete(batch.date, day_dir, state):
                 # Superlong's only producer lives in run_day_pipeline's tail,
@@ -2525,6 +2536,10 @@ def _record_day_and_save(artifacts, state, state_save_fn) -> None:
     entry["deliverables"] = _deliverables_record(artifacts, state)
     per_day[artifacts.date] = entry
     state.per_day_completed = per_day
+    # The day really finished, so its finals now burn the current label.
+    marked = getattr(state, "reburn_days", None)
+    if isinstance(marked, dict) and artifacts.date in marked:
+        state.reburn_days = {d: r for d, r in marked.items() if d != artifacts.date}
     if state_save_fn is not None:
         try:
             state_save_fn(state)
@@ -2535,6 +2550,19 @@ def _record_day_and_save(artifacts, state, state_save_fn) -> None:
                 artifacts.date,
                 exc,
             )
+
+
+def day_needs_reburn(state, date: str) -> bool:
+    """True when ``date``'s finals carry a label that changed on resume.
+
+    Set by the resume relabel (``state.reburn_days``). Such a day's long-forms and
+    Shorts still burn the OLD text, so neither resume fast-path may reuse them and
+    the recovery hook may not mark the day complete from the files on disk.
+    """
+    marked = (
+        state.get("reburn_days") if isinstance(state, dict) else getattr(state, "reburn_days", None)
+    )
+    return isinstance(marked, dict) and date in marked
 
 
 def _day_dir_has_finals(day_dir: Path) -> bool:

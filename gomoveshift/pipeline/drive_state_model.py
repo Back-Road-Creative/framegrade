@@ -602,6 +602,11 @@ class PipelineState:
     # field). `from_dict` returns None for missing entries, which the
     # skip logic treats as "not recorded → fall through".
     per_day_completed: Optional[dict] = None
+    # Days whose finals were burned with a label that has since changed on resume
+    # (``{date: reason}``, set by ``drive_orchestrator._drop_old_label_text``). A day
+    # here is never skipped or recovered from the finals on disk; the entry is dropped
+    # only when the day completes again (``phase_bc_day_first._record_day_and_save``).
+    reburn_days: Optional[dict] = None
     # The insert flags the finished days were rendered with (``inserts.insert_request``); the
     # flags themselves stay per-invocation, a resume is refused if they differ. Bookkeeping.
     insert_request: Optional[dict] = None

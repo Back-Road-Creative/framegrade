@@ -31,6 +31,7 @@ from .drive_phases.phase_bc_day_first import (
     PhaseBCDayFirst,
     _day_dir_has_finals,
     _resolve_ingest_plan,
+    day_needs_reburn,
 )
 from .drive_phases.phase_d import PUBLISH_DAYS, PhaseD
 from .drive_phases.phase_d_fingerprint import (
@@ -248,6 +249,9 @@ def auto_populate_per_day_completed(state: dict, stages_dir: Path, *, fresh: boo
         if date is None:
             continue
         if date in per_day:
+            continue
+        if day_needs_reburn(state, date):
+            # Finals of a label that changed on resume: never a completed day.
             continue
         if not _day_dir_has_finals(child):
             continue
@@ -565,15 +569,34 @@ def _drop_old_label_text(
     state.phases_completed = [
         p for p in (getattr(state, "phases_completed", None) or []) if p not in drop
     ]
+    # Every day with finals burned the old text. Mark each one so neither the
+    # recovery hook (which runs right after this) nor a later resume reuses them.
+    reburn = dict(getattr(state, "reburn_days", None) or {})
+    stale_days = set(getattr(state, "per_day_completed", None) or {})
+    if Path(stages_dir).is_dir():
+        for child in Path(stages_dir).iterdir():
+            day = date_from_day_dir_name(child.name) if child.is_dir() else None
+            if day is not None and _day_dir_has_finals(child):
+                stale_days.add(day)
+    for day in sorted(stale_days):
+        reburn.setdefault(day, "label changed on resume")
+    state.reburn_days = reburn
     state.per_day_completed = {}
     state.ost_audit_passed = {}
     state.ost_audit_hash = {}
+    state.shorts_ost_audit_passed = {}
+    state.shorts_ost_audit_hash = {}
     state.shorts_ost_system_review = {}
     state.superlong_ost_system_review = {}
     mirror = Path(output_base) / "_stages"
     seen: set[Path] = set()
     for base in (Path(output_base), Path(stages_dir), mirror):
-        for pattern in ("ost_audit_*.json", "*.confirmed"):
+        for pattern in (
+            "ost_audit_*.json",
+            "shorts_ost_audit_*.json",
+            "shorts_ost_system_review_*.json",
+            "*.confirmed",
+        ):
             for path in base.glob(pattern):
                 if path.resolve() not in seen:
                     seen.add(path.resolve())
