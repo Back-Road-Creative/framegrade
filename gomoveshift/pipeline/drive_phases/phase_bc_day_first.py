@@ -262,6 +262,9 @@ def _maybe_drop_day_master(artifacts, state, stages_dir: Path) -> None:
             day_dir,
             date=date,
             expected_shorts_count=expected_shorts,
+            expected_short_names=[
+                Path(sp).name for sp in (getattr(artifacts, "short_paths", None) or [])
+            ],
             expected_superlong_parts=expected_superlong,
         )
     except Exception as exc:  # noqa: BLE001 — cleanup never blocks
