@@ -555,6 +555,7 @@ def _build_metadata_per_lf(
             metadata.get("title", ""),
             (state.per_lf_location_evidence or {}).get(lf.index),
             lf_index=lf.index,
+            bracket=getattr(state, "bracket_route", None),
         )
         # Waypost's review of the final text against the retained route;
         # ``None`` for a GPS-less LF. Upload re-verifies it before insert.
