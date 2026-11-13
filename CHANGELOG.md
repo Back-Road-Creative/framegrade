@@ -5,6 +5,27 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.82] - 2026-11-13
+
+### Added
+
+- `gomoveshift queue remeasure-short-route --id N --stages-dir <run>/_stages` re-derives the
+  route `bins` a Short planned before the place gate lacks, from the day's `gps_points_<date>.json`
+  and the clip range in `shorts_ost_audit_<date>.json`, and writes it to the sidecar's
+  `route_record`. Dry run unless `--apply`; refuses (writing nothing) when a source is gone, the
+  clip does not match the Short's media, or the clip holds no GPS fix. It never writes to YouTube
+  and never touches the place gate; `recover-terminal`'s gates then decide.
+
+### Changed
+
+- The place gate's "route record has no 'bins'" refusal now names `queue remeasure-short-route`.
+
+### Fixed
+
+- The per-day master drop's shorts integrity check compared against a contiguous `short_01..short_N` range, so a day whose shorts were dropped and refilled (gapped file numbers) reported "missing 5 short(s) (expected 21, found 21)" and kept a ~59 GB master. It now checks the day's own planned short file names; a genuinely absent planned short still fails closed.
+- A GPS-less drive's shorts no longer fail the `places_verified` gate (check 20) and the drive-text review no longer refuses a bracket label. A short records `place_source` `bracket_route` only when its text is exactly the label of a `--bracket-gpx` record within its gap cap, and `placeless_label` only when the text is a claim-free placeless label. The gate re-checks that evidence instead of trusting the string; `lf_label` and a short with clip regions stay unverified, and any other unbacked name is still refused.
+- `gomoveshift queue sync-plan-tags` now also rewrites the sidecar tags of a `failed_permanent` YouTube row the final-text review refused before any upload (no upload id), so `queue recover-terminal` can re-queue it. Dry run stays the default, nothing is sent to YouTube, and the Short tag rule is unchanged.
+
 ## [0.3.81] - 2026-11-12
 
 ### Added
@@ -992,7 +1013,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...HEAD
+[0.3.82]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...v0.3.82
 [0.3.81]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...v0.3.81
 [0.3.80]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...v0.3.80
 [0.3.79]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.78...v0.3.79
