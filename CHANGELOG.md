@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.84] - 2026-11-13
+
+### Added
+
+- `gomoveshift queue remeasure-short-route --rendered-shorts DIR`: with stages from a re-render, the published Short is matched to the re-rendered clip by its frames (exactly one match, else refused) instead of by rank, so a re-planned day cannot give a Short another clip's route record.
+
+### Changed
+
+- A bracket route whose two fixes sit in different states of one country now labels the leg in travel order (`Virginia to Pennsylvania`, level `states`, 36 h cap) instead of only the country (nctopa-2026-03-05-rec0063 was labelled `United States`). Past the state cap, or where a fix has no state, the label is still the country.
+- A resumed drive whose stored bracket record now earns a different label (a two-state leg staged as its country) is re-labelled and re-burned: the label is recomputed from the record's own fixes, and the old text's renders and OST confirmations are dropped.
+
+### Fixed
+
+- A resumed drive re-stamps its staged shorts sidecar: a GPS-less Short recorded as `lf_label` whose exact text the drive's bracket record (or claim-free placeless label) proves takes `bracket_route` / `placeless_label`, so `places_verified` no longer refuses a drive staged before that source was recorded (nctopa-2026-03-05-rec0063, 21 Shorts). The gate is unchanged.
+
 ## [0.3.83] - 2026-11-13
 
 ### Added
@@ -1024,7 +1039,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...HEAD
+[0.3.84]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...v0.3.84
 [0.3.83]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...v0.3.83
 [0.3.82]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...v0.3.82
 [0.3.81]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...v0.3.81
