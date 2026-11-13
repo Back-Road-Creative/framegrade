@@ -13,8 +13,9 @@ from unittest.mock import Mock
 import pytest
 from test_publishing_plan_io import _record, _write
 
-from gomoveshift.cli.handlers import queue_facebook_caption
 from gomoveshift.cli.handlers.queue_recover import cmd_queue
+from gomoveshift.pipeline.social_generator import FACEBOOK_CAPTION_TEMPLATES
+from gomoveshift.publishing import facebook_caption_edit
 from gomoveshift.publishing.facebook_adapter import (
     FacebookPermanentError,
     FacebookReelsAdapter,
@@ -26,6 +27,11 @@ from gomoveshift.publishing.queue import enqueue, open_queue_db
 CREDS = {"page_id": "page-1", "page_access_token": "tok", "graph_version": "v21.0"}
 OLD = "Fort Fremont — worth the detour? Filmed February 2026."
 NEW = "Somewhere On The Road"
+COUNTY = "Beaufort County, South Carolina"
+BUILT = (
+    "Passing through Beaufort County, South Carolina. Filmed February 2026."
+    "\n\n#BeaufortCounty #SouthCarolina"
+)
 
 
 def _resp(status_code=200, body=None):
@@ -66,13 +72,17 @@ class _FakeAdapter:
         return {"video_id": video_id, "description": self._readback or text}
 
 
-def _sidecar(tmp_path):
+def _sidecar(tmp_path, regions=None):
     rec = dataclasses.replace(_record(), payloads=PlatformPayloads(facebook=FacebookPayload(OLD)))
+    if regions is not None:
+        rec = dataclasses.replace(rec, sampled_regions=regions, recording_date="2026-02-20")
     return _write(tmp_path, PublishPlan(shorts=(rec,)))
 
 
-def _setup(tmp_path, monkeypatch, *, platform="facebook", status="published", upload="v-1"):
-    sc = _sidecar(tmp_path)
+def _setup(
+    tmp_path, monkeypatch, *, platform="facebook", status="published", upload="v-1", regions=None
+):
+    sc = _sidecar(tmp_path, regions)
     conn = open_queue_db(str(tmp_path))
     enqueue(conn, "proj", 3, platform, "p1", sidecar_path=str(sc))
     conn.execute(
@@ -81,7 +91,7 @@ def _setup(tmp_path, monkeypatch, *, platform="facebook", status="published", up
     conn.commit()
     conn.close()
     fake = _FakeAdapter()
-    monkeypatch.setattr(queue_facebook_caption, "_adapter", lambda config: fake)
+    monkeypatch.setattr(facebook_caption_edit, "_adapter", lambda credentials_dir: fake)
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
     return sc, fake, config
 
@@ -167,10 +177,56 @@ def test_apply_readback_mismatch_exits_nonzero_and_leaves_the_sidecar(
 ):
     sc, _fake, config = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        queue_facebook_caption, "_adapter", lambda config: _FakeAdapter(readback="other")
+        facebook_caption_edit, "_adapter", lambda credentials_dir: _FakeAdapter(readback="other")
     )
     before = sc.read_bytes()
     assert cmd_queue(_args(apply=True), config) == 1
     assert "read-back" in capsys.readouterr().err
     assert sc.read_bytes() == before
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_measured_county_builds_the_caption_and_apply_records_it(tmp_path, monkeypatch, capsys):
+    sc, fake, config = _setup(tmp_path, monkeypatch, regions=(COUNTY,))
+    assert cmd_queue(_args(text=None, apply=True), config) == 0
+    assert fake.calls == [("v-1", BUILT)]
+    assert _desc(sc) == BUILT
+    out = capsys.readouterr().out
+    assert "measured county" in out and "Fort Fremont" not in BUILT
+
+
+def test_measured_county_refuses_typed_text_even_placeless(tmp_path, monkeypatch, capsys):
+    sc, fake, config = _setup(tmp_path, monkeypatch, regions=(COUNTY,))
+    before = sc.read_bytes()
+    assert cmd_queue(_args(text=NEW, apply=True), config) == 1
+    err = capsys.readouterr().err
+    assert COUNTY in err and "drop --text" in err
+    assert fake.calls == [] and sc.read_bytes() == before
+
+
+def test_two_measured_counties_refuse(tmp_path, monkeypatch, capsys):
+    regions = (COUNTY, "Colleton County, South Carolina")
+    sc, fake, config = _setup(tmp_path, monkeypatch, regions=regions)
+    before = sc.read_bytes()
+    assert cmd_queue(_args(text=None, apply=True), config) == 1
+    assert "2 counties" in capsys.readouterr().err
+    assert fake.calls == [] and sc.read_bytes() == before
+
+
+def test_no_measured_county_and_no_text_refuses(tmp_path, monkeypatch, capsys):
+    sc, fake, config = _setup(tmp_path, monkeypatch)
+    before = sc.read_bytes()
+    assert cmd_queue(_args(text=None, apply=True), config) == 1
+    assert "no measured county" in capsys.readouterr().err
+    assert fake.calls == [] and sc.read_bytes() == before
+
+
+def test_measured_template_is_a_reviewed_facebook_template():
+    assert facebook_caption_edit.MEASURED_TEMPLATE in FACEBOOK_CAPTION_TEMPLATES
+
+
+def test_measured_caption_without_a_date_says_nothing_about_when():
+    text = facebook_caption_edit.measured_caption(COUNTY, "")
+    assert (
+        text == "Passing through Beaufort County, South Carolina.\n\n#BeaufortCounty #SouthCarolina"
+    )

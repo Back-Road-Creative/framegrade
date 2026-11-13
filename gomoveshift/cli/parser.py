@@ -1725,11 +1725,17 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
     fc = actions.add_parser(
         "edit-facebook-caption",
         help="Rewrite the description of a published Facebook Reel and record it in the "
-        "publish-plan sidecar. The new text must claim nothing (claim-free placeless words "
-        "only). Dry run unless --apply; never changes the queue row or deletes the post",
+        "publish-plan sidecar. The caption is built from the Short's measured county; --text "
+        "(claim-free words only) is for a Short with none. Dry run unless --apply; never "
+        "changes the queue row or deletes the post",
     )
     fc.add_argument("--id", type=int, required=True, help="Delivery id of the published Reel.")
-    fc.add_argument("--text", required=True, help="The new description.")
+    fc.add_argument(
+        "--text",
+        default=None,
+        help="Claim-free caption, only for a Short whose record holds no measured county "
+        "(refused when it holds one: the caption is then built from it).",
+    )
     fc.add_argument("--apply", action="store_true", help="Edit the live post (default: dry run).")
 
 
