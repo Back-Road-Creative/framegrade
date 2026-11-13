@@ -1947,6 +1947,15 @@ def _add_schedule_parser(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--json", action="store_true", help="Emit the report as JSON.")
 
 
+def _add_status_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "status",
+        help="One read-only snapshot of everything live: jobs, open incidents, the publishing "
+        "queue, the schedule runway, the drive backlog and the machine (docs/pipeline/179-status.md)",
+    )
+    p.add_argument("--json", action="store_true", help="Emit the snapshot as JSON.")
+
+
 def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "health",
@@ -3895,7 +3904,7 @@ def _add_review_set_parser(subparsers: argparse._SubParsersAction) -> None:
 _COMMAND_GROUPS = """\
 command groups (run `gomoveshift <command> --help` for any of them):
   process a drive    drive, pipeline, batch, ingest, upload, cleanup, find-stops
-  review and console server, console, doctor, health, library-hygiene
+  review and console server, console, doctor, health, status, library-hygiene
   analyze a video    analyze, process, scan, review-set
   route story        route-story-prepare, route-story-proof, route-story-verify, route-story-film
   publishing queue   enqueue-plan, enqueue-asset, dispatch-queue, queue, publishing-status,
@@ -3989,6 +3998,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_youtube_auth_parser(subparsers)
     _add_schedule_parser(subparsers)
     _add_health_parser(subparsers)
+    _add_status_parser(subparsers)
     _add_sync_site_parser(subparsers)
     _add_reconcile_playlists_parser(subparsers)
     _add_clip_claims_parser(subparsers)
