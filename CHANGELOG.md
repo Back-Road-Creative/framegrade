@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.83] - 2026-11-13
+
+### Added
+
+- `gomoveshift queue edit-facebook-caption --id N [--text "..."] [--apply]` rewrites the description of a published Facebook Reel (`FacebookReelsAdapter.update_description`), reads it back, and records it in the publish-plan sidecar. The caption is built from the Short's own measured county (`sampled_regions`) and recording month; typed `--text` is refused for such a Short, and for a Short with no measured county it must claim nothing (`placeless_label_claims_nothing`). Dry run by default; never changes the queue row or deletes the post.
+
+### Fixed
+
+- `--placeless-label` no longer overwrites the measured label of a long-form that has GPS; it labels only the GPS-less ones, and one warning names the long-forms where it was withheld.
+- The unattended backlog launcher skips every row carrying `placeless_label` (claim-free or not) and tells the operator to give `bracket_gpx` instead; `gomoveshift health check` rule 5 reports each such row. A placeless label stays a hand-run last resort.
+
 ## [0.3.82] - 2026-11-13
 
 ### Added
@@ -1013,7 +1024,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...HEAD
+[0.3.83]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...v0.3.83
 [0.3.82]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...v0.3.82
 [0.3.81]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.80...v0.3.81
 [0.3.80]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.79...v0.3.80
