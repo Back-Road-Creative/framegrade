@@ -445,7 +445,7 @@ def _label_row(project, label):
     return SimpleNamespace(project=project, placeless_label=label)
 
 
-def test_a_claiming_placeless_label_is_an_incident_naming_row_label_and_words():
+def test_every_placeless_label_is_an_incident_naming_row_label_and_any_claim_words():
     rows = check_mod.placeless_label_incidents(
         [
             _label_row("a", "Through The Valleys And Ridges"),
@@ -454,14 +454,15 @@ def test_a_claiming_placeless_label_is_an_incident_naming_row_label_and_words():
         ],
         NOW.isoformat(),
     )
-    assert [r["project"] for r in rows] == ["a"]
+    assert [r["project"] for r in rows] == ["a", "b"]
+    assert rows[1]["claims"] == [] and "bracket_gpx" in check_mod._line(rows[1])
     row = rows[0]
     assert row["kind"] == "placeless_label_unverifiable"
     assert row["key"] == "placeless_label_unverifiable:a"
     assert row["label"] == "Through The Valleys And Ridges"
     assert row["claims"] == ["Valleys", "Ridges"]
     line = check_mod._line(row)
-    assert "a" in line and "Valleys, Ridges" in line
+    assert "a" in line and "Valleys, Ridges" in line and "bracket_gpx" in line
 
 
 def test_check_opens_the_incident_once_and_closes_it_when_the_yaml_drops_the_label(
@@ -471,13 +472,17 @@ def test_check_opens_the_incident_once_and_closes_it_when_the_yaml_drops_the_lab
     monkeypatch.setattr(check_mod, "_backlog_rows", lambda notes: rows)
     sent = []
     first = _run(tmp_path, lambda *a: sent.append(a) or True)
-    assert first["new"] == ["placeless_label_unverifiable:a"]
+    assert first["new"] == ["placeless_label_unverifiable:a", "placeless_label_unverifiable:b"]
     assert sent[0][0] == "health_placeless_label_unverifiable"
     again = _run(tmp_path, lambda *a: sent.append(a) or True)
-    assert again["new"] == [] and len(sent) == 1
-    rows[0] = _label_row("a", "Somewhere On The Road")
+    assert again["new"] == [] and len(sent) == 2
+    rows[0] = _label_row("a", "")
+    rows[1] = _label_row("b", "")
     closed = _run(tmp_path, lambda *a: True)
-    assert closed["resolved"] == ["placeless_label_unverifiable:a"]
+    assert sorted(closed["resolved"]) == [
+        "placeless_label_unverifiable:a",
+        "placeless_label_unverifiable:b",
+    ]
     assert closed["incidents"] == []
 
 

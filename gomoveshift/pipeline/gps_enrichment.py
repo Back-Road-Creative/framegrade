@@ -529,9 +529,20 @@ def _enrich_per_lf_gps(
         # ``--placeless-label``: the same operator-override path, one label for
         # every LF. Mirrored onto state so the later fallbacks and Phase D read
         # it exactly as they read a ``--per-lf-location`` label.
+        # A placeless label is the last resort: an LF with GPS keeps its measured label.
+        _withheld: list[int] = []
         for _lfs in (lf_plans_by_date or {}).values():
             for _lf in _lfs or []:
-                per_lf_overrides[int(getattr(_lf, "index", 0))] = _placeless
+                _idx = int(getattr(_lf, "index", 0))
+                if gps_points_by_lf and gps_points_by_lf.get(_idx):
+                    _withheld.append(_idx)
+                    continue
+                per_lf_overrides[_idx] = _placeless
+        if _withheld:
+            logger.warning(
+                "placeless label %r withheld from LF %s: they have GPS, so they keep their measured label",
+                _placeless, sorted(_withheld),
+            )  # fmt: skip
         state.per_lf_overrides = dict(per_lf_overrides)
     _bracket = [str(p) for p in (getattr(state, "bracket_gpx", None) or []) if str(p).strip()]
     if _bracket:
