@@ -492,6 +492,73 @@ def relabel_placeless_on_resume(
         ", ".join(_PLACELESS_RELABEL_REBUILT_PHASES),
     )
     preserve_per_lf_overrides_on_resume(state, {i: label for i in sorted(indices)})
+    return _drop_old_label_text(
+        state, resumed_phases, stages_completed, output_base=output_base, stages_dir=stages_dir
+    )
+
+
+def relabel_bracket_on_resume(
+    state,
+    resumed_phases: list[str],
+    stages_completed: list[str],
+    *,
+    output_base,
+    stages_dir,
+) -> list[str]:
+    """Make a bracket label the rules now word differently replace the old text.
+
+    ``state.bracket_route`` keeps both geocoded fixes, so the label is recomputed
+    from the record itself (``bracket_route.recomputed_region``: no geocoder, no
+    fix files). When it differs from the label the drive was burned under (a
+    two-state leg staged as its country, nctopa-2026-03-05-rec0063), the record,
+    every LF's override and mirror, and a drive-wide ``location`` /
+    ``per_day_locations`` that IS the old label take the new one, then everything
+    built from the old text is dropped exactly as for a corrected placeless label
+    (``_drop_old_label_text``). An unchanged or unreadable record is a no-op.
+    """
+    from .bracket_route import recomputed_region
+
+    record = getattr(state, "bracket_route", None)
+    current = recomputed_region(record)
+    if current is None or current[1] == record.get("label"):
+        return resumed_phases
+    level, label = current
+    old = record.get("label")
+    logger.warning(
+        "BRACKET-RELABEL-ON-RESUME: the checkpoint's bracket label %r is now %r (%s "
+        "level) -- re-labelling every LF and re-running %s.",
+        old,
+        label,
+        level,
+        ", ".join(_PLACELESS_RELABEL_REBUILT_PHASES),
+    )
+    state.bracket_route = {**record, "level": level, "label": label}
+    indices: set[int] = set()
+    for field in ("per_lf_overrides", *PER_LF_OVERRIDE_MIRROR_FIELDS):
+        indices.update(int(key) for key in (getattr(state, field, None) or {}))
+    preserve_per_lf_overrides_on_resume(state, {i: label for i in sorted(indices)})
+    if getattr(state, "location", None) == old:
+        state.location = label
+    state.per_day_locations = {
+        day: (label if text == old else text)
+        for day, text in (getattr(state, "per_day_locations", None) or {}).items()
+    }
+    return _drop_old_label_text(
+        state, resumed_phases, stages_completed, output_base=output_base, stages_dir=stages_dir
+    )
+
+
+def _drop_old_label_text(
+    state,
+    resumed_phases: list[str],
+    stages_completed: list[str],
+    *,
+    output_base,
+    stages_dir,
+) -> list[str]:
+    """Drop everything built from a label that just changed on resume: the burned
+    phases leave the resume set, and the fast-path day records and OST audit
+    confirmations of the old text are cleared. Returns the trimmed ``resumed_phases``."""
     drop = set(_PLACELESS_RELABEL_REBUILT_PHASES)
     resumed_phases = [p for p in resumed_phases if p not in drop]
     stages_completed[:] = [p for p in stages_completed if p not in drop]
@@ -511,7 +578,7 @@ def relabel_placeless_on_resume(
                 if path.resolve() not in seen:
                     seen.add(path.resolve())
                     path.unlink()
-                    logger.info("  placeless relabel: cleared old-text artifact %s", path)
+                    logger.info("  relabel: cleared old-text artifact %s", path)
     return resumed_phases
 
 
@@ -1187,6 +1254,14 @@ class DrivePipelineOrchestrator:
             # A corrected --placeless-label replaces the old text everywhere it was
             # burned or written (see ``relabel_placeless_on_resume``).
             resumed_phases = relabel_placeless_on_resume(
+                state,
+                resumed_phases,
+                stages_completed,
+                output_base=output_base,
+                stages_dir=stages_dir,
+            )
+            # Same for a bracket label the rules now word differently.
+            resumed_phases = relabel_bracket_on_resume(
                 state,
                 resumed_phases,
                 stages_completed,

@@ -225,7 +225,7 @@ def resolve_bracket_route(
         )
     gap_h = (after.ts - before.ts) / 3600.0
     caps = dict(max_gap_h_by_level or BRACKET_MAX_GAP_H_BY_LEVEL)
-    levels = tuple(k for k in _PLACE_KEYS if gap_h <= float(caps.get(k, 0.0)))
+    levels = _levels_within(gap_h, caps)
     if not levels:
         raise BracketRouteRefusedError(
             f"bracket fixes are {gap_h:.1f} h apart (> {max(caps.values()):g} h): "
@@ -256,6 +256,23 @@ def resolve_bracket_route(
         level=level,
         label=label,
     )
+
+
+def _levels_within(gap_h: float, caps: dict) -> tuple:
+    """The place levels whose gap cap ``gap_h`` is inside."""
+    return tuple(k for k in _PLACE_KEYS if gap_h <= float(caps.get(k, 0.0)))
+
+
+def recomputed_region(record: Optional[dict]) -> Optional[tuple[str, str]]:
+    """``(level, label)`` a stored record's own geocoded fixes earn under the CURRENT
+    rules (no geocoder, no fix files), or ``None`` for a record that is unreadable or
+    earns nothing. A resumed drive compares it with the label the record was burned
+    under (``drive_orchestrator.relabel_bracket_on_resume``)."""
+    try:
+        levels = _levels_within(float(record["gap_h"]), BRACKET_MAX_GAP_H_BY_LEVEL)
+        return common_region(record["before_place"], record["after_place"], levels)
+    except (KeyError, TypeError, ValueError, AttributeError, BracketRouteRefusedError):
+        return None
 
 
 def bracket_outcome(record: dict) -> dict:
