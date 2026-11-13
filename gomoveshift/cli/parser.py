@@ -1722,6 +1722,15 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
         help="The run's _stages directory (gps_points_<date>.json, shorts_ost_audit_<date>.json).",
     )
     rm.add_argument("--apply", action="store_true", help="Write the sidecar (default: dry run).")
+    fc = actions.add_parser(
+        "edit-facebook-caption",
+        help="Rewrite the description of a published Facebook Reel and record it in the "
+        "publish-plan sidecar. The new text must claim nothing (claim-free placeless words "
+        "only). Dry run unless --apply; never changes the queue row or deletes the post",
+    )
+    fc.add_argument("--id", type=int, required=True, help="Delivery id of the published Reel.")
+    fc.add_argument("--text", required=True, help="The new description.")
+    fc.add_argument("--apply", action="store_true", help="Edit the live post (default: dry run).")
 
 
 def _add_catalog_inventory_parser(subparsers: argparse._SubParsersAction) -> None:
