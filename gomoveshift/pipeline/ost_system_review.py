@@ -107,6 +107,21 @@ def _bracket_outcome(state, text) -> Optional[dict]:
     return bracket_outcome(record)
 
 
+def unmeasured_place_source(evidence, text) -> Optional[str]:
+    """``place_source`` a short's ``text`` earns from the drive's evidence
+    (``{"bracket_route": record, "placeless_label": label}``, or a state): the
+    placeless source when the text is exactly a claim-free placeless label, the
+    bracket source when it is exactly the label of a bracket record within its
+    gap cap; ``None`` otherwise (an inherited label proves nothing)."""
+    from .bracket_route import bracket_record_valid
+
+    if _placeless_outcome(evidence, text):
+        return PLACELESS_SOURCE
+    if bracket_record_valid(_field(evidence, "bracket_route")) and _bracket_outcome(evidence, text):
+        return BRACKET_SOURCE
+    return None
+
+
 def _unmeasured_outcome(state, text) -> Optional[dict]:
     """The drive's placeless or bracket label agreeing with itself, else ``None``."""
     return _placeless_outcome(state, text) or _bracket_outcome(state, text)

@@ -1346,11 +1346,15 @@ def check_places_verified(project_dir: Path, state: Any | None = None) -> CheckR
     if not shorts_per_lf:
         return CheckResult(20, name, True, "skipped (state has no shorts_per_lf)")
     try:
-        from gomoveshift.pipeline.drive_phases.phase_d_scheduling import unverified_place_shorts
+        from gomoveshift.pipeline.drive_phases.phase_d_scheduling import (
+            place_evidence,
+            unverified_place_shorts,
+        )
     except ImportError as exc:  # pragma: no cover — repo checkout always has it
         return CheckResult(20, name, False, f"cannot import phase_d_scheduling: {exc}")
     problems = unverified_place_shorts(
-        {lf: list(paths or []) for lf, paths in shorts_per_lf.items()}
+        {lf: list(paths or []) for lf, paths in shorts_per_lf.items()},
+        place_evidence(state),
     )
     if problems:
         return CheckResult(

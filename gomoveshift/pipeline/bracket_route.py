@@ -47,6 +47,19 @@ _GPX_SUFFIXES = {".gpx"}
 _VIDEO_SUFFIXES = {".mp4", ".mov"}
 
 
+def bracket_record_valid(record) -> bool:
+    """``record`` (``state.bracket_route``) names a label at a known level and its fix
+    gap is within that level's cap (:data:`BRACKET_MAX_GAP_H_BY_LEVEL`)."""
+    if not isinstance(record, dict) or not str(record.get("label") or "").strip():
+        return False
+    cap = BRACKET_MAX_GAP_H_BY_LEVEL.get(str(record.get("level") or ""))
+    try:
+        gap = float(record["gap_h"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return cap is not None and 0 <= gap <= cap
+
+
 class BracketRouteRefusedError(ValueError):
     """The two files do not bracket this footage with one common region."""
 

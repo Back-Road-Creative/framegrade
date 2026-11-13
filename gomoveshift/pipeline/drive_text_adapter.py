@@ -337,16 +337,36 @@ def lf_drive_facts(
     )
 
 
-def attach_drive_text(route_entry: Optional[dict], metadata: dict, label: str, **facts_kw) -> dict:
+def _back_bracket_label(index: EvidenceIndex, bracket_route: Optional[dict]) -> None:
+    """Cite the label of a valid ``--bracket-gpx`` record (both bracketing fixes agree on
+    it, inside the level's gap cap) as backed. Any other name stays unbacked."""
+    from .bracket_route import bracket_record_valid
+    from .final_text_record import _region_id
+
+    if bracket_record_valid(bracket_route):
+        label = str(bracket_route["label"]).strip()
+        index.setdefault(_key(label), (_region_id(str(bracket_route["level"]), label), label))
+
+
+def attach_drive_text(
+    route_entry: Optional[dict],
+    metadata: dict,
+    label: str,
+    bracket_route: Optional[dict] = None,
+    **facts_kw,
+) -> dict:
     """Set ``metadata["final_text_description"]`` to Waypost's entries for the
     LF, or to ``[]`` with ``metadata["drive_text_refusal"]`` naming why. A
     refusal leaves the review without its layout blocks, so it refuses and the
     upload is held -- the pipeline run itself keeps going."""
     metadata.pop("drive_text_refusal", None)
     metadata["drive_text_inputs"] = {"label": label, **facts_kw}
+    if bracket_route:
+        metadata["drive_text_inputs"]["bracket_route"] = bracket_route
     record = (route_entry or {}).get("record")
     try:
         index = evidence_index(route_entry)
+        _back_bracket_label(index, bracket_route)
         data = build_drive_data(lf_drive_facts(label, index, record=record, **facts_kw), index)
         entries = drive_entries(data)
         if _binned(record):
