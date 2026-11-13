@@ -31,6 +31,7 @@ from .drive_phases.phase_bc_day_first import (
     PhaseBCDayFirst,
     _day_dir_has_finals,
     _resolve_ingest_plan,
+    day_needs_reburn,
 )
 from .drive_phases.phase_d import PUBLISH_DAYS, PhaseD
 from .drive_phases.phase_d_fingerprint import (
@@ -248,6 +249,9 @@ def auto_populate_per_day_completed(state: dict, stages_dir: Path, *, fresh: boo
         if date is None:
             continue
         if date in per_day:
+            continue
+        if day_needs_reburn(state, date):
+            # Finals of a label that changed on resume: never a completed day.
             continue
         if not _day_dir_has_finals(child):
             continue
@@ -565,21 +569,94 @@ def _drop_old_label_text(
     state.phases_completed = [
         p for p in (getattr(state, "phases_completed", None) or []) if p not in drop
     ]
+    # Every day with finals burned the old text. Mark each one so neither the
+    # recovery hook (which runs right after this) nor a later resume reuses them.
+    reburn = dict(getattr(state, "reburn_days", None) or {})
+    stale_days = set(getattr(state, "per_day_completed", None) or {})
+    if Path(stages_dir).is_dir():
+        for child in Path(stages_dir).iterdir():
+            day = date_from_day_dir_name(child.name) if child.is_dir() else None
+            if day is not None and _day_dir_has_finals(child):
+                stale_days.add(day)
+    for day in sorted(stale_days):
+        reburn.setdefault(day, "label changed on resume")
+    state.reburn_days = reburn
     state.per_day_completed = {}
     state.ost_audit_passed = {}
     state.ost_audit_hash = {}
+    state.shorts_ost_audit_passed = {}
+    state.shorts_ost_audit_hash = {}
     state.shorts_ost_system_review = {}
     state.superlong_ost_system_review = {}
     mirror = Path(output_base) / "_stages"
     seen: set[Path] = set()
     for base in (Path(output_base), Path(stages_dir), mirror):
-        for pattern in ("ost_audit_*.json", "*.confirmed"):
+        for pattern in (
+            "ost_audit_*.json",
+            "shorts_ost_audit_*.json",
+            "shorts_ost_system_review_*.json",
+            "*.confirmed",
+        ):
             for path in base.glob(pattern):
                 if path.resolve() not in seen:
                     seen.add(path.resolve())
                     path.unlink()
                     logger.info("  relabel: cleared old-text artifact %s", path)
     return resumed_phases
+
+
+def reburn_finals_of_an_old_label(
+    state,
+    resumed_phases: list[str],
+    stages_completed: list[str],
+    *,
+    output_base,
+    stages_dir,
+) -> list[str]:
+    """Send a day back to the burn when its Shorts record still names an old label.
+
+    A drive relabelled before ``reburn_days`` existed already carries the new label
+    in its checkpoint, so neither relabel fires again, yet its finals were never
+    burned again (2026-11-13, nctopa-2026-03-05-rec0063). The staged
+    ``shorts_ost_audit_<date>.json`` is the record of what was burned: an entry with
+    no clip regions whose source is the bracket route or the placeless label, and
+    whose text the drive's evidence no longer earns
+    (``ost_system_review.unmeasured_place_source``), was burned with a label since
+    replaced. Any such entry drops the old text (``_drop_old_label_text``), which
+    also removes the sidecar, so this fires once. Returns ``resumed_phases``.
+    """
+    from .ost_system_review import BRACKET_SOURCE, PLACELESS_SOURCE, unmeasured_place_source
+
+    stale: list[str] = []
+    seen: set[Path] = set()
+    for base in (Path(stages_dir), Path(output_base), Path(output_base) / "_stages"):
+        for path in sorted(base.glob("shorts_ost_audit_*.json")):
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
+            try:
+                entries = json.loads(path.read_text(encoding="utf-8"))["shorts"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict) or entry.get("regions"):
+                    continue
+                if entry.get("place_source") not in (BRACKET_SOURCE, PLACELESS_SOURCE):
+                    continue
+                if unmeasured_place_source(state, entry.get("ost_text")) is None:
+                    stale.append(f"{path.name}: {entry.get('ost_text')!r}")
+                    break
+    if not stale:
+        return resumed_phases
+    logger.warning(
+        "OLD-LABEL-FINALS: the Shorts record still names a label the drive no longer "
+        "carries (%s) -- burning the day's long-forms and Shorts again and re-running %s.",
+        "; ".join(stale),
+        ", ".join(_PLACELESS_RELABEL_REBUILT_PHASES),
+    )
+    return _drop_old_label_text(
+        state, resumed_phases, stages_completed, output_base=output_base, stages_dir=stages_dir
+    )
 
 
 def restamp_unmeasured_place_source_on_resume(state, *, output_base, stages_dir) -> int:
@@ -1307,6 +1384,14 @@ class DrivePipelineOrchestrator:
             )
             # Same for a bracket label the rules now word differently.
             resumed_phases = relabel_bracket_on_resume(
+                state,
+                resumed_phases,
+                stages_completed,
+                output_base=output_base,
+                stages_dir=stages_dir,
+            )
+            # A drive relabelled by an earlier run whose finals were never burned again.
+            resumed_phases = reburn_finals_of_an_old_label(
                 state,
                 resumed_phases,
                 stages_completed,
