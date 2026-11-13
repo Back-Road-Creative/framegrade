@@ -30,7 +30,14 @@ def cmd_remeasure_short_route(args, config) -> int:
         if geocoder is None:
             print("REFUSED: no geocoder available to measure with", file=sys.stderr)
             return 1
-        out = remeasure_short_route(row, Path(args.stages_dir), geocoder, apply=bool(args.apply))
+        rendered = getattr(args, "rendered_shorts", None)
+        out = remeasure_short_route(
+            row,
+            Path(args.stages_dir),
+            geocoder,
+            apply=bool(args.apply),
+            rendered_dir=Path(rendered) if rendered else None,
+        )
     except RemeasureRefusedError as exc:
         print(f"REFUSED: delivery {args.id}: {exc}", file=sys.stderr)
         return 1
@@ -41,6 +48,8 @@ def cmd_remeasure_short_route(args, config) -> int:
         f"{out['retained_seconds']} s retained, {out['unsettled_seconds']} s unsettled, "
         f"{out['gap_seconds']} s gap, windows_key {out['windows_key'][:12]}"
     )
+    if "frame_distance" in out:
+        line += f", frame distance {out['frame_distance']:.3f} to the re-rendered Short"
     if out["applied"]:
         print(f"wrote route_record: {line}")
     else:

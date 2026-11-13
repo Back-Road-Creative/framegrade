@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -187,3 +188,132 @@ def test_cli_refuses_with_the_reason(tmp_path, monkeypatch, capsys):
 def test_the_no_bins_refusal_names_the_command():
     (issue,) = recheck_place_text({}, "Vernon County, Wisconsin")
     assert "queue remeasure-short-route" in issue
+
+
+# --- stages from a RE-RENDER: the clip is identified by its frames, not its rank -------
+# 2026-11-13, ireland-2025-09-17-mizen-s5-s7: the original stages are gone, and a
+# re-render re-plans the day's Shorts, so "rank 3 of LF 1, 38 s long" may be another
+# clip. With ``rendered_dir`` the published media must frame-match exactly one of the
+# re-render's Shorts; that Short's clip range is the one measured.
+
+SAME, NEAR, FAR = bytes([100] * 64), bytes([104] * 64), bytes([160] * 64)
+
+
+def _rerender(tmp_path, entries):
+    """A re-render's stages + shorts dir; ``entries`` = (rank, lf, start, end)."""
+    d = tmp_path / "restages"
+    d.mkdir()
+    (d / f"gps_points_{DATE}.json").write_text(json.dumps(_points()))
+    audit = [
+        {"rank": r, "parent_lf_index": lf, "start_sec": s, "end_sec": e} for r, lf, s, e in entries
+    ]
+    (d / f"shorts_ost_audit_{DATE}.json").write_text(json.dumps({"shorts": audit}))
+    out = tmp_path / "rerender" / "shorts"
+    for r, lf, _s, _e in entries:
+        (out / f"lf_{lf:02d}").mkdir(parents=True, exist_ok=True)
+        (out / f"lf_{lf:02d}" / f"short_{r:02d}.mp4").write_bytes(b"x")
+    return d, out
+
+
+def _published(tmp_path):
+    media = tmp_path / "old" / "short_02.mp4"
+    media.parent.mkdir()
+    media.write_bytes(b"x")
+    return _sidecar(tmp_path, media=str(media)), media
+
+
+def _sig(table):
+    """Signature per file: the published media is ``old``, a re-render file its name."""
+    return lambda path: table["old" if Path(path).parent.name == "old" else Path(path).name]
+
+
+def _run_rerender(tmp_path, entries, table, apply=True):
+    sc, _media = _published(tmp_path)
+    stages, out = _rerender(tmp_path, entries)
+    result = remeasure_short_route(
+        _row(sc), stages, _Geo(), apply=apply, rendered_dir=out, signature_fn=_sig(table)
+    )
+    return sc, result
+
+
+def test_rerender_measures_the_clip_whose_frames_match_whatever_its_rank(tmp_path):
+    # The published Short was rank 2; in the re-render the same clip is rank 5.
+    entries = [(2, 2, 300.0, 321.5), (5, 2, 100.0, 121.5)]
+    table = {"short_02.mp4": FAR, "short_05.mp4": NEAR}
+    sc, out = _run_rerender(tmp_path, entries, {**table, "old": SAME})
+    assert out["rank"] == 5 and out["frame_distance"] == pytest.approx(4 / 255)
+    assert _route_record(sc)["bins"]
+
+
+def test_rerender_with_no_matching_clip_refuses_and_writes_nothing(tmp_path):
+    entries = [(2, 2, 100.0, 121.5), (5, 2, 200.0, 221.5)]
+    sc, _media = _published(tmp_path)
+    before = sc.read_bytes()
+    stages, out = _rerender(tmp_path, entries)
+    table = {"short_02.mp4": FAR, "short_05.mp4": FAR, "old": SAME}
+    with pytest.raises(RemeasureRefusedError, match="frame-match"):
+        remeasure_short_route(
+            _row(sc), stages, _Geo(), apply=True, rendered_dir=out, signature_fn=_sig(table)
+        )
+    assert sc.read_bytes() == before
+
+
+def test_rerender_with_two_matching_clips_refuses(tmp_path):
+    entries = [(2, 2, 100.0, 121.5), (5, 2, 200.0, 221.5)]
+    with pytest.raises(RemeasureRefusedError, match="frame-match"):
+        _run_rerender(tmp_path, entries, {"short_02.mp4": NEAR, "short_05.mp4": SAME, "old": SAME})
+
+
+def test_rerender_refuses_a_match_with_a_near_miss_beside_it(tmp_path):
+    almost = bytes([118] * 64)  # 18/255 = 0.07: neither a match nor clearly another clip
+    entries = [(2, 2, 100.0, 121.5), (5, 2, 200.0, 221.5)]
+    with pytest.raises(RemeasureRefusedError, match="ambiguous"):
+        _run_rerender(
+            tmp_path, entries, {"short_02.mp4": almost, "short_05.mp4": SAME, "old": SAME}
+        )
+
+
+def test_rerender_ignores_clips_of_another_lf_or_length(tmp_path):
+    entries = [(2, 1, 100.0, 121.5), (5, 2, 100.0, 140.0), (7, 2, 200.0, 221.5)]
+    table = {"short_02.mp4": SAME, "short_05.mp4": SAME, "short_07.mp4": NEAR, "old": SAME}
+    _sc, out = _run_rerender(tmp_path, entries, table)
+    assert out["rank"] == 7
+
+
+def test_rerender_refuses_when_the_published_media_is_gone(tmp_path):
+    sc = _sidecar(tmp_path, media=str(tmp_path / "gone" / "short_02.mp4"))
+    stages, out = _rerender(tmp_path, [(2, 2, 100.0, 121.5)])
+    with pytest.raises(RemeasureRefusedError, match="published media"):
+        remeasure_short_route(
+            _row(sc), stages, _Geo(), apply=True, rendered_dir=out, signature_fn=_sig({})
+        )
+
+
+def test_signature_distance_is_the_mean_absolute_difference():
+    from gomoveshift.publishing.route_remeasure import signature_distance
+
+    assert signature_distance(SAME, SAME) == 0.0
+    assert signature_distance(SAME, FAR) == pytest.approx(60 / 255)
+    with pytest.raises(RemeasureRefusedError, match="signature"):
+        signature_distance(SAME, SAME[:10])
+
+
+def test_cli_passes_rendered_shorts_through(tmp_path, monkeypatch, capsys):
+    sc, _media = _published(tmp_path)
+    stages, out = _rerender(tmp_path, [(5, 2, 100.0, 121.5)])
+    conn = open_queue_db(str(tmp_path))
+    enqueue(conn, "proj", 3, "youtube", "p1", sidecar_path=str(sc))
+    conn.close()
+    monkeypatch.setattr(queue_remeasure, "_geocoder", lambda: _Geo())
+    monkeypatch.setattr("gomoveshift.publishing.route_remeasure.media_signature", lambda path: SAME)
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    args = SimpleNamespace(
+        queue_action="remeasure-short-route",
+        id=1,
+        stages_dir=stages,
+        apply=True,
+        rendered_shorts=out,
+    )
+    assert cmd_queue(args, config) == 0
+    assert "frame distance" in capsys.readouterr().out
+    assert _route_record(sc)["bins"]

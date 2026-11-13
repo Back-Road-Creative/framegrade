@@ -532,6 +532,8 @@ GPS fix, or the record already has `bins`. Dry run by default; `--apply` writes 
 sidecar's `route_record` (never the queue, never YouTube). The place gate and
 `recover-terminal`'s other gates then decide as usual.
 
+Stages from a **re-render** (the original `_stages` are gone) re-plan the day's Shorts, so a rank no longer names the published clip. Pass `--rendered-shorts <that render's shorts dir>`: the clip measured is then the one whose re-rendered Short frame-matches the published media (`route_remeasure.media_signature`: 8 frames, 16×16 grey; a match is a distance ≤ 0.06, another clip ≥ 0.09). No match, two matches, or a clip between the two bounds is a refusal and nothing is written.
+
 ## Rewriting a published Facebook Reel's caption (`queue edit-facebook-caption`)
 
 `gomoveshift queue edit-facebook-caption --id N [--text "..."] [--apply]` changes the description
