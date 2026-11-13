@@ -150,8 +150,13 @@ def test_different_counties_in_one_state_fall_to_the_state():
     assert br.common_region(FRANKLIN_PA, ADAMS_PA) == ("state", "Pennsylvania")
 
 
-def test_different_states_in_one_country_fall_to_the_country():
-    assert br.common_region(FRANKLIN_PA, MONTGOMERY_VA) == ("country", "United States")
+def test_different_states_in_one_country_name_the_leg():
+    # Was ("country", "United States") until 2026-11-13: both ends of the leg are measured.
+    assert br.common_region(FRANKLIN_PA, MONTGOMERY_VA) == ("states", "Pennsylvania to Virginia")
+    assert br.common_region(FRANKLIN_PA, MONTGOMERY_VA, ("country",)) == (
+        "country",
+        "United States",
+    )
 
 
 def test_different_counties_with_no_state_fall_to_the_country():
@@ -222,7 +227,12 @@ def test_a_file_with_no_timed_fix_is_refused(tmp_path):
 
 def test_the_gap_caps_are_per_level():
     # A county claim needs a tight bracket; a whole country survives a longer one.
-    assert br.BRACKET_MAX_GAP_H_BY_LEVEL == {"county": 36.0, "state": 36.0, "country": 48.0}
+    assert br.BRACKET_MAX_GAP_H_BY_LEVEL == {
+        "county": 36.0,
+        "state": 36.0,
+        "states": 36.0,
+        "country": 48.0,
+    }
     assert br.BRACKET_MAX_GAP_H == 48.0
 
 
