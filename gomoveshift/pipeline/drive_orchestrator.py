@@ -582,6 +582,51 @@ def _drop_old_label_text(
     return resumed_phases
 
 
+def restamp_unmeasured_place_source_on_resume(state, *, output_base, stages_dir) -> int:
+    """Re-stamp a staged shorts sidecar's ``place_source`` from the drive's evidence.
+
+    ``day_pipeline`` records ``bracket_route`` / ``placeless_label`` when it renders a
+    GPS-less Short, but a Phase-D-only resume never re-derives
+    ``shorts_ost_audit_<date>.json``: a sidecar staged before that (or before the
+    bracket record existed) keeps ``lf_label``, which the place gate rightly refuses, so
+    every Short fails ``places_verified`` although the evidence proves its exact text
+    (2026-11-13, nctopa-2026-03-05-rec0063, 21 Shorts). An entry with no clip regions,
+    source ``lf_label`` and text that earns a source now
+    (``ost_system_review.unmeasured_place_source``) takes that source; nothing else is
+    touched (``place_source`` is outside the audit hash). Returns the entries re-stamped.
+    """
+    from ._atomic_write import atomic_write_json
+    from .ost_system_review import unmeasured_place_source
+
+    done = 0
+    seen: set[Path] = set()
+    for base in (Path(stages_dir), Path(output_base), Path(output_base) / "_stages"):
+        for path in sorted(base.glob("shorts_ost_audit_*.json")):
+            if path.resolve() in seen:
+                continue
+            seen.add(path.resolve())
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                entries = payload["shorts"]
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            changed = 0
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict) or entry.get("regions"):
+                    continue
+                if (entry.get("place_source") or "lf_label") != "lf_label":
+                    continue
+                source = unmeasured_place_source(state, entry.get("ost_text"))
+                if source:
+                    entry["place_source"] = source
+                    changed += 1
+            if changed:
+                atomic_write_json(path, payload, sort_keys=True)
+                logger.info("PLACE-SOURCE-RESTAMP: %d short(s) in %s", changed, path)
+                done += changed
+    return done
+
+
 def reset_force_sidecar_reset_after_resume(state, cli_value: Optional[bool]) -> None:
     """Force ``state.force_sidecar_reset`` to THIS invocation's CLI intent,
     unconditionally, AFTER the resume merge.
@@ -1267,6 +1312,10 @@ class DrivePipelineOrchestrator:
                 stages_completed,
                 output_base=output_base,
                 stages_dir=stages_dir,
+            )
+            # A staged shorts sidecar takes the place source its evidence proves now.
+            restamp_unmeasured_place_source_on_resume(
+                state, output_base=output_base, stages_dir=stages_dir
             )
             # ── force_sidecar_reset per-invocation reset (post-merge) ────────
             # See ``reset_force_sidecar_reset_after_resume`` docstring — must
