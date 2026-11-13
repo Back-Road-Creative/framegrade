@@ -526,6 +526,7 @@ def cmd_queue(args, config) -> int:
         "sync-plan-tags",
         "reslot-overdue-manual",
         "reslot-overdue-youtube",
+        "remeasure-short-route",
     ):
         print(f"Error: unknown queue action {args.queue_action!r}", file=sys.stderr)
         return 2
@@ -550,6 +551,10 @@ def cmd_queue(args, config) -> int:
         from .queue_reslot import cmd_reslot_overdue_youtube
 
         return cmd_reslot_overdue_youtube(args, config)
+    if args.queue_action == "remeasure-short-route":
+        from .queue_remeasure import cmd_remeasure_short_route
+
+        return cmd_remeasure_short_route(args, config)
     sidecar_dir = Path(args.sidecar_dir) if args.sidecar_dir else Path(config.seo.storage_path)
     conn = open_queue_db(config.seo.storage_path)
     try:

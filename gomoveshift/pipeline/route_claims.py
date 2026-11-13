@@ -1095,7 +1095,10 @@ def recheck_place_text(record: dict, text: str) -> list:
     Empty = every retained second is inside a place the text names. A record with no
     ``bins`` (made before this gate) cannot be checked and returns an issue."""
     if "bins" not in (record or {}):
-        return ["route record has no 'bins' (measured before the zero-tolerance gate); re-measure"]
+        return [
+            "route record has no 'bins' (measured before the zero-tolerance gate); "
+            "re-measure with `gomoveshift queue remeasure-short-route`"
+        ]
     return place_text_issues(text, RouteEvidence.from_record(record))
 
 
@@ -1231,16 +1234,26 @@ def _day_window(segment_id: str, start_s: float, end_s: float, day_points) -> Ro
     )
 
 
+def measure_short_route(rank, start_s: float, end_s: float, day_points, geocoder) -> RouteEvidence:
+    """One Short's route evidence: the measurement :func:`make_short_route_fn` records
+    (one bin per ``GAP_S``, no place floor), shared with the operator re-measure."""
+    w = short_route_window(rank, start_s, end_s, day_points)
+    return measure_route([w], geocoder, bin_s=GAP_S, min_place_s=_SHORT_FLOOR_S)
+
+
 def make_short_route_fn(geocoder):
     """``check(day_points, short_range, text) -> (label, note)`` for one GPS-bearing
     Short: the long-form rule at Short scale (one sample per ``GAP_S``, no floor).
     Raises :class:`RouteClaimRefusedError` when no supported label exists."""
 
     def check(day_points, short_range, text):
-        w = short_route_window(
-            short_range.rank, float(short_range.start_sec), float(short_range.end_sec), day_points
+        ev = measure_short_route(
+            short_range.rank,
+            float(short_range.start_sec),
+            float(short_range.end_sec),
+            day_points,
+            geocoder,
         )
-        ev = measure_route([w], geocoder, bin_s=GAP_S, min_place_s=_SHORT_FLOOR_S)
         # Read straight after the call: the Short's title, description and tags are
         # composed later and are gated against this record before upload.
         check.last_record = ev.record()

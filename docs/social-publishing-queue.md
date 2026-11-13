@@ -518,6 +518,20 @@ called by the drain, and writes nothing to YouTube. `recover-terminal` uses the 
 for a review-refused row (previous section). A refused row prints `REFUSED: <id>: <reason>` and
 the exit code is 1; the others are still processed.
 
+## A Short with no measured route (`queue remeasure-short-route`)
+
+A Short planned before the zero-tolerance place gate has no `route_record` with `bins` in its
+sidecar, so the gate refuses its title, description and tags (`place_outside_text`: "route
+record has no 'bins'") and `recover-terminal` stops at the review gate. `gomoveshift queue
+remeasure-short-route --id N --stages-dir <run>/_stages [--apply]` re-derives the record from
+the sources a verifier re-measures from: the day's `gps_points_<date>.json` and the clip range in
+`shorts_ost_audit_<date>.json` (rank read from the media file name), through the same
+measurement the pipeline used. It refuses, writing nothing, when either file is gone, the rank's
+parent LF or its range against the media duration (within 1 s) does not match, the clip holds no
+GPS fix, or the record already has `bins`. Dry run by default; `--apply` writes only the
+sidecar's `route_record` (never the queue, never YouTube). The place gate and
+`recover-terminal`'s other gates then decide as usual.
+
 ## A YouTube short the channel does not return (`missing_remote`)
 
 `missing_remote` is a **terminal** status for a YouTube row the queue holds an upload id for
