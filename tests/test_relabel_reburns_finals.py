@@ -151,3 +151,52 @@ def test_a_state_without_the_mark_behaves_as_before(tmp_path):
     auto_populate_per_day_completed(state, stages, fresh=False)
     assert state.per_day_completed == {DAY: {"master_path": None}}
     assert bc.day_needs_reburn(state, DAY) is False
+
+
+# ── A drive relabelled before this fix: the label is already new, the burn is old ──
+
+
+def _already_relabelled(tmp_path, burned=OLD, source="bracket_route"):
+    import json
+
+    from gomoveshift.pipeline.drive_orchestrator import reburn_finals_of_an_old_label
+
+    record = {**_record(), "label": NEW, "level": "states"}
+    mirror = {1: NEW, 2: NEW, 3: NEW}
+    state = make_state(
+        bracket_route=record,
+        location=NEW,
+        per_lf_overrides=dict(mirror),
+        per_lf_ost_text=dict(mirror),
+        per_day_completed={DAY: {"master_path": None}},
+        shorts_ost_audit_passed={DAY: True},
+        shorts_ost_audit_hash={DAY: "d" * 64},
+        phases_completed=list(PHASES),
+    )
+    stages = _stages(tmp_path)
+    sidecar = stages / f"shorts_ost_audit_{DAY}.json"
+    entry = {"ost_text": burned, "place_source": source, "regions": [], "rank": 1}
+    sidecar.write_text(json.dumps({"date": DAY, "shorts": [entry]}))
+    stages_completed = list(PHASES)
+    resumed = reburn_finals_of_an_old_label(
+        state, list(PHASES), stages_completed, output_base=tmp_path / "out", stages_dir=stages
+    )
+    return state, resumed, stages_completed, sidecar
+
+
+def test_shorts_recorded_with_the_old_label_send_the_day_back(tmp_path):
+    state, resumed, stages_completed, sidecar = _already_relabelled(tmp_path)
+    assert resumed == ["phase_a"] == stages_completed == state.phases_completed
+    assert DAY in state.reburn_days and state.per_day_completed == {}
+    assert state.shorts_ost_audit_hash == {} and not sidecar.exists()
+
+
+def test_shorts_recorded_with_the_current_label_are_left_alone(tmp_path):
+    state, resumed, _, sidecar = _already_relabelled(tmp_path, burned=NEW)
+    assert resumed == PHASES and not state.reburn_days
+    assert state.per_day_completed == {DAY: {"master_path": None}} and sidecar.exists()
+
+
+def test_a_short_named_by_its_own_gps_is_never_judged_here(tmp_path):
+    state, resumed, _, sidecar = _already_relabelled(tmp_path, source="clip_gps")
+    assert resumed == PHASES and not state.reburn_days and sidecar.exists()
