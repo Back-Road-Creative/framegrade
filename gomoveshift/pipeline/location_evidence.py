@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Optional
 
@@ -212,14 +213,40 @@ class TitleEvidenceError(RuntimeError):
     """A long-form title names places its location-evidence record does not back."""
 
 
-def refuse_unsupported_title(label: str, record, *, lf_index) -> None:
+# What may follow the bracket leg in a title: nothing, a separator, or a lowercase /
+# digit word ("in 4K"). A capitalised word would extend the place name
+# ("Pennsylvania Avenue"), which the bracket never measured.
+_AFTER_BRACKET_LEG_RE = re.compile(r"\s*(?:$|[,|—(]|\s[a-z0-9])")
+
+
+def bracket_backs_title(label: str, bracket) -> bool:
+    """``label`` opens with exactly the leg a valid ``states``-level bracket record
+    measured ("Virginia to Pennsylvania": the last fix before and the first fix after
+    the footage, in travel order, within the gap cap). The bracket backs that text
+    and no other "A to B" claim."""
+    from gomoveshift.pipeline.bracket_route import bracket_record_valid, recomputed_region
+
+    if not bracket_record_valid(bracket) or bracket.get("level") != "states":
+        return False
+    leg = str(bracket.get("label") or "").strip()
+    if recomputed_region(bracket) != ("states", leg):
+        return False
+    text = (label or "").strip()
+    return text.startswith(leg) and bool(_AFTER_BRACKET_LEG_RE.match(text[len(leg) :]))
+
+
+def refuse_unsupported_title(label: str, record, *, lf_index, bracket=None) -> None:
     """Raise :class:`TitleEvidenceError` (and log ``TITLE-EVIDENCE E``) when
     ``label`` makes an "A to B" claim ``record`` does not back. No record behind
     such a claim is a refusal, never a skip; a label with no A-to-B claim has
-    nothing to check. ``record`` may be the dict form persisted to state."""
+    nothing to check. ``record`` may be the dict form persisted to state.
+    ``bracket`` (``state.bracket_route``) backs a GPS-less LF whose title is the
+    bracket's own leg label (:func:`bracket_backs_title`), and nothing else."""
     from gomoveshift.pipeline.validation.content_gates import _TITLE_ENDPOINTS_RE
 
     if not _TITLE_ENDPOINTS_RE.match(label or ""):
+        return
+    if not record and bracket_backs_title(label, bracket):
         return
     if record is not None and not isinstance(record, LocationEvidence):
         record = LocationEvidence.from_dict(record) if record else None
