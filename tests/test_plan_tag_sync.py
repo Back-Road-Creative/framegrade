@@ -81,3 +81,49 @@ def test_cli_dry_run(queue, capsys):
     assert cmd_queue(args, config) == 0
     out = capsys.readouterr().out
     assert "would sync" in out and "'driving'" in out
+
+
+def _failed_row(queue, short_index, error_class, upload_id=None):
+    row = enqueue(
+        queue.conn,
+        "proj",
+        short_index,
+        "youtube",
+        f"H{short_index}",
+        sidecar_path=str(queue.sidecar),
+    )
+    queue.conn.execute(
+        "UPDATE deliveries SET status='failed_permanent', error_class=?, "
+        "platform_upload_id=? WHERE id=?",
+        (error_class, upload_id, row),
+    )
+    queue.conn.commit()
+    return row
+
+
+@pytest.fixture
+def failed_queue(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    sidecar = _sidecar(out, _legacy_record(5), _legacy_record(6), _legacy_record(7))
+    conn = open_queue_db(tmp_path)
+    q = SimpleNamespace(conn=conn, sidecar=sidecar, dir=tmp_path)
+    q.refused = _failed_row(q, 5, "MaxAttemptsExceeded(FinalTextReviewError)")
+    q.other = _failed_row(q, 6, "MaxAttemptsExceeded(HttpError)")
+    q.uploaded = _failed_row(q, 7, "MaxAttemptsExceeded(FinalTextReviewError)", upload_id="vid")
+    yield q
+    conn.close()
+
+
+def test_failed_final_text_row_is_healed_on_apply(failed_queue):
+    q = failed_queue
+    changes = sync_plan_tags(q.conn, apply=False)
+    assert [c.delivery_id for c in changes] == [q.refused]
+    assert _tags(q.sidecar, 5) == LEGACY  # dry run writes nothing
+    sync_plan_tags(q.conn, apply=True)
+    assert _tags(q.sidecar, 5) == ("road trip", "a")
+    assert _tags(q.sidecar, 6) == LEGACY  # other failure: untouched
+    assert _tags(q.sidecar, 7) == LEGACY  # holds an upload id: untouched
+    status = q.conn.execute("SELECT status FROM deliveries WHERE id=?", (q.refused,)).fetchone()[0]
+    assert status == "failed_permanent"  # recover-terminal's gates decide, not the sync
+    assert sync_plan_tags(q.conn, apply=True) == []

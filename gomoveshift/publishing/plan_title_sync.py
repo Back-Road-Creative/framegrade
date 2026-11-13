@@ -18,7 +18,10 @@ the one place that closes it:
   (Waypost tag templates plus the clip's own counties and roads,
   ``final_text_record.reviewable_short_tags``) when its sidecar was written
   before that rule, so the final-text review does not refuse it
-  (``tag_unreviewable``). ``gomoveshift queue sync-plan-tags`` runs it.
+  (``tag_unreviewable``). It also heals a ``failed_permanent`` YouTube row the final-text
+  review refused before any upload (``error_class`` holds ``FinalTextReview``, no upload
+  id), so ``queue recover-terminal`` can re-queue it; its own gates still decide.
+  ``gomoveshift queue sync-plan-tags`` runs it.
 
 The stored ``reviewed_plan_hash`` is a field of the record, never recomputed
 from it, so editing the title or tags does not orphan any queued delivery.
@@ -219,16 +222,21 @@ def sync_plan_title(
 
 def sync_plan_tags(conn, *, apply: bool) -> List[PlanTagChange]:
     """Rewrite the sidecar tags of every non-terminal YouTube delivery whose tags are not
-    all reviewable to ``reviewable_short_tags`` of its own clip. Published and other
-    terminal rows keep the record of what was sent. Returns one change per row rewritten
+    all reviewable to ``reviewable_short_tags`` of its own clip. The one terminal row
+    included is a ``failed_permanent`` one the final-text review refused before any upload
+    (``FinalTextReview`` in ``error_class``, no ``platform_upload_id``): nothing was sent,
+    so there is no record to keep. Published and other terminal rows keep the record of
+    what was sent. Returns one change per row rewritten
     (or, without ``apply``, that would be); with ``apply`` each is logged to
     ``response_log`` as ``sync_plan_tags``."""
     from gomoveshift.pipeline.final_text_record import reviewable_short_tags
 
     terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
     rows = conn.execute(
-        "SELECT id, project_name, short_index, sidecar_path FROM deliveries "  # noqa: S608
-        f"WHERE platform = 'youtube' AND status NOT IN ({terminal}) "
+        "SELECT id, project_name, short_index, sidecar_path, status FROM deliveries "  # noqa: S608
+        f"WHERE platform = 'youtube' AND (status NOT IN ({terminal}) "
+        "OR (status = 'failed_permanent' AND platform_upload_id IS NULL "
+        "AND error_class LIKE '%FinalTextReview%')) "
         "AND sidecar_path IS NOT NULL ORDER BY id",
         TERMINAL_STATUSES,
     ).fetchall()
@@ -265,6 +273,7 @@ def sync_plan_tags(conn, *, apply: bool) -> List[PlanTagChange]:
                 reason=json.dumps(
                     {
                         "delivery_id": row["id"],
+                        "status": row["status"],
                         "sidecar": str(sidecar),
                         "old": list(old),
                         "new": list(new),
