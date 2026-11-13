@@ -23,7 +23,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -860,6 +860,7 @@ def verify_shorts_integrity(
     day_dir: Path,
     *,
     expected_count: Optional[int] = None,
+    expected_names: Optional[Sequence[str]] = None,
     ffprobe_fn: Optional[object] = None,
 ) -> Dict[str, object]:
     """Verify a day's shorts are publishable before letting the day master be dropped.
@@ -879,6 +880,12 @@ def verify_shorts_integrity(
     3. **Count match** (only when ``expected_count`` is provided) — the number
        of present shorts equals ``expected_count``. Useful when the caller
        knows from state how many shorts the day was supposed to emit.
+
+    ``expected_names`` (the day's planned/shipped short file names) is the
+    existence reference when given: a day whose shorts were dropped and
+    refilled keeps gapped file numbers (``short_01..short_26`` with 21 files),
+    so a contiguous ``1..expected_count`` range would flag healthy shorts as
+    missing. Without names the legacy contiguous range is used.
 
     On any failure, the result names the offending shorts so the operator can
     investigate without grepping logs.
@@ -927,7 +934,10 @@ def verify_shorts_integrity(
 
     # Existence: if expected_count given, identify gaps by index.
     missing: list[str] = []
-    if expected_count is not None and expected_count > 0:
+    if expected_names:
+        present_names = {p.name for p in present}
+        missing = sorted({Path(n).name for n in expected_names} - present_names)
+    elif expected_count is not None and expected_count > 0:
         present_indices = {
             int(_SHORT_FINAL_RE.match(p.name).group(1))  # type: ignore[union-attr]
             for p in present
@@ -997,6 +1007,7 @@ def drop_day_master(
     *,
     date: str,
     expected_shorts_count: Optional[int] = None,
+    expected_short_names: Optional[Sequence[str]] = None,
     ffprobe_fn: Optional[object] = None,
     expected_superlong_parts: Optional[int] = None,
 ) -> Dict[str, object]:
@@ -1071,6 +1082,7 @@ def drop_day_master(
     integrity = verify_shorts_integrity(
         day_dir,
         expected_count=expected_shorts_count,
+        expected_names=expected_short_names,
         ffprobe_fn=ffprobe_fn,
     )
     summary["integrity"] = integrity
