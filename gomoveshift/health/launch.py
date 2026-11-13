@@ -193,25 +193,33 @@ def staged_sources(stages_root: Path) -> List[Tuple[Path, Set[str], bool]]:
 
 
 def placeless_label_skip_reason(label: str) -> Optional[str]:
-    """Why a backlog row's ``placeless_label`` may not launch unattended, or ``None``.
+    """Why a backlog row's ``placeless_label`` may not launch unattended: always, for a label.
 
-    A placeless label is operator-typed and nothing in the pipeline measures it (no GPS, so
-    route claims have nothing to check). The launcher passes only a label that claims nothing
-    (``content_gates.placeless_label_claims_nothing``); a descriptive one is a claim about the
-    footage and is skipped here, before any render, instead of burning in and waiting for a
-    person at the OST audit gate. 2026-11-08: nctopa-2026-03-05-rec0063 rendered "Through The
-    Valleys And Ridges" over a drive that is mostly divided interstate and farmland.
+    A placeless label is the LAST resort: "we should always have a better idea than 'somewhere
+    on the road' if it be gps, or the previous and following day's travel". The better idea for
+    a GPS-less drive is ``bracket_gpx`` (the fixes files of the drives before and after), so the
+    launcher never starts a row carrying ``placeless_label``, claim-free or not; a person runs
+    ``--placeless-label`` by hand when no bracket exists. When the label also claims something
+    (``content_gates.placeless_label_claims_nothing`` is false) the reason names the claim too:
+    2026-11-08: nctopa-2026-03-05-rec0063 rendered "Through The Valleys And Ridges" over a drive
+    that is mostly divided interstate and farmland. ``None`` only for an empty label.
     """
+    if not label:
+        return None
+    base = (
+        f"placeless_label {label!r}: a placeless label is a last resort, never launched "
+        "unattended; give bracket_gpx (the fixes files of the drives before and after) instead, "
+        "or run --placeless-label by hand when no bracket exists"
+    )
     problem = placeless_label_problem(label)
     if problem:
-        return f"placeless_label {label!r}: {problem}"
+        return f"{base} ({problem})"
     if placeless_label_claims_nothing(label):
-        return None
+        return base
     claims = placeless_label_claimed_words(label)
     return (
-        f"placeless_label {label!r} claims {', '.join(claims)}, which nothing measures on a "
-        "GPS-less drive; a backlog row launches only a claim-free label (every word in "
-        "PLACELESS_NO_CLAIM_WORDS, e.g. 'Somewhere On The Road')"
+        f"{base} (it also claims {', '.join(claims)}, which nothing measures on a GPS-less "
+        "drive; a hand run takes only a claim-free label, every word in PLACELESS_NO_CLAIM_WORDS)"
     )
 
 

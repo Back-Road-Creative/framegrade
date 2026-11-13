@@ -631,14 +631,15 @@ def _placeless_row(rig, label):
     )  # fmt: skip
 
 
-def test_a_placeless_row_launches_with_its_label(tmp_path):
+def test_a_claim_free_placeless_row_is_skipped_pointing_at_bracket_gpx(tmp_path):
     rig = Rig(tmp_path)
     rig.rows[0] = _placeless_row(rig, "Somewhere On The Road")
     res = rig.run()
-    assert res["action"] == "launched", res
-    drive_args = rig.launches[0][0][rig.launches[0][0].index("--") + 1 :]
-    assert drive_args[drive_args.index("--placeless-label") + 1] == "Somewhere On The Road"
-    assert "--day-gpx" not in drive_args
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    (skip,) = res["skipped"]
+    assert skip["project"] == "day-a"
+    assert "bracket_gpx" in skip["reason"] and "last resort" in skip["reason"]
+    assert "--placeless-label" not in rig.launches[0][0]
 
 
 # 2026-11-08: nctopa-2026-03-05-rec0063 rendered "Through The Valleys And Ridges" over a drive that
@@ -653,11 +654,7 @@ def test_a_descriptive_placeless_label_is_skipped_before_any_render(tmp_path):
     assert res["skipped"] == [
         {
             "project": "day-a",
-            "reason": (
-                "placeless_label 'Through The Valleys And Ridges' claims Valleys, Ridges, which "
-                "nothing measures on a GPS-less drive; a backlog row launches only a claim-free "
-                "label (every word in PLACELESS_NO_CLAIM_WORDS, e.g. 'Somewhere On The Road')"
-            ),
+            "reason": launch.placeless_label_skip_reason("Through The Valleys And Ridges"),
         }
     ]
     assert rig.gates == [(rig.sources / "day-b", "day-b")]  # never reached the render gate
@@ -669,16 +666,14 @@ def test_a_placeless_label_outside_the_vocabulary_is_skipped_at_the_backlog_not_
     rig.rows[0] = _placeless_row(rig, "Through Roanoke")
     res = rig.run()
     assert (res["action"], res["project"]) == ("launched", "day-b"), res
-    assert res["skipped"][0]["reason"].startswith(
-        "placeless_label 'Through Roanoke': placeless label word(s) 'roanoke' are outside"
-    )
+    reason = res["skipped"][0]["reason"]
+    assert reason.startswith("placeless_label 'Through Roanoke': ")
+    assert "'roanoke' are outside" in reason and "bracket_gpx" in reason
 
 
 @pytest.mark.parametrize(
     "label, expected",
     [
-        ("Somewhere On The Road", None),
-        ("Somewhere Between", None),
         ("Out Through Open Country", "claims Open, Country"),
         ("Somewhere In The Hills", "claims Hills"),
         ("Back Roads In The Morning Fog", "claims Back, Morning, Fog"),
@@ -687,10 +682,7 @@ def test_a_placeless_label_outside_the_vocabulary_is_skipped_at_the_backlog_not_
 )
 def test_placeless_label_skip_reason(label, expected):
     reason = launch.placeless_label_skip_reason(label)
-    if expected is None:
-        assert reason is None
-    else:
-        assert reason is not None and expected in reason, reason
+    assert reason is not None and expected in reason, reason
 
 
 def test_a_row_without_a_placeless_label_passes_no_label(tmp_path):
