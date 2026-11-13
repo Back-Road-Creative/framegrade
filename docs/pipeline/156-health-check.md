@@ -31,11 +31,12 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    (non-shadow, non-terminal, `scheduled_at` null or past, platform not paused) and no delivery
    row has `updated_at` within 24 h. Every dispatch attempt rewrites `updated_at`, so a quiet queue
    with due work means the drain is not running. Row file: `queue_stalled.json`.
-5. **Unverifiable placeless label.** A `drive_backlog.yaml` row carries a `placeless_label` the
-   launcher refuses (`launch.placeless_label_skip_reason`): it claims scenery, weather, time of
-   day or road kind, which nothing can measure on a GPS-less drive, so it cannot be said. The row
-   never launches (the rows behind it still do) and the incident stays open while the yaml carries
-   the label; editing the row to a claim-free label (e.g. `Somewhere On The Road`) closes it. An
+5. **Placeless label in the backlog.** A `drive_backlog.yaml` row carries a `placeless_label`.
+   The launcher refuses every such row (`launch.placeless_label_skip_reason`): a placeless label
+   is a last resort, and the better answer is `bracket_gpx` (the fixes files of the drives before
+   and after). The row never launches (the rows behind it still do) and the incident stays open
+   while the yaml carries the label; replacing it with `bracket_gpx` closes it. `claims` lists any
+   scenery, weather, time-of-day or road-kind words in the label. An
    absent or unreadable backlog closes nothing. Row file: `placeless_label_<project>.json`.
 
 A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve against the cwd).
@@ -185,7 +186,7 @@ written. The text output, which is what the cron logs, prints `retired <project>
 `held <stages dir> (no-auto-resume)`, or `would retire` and `would hold` under `--dry-run`.
 The row is the first `drive_backlog.yaml` row for the region that is not skipped. Each skip is
 reported with its reason: already in the store (with its status), already in the content ledger,
-a missing source file, a missing `day_gpx` track, a `placeless_label` that claims something, typed
+a missing source file, a missing `day_gpx` track, any `placeless_label` (a last resort: give `bracket_gpx`), typed
 labels (`per_lf_locations` / `location`) the drive's own `--per-lf-location` rules would refuse
 (`location labels: <the parser's reason>`), an operator hold (a `no-auto-resume` file under `<stages root>/<project>`,
 or a held earlier stage whose sources overlap the row's), or every source already staged by an

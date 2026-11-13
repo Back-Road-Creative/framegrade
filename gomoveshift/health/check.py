@@ -37,15 +37,12 @@ def _line(row: Dict[str, Any]) -> str:
         )
         return f"LF slot {row['slot']} ({row['region']}) has no ready drive; {todo}."
     if row["kind"] == "placeless_label_unverifiable":
-        why = (
-            f"claims {', '.join(row['claims'])}"
-            if row.get("claims")
-            else row.get("reason", "is not a valid placeless label")
-        )
+        why = f"claims {', '.join(row['claims'])}" if row.get("claims") else "no claim words"
         return (
-            f"drive_backlog.yaml row {row['project']} carries placeless_label {row['label']!r}, "
-            f"which {why}: nothing measures a label on a GPS-less drive, so the row never "
-            "launches. Edit the row to a claim-free label (e.g. 'Somewhere On The Road')."
+            f"drive_backlog.yaml row {row['project']} carries placeless_label {row['label']!r} "
+            f"({why}): a placeless label is a last resort, so the row never launches unattended. "
+            "Give it bracket_gpx (the fixes files of the drives before and after) instead; run "
+            "--placeless-label by hand only when no bracket exists."
         )
     return f"{row['due_deliveries']} publishing deliveries are due and nothing has touched the queue in {row['quiet_hours']} h."
 
@@ -86,10 +83,10 @@ def _backlog_rows(notes: List[str]) -> Optional[List[Any]]:
 
 
 def placeless_label_incidents(rows: List[Any], now_iso: str) -> List[Dict[str, Any]]:
-    """Rule 5: one incident per backlog row whose ``placeless_label`` the launcher refuses
-    (``launch.placeless_label_skip_reason``). A label nothing can measure may say nothing the
-    footage cannot prove, so such a row never launches; it is surfaced here, open for as long
-    as the yaml carries the label, instead of parking silently."""
+    """Rule 5: one incident per backlog row carrying a ``placeless_label``, which the launcher
+    always refuses (``launch.placeless_label_skip_reason``): a placeless label is a last resort
+    and the row should carry ``bracket_gpx`` instead. It is surfaced here, open for as long as
+    the yaml carries the label, instead of parking silently."""
     from ..pipeline.validation.content_gates import placeless_label_claimed_words
     from .launch import placeless_label_skip_reason
     from .store import new_incident, safe_name
