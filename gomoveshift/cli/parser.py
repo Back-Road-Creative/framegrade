@@ -1721,6 +1721,14 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
         required=True,
         help="The run's _stages directory (gps_points_<date>.json, shorts_ost_audit_<date>.json).",
     )
+    rm.add_argument(
+        "--rendered-shorts",
+        type=Path,
+        default=None,
+        help="Stages from a RE-RENDER only: that render's Shorts directory. The clip is then "
+        "the one whose re-rendered Short frame-matches the published media (exactly one, "
+        "else refused), whatever its rank.",
+    )
     rm.add_argument("--apply", action="store_true", help="Write the sidecar (default: dry run).")
     fc = actions.add_parser(
         "edit-facebook-caption",
