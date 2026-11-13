@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.85] - 2026-11-13
+
+### Fixed
+
+- Phase D no longer refuses a GPS-less long-form titled with its bracket leg ("Virginia to Pennsylvania in 4K"): the title-evidence gate read the two-state label as town endpoints and found no location-evidence record. A valid `states`-level bracket record now backs exactly its own leg label; any other "A to B" title with no record is still refused (nctopa-2026-03-05-rec0063).
+
 ## [0.3.84] - 2026-11-13
 
 ### Added
@@ -1039,7 +1045,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...HEAD
+[0.3.85]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...v0.3.85
 [0.3.84]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...v0.3.84
 [0.3.83]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.82...v0.3.83
 [0.3.82]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.81...v0.3.82
