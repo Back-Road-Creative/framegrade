@@ -41,6 +41,7 @@ from .handlers.route_story_prepare import cmd_route_story_prepare
 from .handlers.route_story_proof import cmd_route_story_proof
 from .handlers.route_story_verify import cmd_route_story_verify
 from .handlers.schedule import cmd_schedule
+from .handlers.status import cmd_status
 from .handlers.sync_site import cmd_sync_site
 from .handlers.upload import cmd_upload
 from .handlers.youtube_auth import cmd_youtube_auth
@@ -89,6 +90,7 @@ __all__ = [
     "cmd_scan",
     "cmd_health",
     "cmd_schedule",
+    "cmd_status",
     "cmd_sync_site",
     "cmd_upload",
     "cmd_library_hygiene",
@@ -136,6 +138,7 @@ _COMMAND_MAP = {
     "route-story-film": cmd_route_story_film,
     "health": cmd_health,
     "schedule": cmd_schedule,
+    "status": cmd_status,
     "sync-site": cmd_sync_site,
     "library-hygiene": cmd_library_hygiene,
     "doctor": cmd_doctor,

@@ -101,15 +101,9 @@ def _links(rec: Dict[str, Any]) -> Tuple[Set[str], Optional[str]]:
     return logs, stages
 
 
-def detect(
-    jobs_dir: Path, staging_sha: Optional[str], now_iso: str
-) -> Tuple[List[Dict[str, Any]], Set[str], int]:
-    """``(incidents, succeeded_job_names, unreadable)``.
-
-    A drive's incident is its LATEST job record only; ``succeeded_job_names`` are job names whose
-    latest run succeeded (the caller resolves their open incidents)."""
-    latest: Dict[str, Dict[str, Any]] = {}
-    succeeded: Set[str] = set()
+def load_records(jobs_dir: Path) -> Tuple[List[Dict[str, Any]], int]:
+    """``(job/1 records oldest first, unreadable count)``; each record carries the directory it
+    was loaded from. Shared with ``gomoveshift status``, which only reads."""
     unreadable = 0
     records: List[Dict[str, Any]] = []
     if jobs_dir.is_dir():
@@ -124,7 +118,21 @@ def detect(
                 continue
             rec[_DIR_KEY] = str(path.parent)
             records.append(rec)
-    for rec in sorted(records, key=lambda r: float(r.get("created_at") or 0)):
+    records.sort(key=lambda r: float(r.get("created_at") or 0))
+    return records, unreadable
+
+
+def detect(
+    jobs_dir: Path, staging_sha: Optional[str], now_iso: str
+) -> Tuple[List[Dict[str, Any]], Set[str], int]:
+    """``(incidents, succeeded_job_names, unreadable)``.
+
+    A drive's incident is its LATEST job record only; ``succeeded_job_names`` are job names whose
+    latest run succeeded (the caller resolves their open incidents)."""
+    latest: Dict[str, Dict[str, Any]] = {}
+    succeeded: Set[str] = set()
+    records, unreadable = load_records(jobs_dir)
+    for rec in records:
         if _is_drive_job(rec):
             latest[str(rec.get("name"))] = rec
     incidents: List[Dict[str, Any]] = []
