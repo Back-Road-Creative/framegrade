@@ -948,7 +948,7 @@ def get_host_record(record_id: str) -> dict | None:
         return None
     try:
         records, _ = drives.load_records(snapshot.jobs_dir())
-    except OSError:
+    except Exception:  # noqa: BLE001 -- the data-root probe shells out; unknown, never a 500
         return None
     for rec in records:
         if Path(str(rec.get(drives._DIR_KEY))).name == record_id:

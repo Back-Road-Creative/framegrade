@@ -166,3 +166,14 @@ def test_dot_segments_never_resolve_to_a_record(tmp_path):
         assert jobs.get_host_record(bad) is None, bad
     # The client folds `/jobs/host/..` into `/jobs/` before sending; no id route is reached.
     assert _client().get("/jobs/host/").status_code in (404, 422)
+
+
+def test_detail_lookup_survives_an_unresolvable_jobs_dir(monkeypatch):
+    from gomoveshift.console import jobs
+    from gomoveshift.status import snapshot
+
+    def boom():
+        raise RuntimeError("no data root")
+
+    monkeypatch.setattr(snapshot, "jobs_dir", boom)
+    assert jobs.get_host_record("abc-123") is None
