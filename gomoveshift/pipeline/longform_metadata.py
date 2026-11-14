@@ -1446,6 +1446,7 @@ class LongFormMetadataGenerator:
         self._optimizer = None
         self._ledger = None
         self._seo_degraded = False
+        self._analytics_synced = False
         self._init_seo_manager()
         self._init_ledger()
 
@@ -2118,7 +2119,7 @@ class LongFormMetadataGenerator:
 
         video_ids = list(video_mapping.keys())
         index_by_id = {vid: idx for idx, vid in enumerate(video_ids)}
-        synced = 0
+        events: list = []
         now = datetime.now(timezone.utc)
 
         for i in range(0, len(video_ids), 50):
@@ -2179,11 +2180,29 @@ class LongFormMetadataGenerator:
                         timestamp=datetime.now().isoformat(),
                         data=data,
                     )
-                    self._manager.store.upsert_event(event)
-                    synced += 1
+                    events.append(event)
 
             except Exception as e:
                 logger.warning(f"  Batch sync error (offset {i}): {e}")
+
+        # One save for the whole sync: each upsert_event rewrites events.jsonl
+        # and rebuilds every index (a 1126-video channel took ~23 min that way).
+        store = self._manager.store
+        upsert_events = getattr(store, "upsert_events", None)
+        synced = 0
+        if events:
+            # A save failure only logs, as it did when each upsert sat inside
+            # the per-offset try: analytics are advisory to metadata generation.
+            try:
+                if upsert_events is not None:
+                    upsert_events(events)
+                    synced = len(events)
+                else:
+                    for event in events:
+                        store.upsert_event(event)
+                        synced += 1
+            except Exception as e:
+                logger.warning(f"  Analytics save error after {synced} events: {e}")
 
         logger.info(f"  Synced stats for {synced}/{len(video_ids)} videos")
 
@@ -2211,9 +2230,15 @@ class LongFormMetadataGenerator:
         """Generate metadata using SEO Manager with analytics optimization."""
         from seo_manager import ContentType
 
-        # Sync latest YouTube analytics before generating
-        logger.info("  Syncing YouTube analytics...")
-        self._sync_youtube_analytics()
+        # Sync latest YouTube analytics before generating. Phase D reuses one
+        # generator across every LF of the drive, and the channel stats do not
+        # change between them, so sync once per generator (per run).
+        if self._analytics_synced:
+            logger.info("  YouTube analytics already synced this run — skipping")
+        else:
+            logger.info("  Syncing YouTube analytics...")
+            self._analytics_synced = True
+            self._sync_youtube_analytics()
 
         # Format duration for description
         duration_str = self._format_duration(video_duration)
