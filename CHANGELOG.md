@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.88] - 2026-11-14
+
+### Fixed
+
+- The YouTube analytics sync saved each channel video's event one at a time (every save rewrote the whole event store and rebuilt its indexes) and ran again for every long-form. It now collects the events and saves them in one batch (falling back to one save per event when the store has no batch method), and runs once per Phase D run. A 1126-video channel took about 23 minutes in one sync before any upload.
+
 ## [0.3.87] - 2026-11-13
 
 ### Added
@@ -1063,7 +1069,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.87...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.88...HEAD
+[0.3.88]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.87...v0.3.88
 [0.3.87]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...v0.3.87
 [0.3.86]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...v0.3.86
 [0.3.85]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...v0.3.85
