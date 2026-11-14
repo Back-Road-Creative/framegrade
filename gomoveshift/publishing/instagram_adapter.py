@@ -6,6 +6,7 @@ immediately before every ``media_publish`` call — never cached, see
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,16 @@ _MEDIA_NOT_READY = (9007, 2207027)
 #: ``LEASE_SEC``; a container still processing at the bound is retried later.
 CONTAINER_READY_POLL_S = 10
 CONTAINER_READY_TIMEOUT_S = 300
+#: A failed byte upload leaves its container with no bytes: it can never
+#: publish, and sits IN_PROGRESS until it expires 24 h later. So a failed
+#: upload starts over on a fresh container, this many tries in all, waiting
+#: ``UPLOAD_RETRY_BACKOFF_S`` times the try number between them. 2026-11-14:
+#: 15 of 19 rows since 10-31 failed one rupload POST and went permanent.
+UPLOAD_ATTEMPTS = 3
+UPLOAD_RETRY_BACKOFF_S = 30
+#: rupload's ``debug_info.message`` is response data: one line, this long at most.
+_RUPLOAD_MESSAGE_MAX = 300
+_RUPLOAD_TYPE_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 
 
 class InstagramPublishError(Exception):  # queue_state names the queue.py state this maps to
@@ -59,6 +70,11 @@ class InstagramPublishingLimitError(InstagramRetryableError):
 
 class InstagramPermanentError(InstagramPublishError):  # message names the recovery action
     queue_state = "failed_permanent"
+
+
+class InstagramUploadError(InstagramPermanentError):
+    """The byte upload to ``rupload.facebook.com`` failed. Permanent for the
+    container it targeted; the shorts adapter retries on a fresh one."""
 
 
 class UnsafeUploadHostError(InstagramPermanentError):  # upload URL failed the host allowlist
@@ -93,6 +109,22 @@ def _raise_for_graph_error(status_code: int, body: dict) -> None:
         "automatically retryable; this can mean a content/account rejection "
         "or a request bug (e.g. an invalid/nonexistent field), verify before "
         "resubmitting"
+    )
+
+
+def _raise_for_rupload_error(status_code: int, body: dict) -> None:
+    """Classify a failed byte upload. rupload answers with ``debug_info``
+    (``type``, ``message``, ``retriable``), never a Graph ``error`` object,
+    so the Graph classifier read every one as "unknown Graph API error"."""
+    info = (body or {}).get("debug_info") or {}
+    kind = _RUPLOAD_TYPE_UNSAFE.sub("", str(info.get("type") or ""))[:64] or "-"
+    retriable = info.get("retriable")
+    message = " ".join(str(info.get("message") or "no debug_info message").split())
+    raise InstagramUploadError(
+        f"[rupload http={status_code} type={kind} "
+        f"retriable={'-' if retriable is None else retriable}] "
+        f"video upload failed: {message[:_RUPLOAD_MESSAGE_MAX]} — this container "
+        "has no bytes and can never publish; a fresh container is the only retry"
     )
 
 
@@ -189,8 +221,10 @@ class InstagramReelsAdapter:
             raise UnsafeUploadHostError(
                 f"refusing upload to {parsed.scheme}://{parsed.hostname}: not an allowlisted host"
             )
-        self._post(
+        graph_post(
+            self._session,
             upload_url,
+            _raise_for_rupload_error,
             headers={
                 "Authorization": f"OAuth {self._access_token}",
                 "offset": "0",
@@ -378,22 +412,34 @@ class InstagramShortsAdapter:
     def _create_and_upload(
         self, conn, delivery_id: int, from_status: str, payload, video_bytes: bytes
     ) -> str:
-        """Lease, create a container, persist it, upload; returns its id."""
-        self._take_lease(conn, delivery_id)
-        transition(conn, delivery_id, from_status, STATUS_SUBMITTING)
-        handle = self._reels.create_container(payload)
-        # Persist BEFORE upload/publish — the create call above put a
-        # live container on the platform; this write makes it
-        # recoverable by reconciliation instead of orphaned.
-        transition(
-            conn,
-            delivery_id,
-            STATUS_SUBMITTING,
-            STATUS_UPLOADED,
-            platform_upload_id=handle.container_id,
-        )
-        self._reels.upload_video(handle.upload_url, video_bytes)
-        return handle.container_id
+        """Lease, create a container, persist it, upload; returns its id.
+        A failed upload starts over on a fresh container, ``UPLOAD_ATTEMPTS``
+        tries in all; the last failure is raised. A container that never got
+        its bytes cannot publish, so starting over never risks a duplicate."""
+        for attempt in range(1, UPLOAD_ATTEMPTS + 1):
+            self._take_lease(conn, delivery_id)
+            transition(conn, delivery_id, from_status, STATUS_SUBMITTING)
+            handle = self._reels.create_container(payload)
+            # Persist BEFORE upload/publish — the create call above put a
+            # live container on the platform; this write makes it
+            # recoverable by reconciliation instead of orphaned.
+            transition(
+                conn,
+                delivery_id,
+                STATUS_SUBMITTING,
+                STATUS_UPLOADED,
+                platform_upload_id=handle.container_id,
+            )
+            from_status = STATUS_UPLOADED
+            try:
+                self._reels.upload_video(handle.upload_url, video_bytes)
+            except InstagramUploadError:
+                if attempt == UPLOAD_ATTEMPTS:
+                    raise
+                self._sleep(UPLOAD_RETRY_BACKOFF_S * attempt)
+                continue
+            return handle.container_id
+        raise AssertionError("unreachable: the last attempt returns or raises")
 
     def publish(
         self, record: ShortPublishRecord, *, conn, delivery_id: int, video_bytes: bytes

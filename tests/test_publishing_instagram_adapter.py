@@ -14,6 +14,8 @@ from gomoveshift.publishing.instagram_adapter import (
     CONTAINER_READY_POLL_S,
     CONTAINER_READY_TIMEOUT_S,
     LEASE_SEC,
+    UPLOAD_ATTEMPTS,
+    UPLOAD_RETRY_BACKOFF_S,
     ContainerHandle,
     InstagramAuthBlockedError,
     InstagramPermanentError,
@@ -21,6 +23,7 @@ from gomoveshift.publishing.instagram_adapter import (
     InstagramReelsAdapter,
     InstagramRetryableError,
     InstagramShortsAdapter,
+    InstagramUploadError,
     UnsafeUploadHostError,
     _raise_for_graph_error,
 )
@@ -780,3 +783,107 @@ def test_an_error_body_meta_left_empty_still_records_the_http_status():
     with pytest.raises(InstagramPermanentError) as exc_info:
         _raise_for_graph_error(403, {})
     assert str(exc_info.value).startswith("[graph http=403 code=- subcode=- fbtrace=-] ")
+
+
+# --- the byte upload to rupload.facebook.com --------------------------------
+# rupload answers a failed upload with ``{"debug_info": {...}}``, never a Graph
+# ``error`` object, so it was stored as "unknown Graph API error" and the row
+# went failed_permanent on its first try. On 2026-11-14 that was 15 of the 19
+# Instagram rows since 10-31; each one's container sat IN_PROGRESS with no
+# bytes until it expired.
+
+
+_RUPLOAD_FAIL = {
+    "debug_info": {
+        "retriable": False,
+        "type": "ProcessingFailedError",
+        "message": "Request processing failed",
+    }
+}
+
+
+def test_a_rupload_error_names_its_debug_info_not_unknown_graph_error():
+    adapter = InstagramReelsAdapter(
+        CREDS, session=Mock(post=Mock(return_value=_resp(400, _RUPLOAD_FAIL)))
+    )
+    with pytest.raises(InstagramUploadError) as exc_info:
+        adapter.upload_video("https://rupload.facebook.com/ig-api-upload/v21.0/c-1", b"xx")
+    message = str(exc_info.value)
+    assert message.startswith("[rupload http=400 type=ProcessingFailedError retriable=False] ")
+    assert "Request processing failed" in message
+    assert "unknown Graph API error" not in message
+    assert FAKE_TOKEN not in message
+    assert isinstance(exc_info.value, InstagramPermanentError)
+
+
+def test_a_rupload_error_with_no_debug_info_still_records_the_http_status():
+    adapter = InstagramReelsAdapter(CREDS, session=Mock(post=Mock(return_value=_resp(400, {}))))
+    with pytest.raises(InstagramUploadError) as exc_info:
+        adapter.upload_video("https://rupload.facebook.com/x", b"xx")
+    assert str(exc_info.value).startswith("[rupload http=400 type=- retriable=-] ")
+
+
+def test_a_rupload_message_is_bounded_and_single_line():
+    body = {"debug_info": {"type": "T", "message": "line1\nline2 " + "y" * 2000}}
+    adapter = InstagramReelsAdapter(CREDS, session=Mock(post=Mock(return_value=_resp(400, body))))
+    with pytest.raises(InstagramUploadError) as exc_info:
+        adapter.upload_video("https://rupload.facebook.com/x", b"xx")
+    message = str(exc_info.value)
+    assert "\n" not in message
+    assert len(message) < 700
+
+
+class _FlakyUploadReels(_FakeReels):
+    """Every container gets its own id; the first ``failures`` uploads fail."""
+
+    def __init__(self, failures, *statuses):
+        super().__init__(*statuses)
+        self.failures, self.uploads = failures, []
+
+    def create_container(self, payload):
+        self.created.append(payload)
+        return ContainerHandle(f"c-{len(self.created)}", "https://rupload.facebook.com/x", _T0)
+
+    def upload_video(self, upload_url, video_bytes):
+        self.uploads.append(upload_url)
+        if len(self.uploads) <= self.failures:
+            raise InstagramUploadError(
+                "[rupload http=400 type=ProcessingFailedError retriable=False] boom"
+            )
+
+
+def test_a_failed_upload_starts_over_on_a_fresh_container_and_publishes(queue_conn):
+    reels = _FlakyUploadReels(1, "FINISHED")
+    publish, row, clock = _run(queue_conn, reels)
+    assert publish().media_id == "m-1"
+    assert len(reels.created) == 2
+    # The container that never got its bytes is never checked or published.
+    assert reels.checked == ["c-2"] and reels.published == ["c-2"]
+    assert row()["status"] == "published"
+    assert row()["platform_upload_id"] == "c-2"
+    assert clock.sleeps[0] == UPLOAD_RETRY_BACKOFF_S
+
+
+def test_an_upload_failing_every_attempt_is_permanent_and_bounded(queue_conn):
+    reels = _FlakyUploadReels(99, "FINISHED")
+    publish, row, _ = _run(queue_conn, reels)
+    with pytest.raises(InstagramUploadError, match="ProcessingFailedError"):
+        publish()
+    assert len(reels.created) == UPLOAD_ATTEMPTS
+    assert reels.checked == [] and reels.published == []
+    assert row()["platform_upload_id"] == f"c-{UPLOAD_ATTEMPTS}"
+
+
+def test_a_failure_other_than_the_byte_upload_is_not_retried(queue_conn):
+    class _CreateRefused(_FlakyUploadReels):
+        def create_container(self, payload):
+            self.created.append(payload)
+            raise InstagramPermanentError(
+                "[graph http=400 code=100 subcode=- fbtrace=-] bad caption"
+            )
+
+    reels = _CreateRefused(0, "FINISHED")
+    publish, _, _ = _run(queue_conn, reels)
+    with pytest.raises(InstagramPermanentError, match="bad caption"):
+        publish()
+    assert len(reels.created) == 1
