@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from test_pub_status import _published_youtube
+from test_pub_status import _published_youtube as _published_youtube_now
 
 from gomoveshift.cli.handlers import catalog_fetch as cf
 from gomoveshift.cli.handlers.pub_status import (
@@ -31,6 +31,19 @@ from gomoveshift.publishing.queue import open_queue_db
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 _GONE = "SYNTHgone02"
 _LIVE = "SYNTHlive02"
+
+
+def _published_youtube(tmp_path, upload_id, *, published_at=None):
+    """A short our queue recorded as published two days before ``NOW`` -- well
+    before any snapshot below -- unless ``published_at`` says otherwise."""
+    conn, delivery_id = _published_youtube_now(tmp_path, upload_id)
+    when = published_at or (NOW - timedelta(days=2))
+    conn.execute(
+        "UPDATE deliveries SET published_at=?, updated_at=? WHERE id=?",
+        (when.isoformat(), when.isoformat(), delivery_id),
+    )
+    conn.commit()
+    return conn, delivery_id
 
 
 def _snapshot(tmp_path, videos, *, age_hours=1.0, fetched=True):
@@ -214,3 +227,62 @@ def test_fresh_means_at_most_24_hours(tmp_path, age):
         assert [p.kind for p in _gate(conn, tmp_path)] == ["published_video_missing"]
     finally:
         conn.close()
+
+
+# --- a short published after the snapshot was taken -------------------------
+# The nightly snapshot (02:50 ET) runs before the 03:05 drain. A short that
+# drain publishes cannot be in it, and naming it "missing" held every later
+# short of its project until the next night's snapshot -- whose own 03:05
+# drain then repeated the hold, day after day (2026-11-13/14: youtube
+# ballyvourney-kenmare and ace-basin held 12+ hours past their slots).
+
+
+def test_a_short_published_after_the_snapshot_is_not_missing(tmp_path):
+    conn, _ = _published_youtube(tmp_path, _GONE, published_at=NOW - timedelta(minutes=15))
+    _snapshot(tmp_path, {}, age_hours=1.0)
+    try:
+        assert _gate(conn, tmp_path) == []
+    finally:
+        conn.close()
+
+
+def test_a_short_published_before_the_snapshot_and_absent_is_still_missing(tmp_path):
+    conn, delivery_id = _published_youtube(tmp_path, _GONE, published_at=NOW - timedelta(hours=2))
+    _snapshot(tmp_path, {}, age_hours=1.0)
+    try:
+        problems = _gate(conn, tmp_path)
+    finally:
+        conn.close()
+    assert [(p.delivery_id, p.kind) for p in problems] == [(delivery_id, "published_video_missing")]
+
+
+def test_a_short_with_no_publish_time_is_judged_against_the_snapshot(tmp_path):
+    """No recorded publish time means no evidence the snapshot predates it:
+    fail closed. A later ``updated_at`` (any later write) is not that evidence."""
+    conn, delivery_id = _published_youtube(tmp_path, _GONE)
+    conn.execute(
+        "UPDATE deliveries SET published_at=NULL, updated_at=? WHERE id=?",
+        ((NOW - timedelta(minutes=15)).isoformat(), delivery_id),
+    )
+    conn.commit()
+    _snapshot(tmp_path, {}, age_hours=1.0)
+    try:
+        assert [p.kind for p in _gate(conn, tmp_path)] == ["published_video_missing"]
+    finally:
+        conn.close()
+
+
+def test_dispatch_drains_a_pair_whose_short_postdates_the_snapshot(tmp_path, monkeypatch):
+    from test_validate_gate import _dispatch
+
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path / "_console"))
+    monkeypatch.setenv("GMS_TIKTOK_PACK_DIR", str(tmp_path / "pack"))
+    conn, _ = _published_youtube(tmp_path, _GONE, published_at=NOW - timedelta(minutes=15))
+    conn.close()
+    _snapshot(tmp_path, {}, age_hours=1.0)
+    monkeypatch.setattr("gomoveshift.cli.handlers.pub_status._utcnow", lambda: NOW, raising=True)
+
+    rc, drain = _dispatch(tmp_path)
+
+    assert rc == 0
+    assert ("youtube", "proj") not in drain.call_args.kwargs["held_scopes"]

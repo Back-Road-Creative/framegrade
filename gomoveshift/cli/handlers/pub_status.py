@@ -415,6 +415,25 @@ def _plan_youtube_title(sidecar_path, project_name, short_index, plan_cache) -> 
     return None
 
 
+def _parse_utc(value) -> "Optional[datetime]":
+    """An ISO timestamp as an aware UTC datetime; None when absent or unreadable."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _published_after(row, fetched: "Optional[datetime]") -> bool:
+    """True only when the row's recorded ``published_at`` is later than the
+    snapshot's ``fetched_at``. Either time missing is False: no evidence the
+    snapshot predates the publish, so the row is judged against it."""
+    published = _parse_utc(row["published_at"])
+    return fetched is not None and published is not None and published > fetched
+
+
 def validate_against_live_catalog(conn, live_catalog: dict, retitles=None) -> List:
     """Every ``published`` YouTube delivery checked against the live channel.
 
@@ -429,6 +448,7 @@ def validate_against_live_catalog(conn, live_catalog: dict, retitles=None) -> Li
     made, report-only, with the sync command -- never drift.
     """
     videos = live_catalog.get("videos") or {}
+    fetched = _parse_utc(live_catalog.get("fetched_at"))
     rows = conn.execute(
         "SELECT * FROM deliveries WHERE platform = 'youtube' AND status = 'published' "
         "AND platform_upload_id IS NOT NULL ORDER BY id"
@@ -439,6 +459,12 @@ def validate_against_live_catalog(conn, live_catalog: dict, retitles=None) -> Li
         video_id = row["platform_upload_id"]
         where = f"{row['project_name']}#{row['short_index']}"
         live = videos.get(video_id)
+        if live is None and _published_after(row, fetched):
+            # The snapshot was taken before this short was published, so its
+            # absence is no evidence: the nightly 03:05 drain publishes after
+            # the 02:50 snapshot, and naming those "missing" held each
+            # project's next shorts until the following night.
+            continue
         if live is None:
             problems.append(
                 RestoreProblem(
