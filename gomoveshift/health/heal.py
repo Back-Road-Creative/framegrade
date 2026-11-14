@@ -6,6 +6,8 @@ publishes: it appends ``--skip-upload --no-youtube-upload``. A ``no-auto-resume`
 recipe refuses the drive on every SHA (an operator's stop). Guards, each a recorded skip: (a) this
 recipe already has a launched attempt on this SHA, (b) a drive job is running, (c) the publish slot has passed
 or is unknown, (d) a metadata-gate failure with no generator change since the failure.
+A launch that failed in drive pre-flight (before any encode) is outcome ``preflight_failed``: it does
+not count as launched on its SHA, so the next tick retries, at most ``HEAL_PREFLIGHT_RETRIES`` times.
 Every attempt is appended to the row's ``resume_attempts``."""
 
 from __future__ import annotations
@@ -33,6 +35,15 @@ GENERATOR_PATHS: Tuple[str, ...] = (
 )
 _METADATA_GATE = re.compile(r"metadata", re.I)
 _STALL_S = "86400"
+#: Pre-flight failures a recipe may retry on one mirror SHA before it waits for a new SHA.
+HEAL_PREFLIGHT_RETRIES = 8
+#: What the drive logs when pre-flight blocks the run (``orchestrator_preflight``), and the
+#: line that proves an encode phase ran (``orchestrator``): the latter means NOT a pre-flight failure.
+_PREFLIGHT_MARK = "Pre-flight check failed:"
+_PHASE_DONE_MARK = "PHASE DONE"
+_BLOCKER_LINE = re.compile(r"^\s*\d+\.\s+\S")
+_DETAIL_MAX = 300
+_LOG_MAX_BYTES = 1_000_000
 
 Launcher = Callable[[List[str], str], Tuple[bool, str]]
 
@@ -279,6 +290,23 @@ def default_slot(
     return slot
 
 
+def preflight_detail(log_path: Path) -> Optional[str]:
+    """The first blocker line of a drive log that failed in pre-flight, else ``None`` (no log, an
+    unreadable or oversized one, no pre-flight failure, or a run that got as far as a phase)."""
+    try:
+        if log_path.stat().st_size > _LOG_MAX_BYTES:
+            return None
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if _PREFLIGHT_MARK not in text or _PHASE_DONE_MARK in text:
+        return None
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if _PREFLIGHT_MARK in ln)
+    blocker = next((ln for ln in lines[start:] if _BLOCKER_LINE.match(ln)), lines[start])
+    return blocker.strip()[:_DETAIL_MAX]
+
+
 def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
     """Push once per launched attempt whose heal job has since succeeded or failed."""
     done: List[str] = []
@@ -287,7 +315,13 @@ def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
         for att in row.get("resume_attempts") or []:
             if att.get("action") != "launched" or att.get("outcome"):
                 continue
-            runs = [r for r in records if r.get("name") == att.get("job_name")]
+            since = _parse_when(att.get("at"))
+            # A retry reuses its SHA's job name: only a record made at or after this attempt is its run.
+            runs = [
+                r for r in records
+                if r.get("name") == att.get("job_name")
+                and (since is None or float(r.get("created_at") or 0) >= since.timestamp() - 60)
+            ]  # fmt: skip
             if not runs:
                 continue
             result = runs[-1].get("result") or {}
@@ -298,12 +332,19 @@ def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
                 outcome = "failed"
             else:
                 continue
+            detail = None
+            if outcome == "failed":
+                detail = preflight_detail(jobs_dir / str(runs[-1].get("run_id")) / "output.log")
+                if detail is not None:
+                    outcome, att["outcome_detail"] = "preflight_failed", detail
             att["outcome"], att["outcome_at"] = outcome, now_iso
             write_row(incidents_dir, row)
             notify_fn(
                 "health_heal_outcome",
                 {"incident": row["key"], "job": att["job_name"]},
-                f"Auto-resume of {row['drive']} {outcome}.",
+                f"Auto-resume of {row['drive']} failed pre-flight: {detail}."
+                if detail is not None
+                else f"Auto-resume of {row['drive']} {outcome}.",
             )
             done.append(f"{row['key']}:{outcome}")
     return done
@@ -348,14 +389,27 @@ def run_heal(
     if not sha:
         out["notes"].append("mirror SHA unknown: nothing launched")
         return out
+
     # Guard (a) is per recipe, not per row: ``health check`` files a failed heal job as a row of
     # its own, and a per-row guard healed that row again on the same SHA, every tick.
+    # A launch that died in pre-flight never started the work: it is retried, up to the cap.
+    def _launched(a: Dict[str, Any]) -> bool:
+        return (
+            a.get("mirror_sha") == sha
+            and a.get("action") == "launched"
+            and a.get("outcome") != "preflight_failed"
+        )
+
     launched_recipes = {
-        r.get("resume_recipe")
-        for r in rows
-        for a in r.get("resume_attempts") or []
-        if a.get("mirror_sha") == sha and a.get("action") == "launched"
+        r.get("resume_recipe") for r in rows for a in r.get("resume_attempts") or [] if _launched(a)
     }
+    preflight_fails: Dict[Any, int] = {}
+    for r in rows:
+        for a in r.get("resume_attempts") or []:
+            if a.get("mirror_sha") == sha and a.get("outcome") == "preflight_failed":
+                preflight_fails[r.get("resume_recipe")] = (
+                    preflight_fails.get(r.get("resume_recipe"), 0) + 1
+                )
     for row in rows:
         if row.get("resolved_at"):
             continue
@@ -376,10 +430,13 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif recipe_path in launched_recipes or any(
-            a.get("mirror_sha") == sha and a.get("action") == "launched" for a in attempts
-        ):
+        elif recipe_path in launched_recipes or any(_launched(a) for a in attempts):
             continue  # guard (a): once per recipe per mirror SHA; silent so a pass is not noise
+        elif preflight_fails.get(recipe_path, 0) >= HEAL_PREFLIGHT_RETRIES:
+            att["reason"] = (
+                f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this SHA; "
+                "waiting for a new mirror SHA"
+            )
         elif drive_running(jobs_dir):
             att["reason"] = "a drive job is running"
         else:
@@ -421,8 +478,10 @@ def run_heal(
         if dry_run:
             out["attempts"].append({"key": row["key"], **att})
             continue
-        if attempts and all(
-            attempts[-1].get(k) == att[k] for k in ("mirror_sha", "action", "reason")
+        if (
+            att["action"] != "launched"
+            and attempts
+            and all(attempts[-1].get(k) == att[k] for k in ("mirror_sha", "action", "reason"))
         ):
             continue  # same skip as last pass: do not grow the list every cycle
         attempts.append(att)
