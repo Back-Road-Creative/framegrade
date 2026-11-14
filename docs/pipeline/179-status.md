@@ -32,3 +32,15 @@ uniform way, so only the last line and the last `FAILED` line are shown.
 
 On a read-only mount the queue is read with SQLite `immutable=1`, which reads the database file as it
 stands and can lag writes still in the write-ahead log.
+
+## The console page
+
+The console shows the same snapshot at `GET /status` (the "Waypost" tab, first in the nav) and
+`GET /status.json`. Both call `build_snapshot`, so there is no second reader. Blocks, top to
+bottom: Needs you (open incidents, jobs that did not succeed, overdue manual publishes), Rendering
+now, Runway, Publishing by platform, Backlog, Machine. A section that carries `unavailable` shows
+`unavailable: <reason>`, never zeros. The page refreshes in place: a small script re-fetches
+`/status.json` every 30 s and rewrites the blocks, shows "updated HH:MM:SS ET" (or "stale since ..."
+when a fetch fails), and a **Pause updates** button stops the timer. There is no meta refresh and no
+form; with scripting off the server-rendered snapshot stays with a plain Refresh link. Both routes
+sit behind `GMS_CONSOLE_TOKEN` like every other page, and neither writes or launches anything.

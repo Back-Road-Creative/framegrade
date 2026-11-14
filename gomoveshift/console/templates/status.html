@@ -1,0 +1,188 @@
+{% extends "_base.html" %}
+{% block title %}Waypost - GoMoveShift Console{% endblock %}
+{% block head_extra %}
+<style>
+  .status-stale { border-left: 4px solid #b00020; padding-left: 0.5rem; }
+  .status-block { margin: 0 0 var(--gap); }
+  .status-unavailable { font-weight: 600; }
+</style>
+{% endblock %}
+{% macro unavail(sec) %}<p class="status-unavailable">unavailable: {{ sec.unavailable }}</p>{% endmacro %}
+{% block content %}
+  <h1>Waypost</h1>
+  <p id="status-meta" aria-live="polite">As of {{ snap.as_of|et }}.
+    <span id="status-updated"></span></p>
+  <p>
+    <button type="button" id="status-pause" aria-pressed="false">Pause updates</button>
+    <a href="/status">Refresh</a>
+    <a href="/status.json">JSON</a>
+  </p>
+
+  <section class="status-block" id="b-needs">
+    <h2>Needs you</h2>
+    {% for name, sec in (("Incidents", snap.incidents), ("Jobs", snap.jobs), ("Publishing", snap.queue)) %}
+      {% if sec.unavailable %}<p class="status-unavailable">{{ name }} unavailable: {{ sec.unavailable }}</p>{% endif %}
+    {% endfor %}
+    <ul>
+    {% if not snap.incidents.unavailable %}{% for row in snap.incidents.open %}
+      <li>Open problem: {{ row.kind }} {{ row.key }}{% if row.error %} - {{ row.error }}{% endif %}</li>
+    {% endfor %}{% endif %}
+    {% if not snap.jobs.unavailable %}{% for job in snap.jobs.recent if job.state != 'succeeded' %}
+      <li>Job {{ job.state }}: <a href="/jobs">{{ job.name }}</a>{% if job.error %} - {{ job.error }}{% endif %}</li>
+    {% endfor %}{% endif %}
+    {% if not snap.queue.unavailable %}{% for row in snap.queue.overdue_manual %}
+      <li>Overdue manual publish: <a href="/publishing/{{ row.id }}">{{ row.platform }} {{ row.project_name }} #{{ row.short_index }}</a> was due {{ row.scheduled_at|et }}</li>
+    {% endfor %}{% endif %}
+    </ul>
+  </section>
+
+  <section class="status-block" id="b-running">
+    <h2>Rendering now</h2>
+    {% if snap.jobs.unavailable %}{{ unavail(snap.jobs) }}
+    {% elif snap.jobs.running %}<ul>
+      {% for job in snap.jobs.running %}
+      <li><a href="/jobs">{{ job.name }}</a>{% set where = [job.drive, job.phase]|select|join(' / ') %}{% if where %} - {{ where }}{% endif %}; heartbeat {{ job.heartbeat_at|et }}</li>
+      {% endfor %}</ul>
+    {% else %}<p>Nothing is rendering.</p>{% endif %}
+  </section>
+
+  <section class="status-block" id="b-runway">
+    <h2>Runway</h2>
+    {% if snap.runway.unavailable %}{{ unavail(snap.runway) }}
+    {% else %}<p>Long-form queue ends {{ snap.runway.queue_ends or '(nothing booked)' }}.
+      <a href="/schedule">Open the schedule</a></p>{% endif %}
+  </section>
+
+  <section class="status-block" id="b-publishing">
+    <h2>Publishing by platform</h2>
+    {% if snap.queue.unavailable %}{{ unavail(snap.queue) }}
+    {% else %}<ul>
+      {% for platform, states in snap.queue.counts.items() %}
+      <li>{{ platform }}: {% for k, v in states.items() %}{{ k }} {{ v }}{% if not loop.last %}, {% endif %}{% endfor %}</li>
+      {% endfor %}</ul>
+      {% for row in snap.queue.next %}
+      <p>Next: <a href="/publishing/{{ row.id }}">{{ row.platform }} {{ row.project_name }} #{{ row.short_index }}</a> at {{ row.scheduled_at|et }}</p>
+      {% endfor %}{% endif %}
+  </section>
+
+  <section class="status-block" id="b-backlog">
+    <h2>Backlog</h2>
+    {% if snap.backlog.unavailable %}{{ unavail(snap.backlog) }}
+    {% else %}<p>{{ snap.backlog.rows }} waiting:
+      {% for region, n in snap.backlog.by_region.items() %}{{ region }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+  </section>
+
+  <section class="status-block" id="b-machine">
+    <h2>Machine</h2>
+    {% if snap.machine.unavailable %}{{ unavail(snap.machine) }}
+    {% else %}<ul>
+      {% for vol in snap.machine.volumes %}
+      <li>{{ vol.label }}: {% if vol.unavailable %}unavailable: {{ vol.unavailable }}{% else %}{{ (vol.free_bytes / 1073741824)|round|int }} GB free of {{ (vol.total_bytes / 1073741824)|round|int }} GB{% endif %}</li>
+      {% endfor %}
+      {% set gpu = snap.machine.gpu %}
+      <li>GPU: {% if gpu.unavailable %}unavailable: {{ gpu.unavailable }}{% elif gpu.held %}in use by {{ gpu.owner }}{% else %}free{% endif %}</li>
+      {% if snap.machine.cron is mapping %}<li>Scheduled runs: unavailable: {{ snap.machine.cron.unavailable }}</li>
+      {% else %}{% for row in snap.machine.cron %}
+      <li>{{ row.name }}: {% if row.unavailable %}unavailable: {{ row.unavailable }}{% else %}last ran {{ row.last_at or 'never' }}{% if row.last_failure %}; last failure {{ row.last_failure.at }}{% endif %}{% endif %}</li>
+      {% endfor %}{% endif %}</ul>{% endif %}
+  </section>
+
+  <script>
+  (function () {
+    var timer = null, paused = false;
+    var meta = document.getElementById('status-updated');
+    var btn = document.getElementById('status-pause');
+    function et(v) {
+      var d = v ? new Date(v) : null;
+      if (!d || isNaN(d)) return v || '-';
+      return d.toLocaleString('en-US', {timeZone: 'America/New_York', hour12: false});
+    }
+    function clock() {
+      return new Date().toLocaleTimeString('en-GB', {timeZone: 'America/New_York'}) + ' ET';
+    }
+    function esc(v) {
+      return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) {
+        return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c];
+      });
+    }
+    function bad(sec, label) { return '<p class="status-unavailable">' + (label ? label + ' ' : '') + 'unavailable: ' + esc(sec.unavailable) + '</p>'; }
+    function pairs(o) { return Object.keys(o || {}).map(function (k) { return esc(k) + ' ' + esc(o[k]); }).join(', '); }
+    function link(href, text) { return '<a href="' + href + '">' + esc(text) + '</a>'; }
+    function gb(n) { return Math.round(n / 1073741824) + ' GB'; }
+    var render = {
+      'b-needs': function (s) {
+        var h = '<h2>Needs you</h2>', li = '';
+        [['Incidents', s.incidents], ['Jobs', s.jobs], ['Publishing', s.queue]].forEach(function (p) { if (p[1].unavailable) h += bad(p[1], p[0]); });
+        if (!s.incidents.unavailable) s.incidents.open.forEach(function (r) { li += '<li>Open problem: ' + esc(r.kind) + ' ' + esc(r.key) + (r.error ? ' - ' + esc(r.error) : '') + '</li>'; });
+        if (!s.jobs.unavailable) s.jobs.recent.forEach(function (j) { if (j.state !== 'succeeded') li += '<li>Job ' + esc(j.state) + ': ' + link('/jobs', j.name) + (j.error ? ' - ' + esc(j.error) : '') + '</li>'; });
+        if (!s.queue.unavailable) s.queue.overdue_manual.forEach(function (r) { li += '<li>Overdue manual publish: ' + link('/publishing/' + encodeURIComponent(r.id), r.platform + ' ' + r.project_name + ' #' + r.short_index) + ' was due ' + esc(et(r.scheduled_at)) + '</li>'; });
+        return h + '<ul>' + li + '</ul>';
+      },
+      'b-running': function (s) {
+        var h = '<h2>Rendering now</h2>';
+        if (s.jobs.unavailable) return h + bad(s.jobs);
+        if (!s.jobs.running.length) return h + '<p>Nothing is rendering.</p>';
+        return h + '<ul>' + s.jobs.running.map(function (j) {
+          var where = [j.drive, j.phase].filter(Boolean).join(' / ');
+          return '<li>' + link('/jobs', j.name) + (where ? ' - ' + esc(where) : '') + '; heartbeat ' + esc(et(j.heartbeat_at)) + '</li>';
+        }).join('') + '</ul>';
+      },
+      'b-runway': function (s) {
+        var h = '<h2>Runway</h2>';
+        if (s.runway.unavailable) return h + bad(s.runway);
+        return h + '<p>Long-form queue ends ' + esc(s.runway.queue_ends || '(nothing booked)') + '. ' + link('/schedule', 'Open the schedule') + '</p>';
+      },
+      'b-publishing': function (s) {
+        var h = '<h2>Publishing by platform</h2>', q = s.queue;
+        if (q.unavailable) return h + bad(q);
+        h += '<ul>' + Object.keys(q.counts).map(function (p) { return '<li>' + esc(p) + ': ' + pairs(q.counts[p]) + '</li>'; }).join('') + '</ul>';
+        return h + q.next.map(function (r) { return '<p>Next: ' + link('/publishing/' + encodeURIComponent(r.id), r.platform + ' ' + r.project_name + ' #' + r.short_index) + ' at ' + esc(et(r.scheduled_at)) + '</p>'; }).join('');
+      },
+      'b-backlog': function (s) {
+        var h = '<h2>Backlog</h2>';
+        if (s.backlog.unavailable) return h + bad(s.backlog);
+        return h + '<p>' + esc(s.backlog.rows) + ' waiting: ' + pairs(s.backlog.by_region) + '</p>';
+      },
+      'b-machine': function (s) {
+        var h = '<h2>Machine</h2>', m = s.machine;
+        if (m.unavailable) return h + bad(m);
+        var li = m.volumes.map(function (v) {
+          return '<li>' + esc(v.label) + ': ' + (v.unavailable ? 'unavailable: ' + esc(v.unavailable) : gb(v.free_bytes) + ' free of ' + gb(v.total_bytes)) + '</li>';
+        }).join('');
+        li += '<li>GPU: ' + (m.gpu.unavailable ? 'unavailable: ' + esc(m.gpu.unavailable) : m.gpu.held ? 'in use by ' + esc(m.gpu.owner) : 'free') + '</li>';
+        if (!Array.isArray(m.cron)) li += '<li>Scheduled runs: unavailable: ' + esc(m.cron.unavailable) + '</li>';
+        else m.cron.forEach(function (r) {
+          li += '<li>' + esc(r.name) + ': ' + (r.unavailable ? 'unavailable: ' + esc(r.unavailable) : 'last ran ' + esc(r.last_at || 'never') + (r.last_failure ? '; last failure ' + esc(r.last_failure.at) : '')) + '</li>';
+        });
+        return h + '<ul>' + li + '</ul>';
+      }
+    };
+    function show(s) {
+      Object.keys(render).forEach(function (id) { document.getElementById(id).innerHTML = render[id](s); });
+      document.getElementById('status-meta').firstChild.nodeValue = 'As of ' + et(s.as_of) + '. ';
+    }
+    function tick() {
+      fetch('/status.json', {credentials: 'same-origin', headers: {Accept: 'application/json'}})
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function (s) {
+          show(s); delete meta.dataset.since;
+          document.body.classList.remove('status-stale');
+          meta.textContent = 'updated ' + clock();
+        })
+        .catch(function () {
+          document.body.classList.add('status-stale');
+          meta.textContent = 'stale since ' + (meta.dataset.since || (meta.dataset.since = clock()));
+        });
+    }
+    function start() { if (!timer) timer = setInterval(tick, 30000); }
+    function stop() { clearInterval(timer); timer = null; }
+    btn.addEventListener('click', function () {
+      paused = !paused;
+      btn.setAttribute('aria-pressed', String(paused));
+      btn.textContent = paused ? 'Resume updates' : 'Pause updates';
+      if (paused) { stop(); meta.textContent = 'paused'; } else { tick(); start(); }
+    });
+    start();
+  })();
+  </script>
+{% endblock %}

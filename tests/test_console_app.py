@@ -32,7 +32,7 @@ def test_healthz_reports_notify_configured_when_the_webhook_url_is_set(monkeypat
 
 
 def test_index_lists_the_nine_nav_entries():
-    assert len(NAV_ENTRIES) == 11
+    assert len(NAV_ENTRIES) == 12
     response = _client().get("/")
     assert response.status_code == 200
     for _slug, title in NAV_ENTRIES:
