@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.90] - 2026-11-14
+
+### Fixed
+
+- An Instagram video upload that `rupload.facebook.com` refused was stored as "unknown Graph API error", and its row went `failed_permanent` on the first try (15 of 19 rows from 2026-10-31 to 11-14). The error now names rupload's `debug_info` type and message, and a failed upload starts over on a fresh container, up to 3 tries.
+
 ## [0.3.89] - 2026-11-14
 
 ### Fixed
@@ -1076,7 +1082,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.89...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.90...HEAD
+[0.3.90]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.89...v0.3.90
 [0.3.89]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.88...v0.3.89
 [0.3.88]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.87...v0.3.88
 [0.3.87]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...v0.3.87
