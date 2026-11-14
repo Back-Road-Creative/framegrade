@@ -154,6 +154,7 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
+        horizon_h=launch.render_horizon_h(config),
         publish=publish.backlog_publisher(
             config, region=region, stages_root=args.stages_root, code_root=code_root,
             jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,

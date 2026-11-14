@@ -33,6 +33,7 @@ def wired(monkeypatch):
         lambda config, region, ledger_path, now: ("usa", [], [], [], set(), lambda **kw: None),
     )  # fmt: skip
     monkeypatch.setattr(launch, "lease_fns", lambda code_root: (lambda: True, lambda: None))
+    monkeypatch.setattr(launch, "render_horizon_h", lambda config: 1680)
 
     def fake(**kw):
         seen.update(kw)
@@ -178,3 +179,9 @@ def test_a_dry_run_says_would_retire_and_would_hold(tmp_path, capsys, wired):
     assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
     out = capsys.readouterr().out
     assert "would retire nc-a: r" in out and "would hold /st/nc-a/nc-a/_stages" in out
+
+
+def test_the_handler_passes_the_render_horizon(tmp_path, wired):
+    wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    assert wired["horizon_h"] == 1680

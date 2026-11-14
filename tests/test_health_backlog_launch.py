@@ -1631,3 +1631,40 @@ def test_a_waiting_audit_can_still_be_superseded(tmp_path):
     res = rig.run()
     assert (res["action"], res["project"]) == ("launched", "day-a"), res
     assert "1a3f8a41" in res["relaunch"]
+
+
+def test_a_slot_past_seven_days_is_covered_by_default(tmp_path):
+    rig = Rig(tmp_path)
+    rig.slots = [(NOW + timedelta(days=10), "sun")]
+    res = rig.run()
+    assert res["action"] == "noop" and "covered" in res["reason"], res
+    assert f"inside {launch.COVERAGE_HORIZON_H} h" in res["reason"]
+
+
+def test_a_wider_horizon_renders_ahead_for_a_later_slot(tmp_path):
+    """JP 2026-11-14: render the backlog through as fast as the box allows. A horizon as wide
+    as the publish lead window lets the next drive start for a slot weeks out."""
+    rig = Rig(tmp_path)
+    later = NOW + timedelta(days=40)
+    rig.slots = [(later, "sun")]
+    res = launch.run_backlog(**rig.kwargs(), horizon_h=70 * 24)
+    assert (res["action"], res["slot"], res["lf_day"]) == ("launched", later.isoformat(), "sun"), (
+        res
+    )
+
+
+def test_a_wider_horizon_still_reports_its_own_hours_when_covered(tmp_path):
+    rig = Rig(tmp_path)
+    rig.slots = [(NOW + timedelta(days=80), "sun")]
+    res = launch.run_backlog(**rig.kwargs(), horizon_h=70 * 24)
+    assert res["action"] == "noop" and "inside 1680 h" in res["reason"], res
+
+
+@pytest.mark.parametrize(("lead", "want"), [(72, launch.COVERAGE_HORIZON_H), (1680, 1680)])
+def test_render_horizon_is_the_wider_of_seven_days_and_the_lead_window(monkeypatch, lead, want):
+    from gomoveshift.pipeline import seo_slots
+
+    monkeypatch.setattr(
+        seo_slots, "waypost_cadence", lambda config: SimpleNamespace(lead_hours=lead)
+    )
+    assert launch.render_horizon_h(object()) == want

@@ -151,10 +151,15 @@ outcome (`health_heal_outcome`), the latter observed on the next heal pass.
 [--dry-run] [--json]` launches at most one audit-only drive for the region's next uncovered LF
 slot. The hourly `bin/gms-health-cron.sh` tick (workspaces) calls it per region; an operator may too. Exit 2 on `refused`, else 0.
 
-**Selection.** The region's free LF slots in the next 7 days (from `build_schedule_report`) are
+**Selection.** The region's free LF slots inside the render horizon (from `build_schedule_report`) are
 sorted; every `ready` or `auditing` drive in `schedule.sqlite3` covers one, and the first slot
 left over is the target. An `auditing` drive for the region, or a drive job already running
 (job/1 record with no result, or `pgrep`), is a `noop`: a repeat call never starts a second run.
+The render horizon is `launch.render_horizon_h`: the wider of 7 days and the cadence's
+`lead_hours` (the packaged `brand.yaml` sets 1680 h, 70 days). A finished drive can claim a
+slot only inside `lead_hours`, so the horizon matches it: each drive renders, publishes into the
+next free slot and frees its scratch, and the next tick launches the next row, instead of one
+drive a week. The `covered` noop names the horizon in hours.
 An `auditing` drive whose newest audit job record (`gms-backlog-<project>`, or a `health heal`
 resume of it, `gms-heal-gms-backlog-<project>-<sha7>`, nested once per resume) ended in anything but
 `succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
