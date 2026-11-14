@@ -20,6 +20,18 @@ after creation; `ContainerHandle.is_expired()` refuses a stale publish
 before the API call. Graph version: the credential's `graph_version`,
 falling back to `DEFAULT_GRAPH_VERSION` — never unversioned.
 
+**A failed byte upload starts over on a fresh container.** `rupload`
+answers a failed upload with a `debug_info` envelope (`type`, `message`,
+`retriable`), never a Graph `error` object. `upload_video` classifies it
+as `InstagramUploadError`, tagged `[rupload http=.. type=.. retriable=..]`
+with the bounded one-line message. A container that never got its bytes can
+never publish (it sits `IN_PROGRESS` until it expires), so
+`InstagramShortsAdapter` creates a new container, persists it and uploads
+again, `UPLOAD_ATTEMPTS` = 3 tries in all, sleeping
+`UPLOAD_RETRY_BACKOFF_S` = 30 times the try number between them. Only the
+last failure reaches the queue, as `failed_permanent`. Any other error
+(container create, status, publish) is not retried here.
+
 **Publish only once the container is `FINISHED`.** Meta processes the
 upload after `rupload` returns, and `media_publish` on a container still
 processing fails (code 9007, subcode 2207027, "The media is not ready for
