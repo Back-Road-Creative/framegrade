@@ -80,6 +80,8 @@ _DEFAULT_TIKTOK_MODE = "pack"
 _TIKTOK_MODES = ("pack", "inbox", "direct")
 
 #: Stop uploading inbox drafts once this many already sit unpublished.
+#: Counts only rows parked WITH an upload id (real inbox drafts); a
+#: pack-parked row never reached TikTok and holds no slot.
 #: TikTok enforces its own undocumented ceiling with
 #: `spam_risk_too_many_pending_share`, which blocks the account entirely
 #: once enough drafts are pending. Three leaves room for a normal day's
@@ -434,8 +436,15 @@ def make_tiktok_handler(
                 # our own parked rows sees that coming; the adapter's
                 # TikTokThrottledError below is the backstop for when this
                 # count is wrong (a draft dismissed in the app, say).
+                # Only rows with an upload id are drafts on TikTok. A
+                # pack-parked row (no upload id) went to the Studio pack
+                # folder, never to the account, so it is not a pending share;
+                # counting it refused every inbox upload after a pack -> inbox
+                # switch (46 pack rows, 2026-11-14). The reconcile pass skips
+                # the same rows for the same reason.
                 pending = conn.execute(
-                    "SELECT COUNT(*) FROM deliveries WHERE platform='tiktok' AND status=?",
+                    "SELECT COUNT(*) FROM deliveries WHERE platform='tiktok' AND status=? "
+                    "AND platform_upload_id IS NOT NULL AND platform_upload_id != ''",
                     (STATUS_AWAITING_MANUAL_PUBLISH,),
                 ).fetchone()[0]
                 if pending >= _MAX_PENDING_INBOX_DRAFTS:

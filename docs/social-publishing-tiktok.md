@@ -445,6 +445,14 @@ The delivery also parks its own `next_attempt_at` far in the future so
 out of `"awaiting_manual_publish"`; only a human, after publishing the draft
 from the TikTok app, can transition it onward via `queue.transition`.
 
+**The pending-draft cap counts inbox drafts only.** Before each inbox upload
+the handler counts `awaiting_manual_publish` TikTok rows that carry a
+`platform_upload_id` and refuses (throttled, retried later, never counted
+against `max_attempts`) at `_MAX_PENDING_INBOX_DRAFTS` (3). A pack-parked row
+has no upload id: its file went to the Studio pack folder, not to TikTok, so
+it is not a pending share and holds no slot. Counting it refused every inbox
+upload after the 2026-11-14 pack → inbox switch, with 46 pack rows parked.
+
 **`"uploaded"` means the bytes are on TikTok, and a resume
 can tell that from "init returned an id".** The publish id is still persisted
 before the chunked upload -- that is what makes an interrupted upload

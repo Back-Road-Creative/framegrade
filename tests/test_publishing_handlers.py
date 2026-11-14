@@ -428,6 +428,57 @@ def test_tiktok_inbox_uploads_normally_below_the_cap(conn, tiktok_stubs):
     assert row["status"] == "awaiting_manual_publish"
 
 
+def _park_packed(conn, count: int) -> None:
+    """`count` TikTok rows parked by PACK mode: awaiting a human, but with no
+    `platform_upload_id` -- the file went to the Studio pack folder, never to
+    TikTok, so no draft sits in the account's inbox."""
+    for i in range(count):
+        delivery_id = enqueue(conn, "proj", 200 + i, "tiktok", "hash-packed")
+        conn.execute(
+            "UPDATE deliveries SET status='awaiting_manual_publish' WHERE id=?",
+            (delivery_id,),
+        )
+    conn.commit()
+
+
+def test_tiktok_inbox_cap_ignores_pack_parked_rows(conn, tiktok_stubs):
+    """Switching pack -> inbox on 2026-11-14 found 46 pack-parked rows. The
+    cap counted them as inbox drafts, so every inbox upload was refused
+    forever: none of them is a draft on TikTok, and the reconcile pass already
+    skips them for the same reason (no upload id)."""
+    _park_packed(conn, 46)
+
+    creds = TikTokCredentials(access_token=FAKE_TOKEN, audit_approved=False)
+    handler = make_tiktok_handler(creds, conn, lambda p, i: _record(), _loader(), mode="inbox")
+    handler(_row(conn, "tiktok"))
+
+    row = dict(
+        conn.execute(
+            "SELECT status FROM deliveries WHERE platform='tiktok' AND short_index=0"
+        ).fetchone()
+    )
+    assert row["status"] == "awaiting_manual_publish"
+
+
+def test_tiktok_inbox_cap_still_counts_real_drafts_beside_pack_rows(
+    conn, tiktok_stubs, monkeypatch
+):
+    """Excluding pack rows must not blind the cap: three real inbox drafts
+    still refuse the upload, however many pack rows sit beside them."""
+    called = []
+    monkeypatch.setattr(tiktok_stubs, "init_direct_post", lambda *a, **k: called.append(1))
+    _park_packed(conn, 5)
+    _park(conn, 3)
+
+    creds = TikTokCredentials(access_token=FAKE_TOKEN, audit_approved=False)
+    handler = make_tiktok_handler(creds, conn, lambda p, i: _record(), _loader(), mode="inbox")
+    with pytest.raises(ThrottledDeliveryError) as excinfo:
+        handler(_row(conn, "tiktok"))
+
+    assert called == []
+    assert "3 TikTok drafts" in str(excinfo.value)
+
+
 def test_tiktok_direct_mode_ignores_the_pending_cap(conn, tiktok_stubs, monkeypatch):
     """Direct Post never creates an inbox draft, so pending drafts are
     irrelevant to it -- gating it would block a path the throttle can't
