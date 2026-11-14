@@ -59,5 +59,6 @@ class TestSiteIdThreading:
         gen._is_analytics_eligible = MagicMock(return_value=False)
         gen._batch_sync_stats(sync, {"vid1": "content1"})
 
-        upserted_event = mock_manager_cls.return_value.store.upsert_event.call_args[0][0]
+        (events,) = mock_manager_cls.return_value.store.upsert_events.call_args.args
+        (upserted_event,) = events
         assert upserted_event.site_id == "example-site"
