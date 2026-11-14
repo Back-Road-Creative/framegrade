@@ -187,6 +187,15 @@ def test_runway_carries_the_schedule_report(env, monkeypatch):
     assert section["source"] == "gomoveshift schedule --json"
 
 
+def test_runway_counts_days_from_the_reports_own_today(env, monkeypatch):
+    report = {"as_of": "2026-11-13T13:00:00-05:00", "queue_ends": "2026-12-20"}
+    monkeypatch.setattr(snapshot, "_runway_report", lambda config: dict(report))
+    assert snapshot.build_snapshot(_config(env), now=NOW)["runway"]["days_of_runway"] == 37
+
+    report["queue_ends"] = None
+    assert snapshot.build_snapshot(_config(env), now=NOW)["runway"]["days_of_runway"] is None
+
+
 def test_backlog_counts_rows_by_region(env):
     path = env / "inputs" / "gomoveshift" / "console" / "brands" / "gomoveshift"
     path.mkdir(parents=True)

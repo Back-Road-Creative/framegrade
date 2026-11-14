@@ -14,7 +14,7 @@ One unreadable store does not blank the others.
 | `jobs` | `running` (no result recorded yet) and the 10 most recent ended job-runner records, each with drive, phase and error parsed from its `output.log`; `counts` by state; `unreadable` | `$GMS_JOBS_DIR`, default `logs/jobs` under the data root (`$GMS_DATA_ROOT`) |
 | `incidents` | `open` incident rows as written by `health check` ([156](156-health-check.md)), `resolved` count, `unreadable` | `$GMS_HEALTH_INCIDENTS_DIR`, default `gms/incidents` under the data root |
 | `queue` | `counts` by platform and status, `overdue_manual` (drafts past their slot plus the 24 h grace of `publishing-status --validate`), the `next` 5 scheduled deliveries | `social_queue.sqlite3` under `seo.storage_path` |
-| `runway` | the `gomoveshift schedule --json` report (what is booked, when the queue ends, next free slots) | the content ledger |
+| `runway` | the `gomoveshift schedule --json` report (what is booked, when the queue ends, next free slots), plus `days_of_runway` (days from the report's own today to the last booked long-form) | the content ledger |
 | `backlog` | `rows`, `by_region`, the first 20 `projects` | `drive_backlog.yaml` under the inputs dir (`$GMS_INPUTS_DIR`) |
 | `machine` | `volumes` (free and total bytes per labelled path), `gpu` (who holds the shared GPU lock), `cron` (per `gms-*-cron.log`: last timestamped line, and the last line containing `FAILED`) | `$GMS_STATUS_VOLUMES`, `$GMS_STATUS_GPU_LOCK_PATH`, `$GMS_CRON_LOGS_DIR` |
 
@@ -32,3 +32,15 @@ uniform way, so only the last line and the last `FAILED` line are shown.
 
 On a read-only mount the queue is read with SQLite `immutable=1`, which reads the database file as it
 stands and can lag writes still in the write-ahead log.
+
+## The console page
+
+The console shows the same snapshot at `GET /status` (the "Waypost" tab, first in the nav) and
+`GET /status.json`. Both call `build_snapshot`, so there is no second reader. Blocks, top to
+bottom: Needs you (open incidents, jobs that did not succeed, overdue manual publishes), Rendering
+now, Runway, Publishing by platform, Backlog, Machine. A section that carries `unavailable` shows
+`unavailable: <reason>`, never zeros. The page refreshes in place: a small script re-fetches
+`/status.json` every 30 s and rewrites the blocks, shows "updated HH:MM:SS ET" (or "stale since ..."
+when a fetch fails), and a **Pause updates** button stops the timer. There is no meta refresh and no
+form; with scripting off the server-rendered snapshot stays with a plain Refresh link. Both routes
+sit behind `GMS_CONSOLE_TOKEN` like every other page, and neither writes or launches anything.

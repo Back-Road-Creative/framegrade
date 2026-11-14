@@ -93,6 +93,8 @@ has those rows **unavailable**; every other row is unchanged.
 | GET | `/settings` | settings | proven | 200 | test_console_settings_tab |  |
 | POST | `/settings` | settings | proven-test | not executed | test_console_settings_tab |  |
 | GET | `/schedule` | schedule | proven | 200 | test_console_journey_follows_you | page shows the schedule and the four-value read model (`console/schedule_model.py`) |
+| GET | `/status` | status | proven-test | not executed | test_console_status | read-only Waypost page from the status snapshot; in-place refresh, no meta refresh |
+| GET | `/status.json` | status | proven-test | not executed | test_console_status | the same snapshot as JSON |
 | GET | `/{slug}` | - | proven-test | 404 for /gomoveshift | test_console_app | catch-all |
 
 Live column: HTTP status from `curl` inside the console container. "not executed" means no

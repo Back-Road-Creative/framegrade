@@ -55,8 +55,17 @@ from .tabs import TabGateMiddleware
 
 logger = logging.getLogger(__name__)
 
+
+def _status_snapshot() -> dict:
+    """The one snapshot behind ``gomoveshift status`` and the Waypost page. Read-only."""
+    from ..status.snapshot import build_snapshot
+
+    return build_snapshot(schedule_model._config())
+
+
 #: Left-nav entries (slug, title), in display order.
 NAV_ENTRIES: list[tuple[str, str]] = [
+    ("status", "Waypost"),
     ("library", "Media library"),
     ("drives", "Drives"),
     ("shorts", "Shorts"),
@@ -1471,6 +1480,16 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request, "schedule.html", {"report": report, "model": model, "model_error": model_error}
         )
+
+    @app.get("/status", response_class=HTMLResponse)
+    def status_page(request: Request):
+        _require_tab("status")
+        return templates.TemplateResponse(request, "status.html", {"snap": _status_snapshot()})
+
+    @app.get("/status.json")
+    def status_json():
+        _require_tab("status")
+        return _status_snapshot()
 
     @app.get("/{slug}", response_class=HTMLResponse)
     def tab(request: Request, slug: str):

@@ -77,8 +77,9 @@ def test_damaged_journey_summary_excludes_path_and_raw_error(monkeypatch, tmp_pa
     assert any(e.journey == "journey-a" for e in ctx["entries"])
 
 
-def test_library_is_first_nav_entry():
-    assert NAV_ENTRIES[0][0] == "library"
+def test_library_is_first_media_nav_entry():
+    # Waypost (the live status page) leads the nav; Media library follows it.
+    assert NAV_ENTRIES[1][0] == "library"
 
 
 def test_library_route_renders_mixed_collection_never_says_verified(monkeypatch, tmp_path):
