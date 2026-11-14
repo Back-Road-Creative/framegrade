@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.89] - 2026-11-14
+
+### Fixed
+
+- `health heal` no longer waits for a new mirror SHA after a resume that died in drive pre-flight (for example, too little staging disk) before any encode. The attempt is recorded as `preflight_failed` with the first blocker line, the outcome notice says "failed pre-flight: <blocker>", and the next tick relaunches at the same SHA, at most 8 times per recipe per SHA (#373).
+- The publishing gate named a YouTube short "missing from the live catalog" when the short was published after the catalog snapshot was taken. The nightly snapshot runs at 02:50 ET, before the 03:05 drain, so every short that drain published held the rest of its project's YouTube shorts until the next night, and that night's drain repeated it. A short whose recorded `published_at` is later than the snapshot's `fetched_at` is now skipped by the missing-video check; a short with no recorded publish time is still judged against the snapshot.
+
 ## [0.3.88] - 2026-11-14
 
 ### Fixed
@@ -1069,7 +1076,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.88...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.89...HEAD
+[0.3.89]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.88...v0.3.89
 [0.3.88]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.87...v0.3.88
 [0.3.87]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...v0.3.87
 [0.3.86]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...v0.3.86
