@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.92] - 2026-11-14
+
+### Changed
+
+- `health backlog` now renders for any free long-form slot inside the cadence's `lead_hours`, not only the next 7 days, and the packaged GoMoveShift cadence raises `lead_hours` from 72 h to 1680 h (70 days). A finished drive claims the next free slot weeks ahead and frees its scratch, so the backlog renders drive after drive instead of one a week. Health-check rule 2b keeps its 7-day page.
+
 ## [0.3.91] - 2026-11-14
 
 ### Fixed
@@ -1088,7 +1094,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.91...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...HEAD
+[0.3.92]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.91...v0.3.92
 [0.3.91]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.90...v0.3.91
 [0.3.90]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.89...v0.3.90
 [0.3.89]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.88...v0.3.89
