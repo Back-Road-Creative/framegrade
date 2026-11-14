@@ -15,6 +15,7 @@ import re
 import shutil
 import sqlite3
 from collections import Counter
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -195,8 +196,17 @@ def _runway_report(config: Any) -> Dict[str, Any]:
 
 def _runway(config: Any) -> Dict[str, Any]:
     report = dict(_runway_report(config))
-    report.pop("as_of", None)  # the section's own as_of is the one clock
-    return {"source": RUNWAY_SOURCE, **report}
+    today = report.pop("as_of", None)  # the section's own as_of is the one clock
+    return {"source": RUNWAY_SOURCE, **report, "days_of_runway": _days_between(today, report)}
+
+
+def _days_between(today: Any, report: Dict[str, Any]) -> Optional[int]:
+    """Days from the schedule's own "today" to the last booked long-form, or None."""
+    try:
+        start = date.fromisoformat(str(today)[:10])
+        return (date.fromisoformat(str(report.get("queue_ends"))[:10]) - start).days
+    except ValueError:
+        return None
 
 
 # ── backlog ─────────────────────────────────────────────────────────────

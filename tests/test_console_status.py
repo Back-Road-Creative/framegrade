@@ -82,8 +82,28 @@ def _snapshot(**over):
             "as_of": NOW,
             "source": "gomoveshift schedule --json",
             "queue_ends": "2026-12-01",
+            "days_of_runway": 18,
             "weekly_longform_capacity": 3,
+            "scheduled_longforms": [
+                {"date": "2026-11-24", "time": "12:00", "region": "usa", "title": "t1"},
+                {"date": "2026-12-01", "time": "12:00", "region": "ireland", "title": "t2"},
+            ],
             "scheduled_shorts_count": 12,
+            "scheduled_shorts_by_region": {"usa": 9, "ireland": 3},
+            "next_available": [
+                {
+                    "region": "usa",
+                    "day": "tuesday",
+                    "slot": "2026-12-08 12:00",
+                    "earliest_for_region": True,
+                },
+                {
+                    "region": "usa",
+                    "day": "friday",
+                    "slot": "2026-12-11 12:00",
+                    "earliest_for_region": False,
+                },
+            ],
         },
         "backlog": {
             "as_of": NOW,
@@ -157,6 +177,14 @@ def test_needs_you_lists_incidents_failed_jobs_and_overdue_with_links(client):
     assert 'href="/publishing/77"' in text
     assert 'href="/schedule"' in text
     assert 'href="/jobs"' in text
+
+
+def test_runway_shows_days_bookings_shorts_and_next_free_slot(client):
+    text = _html(client).split(">Runway<")[1].split(">Publishing by platform<")[0]
+    assert "2026-12-01" in text and "18 days" in text
+    assert "2 long-forms booked" in text and "3 a week" in text
+    assert "12 Shorts booked" in text and "usa 9" in text and "ireland 3" in text
+    assert "2026-12-08 12:00" in text and "2026-12-11 12:00" not in text
 
 
 def test_rendering_now_shows_running_job_and_heartbeat(client):

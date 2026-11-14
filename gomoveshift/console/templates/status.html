@@ -49,8 +49,16 @@
   <section class="status-block" id="b-runway">
     <h2>Runway</h2>
     {% if snap.runway.unavailable %}{{ unavail(snap.runway) }}
-    {% else %}<p>Long-form queue ends {{ snap.runway.queue_ends or '(nothing booked)' }}.
-      <a href="/schedule">Open the schedule</a></p>{% endif %}
+    {% else %}{% set rw = snap.runway %}
+      <p>Long-form queue ends {{ rw.queue_ends or '(nothing booked)' }}{% if rw.days_of_runway is not none and rw.days_of_runway is defined %} ({{ rw.days_of_runway }} days of runway){% endif %}.
+      <a href="/schedule">Open the schedule</a></p>
+      <ul>
+        <li>{{ (rw.scheduled_longforms or [])|length }} long-forms booked, {{ rw.weekly_longform_capacity }} a week</li>
+        <li>{{ rw.scheduled_shorts_count }} Shorts booked{% for region, n in (rw.scheduled_shorts_by_region or {}).items() %}{{ ': ' if loop.first else ', ' }}{{ region }} {{ n }}{% endfor %}</li>
+        {% for row in rw.next_available or [] %}{% if row.earliest_for_region %}
+        <li>Next free long-form slot, {{ row.region }}: {{ row.slot }}</li>
+        {% endif %}{% endfor %}
+      </ul>{% endif %}
   </section>
 
   <section class="status-block" id="b-publishing">
@@ -130,7 +138,12 @@
       'b-runway': function (s) {
         var h = '<h2>Runway</h2>';
         if (s.runway.unavailable) return h + bad(s.runway);
-        return h + '<p>Long-form queue ends ' + esc(s.runway.queue_ends || '(nothing booked)') + '. ' + link('/schedule', 'Open the schedule') + '</p>';
+        var rw = s.runway, by = pairs(rw.scheduled_shorts_by_region);
+        h += '<p>Long-form queue ends ' + esc(rw.queue_ends || '(nothing booked)') + (rw.days_of_runway == null ? '' : ' (' + esc(rw.days_of_runway) + ' days of runway)') + '. ' + link('/schedule', 'Open the schedule') + '</p>';
+        h += '<ul><li>' + (rw.scheduled_longforms || []).length + ' long-forms booked, ' + esc(rw.weekly_longform_capacity) + ' a week</li>';
+        h += '<li>' + esc(rw.scheduled_shorts_count) + ' Shorts booked' + (by ? ': ' + by : '') + '</li>';
+        (rw.next_available || []).forEach(function (r) { if (r.earliest_for_region) h += '<li>Next free long-form slot, ' + esc(r.region) + ': ' + esc(r.slot) + '</li>'; });
+        return h + '</ul>';
       },
       'b-publishing': function (s) {
         var h = '<h2>Publishing by platform</h2>', q = s.queue;
