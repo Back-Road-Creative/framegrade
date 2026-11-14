@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -608,3 +608,108 @@ def test_pgrep_pattern_matches_a_drive_process_only(argv, is_drive):
     finally:
         proc.kill()
         proc.wait()
+
+
+PREFLIGHT_LOG = (
+    "[INFO] gomoveshift Pre-flight: validating environment...\n"
+    "[ERROR] gomoveshift.pipeline.drive_orchestrator Pre-flight check failed: RENDER BLOCKED: "
+    "1 blocker found before any encode:\n"
+    "  1. [staging disk] Insufficient cache space at /stage: 249.8 GB free, need ~351.4 GB\n"
+    "DRIVE FAILED: Pre-flight failed: RENDER BLOCKED\n"
+)
+ENCODE_LOG = "[INFO] PHASE DONE phase_a in 12s\n" + PREFLIGHT_LOG
+
+
+def _tick(n: int) -> datetime:
+    """The clock of the n-th heal run (the n-th attempt is made at ``_tick(n - 1)``)."""
+    return NOW + timedelta(minutes=45 * n)
+
+
+def _finish_heal_job(rig: Rig, n: int, log: str, *, state="failed") -> None:
+    """The heal job the last launch started, finished with ``log`` as its output.log."""
+    name = heal.job_name("demo-drive-a", SHA)
+    d = rig.jobs / f"h{n}"
+    d.mkdir(parents=True)
+    (d / "job.json").write_text(json.dumps({
+        "schema": "job/1", "run_id": f"h{n}", "name": name, "argv": ["x"],
+        "created_at": _tick(n).timestamp() - 300, "result": {"state": state, "exit_code": 1},
+    }))  # fmt: skip
+    (d / "output.log").write_text(log)
+
+
+def test_a_preflight_failed_heal_relaunches_on_the_next_run_at_the_same_sha(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, PREFLIGHT_LOG)
+    out = rig.run(now=_tick(1))
+    atts = rig.row()["resume_attempts"]
+    assert atts[0]["outcome"] == "preflight_failed"
+    assert atts[0]["outcome_detail"].startswith("1. [staging disk] Insufficient cache space")
+    assert len(rig.launches) == 2 and out["launched"] == ["drive_failed:demo-drive-a:r1"]
+    assert atts[1]["action"] == "launched" and "outcome" not in atts[1]
+    rig.run(now=_tick(2))  # the relaunch is not judged by the previous run's finished record
+    assert len(rig.launches) == 2
+
+
+def test_an_encode_stage_failure_does_not_relaunch_at_the_same_sha(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, ENCODE_LOG)
+    rig.run()
+    assert len(rig.launches) == 1
+    assert rig.row()["resume_attempts"][0]["outcome"] == "failed"
+
+
+def test_a_failure_with_no_log_is_a_plain_failure_not_a_preflight_one(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, "")
+    (rig.jobs / "h1" / "output.log").unlink()
+    rig.run()
+    assert len(rig.launches) == 1
+    assert rig.row()["resume_attempts"][0]["outcome"] == "failed"
+
+
+def test_preflight_retries_are_capped_per_recipe_per_sha(tmp_path):
+    rig = Rig(tmp_path)
+    for n in range(1, heal.HEAL_PREFLIGHT_RETRIES + 1):
+        rig.run(now=_tick(n - 1))
+        assert len(rig.launches) == n
+        _finish_heal_job(rig, n, PREFLIGHT_LOG)
+    rig.run(now=_tick(heal.HEAL_PREFLIGHT_RETRIES))
+    rig.run(now=_tick(heal.HEAL_PREFLIGHT_RETRIES + 1))
+    assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES
+    last = rig.row()["resume_attempts"][-1]
+    assert last["action"] == "skipped"
+    assert last["reason"] == "pre-flight failed 8x on this SHA; waiting for a new mirror SHA"
+    rig.run(sha="1234567fedcba")  # pragma: allowlist secret
+    assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES + 1
+
+
+def test_a_preflight_failed_retry_still_obeys_the_other_guards(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, PREFLIGHT_LOG)
+    rig.running = True
+    rig.run(now=_tick(1))
+    assert len(rig.launches) == 1
+    assert rig.row()["resume_attempts"][-1]["reason"] == "a drive job is running"
+
+
+def test_the_outcome_notice_says_failed_pre_flight_with_the_blocker(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, PREFLIGHT_LOG)
+    rig.running = True
+    rig.run(now=_tick(1))
+    text = [s for e, s in rig.pushes if e == "health_heal_outcome"][0]
+    assert "failed pre-flight: 1. [staging disk] Insufficient cache space" in text
+
+
+def test_the_preflight_detail_is_truncated_to_300_chars(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, PREFLIGHT_LOG.replace("need ~351.4 GB", "x" * 500))
+    rig.running = True
+    rig.run(now=_tick(1))
+    assert len(rig.row()["resume_attempts"][0]["outcome_detail"]) == 300
