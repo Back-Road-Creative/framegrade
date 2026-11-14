@@ -90,3 +90,11 @@ def test_block_pins_the_literal_region_days_and_times(brand):
     assert dict(usa.day_times) == {parse_weekday("fri", "fri"): dt_time(15, 0)}
     assert cad.superlong_day == parse_weekday("superlong", "sat")
     assert cad.lead_hours == 72
+
+
+def test_the_seed_books_far_enough_ahead_to_render_the_backlog_through():
+    """JP 2026-11-14: render and schedule the Ireland backlog as fast as the box allows, not
+    one drive a week. ``health backlog`` renders for any free slot inside the lead window
+    (``launch.render_horizon_h``), so the seed's lead window is what lets it run ahead:
+    70 days reaches mid-January from mid-November."""
+    assert load_cadence(SEED).lead_hours == 1680

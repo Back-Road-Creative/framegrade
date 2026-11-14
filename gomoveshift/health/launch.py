@@ -4,7 +4,7 @@ LF slot, audit only (``--skip-upload --no-youtube-upload``), through the job run
 Order, each a stop: the ``gms-backlog-launch`` lease (held = noop); a running drive (noop); a
 region row already ``auditing`` (noop: that audit owns the next slot, so a repeat call never
 launches a second drive; a failed one whose backlog row was dropped is ``retire``d to ``failed``
-instead, and its recipes get a ``no-auto-resume`` hold so ``health heal`` leaves it dead); the region's free slots inside ``COVERAGE_HORIZON_H`` minus its ready
+instead, and its recipes get a ``no-auto-resume`` hold so ``health heal`` leaves it dead); the region's free slots inside ``horizon_h`` (``render_horizon_h``) minus its ready
 drives (none left = covered). A drive whose output dir already holds Phase D upload records
 (``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
@@ -590,8 +590,10 @@ def _job_argv(code_root, jobs_dir, project: str, out_dir: Path, drive_argv: List
     ]  # fmt: skip
 
 
-def _slot_target(slots, ready: int, now: datetime) -> Optional[Tuple[datetime, str]]:
-    horizon = now + timedelta(hours=COVERAGE_HORIZON_H)
+def _slot_target(
+    slots, ready: int, now: datetime, horizon_h: int = COVERAGE_HORIZON_H
+) -> Optional[Tuple[datetime, str]]:
+    horizon = now + timedelta(hours=horizon_h)
     free = sorted(s for s in slots if now <= s[0] <= horizon)
     return free[ready] if len(free) > ready else None
 
@@ -658,6 +660,7 @@ def run_backlog(
     latest_version: Callable[[], str] = default_latest_version,
     supersede: Optional[Tuple[str, str]] = None,
     publish: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
+    horizon_h: int = COVERAGE_HORIZON_H,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
@@ -666,7 +669,7 @@ def run_backlog(
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
                     drive_running, preflight, render_gate, launcher, register, retire, disk,
-                    installed_version, latest_version, supersede, publish)  # fmt: skip
+                    installed_version, latest_version, supersede, publish, horizon_h)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
@@ -674,7 +677,8 @@ def run_backlog(
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
-         launcher, register, retire, disk, installed_version, latest_version, supersede, publish):  # fmt: skip
+         launcher, register, retire, disk, installed_version, latest_version, supersede, publish,
+         horizon_h):  # fmt: skip
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -733,9 +737,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         # it now reads, re-registering the same store row
         relaunch, res["relaunch"] = target, failed
         mine = [d for d in mine if d.project != relaunch]
-    slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now)
+    slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now, horizon_h)
     if slot is None:
-        return {**res, "reason": f"covered: every free slot inside {COVERAGE_HORIZON_H} h has a ready drive"}  # fmt: skip
+        return {**res, "reason": f"covered: every free slot inside {horizon_h} h has a ready drive"}  # fmt: skip
     res.update(slot=slot[0].isoformat(), lf_day=slot[1])
     status = {d.project: d.status for d in drives if d.project != relaunch}
     staged = staged_sources(stages_root)
@@ -950,6 +954,17 @@ def load_inputs(config: Any, region: str, ledger_path: Optional[Path], now: date
     known = {(e.project_name or "").strip().lower() for e in ledger.entries} - {""}
     rows = backlog.load(drive_backlog_path())
     return region, rows, drives, slots, known, register
+
+
+def render_horizon_h(config: Any) -> int:
+    """How far ahead ``health backlog`` renders: the wider of ``COVERAGE_HORIZON_H`` and the
+    cadence's ``lead_hours``. An audited drive publishes only into a slot it can claim, and a
+    claim is refused past ``lead_hours``, so rendering further ahead than that would leave a
+    finished drive holding its scratch. Rendering as far as it reaches lets the backlog run
+    drive after drive instead of one a week (JP 2026-11-14)."""
+    from ..pipeline.seo_slots import waypost_cadence
+
+    return max(COVERAGE_HORIZON_H, int(waypost_cadence(config).lead_hours))
 
 
 def store_retire(config: Any) -> Callable[[str], None]:

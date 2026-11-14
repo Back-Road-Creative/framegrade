@@ -16,7 +16,11 @@ media:
 seo:
   cadence:
     timezone: America/New_York
-    lead_hours: 72
+    # How far ahead a finished drive may claim its slot. ``health backlog`` renders for any
+    # free slot this far out (``launch.render_horizon_h``), so 70 days lets the backlog render
+    # and schedule drive after drive instead of one a week (JP 2026-11-14: "we should be
+    # pumping through these to get them rendered and published/scheduled asap").
+    lead_hours: 1680
     superlong_day: sat
     regions:
       ireland:

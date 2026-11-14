@@ -103,9 +103,10 @@ parses, and that no chapter is queued twice.
 Consumers: `gomoveshift health check` rule 2b (`lf_slot_uncovered`) pages when a region's
 earliest free LF slot is within 7 days and the region has no ready drive, naming the
 manifest's next row for that region (or saying none is left). `seo-manager schedule
-backlog-next --manifest <path>` prints the same row. Nothing audits or renders a row on its
-own: an operator (or an agent session) runs `gomoveshift health backlog --region R` to launch
-the next eligible row as an audit-only drive (`docs/pipeline/156-health-check.md`); no cron
-calls it. Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
+backlog-next --manifest <path>` prints the same row. The hourly `bin/gms-health-cron.sh` tick (workspaces)
+runs `gomoveshift health backlog --region R` per region, which launches the next eligible row as
+an audit-only drive for any free slot inside the render horizon (the wider of 7 days and
+`lead_hours`, 70 days in the packaged `brand.yaml`), so rows render back to back
+(`docs/pipeline/156-health-check.md`). Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
 claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
