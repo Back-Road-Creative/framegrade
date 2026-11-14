@@ -2687,18 +2687,41 @@ def run_day_pipeline(
         # The day's length is the end of its last file boundary.
         _plans = list(lf_plans or [])
         _pos = next(i for i, p in enumerate(_plans) if p is lf_plan)
-        check_lf_work_space(
-            master_source_for_extract,
-            lf_dir,
-            _lf_plan_seconds(segments),
-            float(file_boundaries[-1][1]) if file_boundaries else 0.0,
-            lf_index=idx,
-            later_lf_secs=[
-                _lf_plan_seconds(getattr(p, "segments", []) or [])
-                for n, p in enumerate(_plans[_pos + 1 :], start=_pos + 2)
-                if not (lf_dir / f"lf_{int(getattr(p, 'index', n)):02d}.mp4").is_file()
-            ],
-        )
+
+        def _gate_lf_work_space() -> None:
+            check_lf_work_space(
+                master_source_for_extract,
+                lf_dir,
+                _lf_plan_seconds(segments),
+                float(file_boundaries[-1][1]) if file_boundaries else 0.0,
+                lf_index=idx,
+                later_lf_secs=[
+                    _lf_plan_seconds(getattr(p, "segments", []) or [])
+                    for n, p in enumerate(_plans[_pos + 1 :], start=_pos + 2)
+                    if not (lf_dir / f"lf_{int(getattr(p, 'index', n)):02d}.mp4").is_file()
+                ],
+            )
+
+        try:
+            _gate_lf_work_space()
+        except RuntimeError as exc:
+            # A re-burn's old final sits on this volume and this burn replaces
+            # it. Short with it in the way: give its room back and price again
+            # (the second gate raises if the day is still short).
+            if not final_lf.is_file():
+                raise
+            logger.warning(
+                "Day %s: LF %d work space is short (%s). Removing its stale final "
+                "%s (%.1f GB), which this burn replaces, and checking again.",
+                date,
+                idx,
+                exc,
+                final_lf,
+                final_lf.stat().st_size / 1024**3,
+            )
+            final_lf.unlink()
+            fp_path.unlink(missing_ok=True)
+            _gate_lf_work_space()
         trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"
