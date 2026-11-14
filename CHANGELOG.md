@@ -5,6 +5,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.87] - 2026-11-13
+
+### Added
+
+- The console `/jobs` page now also lists the host job-runner records (cron jobs, heal runs, CLI drives), read-only and marked by origin, with a detail page at `/jobs/host/<id>` showing the last 100 log lines. An unreadable jobs directory shows "unavailable" instead of an empty list.
+- Console: a read-only Waypost page at `/status` (first tab) and `/status.json`, drawn from the same snapshot as `gomoveshift status`. It lists what needs attention, what is rendering, the runway, publishing by platform, the backlog and the machine, refreshes in place every 30 s with a Pause updates button, and says `unavailable: <reason>` for any store it cannot read (docs/pipeline/179-status.md).
+- `gomoveshift status [--json]`: one read-only snapshot of running and recent jobs, open incidents, the publishing queue by platform, the schedule runway, the drive backlog, free disk space, the GPU lock and the cron logs. Each section says where and when it read; a store it cannot read says `unavailable` with the reason instead of looking empty. New settings: `GMS_JOBS_DIR`, `GMS_CRON_LOGS_DIR`, `GMS_STATUS_VOLUMES`, `GMS_STATUS_GPU_LOCK_PATH` (docs/pipeline/179-status.md).
+
+### Fixed
+
+- A long-form re-burn that is short of work space only because its own old final is still on the cache volume now removes that final (the burn replaces it) and checks again, instead of stopping the day. Found on `nctopa-2026-03-05-rec0063`: 14.5 GB short beside a 44 GB final of the old label.
+
 ## [0.3.86] - 2026-11-13
 
 ### Fixed
@@ -1051,7 +1063,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.87...HEAD
+[0.3.87]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.86...v0.3.87
 [0.3.86]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.85...v0.3.86
 [0.3.85]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.84...v0.3.85
 [0.3.84]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.83...v0.3.84
