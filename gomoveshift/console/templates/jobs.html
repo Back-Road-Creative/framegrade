@@ -26,6 +26,7 @@
   </div>
   {% endif %}
 
+  <h2>Console jobs (origin: console)</h2>
   {% if not job_rows %}
   <p>No jobs yet.</p>
   {% endif %}
@@ -41,6 +42,32 @@
     </li>
     {% endfor %}
   </ul>
+
+  <h2>Host jobs (started outside this console)</h2>
+  {% if host_jobs.unavailable %}
+  <p>Host jobs unavailable: {{ host_jobs.unavailable }}</p>
+  {% else %}
+  <p>Origin: host runner (cron jobs, heal runs, CLI drives). Read-only; newest {{ host_jobs.rows|length }} shown from {{ host_jobs.source }}.
+  {% if host_jobs.unreadable %}{{ host_jobs.unreadable }} unreadable record{{ "s" if host_jobs.unreadable != 1 else "" }} skipped.{% endif %}</p>
+  {% if not host_jobs.rows %}<p>No host job records in that directory.</p>{% else %}
+  <table>
+    <thead><tr><th>Origin</th><th>Name</th><th>State</th><th>Started</th><th>Ended</th><th>Exit code</th><th></th></tr></thead>
+    <tbody>
+    {% for h in host_jobs.rows %}
+    <tr>
+      <td>{{ h.origin }}</td>
+      <td>{{ h.name }}</td>
+      <td>{{ h.state }}</td>
+      <td>{{ h.created_at | et }}</td>
+      <td>{{ h.ended_at | et }}</td>
+      <td>{{ h.exit_code if h.exit_code is not none else "-" }}</td>
+      <td><a href="/jobs/host/{{ h.id }}">Details</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% endif %}
 
   <h2>Schedules</h2>
   {# `form` is what was submitted, present only on a refusal. #}

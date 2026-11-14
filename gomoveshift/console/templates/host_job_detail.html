@@ -1,0 +1,19 @@
+{% extends "_base.html" %}
+{% block title %}Host job {{ job.name }} - GoMoveShift Console{% endblock %}
+{% block content %}
+  <h1>Host job: {{ job.name }}</h1>
+  <p><em>Origin: {{ job.origin }}. Started outside this console, so it can only be viewed here.</em></p>
+  <ul>
+    <li>State: {{ job.state }}{% if job.exit_code is not none %} (exit code {{ job.exit_code }}){% endif %}</li>
+    <li>Started: {{ job.created_at | et }}</li>
+    <li>Last heartbeat: {{ job.heartbeat_at | et }}</li>
+    <li>Ended: {{ job.ended_at | et }}</li>
+    <li>Run id: {{ job.run_id or "-" }}</li>
+    <li>Command: <code>{{ job.argv or "-" }}</code></li>
+    <li>Log file: {{ job.log }}</li>
+  </ul>
+  <h2>Last 100 log lines</h2>
+  <pre>{% for line in job.log_tail %}{{ line }}
+{% endfor %}</pre>
+  <p><a href="/jobs">Back to jobs</a></p>
+{% endblock %}
