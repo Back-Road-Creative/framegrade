@@ -86,3 +86,15 @@ unreadable log yields no label at all, never a "stalled" claim it can't back up.
 `list_jobs` add the `liveness` key only to a row whose `status == "running"`; every other status
 renders exactly as before, with no new key. `jobs.html` and `job_detail.html` print it beside the
 status when present.
+
+**Host job-runner records on `/jobs` (read-only).** The console's own jobs are only the ones it
+started, so cron jobs, heal runs and CLI drives were invisible there. `/jobs` now has a second table,
+"Host jobs (started outside this console)": the newest 50 records from the job-runner directory
+(`GMS_JOBS_DIR`, default `<data root>/logs/jobs`, the same directory `gomoveshift status` reads,
+via `health.drives.load_records`). Each row is marked `host runner`; the console table is marked
+`console`. Times show in Eastern. If the directory cannot be read the section says
+`unavailable: <reason>` rather than an empty table, and unreadable records are counted. A row links
+to `GET /jobs/host/<uuid>`, which shows the record's fields and the last 100 lines of its
+`output.log`. The id must be a plain `[A-Za-z0-9_-]+` name matching a directory `load_records`
+returned, else 404. Host rows have no cancel, no re-run and no form, and the GET handlers write and
+launch nothing.

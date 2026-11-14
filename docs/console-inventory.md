@@ -26,12 +26,13 @@ has those rows **unavailable**; every other row is unchanged.
 |---|---|---|---|---|---|---|
 | GET | `/healthz` | - | proven | 200 | test_console_app, test_console_auth | minimal body unauthenticated |
 | GET | `/` | overview | proven | 200 | test_console_app |  |
-| GET | `/jobs` | jobs | proven | 200 | test_console_jobs |  |
+| GET | `/jobs` | jobs | proven | 200 | test_console_jobs | also lists host job-runner records (read-only, newest 50), marked by origin |
 | POST | `/jobs` | jobs | proven-test | not executed | test_console_jobs | launches an allowlisted subcommand; generic form only |
 | POST | `/jobs/drain` | jobs | proven-test | not executed | test_console_jobs |  |
 | POST | `/jobs/schedules` | jobs | proven-test | not executed | test_console_jobs |  |
 | POST | `/jobs/schedules/{schedule_id}/toggle` | jobs | proven-test | not executed | test_console_jobs |  |
 | POST | `/jobs/schedules/{schedule_id}/delete` | jobs | proven-test | not executed | test_console_jobs |  |
+| GET | `/jobs/host/{record_id}` | jobs | proven-test | not executed | test_console_jobs_host_records | read-only view of a host job-runner record (not started by this console); log tail only |
 | GET | `/jobs/{job_id}` | jobs | proven-test | not executed | test_console_interrupted_evidence |  |
 | POST | `/jobs/{job_id}/cancel` | jobs | proven-test | not executed | test_console_host_executor | host-executor jobs only; writes the worker's cancel marker |
 | POST | `/jobs/{job_id}/rerun` | jobs | proven-test | not executed | test_console_jobs, test_console_rerun_provenance |  |

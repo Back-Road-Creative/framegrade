@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .. import run_origin
+from ..health import drives
 from . import hostspool, notify, runs, settings
 from .night_job_evidence import project_outcome
 
@@ -898,6 +900,62 @@ def start_ticker(store: JobStore, log_dir: Path, tick_seconds: float) -> Ticker:
     ticker = Ticker(store, log_dir, tick_seconds)
     ticker.start()
     return ticker
+
+
+HOST_LIST_CAP = 50
+_HOST_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _host_row(rec: dict) -> dict:
+    """One job-runner record shaped for the page (reuses the status snapshot's shaping)."""
+    from ..status import snapshot  # noqa: PLC0415
+
+    row = snapshot._job_row(rec)
+    row["id"] = Path(str(rec.get(drives._DIR_KEY))).name
+    row["origin"] = "host runner"
+    row["argv"] = " ".join(str(a) for a in rec.get("argv") or [])
+    return row
+
+
+def host_records() -> dict:
+    """Read-only view of the host job-runner records: ``{"rows", "unreadable", "source"}``, or
+    ``{"unavailable": reason, "source"}`` when the directory cannot be read. Newest first, capped."""
+    from ..status import snapshot  # noqa: PLC0415
+
+    try:
+        path = snapshot.jobs_dir()
+    except Exception as exc:  # the data-root probe shells out; the page must still render
+        return {"unavailable": f"cannot resolve the jobs directory ({exc})", "source": "-"}
+    try:
+        snapshot._need_dir(path)
+        records, unreadable = drives.load_records(path)
+    except OSError as exc:
+        return {"unavailable": str(exc), "source": str(path)}
+    records.reverse()
+    return {
+        "rows": [_host_row(r) for r in records[:HOST_LIST_CAP]],
+        "unreadable": unreadable,
+        "source": str(path),
+    }
+
+
+def get_host_record(record_id: str) -> dict | None:
+    """The record whose directory is ``record_id`` under the jobs dir, else None. The id must be a
+    plain name AND match a directory ``load_records`` returned, so nothing is ever joined to a path."""
+    from ..status import snapshot  # noqa: PLC0415
+
+    if not _HOST_ID_RE.fullmatch(record_id):
+        return None
+    try:
+        records, _ = drives.load_records(snapshot.jobs_dir())
+    except Exception:  # noqa: BLE001 -- the data-root probe shells out; unknown, never a 500
+        return None
+    for rec in records:
+        if Path(str(rec.get(drives._DIR_KEY))).name == record_id:
+            row = _host_row(rec)
+            row["log_tail"] = tail_log(str(rec.get(drives._DIR_KEY)) + "/output.log", 100)
+            return row
+    return None
 
 
 def tail_log(log_path: str | Path, lines: int = 100) -> list[str]:

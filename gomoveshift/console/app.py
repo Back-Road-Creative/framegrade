@@ -314,6 +314,7 @@ def create_app() -> FastAPI:
             "allowed": sorted(jobs.GENERIC_SUBCOMMANDS),
             "schedule_rows": jobs.list_schedules(store),
             "ticker_enabled": ticker_enabled,
+            "host_jobs": jobs.host_records(),
         }
 
     @app.get("/jobs", response_class=HTMLResponse)
@@ -390,6 +391,15 @@ def create_app() -> FastAPI:
             _job_store(), "route-story-film", argv, _log_dir(), env=brand_launch_env()
         )
         return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    @app.get("/jobs/host/{record_id}", response_class=HTMLResponse)
+    def host_job_detail(request: Request, record_id: str):
+        # Read-only: a job-runner record this console did not start. Registered before
+        # `/jobs/{job_id}`; no cancel, no rerun, no form.
+        row = jobs.get_host_record(record_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Unknown host job")
+        return templates.TemplateResponse(request, "host_job_detail.html", {"job": row})
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_detail(request: Request, job_id: int):
