@@ -28,7 +28,10 @@ def _sync_one(tmp_path, analytics):
     gen._is_analytics_eligible = MagicMock(return_value=True)
     gen._fetch_video_analytics_metrics = MagicMock(return_value=analytics)
     gen._batch_sync_stats(sync, {"vid1": "content1"})
-    return mock_manager_cls.return_value.store.upsert_event.call_args[0][0].data
+    # The sync saves its events in one batch (upsert_events); read the one event saved.
+    (events,) = mock_manager_cls.return_value.store.upsert_events.call_args.args
+    (event,) = events
+    return event.data
 
 
 def test_a_card_click_rate_is_written_as_one(tmp_path):
