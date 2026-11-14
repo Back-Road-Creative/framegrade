@@ -2047,14 +2047,24 @@ def _approve_waypost_titles_before_encode(
     prior_decisions = state.per_lf_pre_render_title_decisions or {}
     decisions = {}
     plans_by_index = {int(lf.index): lf for lf in lf_plans}
+    unproven: list = []
     for lf_idx, ost in sorted(ost_text.items()):
         route_ev = (route_claims_by_lf or {}).get(lf_idx)
         if route_ev is None:
-            if gps_points_by_lf.get(lf_idx):
+            if (gps_points_by_lf or {}).get(lf_idx):
                 raise PreRenderTitleError(
                     f"LF {lf_idx} has retained GPS but no route evidence for title approval"
                 )
-            continue  # GPS-less titles keep their existing Phase D path.
+            # GPS-less by Phase D's own record (``per_lf_gpx_path`` holds the LF as
+            # None; a resume has no GPS points even for a GPS drive, so their absence
+            # proves nothing): the two checks Phase D and DoD #20 run on this text
+            # after the render run here, before it.
+            if _recorded_gps_less(state, lf_idx):
+                lf = plans_by_index.get(int(lf_idx))
+                is_part = (getattr(lf, "part_count", None) or 1) > 1
+                title_label = ost if is_part else (state.per_lf_titles or {}).get(lf_idx, ost)
+                unproven.extend(_gps_less_label_problems(state, lf_idx, ost, title_label))
+            continue
         assert_gps_density_backs_title(lf_idx, (state.per_lf_gps_coverage_pct or {}).get(lf_idx))
         lf = plans_by_index[lf_idx]
         part = (
@@ -2085,7 +2095,53 @@ def _approve_waypost_titles_before_encode(
         ):
             decision = old
         decisions[lf_idx] = decision
+    if unproven:
+        raise PreRenderTitleError(
+            f"{len(unproven)} GPS-less long-form label problem(s), refused before the encode "
+            "(each would fail after the render):\n  " + "\n  ".join(unproven)
+        )
     state.per_lf_pre_render_title_decisions = decisions or None
+
+
+def _recorded_gps_less(state, lf_idx) -> bool:
+    """The drive declares unmeasured evidence (a ``bracket_route`` or a
+    ``placeless_label``) and ``per_lf_gpx_path`` records ``lf_idx`` (int or str
+    key) with no GPX path (``_build_per_lf_gpx_path_map``: no GPX-bearing segment).
+    Those are the LFs whose text only the bracket or placeless label can prove."""
+    if not (getattr(state, "bracket_route", None) or getattr(state, "placeless_label", None)):
+        return False
+    paths = getattr(state, "per_lf_gpx_path", None) or {}
+    for key in (lf_idx, str(lf_idx)):
+        if key in paths:
+            return paths[key] is None
+    return False
+
+
+def _gps_less_label_problems(state, lf_idx, ost, title_label) -> list:
+    """Why a GPS-less LF's text would be refused after its render; empty = proven.
+
+    With no clip GPS, its shorts verify (DoD #20, ``unverified_place_shorts``) only
+    when the burned text is exactly the drive's bracket label or its claim-free
+    placeless label (``unmeasured_place_source``), and its title passes Phase D's
+    ``refuse_unsupported_title`` only through the bracket record. Same functions,
+    called before the encode instead of after it."""
+    from ..location_evidence import TitleEvidenceError, refuse_unsupported_title
+    from ..ost_system_review import unmeasured_place_source
+
+    problems = []
+    if not unmeasured_place_source(state, ost):
+        problems.append(
+            f"LF {lf_idx} burns {ost!r}, which is neither the drive's bracket label nor its "
+            "claim-free placeless label: with no clip GPS its shorts fail places_verified "
+            "(DoD #20)"
+        )
+    try:
+        refuse_unsupported_title(
+            title_label, None, lf_index=lf_idx, bracket=getattr(state, "bracket_route", None)
+        )
+    except TitleEvidenceError as exc:
+        problems.append(str(exc))
+    return problems
 
 
 def _build_location_evidence_per_lf(skeleton_lfs, gps_points_by_lf, geocoder) -> dict:
