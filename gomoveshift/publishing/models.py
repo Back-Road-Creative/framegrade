@@ -218,6 +218,11 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: record (``publishing/experiments.py``); ``{}`` = in no experiment. Rides
     #: the sidecar only -- ``deliveries`` has no column for it.
     experiment_arms: dict = field(default_factory=dict, compare=False, hash=False)
+    #: ``{platform: caption opener id}`` (``social_generator.caption_template_id``)
+    #: the caption generator built this record's captions from: the key Meta caption
+    #: learning joins reach and plays to. ``{}`` = hand caption or an older plan.
+    #: Rides the sidecar only, like ``experiment_arms``.
+    caption_templates: dict = field(default_factory=dict, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.format is not None and self.format not in KNOWN_FORMATS:
