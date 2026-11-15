@@ -79,7 +79,9 @@ def test_shorts_never_explore():
             place=Place("Nordale", "seg-1:geocode"),
             highlight=Place("Ashtarn Ridge", "seg-4:gps"),
         )
-        decision = decide_title("short", baseline, None, suffix="", facts=facts, explore_key=baseline)
+        decision = decide_title(
+            "short", baseline, None, suffix="", facts=facts, explore_key=baseline
+        )
         assert decision["reason"] == "insufficient_evidence"
         assert decision["chosen_title"] == baseline
 
@@ -117,7 +119,9 @@ def test_the_final_text_review_agrees_with_the_approved_explored_title():
 
 def test_an_explored_title_no_pre_render_approval_chose_still_disagrees():
     baseline = _approved()["baseline_title"]
-    decision = decide_title("longform", baseline, _location(), suffix=" in 4K", explore_key=baseline)
+    decision = decide_title(
+        "longform", baseline, _location(), suffix=" in 4K", explore_key=baseline
+    )
     assert decision["reason"] == "exploration"
     review = _review(decision)
     assert review["verdict"] == "disagree"

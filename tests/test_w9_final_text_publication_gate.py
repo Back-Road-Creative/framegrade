@@ -274,6 +274,7 @@ def _phase_d_metadata(tmp_path, state):
 
     loc = state.per_lf_location_evidence[1]
     gen = MagicMock()
+
     def generate(**kw):
         # As longform_metadata does: the title is the decision's chosen title.
         decision = kw.get("preselected_title_decision") or decide_title(

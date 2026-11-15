@@ -155,8 +155,11 @@ carry the block itself to keep the experiment running.
   `title_decision.shipped_title_snapshot()`; none, or one Waypost refuses, keeps the baseline as
   `insufficient_evidence`. **A title moves only once the baseline and a non-baseline template
   each have their own 400 impressions** (and the alternative beats the baseline by more than
-  10%). Today only the baseline ships, so no alternative can earn evidence until exploration
-  exists; that is a separate decision, pending with JP. A single-place Short has no second
+  10%). **Exploration** (JP 2026-11-15, Waypost `title-policy-3`): 1 long-form in 4, picked by
+  the SHA-256 of its baseline title, ships its least-measured renderable alternative (reason
+  `exploration`) so alternatives earn their own impressions. Only the pre-render approval
+  (`approve_retained_title`) passes the key, so the explored title is geo-checked before the OST
+  burn and Phase D reuses it; Shorts never explore. A single-place Short has no second
   renderable template, so its decision stays the baseline regardless. The final-text review
   (`youtube_adapter`, `final_text_record`) still decides with no snapshot.
 - **Where the real policy lives**: the host has no `GMS_BRANDS_DIR/gomoveshift/` overlay, so the
