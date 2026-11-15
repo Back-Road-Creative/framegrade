@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.95] - 2026-11-15
+
+### Added
+
+- Facebook and Instagram caption openers now learn from Meta performance. The nightly
+  `metrics collect` writes each opener's day-7 Facebook initial plays and Instagram reach to
+  `caption_evidence.json`, and the caption generator tries openers that clearly beat the pool
+  first and those that clearly trail it last, through Waypost's `rank_captions`. Nothing changes
+  until two openers each have 10 settled posts, and the anti-spam rule against repeating a recent
+  opener still wins. Each post records the ranking it was built from (`caption_rankings`).
+
 ## [0.3.94] - 2026-11-14
 
 ### Fixed
@@ -1110,7 +1121,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.94...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.95...HEAD
+[0.3.95]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.94...v0.3.95
 [0.3.94]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.93...v0.3.94
 [0.3.93]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...v0.3.93
 [0.3.92]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.91...v0.3.92
