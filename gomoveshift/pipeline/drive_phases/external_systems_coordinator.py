@@ -17,6 +17,7 @@ from ..title_decision import (
     TitleDecisionMismatchError,
     TitleDecisionMissingError,
     decide_title,
+    shipped_title_snapshot,
 )
 
 # Logger keeps phase_d's name so caplog assertions still flow.
@@ -162,7 +163,9 @@ def superlong_final_text_inputs(state, part_key: str, record: dict, metadata: di
         raise FinalTextReviewError(
             part_key, ["route_record_missing"], "a GPS day's part carries no retained-route claim"
         )
-    metadata["title_decision"] = decide_title("superlong", title, None, suffix="")
+    metadata["title_decision"] = decide_title(
+        "superlong", title, None, suffix="", snapshot=shipped_title_snapshot()
+    )
     date = part_key.split(":", 1)[0]
     # The review state reads per-LF tables by the LF index (build) and by the
     # part key (upload_if_needed), so each table answers to both.

@@ -37,7 +37,7 @@ from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
 from .final_text_record import reviewable_short_tags
 from .geo_constants import US_STATE_ABBREVS
-from .title_decision import decide_title, short_place_facts
+from .title_decision import decide_title, shipped_title_snapshot, short_place_facts
 from .weather import WeatherCondition, WeatherResult
 
 logger = logging.getLogger(__name__)
@@ -906,6 +906,7 @@ class SocialGenerator:
         )
         #: Meta caption evidence, loaded on first use; ``False`` = none usable.
         self._caption_evidence = None
+        self._title_snapshot = None
         self._caption_rankings: "dict[str, dict]" = {}
         if experiments is None:
             from ..console.settings import current_brand
@@ -2081,7 +2082,16 @@ class SocialGenerator:
                     self._own_regions,
                     segment_id=f"lf{self.series_part or 0:02d}-short{short_index:03d}",
                 )
-            decision = decide_title("short", baseline, None, suffix="", facts=place_facts)
+            if self._title_snapshot is None:
+                self._title_snapshot = shipped_title_snapshot() or False
+            decision = decide_title(
+                "short",
+                baseline,
+                None,
+                suffix="",
+                snapshot=self._title_snapshot or None,
+                facts=place_facts,
+            )
             post = SocialPost(
                 experiment_arms=arms,
                 caption_templates=caption_templates,

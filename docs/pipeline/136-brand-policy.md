@@ -141,5 +141,23 @@ carry the block itself to keep the experiment running.
   opener is still never reused inside the gate's window. Each ranking is recorded on the post as
   `SocialPost.caption_rankings` (`social_posts.json`). No evidence file, or one Waypost refuses,
   leaves the plain rotation and records nothing. YouTube and TikTok openers are not ranked.
+- **YouTube title learning** (`tracking/title_evidence.py`, Waypost
+  `analytics.title_evidence`): the nightly `metrics collect` maps each YouTube video id to the
+  template that titled it (a Short's `title_decision` in `shorts/lf_*/social_posts.json`, joined
+  to `ShortRecord.platform_ids["youtube"]`; a long-form's in `youtube_uploads.json`), skipping a
+  decision with no chosen template id or `facts_unavailable`, and writes
+  `<seo storage>/title_evidence.json` from the collected `youtube_reach_combined` rows (Shorts
+  count browse, long-forms search). It prints `TITLE_EVIDENCE format=<f> traffic=<t>
+  templates=<k> impressions=<n>` plus a `TITLE_EVIDENCE_ROWS` line of skip counters. No reach
+  store (`SEO_COLLECTION_DB`, nightly reach collection not yet switched on) is a logged skip that
+  creates nothing; a failure is logged and never fails the collection. Every shipped-title
+  decision (Shorts, long-forms, the pre-render long-form title, superlong) passes the file via
+  `title_decision.shipped_title_snapshot()`; none, or one Waypost refuses, keeps the baseline as
+  `insufficient_evidence`. **A title moves only once the baseline and a non-baseline template
+  each have their own 400 impressions** (and the alternative beats the baseline by more than
+  10%). Today only the baseline ships, so no alternative can earn evidence until exploration
+  exists; that is a separate decision, pending with JP. A single-place Short has no second
+  renderable template, so its decision stays the baseline regardless. The final-text review
+  (`youtube_adapter`, `final_text_record`) still decides with no snapshot.
 - **Where the real policy lives**: the host has no `GMS_BRANDS_DIR/gomoveshift/` overlay, so the
   shipped template's block is the live one. Adding an overlay later means copying the block into it.

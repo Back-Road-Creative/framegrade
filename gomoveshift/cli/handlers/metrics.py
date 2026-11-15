@@ -67,6 +67,14 @@ from ...tracking.suppression import (
     classify_facebook_reel_reach,
     classify_youtube_shorts_feed,
 )
+from ...tracking.title_evidence import (
+    TENANT as TITLE_EVIDENCE_TENANT,
+)
+from ...tracking.title_evidence import (
+    title_attribution,
+    title_evidence_report_lines,
+    write_title_evidence,
+)
 from ..logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -223,6 +231,7 @@ def _cmd_metrics_collect(args, config) -> int:
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     _report_caption_experiments(config, brand)
     _write_caption_evidence(config)
+    _write_title_evidence(config)
     return 0
 
 
@@ -283,6 +292,45 @@ def _write_caption_evidence(config) -> None:
             print(line)
     except Exception as exc:  # noqa: BLE001 - evidence must never fail the collection
         logger.warning("caption evidence not written: %s", exc)
+
+
+def _write_title_evidence(config) -> None:
+    """Write ``<seo storage>/title_evidence.json``: each shipped YouTube title
+    template's click-through from Waypost's collected reach rows, which every
+    shipped-title caller reads back (``tracking/title_evidence.py``). No reach
+    store yet (nightly reach collection not switched on) is a logged skip that
+    creates nothing. A failure is logged and swallowed: titles then keep the
+    baseline, and the collection still succeeds."""
+    try:
+        from seo_manager.analytics.title_evidence import title_evidence_from_store
+        from seo_manager.collection.store import CollectionStore
+        from seo_manager.paths import collection_db
+
+        db = collection_db()
+        if not db.is_file():
+            logger.info("title evidence: no reach store at %s; skipped", db)
+            print("TITLE_EVIDENCE skipped: no reach store")
+            return
+        storage_path = Path(config.seo.storage_path)
+        conn = open_queue_db(storage_path)
+        try:
+            lookup = _sidecar_lookup(conn, storage_path)
+
+            def base_for(project):
+                path = lookup(project)
+                return None if path is None else path.parent
+
+            attribution = title_attribution(TrackingStore().load_all_records(), base_for)
+        finally:
+            conn.close()
+        result = title_evidence_from_store(
+            CollectionStore(db), TITLE_EVIDENCE_TENANT, attribution, datetime.now(timezone.utc)
+        )
+        write_title_evidence(storage_path, result)
+        for line in title_evidence_report_lines(result):
+            print(line)
+    except Exception as exc:  # noqa: BLE001 - evidence must never fail the collection
+        logger.warning("title evidence not written: %s", exc)
 
 
 def _report_observations(record) -> None:
