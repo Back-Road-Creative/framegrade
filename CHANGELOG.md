@@ -5,6 +5,22 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.96] - 2026-11-15
+
+### Added
+
+- YouTube titles now read YouTube performance. The nightly `metrics collect` joins each
+  shipped title's chosen template to its video id (`social_posts.json` for a Short,
+  `youtube_uploads.json` for a long-form), asks Waypost's `title_evidence` for each template's
+  thumbnail click-through from the collected reach rows, and writes `title_evidence.json`
+  beside the queue. Every shipped-title decision (Shorts, long-forms, the pre-render
+  long-form title, superlong) now passes that file to Waypost's `select_title` instead of an
+  empty snapshot. No reach store yet, or no file, keeps today's behaviour: the baseline ships
+  as `insufficient_evidence`. A title moves only once the baseline and a non-baseline template
+  each have 400 impressions of their own; today only the baseline ships, so no alternative can
+  earn evidence until exploration exists (a separate decision). Pins Waypost to #114's branch
+  head.
+
 ## [0.3.95] - 2026-11-15
 
 ### Added
@@ -1121,7 +1137,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.95...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.96...HEAD
+[0.3.96]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.95...v0.3.96
 [0.3.95]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.94...v0.3.95
 [0.3.94]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.93...v0.3.94
 [0.3.93]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...v0.3.93
