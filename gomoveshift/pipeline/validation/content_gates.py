@@ -717,9 +717,13 @@ _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # "{A} to {B} [via …]" endpoint arc at the head of a title/OST label. Each
 # endpoint may carry its own state abbreviation — the cross-state form
 # "Blountville, TN to McMullin, VA via I-81" — which is not part of the name.
+# Waypost's ``region_route`` title puts the region first ("Ash County Drive: Alder
+# to Dogwood in 4K"): the "{region} Drive: " head and the " in 4K" tail are not
+# part of either endpoint.
 _TITLE_ENDPOINTS_RE = re.compile(
-    r"^\s*(?P<start>[^,|—(]+?)(?:,\s*[A-Z]{2}\b)?\s+to\s+(?P<end>[^,|—(]+?)"
-    r"(?:,\s*[A-Z]{2}\b)?(?:\s+via\s+[^,|—(]+)?\s*(?:[,|—(]|$)"
+    r"^\s*(?:[^,|—(:]+?\s+Drive:\s+)?(?P<start>[^,|—(]+?)(?:,\s*[A-Z]{2}\b)?\s+to\s+"
+    r"(?P<end>[^,|—(]+?)(?:,\s*[A-Z]{2}\b)?(?:\s+via\s+[^,|—(]+)?(?:\s+in\s+4K\b)?"
+    r"\s*(?:[,|—(]|$)"
 )
 
 

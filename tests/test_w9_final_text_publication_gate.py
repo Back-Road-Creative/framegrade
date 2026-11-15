@@ -274,16 +274,22 @@ def _phase_d_metadata(tmp_path, state):
 
     loc = state.per_lf_location_evidence[1]
     gen = MagicMock()
-    gen.generate.side_effect = lambda **kw: attach_drive_description(
-        state,
-        {
-            "title": TITLE,
-            "description": "Reviewed description",
-            "tags": ["harrow", "pellmere"],
-            "title_decision": kw.get("preselected_title_decision")
-            or decide_title("longform", TITLE, loc, suffix=SUFFIX),
-        },
-    )
+    def generate(**kw):
+        # As longform_metadata does: the title is the decision's chosen title.
+        decision = kw.get("preselected_title_decision") or decide_title(
+            "longform", TITLE, loc, suffix=SUFFIX
+        )
+        return attach_drive_description(
+            state,
+            {
+                "title": decision["chosen_title"],
+                "description": "Reviewed description",
+                "tags": ["harrow", "pellmere"],
+                "title_decision": decision,
+            },
+        )
+
+    gen.generate.side_effect = generate
     lf = _plan_lf()
     lf.total_duration = 600.0
     with patch(
@@ -348,7 +354,8 @@ class TestHappyPath:
         assert out is not None and out["video_id"]
         assert _inserts(svc) == 1
         snippet = svc.videos.return_value.insert.call_args.kwargs["body"]["snippet"]
-        assert snippet["title"] == meta["title"] == TITLE
+        decided = state.per_lf_pre_render_title_decisions[1]["chosen_title"]
+        assert snippet["title"] == meta["title"] == decided
         entries = meta["final_text_description"]
         assert snippet["description"] == compose_description(entries)
         assert snippet["tags"] == compose_tags(entries)
