@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Union
 
 from seo_manager.analytics.title_selection import (
@@ -156,6 +157,17 @@ def short_place_facts(
                 format="short", baseline_title=baseline_title, place=Place(place, evidence_id)
             )
     return None
+
+
+def shipped_title_snapshot() -> Optional[EvidenceSnapshot]:
+    """The nightly ``title_evidence.json`` (``tracking/title_evidence.py``) beside the
+    caption generator's ``DEFAULT_SEO_STORAGE``, or None (no file, unreadable or
+    refused): every caller that decides a SHIPPED title passes this as ``snapshot``,
+    and None keeps the baseline as ``insufficient_evidence``."""
+    from ..tracking.title_evidence import load_title_evidence
+    from . import longform_metadata
+
+    return load_title_evidence(Path(longform_metadata.DEFAULT_SEO_STORAGE))
 
 
 def decide_title(
@@ -351,7 +363,7 @@ def approve_retained_title(
         baseline,
         record,
         suffix=suffix,
-        snapshot=snapshot,
+        snapshot=snapshot if snapshot is not None else shipped_title_snapshot(),
         facts=facts,
     )
     if decision["reason"] == FACTS_UNAVAILABLE and not _unproven_title_allowed():

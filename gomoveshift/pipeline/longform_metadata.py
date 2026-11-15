@@ -1712,7 +1712,7 @@ class LongFormMetadataGenerator:
         result, location_evidence, title_evidence, title_part, *, preselected_title_decision=None
     ) -> None:
         from .title_builder import append_full_drive_part_suffix
-        from .title_decision import PreRenderTitleError, decide_title
+        from .title_decision import PreRenderTitleError, decide_title, shipped_title_snapshot
 
         baseline = result["title"]
         if title_part:
@@ -1735,7 +1735,7 @@ class LongFormMetadataGenerator:
             baseline,
             location_evidence,
             suffix=baseline[cut:] if cut >= 0 else "",
-            snapshot=title_evidence,
+            snapshot=title_evidence if title_evidence is not None else shipped_title_snapshot(),
         )
         result["title"] = decision["chosen_title"]
         result["title_decision"] = decision
