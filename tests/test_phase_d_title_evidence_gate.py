@@ -53,6 +53,28 @@ class TestRefuseUnsupportedTitle:
     def test_a_title_with_no_a_to_b_claim_has_nothing_to_check(self):
         refuse_unsupported_title("Ash County, VA in 4K", None, lf_index=1)
 
+    # Waypost's ``region_route`` shape, "{region} Drive: {origin} to {destination}
+    # in 4K": the endpoints are the arc after the colon, not "Ash County Drive: Alder"
+    # and "Dogwood in 4K".
+    def test_a_backed_region_route_title_passes(self):
+        refuse_unsupported_title("Ash County Drive: Alder to Dogwood in 4K", _record(), lf_index=1)
+
+    def test_a_region_route_title_against_the_travel_order_is_refused(self):
+        with pytest.raises(TitleEvidenceError, match="'Dogwood' → 'Alder' run against"):
+            refuse_unsupported_title(
+                "Ash County Drive: Dogwood to Alder in 4K", _record(), lf_index=1
+            )
+
+    def test_a_region_route_endpoint_the_trace_never_entered_is_refused(self):
+        with pytest.raises(TitleEvidenceError, match="end 'Elmwood' is never entered"):
+            refuse_unsupported_title(
+                "Ash County Drive: Alder to Elmwood in 4K", _record(), lf_index=1
+            )
+
+    def test_a_region_route_title_with_no_record_is_refused(self):
+        with pytest.raises(TitleEvidenceError, match="no location evidence record"):
+            refuse_unsupported_title("Ash County Drive: Alder to Dogwood in 4K", None, lf_index=1)
+
 
 def _build(tmp_path, title, evidence):
     gen = MagicMock()

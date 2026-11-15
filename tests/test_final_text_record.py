@@ -359,7 +359,9 @@ class TestPhaseD:
         gen.generate.side_effect = lambda **kw: attach_drive_description(
             state,
             {
-                "title": TITLE,
+                # The generator ships the pre-render decision's title (an explored
+                # baseline ships its alternative), as longform_metadata does.
+                "title": state.per_lf_pre_render_title_decisions[1]["chosen_title"],
                 "description": "d",
                 "title_decision": state.per_lf_pre_render_title_decisions[1],
             },

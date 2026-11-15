@@ -310,10 +310,17 @@ def build_final_text_review(state, lf, metadata: dict) -> Optional[dict]:
         return named + [r["evidence_id"] for r in regions if _named(text, r["value"])]
 
     candidates = decision.get("candidates") or [{}]
+    # ``approve_retained_title`` geo-checks its chosen title before the OST burn
+    # and stamps the decision with its baseline and route fingerprint; that title
+    # is the approved one (Phase D refuses metadata that replaced it). Any other
+    # decision approved only the baseline, so a different pick is a change.
+    pre_rendered = bool(decision.get("baseline_title") and decision.get("route_fingerprint"))
     approved = {
         "record_version": RECORD_VERSION,
         "approval_hash": _approval_hash(state, date),
-        "title": candidates[0].get("title") or decision.get("chosen_title"),
+        "title": (decision.get("chosen_title") if pre_rendered else None)
+        or candidates[0].get("title")
+        or decision.get("chosen_title"),
         "recording_date": date,
         "date_evidence_id": date_id,
         "source_fingerprint": source_fingerprint(state),

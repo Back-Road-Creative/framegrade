@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
@@ -179,11 +180,19 @@ def decide_title(
     snapshot: Optional[EvidenceSnapshot] = None,
     policy: Optional[TitlePolicy] = None,
     facts: Optional[TitleFacts] = None,
+    explore_key: str = "",
 ) -> dict:
     """The decision record for one upload (JSON-safe). No snapshot means no
-    observations: the baseline ships as ``insufficient_evidence``."""
+    observations: the baseline ships as ``insufficient_evidence``.
+
+    ``explore_key`` lets Waypost's policy explore this upload (``exploration``:
+    1 long-form in 4; Shorts never). Only :func:`approve_retained_title`, the
+    pre-render approval, passes one, so an explored title is geo-checked before
+    the OST burn and Phase D reuses that decision. No key never explores."""
     policy = policy or DEFAULT_POLICY
     facts = facts or title_facts(fmt, baseline_title, record, suffix=suffix)
+    if facts is not None and explore_key and not facts.explore_key:
+        facts = replace(facts, explore_key=explore_key)
     if facts is None:
         return {
             "policy_version": policy.version,
@@ -365,6 +374,9 @@ def approve_retained_title(
         suffix=suffix,
         snapshot=snapshot if snapshot is not None else shipped_title_snapshot(),
         facts=facts,
+        # The baseline is the same on every re-render and resume, so the
+        # explore pick is too.
+        explore_key=baseline,
     )
     if decision["reason"] == FACTS_UNAVAILABLE and not _unproven_title_allowed():
         raise PreRenderTitleError(
