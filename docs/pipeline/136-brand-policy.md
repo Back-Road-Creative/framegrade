@@ -126,5 +126,20 @@ carry the block itself to keep the experiment running.
   template text's SHA-256, so reordering a pool keeps every id and rewording a template gives it
   a new one. A hand caption has no template, so its platforms are absent. This is the join key
   Meta caption learning credits reach and plays to; recording it changes no caption.
+- **Meta caption learning** (`tracking/caption_evidence.py`, Waypost
+  `analytics.caption_ranking`): the nightly `metrics collect` joins each tracked Facebook and
+  Instagram post's measured snapshot nearest day 7 (within 12h, the `evidence_export` rule) to
+  the opener id its sidecar recorded, and writes `<seo storage>/caption_evidence.json`: per
+  platform and opener, the median, the post count and the snapshots' fetch-time span. Facebook
+  counts Reel initial plays (Graph answers no per-Reel reach for the live Page); Instagram counts
+  reach (stored as `impressions`). It prints `CAPTION_EVIDENCE platform=<p> metric=<m>
+  openers=<k> posts=<n>`; a failure is logged and never fails the collection. The generator's
+  `_fresh_rotating_pick` hands its shuffled Facebook and Instagram opener order to
+  `rank_captions`, which moves openers more than 10% above the measured openers' median to the
+  front and those more than 10% below to the back, and changes nothing until at least 2 openers
+  each have 10 settled posts. The anti-spam freshness split runs after the ranking, so a winning
+  opener is still never reused inside the gate's window. Each ranking is recorded on the post as
+  `SocialPost.caption_rankings` (`social_posts.json`). No evidence file, or one Waypost refuses,
+  leaves the plain rotation and records nothing. YouTube and TikTok openers are not ranked.
 - **Where the real policy lives**: the host has no `GMS_BRANDS_DIR/gomoveshift/` overlay, so the
   shipped template's block is the live one. Adding an overlay later means copying the block into it.

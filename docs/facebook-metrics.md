@@ -57,7 +57,10 @@ The first numeric answer is stored as `reach`, and `reach_metric` records
 which name answered. A name Graph refuses is skipped for the rest of the run,
 and a refusal never makes the measured observation unanswered. No answer
 leaves `reach` unknown (`null`), never zero. Video-format posts get no reach
-request. Neither name has been confirmed against the live Page yet.
+request. Neither name has answered on the live Page: all 11 Facebook Reels in
+the tracking store on 2026-11-14 held `reach: null`. Caption learning
+(`tracking/caption_evidence.py`) therefore judges Facebook openers on day-7
+`reel_initial_plays`, not reach.
 
 The follower vs non-follower split is not collected: its Graph shape for
 Reels has not been verified, so no field is stored for it.
