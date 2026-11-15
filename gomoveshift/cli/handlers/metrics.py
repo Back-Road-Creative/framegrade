@@ -17,7 +17,7 @@ import contextlib
 import json
 import logging
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -40,6 +40,11 @@ from ...tracking import (
     TrackingStore,
     upsert_audience_online,
     upsert_from_metrics,
+)
+from ...tracking.caption_evidence import (
+    caption_evidence,
+    evidence_report_lines,
+    write_caption_evidence,
 )
 from ...tracking.channel_daily import (
     FACEBOOK_PAGE_METRICS,
@@ -217,6 +222,7 @@ def _cmd_metrics_collect(args, config) -> int:
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     _report_caption_experiments(config, brand)
+    _write_caption_evidence(config)
     return 0
 
 
@@ -248,6 +254,35 @@ def _report_caption_experiments(config, brand: str) -> None:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
         logger.warning("caption experiment report skipped: %s", exc)
+
+
+def _write_caption_evidence(config) -> None:
+    """Write ``<seo storage>/caption_evidence.json``: each Meta caption opener's
+    day-7 performance, which the caption generator re-ranks its openers from
+    (``tracking/caption_evidence.py``). A failure is logged and swallowed: the
+    generator then keeps its plain rotation, and the collection still succeeds."""
+    try:
+        storage_path = Path(config.seo.storage_path)
+        conn = open_queue_db(storage_path)
+        try:
+            lookup = _sidecar_lookup(conn, storage_path)
+
+            def templates_for(project):
+                path = lookup(project)
+                if path is None:
+                    return None
+                return {s.short_index: s.caption_templates for s in load_publish_plan(path).shorts}
+
+            evidence = caption_evidence(
+                TrackingStore().load_all_records(), templates_for, datetime.now(timezone.utc)
+            )
+        finally:
+            conn.close()
+        write_caption_evidence(storage_path, evidence)
+        for line in evidence_report_lines(evidence):
+            print(line)
+    except Exception as exc:  # noqa: BLE001 - evidence must never fail the collection
+        logger.warning("caption evidence not written: %s", exc)
 
 
 def _report_observations(record) -> None:

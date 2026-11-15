@@ -17,6 +17,7 @@ Usage:
 """
 
 import hashlib
+import json
 import logging
 import random
 import re
@@ -417,6 +418,10 @@ class SocialPost:
     #: A hand caption has no template, so its platforms are absent; ``{}`` for a
     #: hand-captioned Short or an older sidecar round-trip.
     caption_templates: "dict[str, str]" = field(default_factory=dict)
+    #: ``{platform: Waypost CaptionRanking record}`` (JSON form) for each Meta
+    #: caption whose opener order was re-ranked from ``caption_evidence.json``;
+    #: absent when there was no evidence file or Waypost refused it.
+    caption_rankings: "dict[str, dict]" = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -434,6 +439,7 @@ class SocialPost:
             "title_decision": self.title_decision,
             "experiment_arms": dict(self.experiment_arms),
             "caption_templates": dict(self.caption_templates),
+            "caption_rankings": dict(self.caption_rankings),
         }
 
 
@@ -898,6 +904,9 @@ class SocialGenerator:
         self._spooled_keys: "Optional[dict[str, list[tuple[str, ...]]]]" = (
             None if spooled_texts is None else _opener_keys(spooled_texts)
         )
+        #: Meta caption evidence, loaded on first use; ``False`` = none usable.
+        self._caption_evidence = None
+        self._caption_rankings: "dict[str, dict]" = {}
         if experiments is None:
             from ..console.settings import current_brand
             from ..publishing.brand_policy import load_brand_policy
@@ -1218,17 +1227,57 @@ class SocialGenerator:
         """:meth:`_rotating_pick` over the pool's entries whose ``render``-ed
         text cannot open like spooled text, then the rest.
 
+        A Meta opener pool is first re-ranked from Meta evidence
+        (:meth:`_meta_ranked`), so the freshness split below still keeps a
+        proven opener out of the anti-spam gate's window.
+
         The fresh entries keep the project's shuffled order, so a batch still
         never repeats an entry until they run out; past that the stale ones
         follow (and the gate refuses them) rather than raising here.
         """
         order = list(pool)
         random.Random(self._project_seed(f"captions:{platform}:{part}")).shuffle(order)
+        if part == "opener":
+            order = self._meta_ranked(platform, order)
         taken = self._spooled_opener_keys().get(platform, [])
         fresh = [e for e in order if not _opens_like(render(e), taken)]
         if len(fresh) < len(order):
             order = fresh + [e for e in order if e not in fresh]
         return order[(short_index - 1) % len(order)]
+
+    def _meta_ranked(self, platform: str, order: "list[str]") -> "list[str]":
+        """``order`` re-ranked by Waypost's ``rank_captions`` from the nightly
+        ``caption_evidence.json`` (``tracking/caption_evidence.py``) for
+        Facebook and Instagram; unchanged for other platforms, with no evidence
+        file, or when Waypost refuses the evidence. The record is kept per
+        platform for :attr:`SocialPost.caption_rankings`."""
+        from seo_manager.analytics.caption_ranking import (
+            DEFAULT_POLICY,
+            PLATFORMS,
+            CaptionRankingRefused,
+            rank_captions,
+            record_to_dict,
+        )
+
+        from ..tracking.caption_evidence import load_caption_evidence
+        from . import longform_metadata
+
+        if platform not in PLATFORMS:
+            return order
+        if self._caption_evidence is None:
+            self._caption_evidence = (
+                load_caption_evidence(Path(longform_metadata.DEFAULT_SEO_STORAGE)) or False
+            )
+        if self._caption_evidence is False:
+            return order
+        by_id = {caption_template_id(t): t for t in order}
+        try:
+            ranking = rank_captions(platform, list(by_id), self._caption_evidence, DEFAULT_POLICY)
+        except CaptionRankingRefused as exc:
+            logger.warning("caption ranking refused for %s: %s", platform, exc)
+            return order
+        self._caption_rankings[platform] = json.loads(json.dumps(record_to_dict(ranking)))
+        return [by_id[t] for t in ranking.order]
 
     def _rotating_pick(self, pool: "list[str]", platform: str, part: str, short_index: int) -> str:
         """The ``short_index``-th entry of ``pool`` in this project's shuffled order.
@@ -2036,6 +2085,11 @@ class SocialGenerator:
             post = SocialPost(
                 experiment_arms=arms,
                 caption_templates=caption_templates,
+                caption_rankings={
+                    p: self._caption_rankings[p]
+                    for p in caption_templates
+                    if p in self._caption_rankings
+                },
                 short_index=short_index,
                 caption=captions["instagram"],
                 captions=captions,
