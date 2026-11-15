@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.94] - 2026-11-14
+
+### Fixed
+
+- The `fb_hashtags` caption experiment now compares arms on Facebook Reel initial plays instead
+  of reach. Graph answers no per-Reel reach for the live Page, so every arm had reported `n=0`
+  since the experiment started. The nightly line now reads `median_plays=` (#385).
+
 ## [0.3.93] - 2026-11-14
 
 ### Added
@@ -1102,7 +1110,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.93...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.94...HEAD
+[0.3.94]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.93...v0.3.94
 [0.3.93]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...v0.3.93
 [0.3.92]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.91...v0.3.92
 [0.3.91]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.90...v0.3.91
