@@ -117,5 +117,12 @@ carry the block itself to keep the experiment running.
   (`tracking.day7.window_settled`; Facebook keeps no daily series, so `has_settled_series` does not
   apply). The median stays `unknown` until EVERY arm holds `min_n`; unmeasured reach is never 0.
   `experiments.arm_results` returns the same data for a caller that wants the numbers.
+- **Caption opener ids** (`social_generator.caption_template_id`): every composed caption also
+  records which opener template it was built from, as `SocialPost.caption_templates`
+  (`{platform: id}`), then `PublishRecord.caption_templates` in the sidecar, with the same
+  omitted-when-empty rule as `experiment_arms`. The id is the first 12 hex digits of the
+  template text's SHA-256, so reordering a pool keeps every id and rewording a template gives it
+  a new one. A hand caption has no template, so its platforms are absent. This is the join key
+  Meta caption learning credits reach and plays to; recording it changes no caption.
 - **Where the real policy lives**: the host has no `GMS_BRANDS_DIR/gomoveshift/` overlay, so the
   shipped template's block is the live one. Adding an overlay later means copying the block into it.

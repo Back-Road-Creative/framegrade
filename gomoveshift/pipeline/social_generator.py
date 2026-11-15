@@ -412,6 +412,11 @@ class SocialPost:
     #: ``{experiment name: arm id}`` for the caption experiments active when
     #: this post was generated (``publishing/experiments.py``); ``{}`` = none.
     experiment_arms: "dict[str, str]" = field(default_factory=dict)
+    #: ``{platform: caption_template_id}`` of the opener each composed caption
+    #: was built from, the key Meta caption learning credits reach and plays to.
+    #: A hand caption has no template, so its platforms are absent; ``{}`` for a
+    #: hand-captioned Short or an older sidecar round-trip.
+    caption_templates: "dict[str, str]" = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -428,6 +433,7 @@ class SocialPost:
             "interactive": self.interactive,
             "title_decision": self.title_decision,
             "experiment_arms": dict(self.experiment_arms),
+            "caption_templates": dict(self.caption_templates),
         }
 
 
@@ -705,6 +711,14 @@ _PLATFORM_CAPTION_TEMPLATES = {
     "instagram": INSTAGRAM_CAPTION_TEMPLATES,
     "tiktok": TIKTOK_CAPTION_TEMPLATES,
 }
+
+
+def caption_template_id(template: str) -> str:
+    """The stable id of one caption opener template: the first 12 hex digits of the
+    SHA-256 of its text. Reordering a pool keeps every id; rewording a template gives
+    it a new one, so its performance is never credited to the old wording."""
+    return hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
+
 
 #: Generic hashtags rotated per short (``_platform_hashtags`` takes
 #: ``GENERIC_HASHTAGS_PER_POST`` of them), so no two posts need carry the same
@@ -1228,9 +1242,17 @@ class SocialGenerator:
         return order[(short_index - 1) % len(order)]
 
     def _compose_caption(
-        self, platform: str, short_index: int, fmap: "dict[str, str]", interactive: bool
+        self,
+        platform: str,
+        short_index: int,
+        fmap: "dict[str, str]",
+        interactive: bool,
+        picked: Optional["dict[str, str]"] = None,
     ) -> str:
-        """One platform caption sentence: opener + (detail | engagement prompt)."""
+        """One platform caption sentence: opener + (detail | engagement prompt).
+
+        ``picked``, when given, receives ``{platform: caption_template_id}`` of the
+        opener this caption opens with."""
 
         def render(entry: str) -> str:
             text = entry.format_map(fmap).strip()
@@ -1239,11 +1261,12 @@ class SocialGenerator:
         def fill(pool: "list[str]", part: str) -> str:
             return render(self._rotating_pick(pool, platform, part, short_index))
 
-        opener = render(
-            self._fresh_rotating_pick(
-                _PLATFORM_CAPTION_TEMPLATES[platform], platform, "opener", short_index, render
-            )
+        template = self._fresh_rotating_pick(
+            _PLATFORM_CAPTION_TEMPLATES[platform], platform, "opener", short_index, render
         )
+        if picked is not None:
+            picked[platform] = caption_template_id(template)
+        opener = render(template)
         if opener[-1] not in ".?!":
             opener += "."
         tail = fill(
@@ -1374,8 +1397,12 @@ class SocialGenerator:
         interactive: bool = False,
         hand_caption: Optional[str] = None,
         experiment_arms: Optional["dict[str, str]"] = None,
+        picked: Optional["dict[str, str]"] = None,
     ) -> "dict[str, str]":
         """Compose one distinct caption per platform.
+
+        ``picked``, when given, receives each composed caption's opener id
+        (:func:`caption_template_id`); a hand caption composes none.
 
         ``experiment_arms`` (``{experiment: arm}``) swaps the Facebook hashtag
         treatment for the arm's ``hashtag_mode``; the ``none`` arm drops the
@@ -1422,7 +1449,7 @@ class SocialGenerator:
         yt = (
             hand_caption.strip()
             if hand_caption
-            else self._compose_caption("youtube", short_index, fmap, interactive)
+            else self._compose_caption("youtube", short_index, fmap, interactive, picked)
         )
         if self.recording_date:
             yt += f"\n\nFilmed {self.recording_date}."
@@ -1430,7 +1457,7 @@ class SocialGenerator:
 
         # Facebook — one line, <=2 hashtags.
         fb_base = first_sentence or self._compose_caption(
-            "facebook", short_index, fmap, interactive
+            "facebook", short_index, fmap, interactive, picked
         )
         mandatory = [] if interactive else self._mandatory_location_tags()
         fb_mode = hashtag_mode_for(self.experiments, experiment_arms or {}, "facebook")
@@ -1444,7 +1471,7 @@ class SocialGenerator:
         # Instagram — short line + recording date + up to 8 tags. This is
         # the legacy shared-column shape (``post.caption`` below).
         ig_base = first_sentence or (
-            f"{self._compose_caption('instagram', short_index, fmap, interactive)} {weather_emoji}"
+            f"{self._compose_caption('instagram', short_index, fmap, interactive, picked)} {weather_emoji}"
         )
         if self.recording_date:
             ig_base += f"\n\n📹 {self.recording_date}"
@@ -1460,7 +1487,9 @@ class SocialGenerator:
         captions["instagram"] = ig_caption
 
         # TikTok — <=150 chars, <=4 tags.
-        tt_base = first_sentence or self._compose_caption("tiktok", short_index, fmap, interactive)
+        tt_base = first_sentence or self._compose_caption(
+            "tiktok", short_index, fmap, interactive, picked
+        )
         tt_caption = self._fit_hashtag_caption(
             tt_base,
             self._platform_hashtags("tiktok", short_index, interactive, limit=4),
@@ -1970,12 +1999,14 @@ class SocialGenerator:
                 title = self._pick_title(rng, weather, short_index, title_facts)
             # One caption per platform — a hand caption becomes the
             # YouTube caption verbatim and seeds the other three.
+            caption_templates: "dict[str, str]" = {}
             captions = self._build_platform_captions(
                 weather,
                 short_index,
                 interactive=interactive,
                 hand_caption=(hand.caption if hand is not None else None),
                 experiment_arms=arms,
+                picked=caption_templates,
             )
             tags = self._build_tags(weather, short_index, interactive=interactive)
             first_comment = self._build_first_comment(weather, short_index, interactive=interactive)
@@ -2004,6 +2035,7 @@ class SocialGenerator:
             decision = decide_title("short", baseline, None, suffix="", facts=place_facts)
             post = SocialPost(
                 experiment_arms=arms,
+                caption_templates=caption_templates,
                 short_index=short_index,
                 caption=captions["instagram"],
                 captions=captions,
