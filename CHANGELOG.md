@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.93] - 2026-11-14
+
+### Added
+
+- Every Short's publish plan now records which caption opener template each platform's caption
+  was built from (`caption_templates`, `{platform: id}`), the key that lets Meta reach and plays
+  be credited to a caption wording. Captions themselves are unchanged.
+
 ## [0.3.92] - 2026-11-14
 
 ### Changed
@@ -1094,7 +1102,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.93...HEAD
+[0.3.93]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.92...v0.3.93
 [0.3.92]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.91...v0.3.92
 [0.3.91]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.90...v0.3.91
 [0.3.90]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.89...v0.3.90
