@@ -82,13 +82,13 @@ dependencies = [
     "deface>=1.5.0",
     # Waypost (distribution name seo-manager) and gps-journey — former workspace
     # siblings, now public repos and the source of truth for that code. Pinned to
-    # a COMMIT (waypost#114's branch head 5e713d7, which adds title evidence on top of
-    # caption ranking and will be re-pinned to its merge commit; gps-journey
+    # a COMMIT (waypost main at #114's merge a6b508b, which adds title evidence on top of
+    # caption ranking; gps-journey
     # v0.2.0's tag commit): a tag can be moved, a SHA cannot, and a bare name either resolves to whatever copy
     # happens to be installed or 404s on PyPI. ci/siblings.txt pins the same
     # commits. Like the four libraries below, requirements.lock carries no entry
     # for them (an unnamed `git+` line is rejected by `uv pip install --constraint`).
-    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@5e713d72fe5e971b81a90387e9ddb2fd12a11105",
+    "seo-manager @ git+https://github.com/Back-Road-Creative/waypost@a6b508bcac3507d08fb178bc9ac16823836f2f7d",
     "gps-journey @ git+https://github.com/Back-Road-Creative/gps-journey@10f9f96ae2fdffdd7372fcb117a1c80ae72c1d35",
     # Extracted libraries — code that used to live in this tree and now ships as
     # standalone repos: sun-track (solar elevation + golden hour, GPX position at
