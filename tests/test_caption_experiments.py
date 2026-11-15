@@ -1,5 +1,5 @@
 """Caption experiment arms: policy block, deterministic assignment, hashtag modes,
-sidecar tag round-trip, per-arm Facebook reach report."""
+sidecar tag round-trip, per-arm Facebook initial-plays report."""
 
 from datetime import date
 
@@ -117,8 +117,8 @@ def test_weights_bias_assignment():
 TODAY = date(2026, 12, 1)
 
 
-def _obs(arm, reach, posted="2026-11-10T12:00:00"):
-    return (arm, posted, reach)
+def _obs(arm, plays, posted="2026-11-10T12:00:00"):
+    return (arm, posted, plays)
 
 
 def test_report_waits_for_min_n_in_every_arm_and_never_counts_unknown():
@@ -126,7 +126,7 @@ def test_report_waits_for_min_n_in_every_arm_and_never_counts_unknown():
     obs = [
         _obs("A", 100),
         _obs("A", 300),
-        _obs("A", None),  # unknown reach: not n
+        _obs("A", None),  # unknown plays: not n
         _obs("B", 50),
         _obs("B", 70),
         _obs("C", 10),  # C below min_n
@@ -134,31 +134,36 @@ def test_report_waits_for_min_n_in_every_arm_and_never_counts_unknown():
     ]
     res = {r.arm: r for r in arm_results(exp, obs, TODAY)}
     assert (res["A"].n, res["B"].n, res["C"].n) == (2, 2, 1)
-    assert all(r.median_reach is None for r in res.values())  # C short: nothing compared yet
+    assert all(r.median_plays is None for r in res.values())  # C short: nothing compared yet
     obs.append(_obs("C", 30))
     res = {r.arm: r for r in arm_results(exp, obs, TODAY)}
-    assert (res["A"].median_reach, res["B"].median_reach, res["C"].median_reach) == (200, 60, 20)
+    assert (res["A"].median_plays, res["B"].median_plays, res["C"].median_plays) == (200, 60, 20)
 
 
 def test_report_lines_format_and_unknown_is_not_zero():
     exp = parse_experiments([_block(min_n=2)])[0]
     lines = arm_report_lines(arm_results(exp, [_obs("A", 0), _obs("A", 0)], TODAY))
-    assert lines[0] == "EXPERIMENT fb_hashtags platform=facebook arm=A n=2 median_reach=unknown"
-    assert lines[1] == "EXPERIMENT fb_hashtags platform=facebook arm=B n=0 median_reach=unknown"
+    assert lines[0] == "EXPERIMENT fb_hashtags platform=facebook arm=A n=2 median_plays=unknown"
+    assert lines[1] == "EXPERIMENT fb_hashtags platform=facebook arm=B n=0 median_plays=unknown"
     done = arm_report_lines(arm_results(exp, [_obs(a, 0) for a in "AABBCC"], TODAY))
-    assert done[0].endswith("n=2 median_reach=0")  # a measured zero is a value
+    assert done[0].endswith("n=2 median_plays=0")  # a measured zero is a value
 
 
-def test_arm_observations_join_sidecar_tags_to_facebook_reach():
+def test_arm_observations_join_sidecar_tags_to_facebook_initial_plays():
+    """Graph answers no per-Reel reach for the live Page (every tracked Reel held
+    ``reach: null`` on 2026-11-14, so every arm stayed n=0): initial plays are the
+    outcome, and a short with reach but no plays is still unmeasured."""
     from types import SimpleNamespace as Ns
 
     from gomoveshift.publishing.experiments import arm_observations
 
     exp = parse_experiments([_block()])[0]
-    short = lambda i, reach: Ns(  # noqa: E731
-        index=i, posted_at="2026-11-10T12:00:00", metrics={"facebook": Ns(reach=reach)}
+    short = lambda i, plays, reach=None: Ns(  # noqa: E731
+        index=i,
+        posted_at="2026-11-10T12:00:00",
+        metrics={"facebook": Ns(reel_initial_plays=plays, reach=reach)},
     )
-    records = [Ns(project="p", shorts=[short(1, 5), short(2, None), short(3, 9)])]
+    records = [Ns(project="p", shorts=[short(1, 5), short(2, None, reach=40), short(3, 9)])]
     tags = {1: {"fb_hashtags": "A"}, 2: {"fb_hashtags": "B"}, 3: {}}
     rows = arm_observations(exp, records, lambda project: tags)
     assert rows == [("A", "2026-11-10T12:00:00", 5), ("B", "2026-11-10T12:00:00", None)]

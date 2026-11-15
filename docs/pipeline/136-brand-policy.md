@@ -112,10 +112,12 @@ carry the block itself to keep the experiment running.
   tags. Only `none` omits the region hashtag, so the Facebook `_assert_region_present` check is
   skipped for it; the caption text still names the place.
 - **Report**: `metrics collect` prints one line per arm after the bounded-response step:
-  `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_reach=<value|unknown>`. A short
-  counts toward `n` only with a measured `PlatformMetrics.reach` and a settled day-7 window
-  (`tracking.day7.window_settled`; Facebook keeps no daily series, so `has_settled_series` does not
-  apply). The median stays `unknown` until EVERY arm holds `min_n`; unmeasured reach is never 0.
+  `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_plays=<value|unknown>`. A short
+  counts toward `n` only with measured `PlatformMetrics.reel_initial_plays` and a settled day-7
+  window (`tracking.day7.window_settled`; Facebook keeps no daily series, so `has_settled_series`
+  does not apply). The median stays `unknown` until EVERY arm holds `min_n`; unmeasured plays are
+  never 0. The outcome was Reel reach until 2026-11-14 (#385): Graph answers no per-Reel reach for
+  the live Page, so every arm sat at n=0.
   `experiments.arm_results` returns the same data for a caller that wants the numbers.
 - **Caption opener ids** (`social_generator.caption_template_id`): every composed caption also
   records which opener template it was built from, as `SocialPost.caption_templates`

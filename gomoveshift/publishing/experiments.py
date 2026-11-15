@@ -14,9 +14,11 @@ never random at runtime, and stops for good ``stop_after_days`` after
 (``PublishRecord.experiment_arms``); ``deliveries`` has no column for it and
 adding one would need a migration.
 
-The outcome is Facebook Reel reach (``PlatformMetrics.reach``). Reach not yet
-measured is unknown, never 0, and a short counts toward an arm's ``n`` only
-once its day-7 window is settled (``tracking.day7.window_settled``).
+The outcome is Facebook Reel initial plays (``PlatformMetrics.reel_initial_plays``):
+Graph answers no per-Reel reach for the live Page, so every Reel's ``reach`` is
+null (``docs/facebook-metrics.md``). Plays not yet measured are unknown, never 0,
+and a short counts toward an arm's ``n`` only once its day-7 window is settled
+(``tracking.day7.window_settled``).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from datetime import date, timedelta
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 HASHTAG_MODES = frozenset({"none", "location", "june"})
-#: Facebook reach is the only outcome measured today, so only it can be tested.
+#: Facebook Reel plays are the only experiment outcome measured today.
 EXPERIMENT_PLATFORMS = frozenset({"facebook"})
 _EXPERIMENT_KEYS = frozenset({"name", "platforms", "start", "min_n", "stop_after_days", "arms"})
 _ARM_KEYS = frozenset({"hashtag_mode", "weight"})
@@ -58,7 +60,7 @@ class ArmResult:
     arm: str
     n: int
     #: ``None`` (unknown) until every arm of the experiment holds ``min_n``.
-    median_reach: Optional[float]
+    median_plays: Optional[float]
 
 
 def _bad(index: int, key: str, why: str) -> ValueError:
@@ -186,28 +188,28 @@ def arm_results(
     observations: Iterable[Tuple[str, Optional[str], Optional[int]]],
     today: date,
 ) -> List[ArmResult]:
-    """Per-arm n and median reach from ``(arm, posted_at, reach)`` observations.
+    """Per-arm n and median initial plays from ``(arm, posted_at, plays)`` observations.
 
-    A row counts toward ``n`` only with a measured reach and a settled day-7
+    A row counts toward ``n`` only with measured plays and a settled day-7
     window. Medians stay unknown until EVERY arm holds ``min_n``, so no
     half-filled comparison is ever reported.
     """
     # Deferred: ``tracking`` imports the pipeline, which loads brand_policy.
     from ..tracking.day7 import posted_date, window_settled
 
-    reach_by_arm = {a.id: [] for a in experiment.arms}
-    for arm, posted_at, reach in observations:
+    plays_by_arm = {a.id: [] for a in experiment.arms}
+    for arm, posted_at, plays in observations:
         posted = posted_date(posted_at)
-        if arm in reach_by_arm and reach is not None and posted and window_settled(posted, today):
-            reach_by_arm[arm].append(reach)
-    ready = all(len(v) >= experiment.min_n for v in reach_by_arm.values())
+        if arm in plays_by_arm and plays is not None and posted and window_settled(posted, today):
+            plays_by_arm[arm].append(plays)
+    ready = all(len(v) >= experiment.min_n for v in plays_by_arm.values())
     return [
         ArmResult(
             experiment.name,
             experiment.platforms[0],
             arm.id,
-            len(reach_by_arm[arm.id]),
-            statistics.median(reach_by_arm[arm.id]) if ready else None,
+            len(plays_by_arm[arm.id]),
+            statistics.median(plays_by_arm[arm.id]) if ready else None,
         )
         for arm in experiment.arms
     ]
@@ -218,11 +220,11 @@ def arm_observations(
     records: Iterable[Any],
     arms_for_project,
 ) -> List[Tuple[str, Optional[str], Optional[int]]]:
-    """``(arm, posted_at, reach)`` for every tracked short tagged into ``experiment``.
+    """``(arm, posted_at, plays)`` for every tracked short tagged into ``experiment``.
 
     ``arms_for_project(project)`` returns ``{short_index: {experiment: arm}}``
-    (the sidecar's tags) or ``None`` when unreadable; reach is the short's
-    Facebook ``PlatformMetrics.reach`` (``None`` when never measured).
+    (the sidecar's tags) or ``None`` when unreadable; plays are the short's
+    Facebook ``PlatformMetrics.reel_initial_plays`` (``None`` when never measured).
     """
     rows = []
     for record in records:
@@ -232,7 +234,7 @@ def arm_observations(
             if arm is None:
                 continue
             metrics = short.metrics.get(experiment.platforms[0])
-            rows.append((arm, short.posted_at, getattr(metrics, "reach", None)))
+            rows.append((arm, short.posted_at, getattr(metrics, "reel_initial_plays", None)))
     return rows
 
 
@@ -240,9 +242,9 @@ def arm_report_lines(results: Sequence[ArmResult]) -> List[str]:
     """One ``EXPERIMENT ...`` line per arm for the nightly output."""
     lines = []
     for r in results:
-        median = "unknown" if r.median_reach is None else f"{r.median_reach:g}"
+        median = "unknown" if r.median_plays is None else f"{r.median_plays:g}"
         lines.append(
             f"EXPERIMENT {r.experiment} platform={r.platform} arm={r.arm} n={r.n} "
-            f"median_reach={median}"
+            f"median_plays={median}"
         )
     return lines
