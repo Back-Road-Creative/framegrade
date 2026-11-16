@@ -76,7 +76,7 @@ def _short(n, lf=1, **over):
         },
         "project_name": PROJECT,
         "recording_date": "2026-03-05",
-        "reviewed_plan_hash": "350925c910b8d45e02976f1a2ae353163d77d75e4df2f421ac6fd3b425c59b9d",
+        "reviewed_plan_hash": "c" * 64,
         "route_record": None,
         "routes": {"selected": ["youtube", "instagram", "facebook", "tiktok"]},
         "sampled_regions": [LABEL],
@@ -125,10 +125,7 @@ def test_a_bracket_short_is_rewritten_and_passes_the_review(tmp_path):
         # a platform caption that named only the destination now names the label
         assert LABEL in rec.payloads.instagram.caption
     kept = _records(plan)[0]
-    assert (
-        kept.reviewed_plan_hash
-        == "350925c910b8d45e02976f1a2ae353163d77d75e4df2f421ac6fd3b425c59b9d"
-    )
+    assert kept.reviewed_plan_hash == "c" * 64
     assert kept.payloads.tiktok.privacy_level == "SELF_ONLY"
 
 
