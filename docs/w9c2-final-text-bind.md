@@ -25,6 +25,12 @@ set for text the review does not cover (insert count 0). Tests:
   Waypost tag template or a name of one of the clip's own GPS places.
   Any other tag refuses the Short with `tag_unreviewable:<tag>`. There is no
   silent drop and no bypass.
+- **Clip places** are the clip's GPS region votes (`"County, State"`) plus the
+  towns its route record measured for every retained second (the route
+  record's own evidence id). A title naming such a town must name only that
+  town; a title naming a county must name every region vote, as before. A town
+  held for part of the clip is not a clip place (2026-11-16: "Quebec" Shorts
+  were refused as naming no clip place).
 - A Short with no label and no regions skips review (unchanged).
 - `social_generator.BASE_TAGS` drops `driving` and `travel`: neither has a
   Waypost tag template.

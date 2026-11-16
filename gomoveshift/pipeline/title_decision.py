@@ -143,13 +143,20 @@ def title_facts(fmt: str, baseline_title: str, record, *, suffix: str) -> Option
 
 
 def short_place_facts(
-    baseline_title: str, place: str, regions, *, segment_id: str
+    baseline_title: str, place: str, regions, *, segment_id: str, towns=None
 ) -> Optional[TitleFacts]:
     """Single-place Waypost facts for a Short whose title names ``place``,
     or ``None`` unless ``place`` is in the title and one of the clip's own
-    GPS region votes (``"County, State"``) backs it."""
+    GPS region votes (``"County, State"``) backs it, or ``towns`` (town name
+    -> evidence id, the towns the clip's route record measured for every
+    retained second) holds it."""
     if not place or place.lower() not in baseline_title.lower():
         return None
+    for town, evidence_id in (towns or {}).items():
+        if place.strip().lower() == town.strip().lower():
+            return TitleFacts(
+                format="short", baseline_title=baseline_title, place=Place(place, evidence_id)
+            )
     for region in regions or ():
         county, _, state = (part.strip() for part in region.partition(","))
         if place.strip().lower() in (county.lower(), region.strip().lower()):
