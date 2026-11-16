@@ -273,3 +273,65 @@ def test_town_measured_for_part_of_the_clip_is_still_refused(mock_service, queue
     adapter, record, did, vp = _prepared(mock_service, queue_conn, tmp_path, title="Pellmere drive")
     record = replace(record, route_record=_town_route_record("Pellmere", seconds=20.0))
     _refuse(mock_service, queue_conn, tmp_path, record, adapter, did, vp)
+
+
+# --- GPS-less bracket-route Short (nctopa-2026-03-05-rec0063) -----------------
+# Its only region vote is the backed bracket label "Virginia to Pennsylvania"
+# and its route record is null. A title naming the whole label passes the review;
+# one naming the destination alone ("Pennsylvania", an endpoint the record never
+# measured) is refused ``description_no_clip_place``.
+
+_BRACKET_LABEL = "Virginia to Pennsylvania"
+_BRACKET_RECORD = {"label": _BRACKET_LABEL, "level": "states", "gap_h": 17.5}
+
+
+def _bracket_short(record, title):
+    return replace(
+        _with(record, title=title, regions=(_BRACKET_LABEL,), description=DESC),
+        route_record=None,
+        recording_date="2026-03-05",
+    )
+
+
+def test_bracket_route_short_titled_with_the_backed_label_is_not_refused(
+    mock_service, queue_conn, tmp_path
+):
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    _adapter, record, _did, _vp = _prepared(mock_service, queue_conn, tmp_path)
+    short = _bracket_short(record, f"Mar 5, 3rd stretch: {_BRACKET_LABEL}")
+    short = replace(short, bracket_route=_BRACKET_RECORD)
+    assert short_review_refusal(short) is None
+
+
+def test_bracket_route_short_naming_the_destination_alone_is_refused(
+    mock_service, queue_conn, tmp_path
+):
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    _adapter, record, _did, _vp = _prepared(mock_service, queue_conn, tmp_path)
+    short = _bracket_short(record, "Mar 5, 1st stretch: Pennsylvania")
+    assert "description_no_clip_place" in (short_review_refusal(short) or "")
+
+
+def test_bracket_route_short_with_its_record_passes_the_place_gate(
+    mock_service, queue_conn, tmp_path
+):
+    """The label is measured by the bracket record, not a route record: no 'bins'."""
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    _adapter, record, _did, _vp = _prepared(mock_service, queue_conn, tmp_path)
+    short = _bracket_short(record, f"Mar 5, 3rd stretch: 38 seconds, {_BRACKET_LABEL}")
+    short = replace(short, bracket_route=_BRACKET_RECORD)
+    assert short_review_refusal(short) is None
+
+
+def test_bracket_record_naming_another_label_does_not_open_the_gate(
+    mock_service, queue_conn, tmp_path
+):
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    _adapter, record, _did, _vp = _prepared(mock_service, queue_conn, tmp_path)
+    short = _bracket_short(record, f"Mar 5, 3rd stretch: {_BRACKET_LABEL}")
+    short = replace(short, bracket_route={**_BRACKET_RECORD, "label": "Ohio to Indiana"})
+    assert "place_outside_text" in (short_review_refusal(short) or "")

@@ -202,6 +202,11 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: description and tags against. ``None`` for a plan written before that gate; such a
     #: GPS-bearing Short is refused as unverifiable. Excluded from equality and hashing.
     route_record: Optional[dict] = field(default=None, compare=False, hash=False)
+    #: ``state.bracket_route`` (the ``--bracket-gpx`` record) when a GPS-less Short's only
+    #: place is that record's label: the place gate judges the label against it, since
+    #: such a Short has no ``route_record``. ``None`` for every other Short. Excluded from
+    #: equality and hashing, like ``route_record``.
+    bracket_route: Optional[dict] = field(default=None, compare=False, hash=False)
     #: Explicit publishable format -- one of KNOWN_FORMATS, or ``None`` for
     #: "not stated". ``None`` must never be READ as FORMAT_SHORT by any
     #: consumer -- that silent default is the defect this field exists to

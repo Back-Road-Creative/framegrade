@@ -244,10 +244,27 @@ def _arc_safe_anchor(component: str) -> str:
     return text or component.strip()
 
 
+def backed_bracket_label(text: str, bracket_route: "Optional[dict]") -> str:
+    """``text`` when it is exactly the label of a valid ``--bracket-gpx`` record, else ``""``.
+
+    A GPS-less drive's place comes from the fixes before and after the footage
+    (``bracket_route``): its label ("Virginia to Pennsylvania") names the leg
+    between two measured fixes. Only that exact label may keep its "A to B" shape
+    in Short text; any other arc still collapses and any other direction framing
+    is still refused.
+    """
+    from .bracket_route import bracket_record_valid
+
+    label = str((bracket_route or {}).get("label") or "").strip()
+    if label and bracket_record_valid(bracket_route) and text.strip() == label:
+        return label
+    return ""
+
+
 # ─── location hashtags ────────────────────────────────────────────
 
 
-def _location_hashtags(location: str) -> list[str]:
+def _location_hashtags(location: str, bracket_route: "Optional[dict]" = None) -> list[str]:
     """Emit one hashtag per comma-delimited location component.
 
     Splits on commas, strips a trailing series suffix, and removes any
@@ -259,7 +276,10 @@ def _location_hashtags(location: str) -> list[str]:
     ``"#" + loc.replace(" ", "").replace(",", "")`` path is unrepresentable.
     """
     base = _strip_series_suffix(location)
-    parts = [_arc_safe_anchor(p.strip()) for p in base.split(",")]
+    parts = [
+        backed_bracket_label(p, bracket_route) or _arc_safe_anchor(p.strip())
+        for p in base.split(",")
+    ]
     out: list[str] = []
     for part in parts:
         # NFKD-fold accented letters to their base ASCII form (ú→u) BEFORE
@@ -392,6 +412,10 @@ class SocialPost:
     sampled_roads: list[str] = field(default_factory=list)
     #: The clip's measured route record (``RouteEvidence.record()``) for the place gate.
     route_record: Optional[dict] = None
+    #: ``state.bracket_route`` when this GPS-less short's only place is the backed
+    #: bracket-route label (its sole ``sampled_regions`` entry); the place gate then
+    #: judges the label against this record instead of a route record it has none of.
+    bracket_route: Optional[dict] = None
     # Whether this short is flagged for the interactive family — the
     # generator withholds the place from ``youtube_title``, ``tiktok_title``,
     # every ``captions[...]``/``caption`` and ``youtube_tags`` by
@@ -859,10 +883,14 @@ class SocialGenerator:
         experiments: "Optional[Sequence[Experiment]]" = None,
         experiment_today: Optional[date] = None,
         spooled_texts: "Optional[Mapping[str, Sequence[str]]]" = None,
+        bracket_route: "Optional[dict]" = None,
     ):
         """
         Args:
             location: Location name (e.g., "County Tipperary, Ireland")
+            bracket_route: ``state.bracket_route`` of a GPS-less drive. A text
+                that is exactly its valid label keeps its "A to B" shape in the
+                Short's title/location; nothing else does.
             project_name: Project name for deterministic seeding
             pinterest_board: Pinterest board name
             youtube_category: YouTube numeric category ID (default "19" = Travel & Events)
@@ -962,7 +990,10 @@ class SocialGenerator:
         self.location_short_full = (
             parse_lf_label(parts[0]).place if parts else parse_lf_label(location_no_suffix).place
         )
-        self.location_short = _arc_safe_anchor(self.location_short_full)
+        self._bracket_route = bracket_route
+        self.location_short = backed_bracket_label(
+            self.location_short_full, bracket_route
+        ) or _arc_safe_anchor(self.location_short_full)
 
         # Destination-anchored location text for the secondary text surfaces
         # (social CAPTION + shorts YouTube DESCRIPTION). When the canonical
@@ -995,7 +1026,7 @@ class SocialGenerator:
         # Per-component hashtags. Replaces the legacy single smashed
         # hashtag (``"".join(c for c in location if c.isalnum())``) which
         # produced unreadable output like ``#DinglePeninsulaCountyKerryIrelandPart1``.
-        self.location_hashtags = _location_hashtags(location)
+        self.location_hashtags = _location_hashtags(location, bracket_route)
         # Backwards-compat alias for any external caller that read .location_tag.
         # Now points to the first (most-specific) component instead of the
         # smashed concatenation. Discovery surfaces should prefer
@@ -1054,7 +1085,9 @@ class SocialGenerator:
         for kind, text in (("title", hand.title), ("caption", hand.caption)):
             if not text:
                 continue
-            m = _DIRECTION_FRAMING_RE.search(text)
+            # The one lifted case: the backed bracket-route label itself.
+            label = backed_bracket_label(self.location_short_full, self._bracket_route)
+            m = _DIRECTION_FRAMING_RE.search(text.replace(label, "") if label else text)
             if m:
                 raise ValueError(
                     f"short_index {hand_idx}: hand {kind} uses direction framing "
@@ -2197,6 +2230,7 @@ class SocialGenerator:
             moment_kinds=self.moment_kinds,
             experiments=self.experiments,
             experiment_today=self.experiment_today,
+            bracket_route=self._bracket_route,
         )
         clone.recording_date = self.recording_date
         clone.resolved_location = self.resolved_location
@@ -2353,6 +2387,12 @@ class SocialGenerator:
                     post.sampled_roads = list(roads or [])
                     if per_short_route_records and i - 1 < len(per_short_route_records):
                         post.route_record = per_short_route_records[i - 1] or None
+                    if (
+                        not post.route_record
+                        and len(regions) == 1
+                        and backed_bracket_label(regions[0], self._bracket_route)
+                    ):
+                        post.bracket_route = dict(self._bracket_route)
             # Apply the resolved global index (explicit list wins,
             # else the legacy offset) for multi-LF drives.
             if global_indexes is not None or index_offset:

@@ -911,6 +911,7 @@ def _build_social_posts_per_lf(
     require_verified_places: bool = False,
     per_lf_overrides: dict | None = None,
     evidence: dict | None = None,
+    bracket_route: dict | None = None,
 ) -> dict:
     """Generate the per-LF ``SocialPost`` list, write ``social_posts.json``.
 
@@ -1052,6 +1053,9 @@ def _build_social_posts_per_lf(
             series_part=lf.index,
             resolved_location=per_lf_resolved.get(lf.index),
             titles_file=titles_file,
+            # Only a drive with a bracket record passes it: a Short whose text is
+            # exactly its label keeps "A to B" whole (never the destination alone).
+            **({"bracket_route": bracket_route} if bracket_route else {}),
         )
         global_indexes = None
         if short_global_index is not None and lf_shorts:

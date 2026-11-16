@@ -1447,6 +1447,7 @@ class PhaseD:
             # shorts whose burned label was inherited from the parent LF.
             per_lf_overrides=state.per_lf_overrides,
             evidence=place_evidence(state),
+            bracket_route=getattr(state, "bracket_route", None),
         )
         # Prefix check on the REAL titles (a titles.yaml override is the only
         # thing that can collide -- composed stamps are unique by construction),
