@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.99] - 2026-11-16
+
+### Fixed
+
+- A Short whose title named a town its own route record measured for every retained second ("Feb 24, 6th stretch: Quebec") was refused on every dispatch with `description_no_clip_place`, because the review took clip places only from the county votes. Such a town is now a clip place under the route record's evidence id, and the Short's text must name only that town. A town held for part of the clip is still refused, and county-titled Shorts are reviewed as before (docs/w9c2-final-text-bind.md).
+
 ## [0.3.98] - 2026-11-16
 
 ### Fixed
@@ -1163,7 +1169,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...HEAD
+[0.3.99]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...v0.3.99
 [0.3.98]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.97...v0.3.98
 [0.3.97]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.96...v0.3.97
 [0.3.96]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.95...v0.3.96
