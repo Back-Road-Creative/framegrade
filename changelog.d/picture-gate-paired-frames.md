@@ -1,0 +1,3 @@
+### Fixed
+
+- The picture gate compared a delivered file's frames with source frames from other scenes, so a faithful day master could fail (Mizen: 335.8 against 405.8 on the same frames, failed against 597.5 on other frames). Each sampled frame is now paired with the frame it was made from: the day master with the same second of the day's episodes, a long-form with its pre-text input, and a Short with the master through the Short's crop. Long-forms and Shorts are checked when they render and write a `<file>.picture_gate.json` record. Phase D and the Shorts validator read that record and no longer re-measure the source, and a final with no current record fails and is re-rendered (docs/pipeline/180-picture-gate.md).

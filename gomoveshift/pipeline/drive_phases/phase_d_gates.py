@@ -120,16 +120,15 @@ def _run_sidecar_integrity_gate(
 def _default_picture_check(
     lf_path: Path, duration: float | None, source_sharpness, changed, source_ringing=None
 ):
-    """Real picture gate (post-rendition softness / ringing); injectable like the spot-check."""
-    from ..validation.longform_validator import picture_quality_gate
+    """The picture verdict the LF's render recorded; injectable like the spot-check.
 
-    return picture_quality_gate(
-        lf_path,
-        duration or 0.0,
-        source_sharpness=source_sharpness,
-        changed=changed,
-        source_ringing=source_ringing,
-    )
+    The render paired each sampled frame with the frame it was made from. Phase D
+    no longer re-measures: it has no like-for-like source frames for a final.
+    ``duration`` / ``source_sharpness`` / ``source_ringing`` stay for injected checks.
+    """
+    from ..validation.longform_validator import recorded_picture_gate
+
+    return recorded_picture_gate(lf_path, changed=changed)
 
 
 def _lf_picture_inputs(state) -> dict:

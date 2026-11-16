@@ -12,9 +12,11 @@ import pytest
 
 from gomoveshift.pipeline import quality
 from gomoveshift.pipeline.drive_phases.phase_d_gates import _run_final_validation_gate
+from gomoveshift.pipeline.pipeline_validator import GateResult
 from gomoveshift.pipeline.validation.longform_validator import (
     PICTURE_SKIPPED_MESSAGE,
     LongformValidator,
+    write_picture_record,
 )
 from gomoveshift.pipeline.validation.shorts_validator import ShortsValidator
 
@@ -98,14 +100,25 @@ def test_gate_skipped_when_no_rendition_step(monkeypatch):
     assert calls == []
 
 
-def test_shorts_validator_records_picture_gate_hard(monkeypatch):
-    _sampler(monkeypatch, [50.0], [0.0])
+def _soft_short(tmp_path) -> Path:
+    """A Short whose render recorded a failed picture gate."""
+    short = tmp_path / "s.mp4"
+    short.write_bytes(b"short")
+    write_picture_record(
+        short,
+        GateResult(gate="picture_quality", passed=False, message="delivered sharpness 50.0 < 300"),
+    )
+    return short
+
+
+def test_shorts_validator_records_picture_gate_hard(tmp_path):
+    short = _soft_short(tmp_path)
     sv = ShortsValidator(MagicMock())
     sv._validate_single_short = lambda p: []
-    skipped = sv.validate_short_files([Path("s.mp4")])
+    skipped = sv.validate_short_files([short])
     assert [g.gate for g in skipped.gates] == ["picture_quality"] and skipped.passed
-    bad = sv.validate_short_files([Path("s.mp4")], source_sharpness=400.0, picture_changed=True)
-    assert not bad.passed
+    bad = sv.validate_short_files([short], source_sharpness=400.0, picture_changed=True)
+    assert not bad.passed and "delivered sharpness" in bad.gates[0].message
 
 
 def _run_gate(tmp_path, picture_check_fn, inputs):
@@ -176,20 +189,31 @@ def test_final_gate_gets_real_inputs_and_fails_on_soft_delivery(tmp_path, monkey
 
     inputs = _lf_picture_inputs(_state(tmp_path, 0.4))
     assert inputs == {1: (500.0, None, True)}
-    _sampler(monkeypatch, [50.0, 60.0], [0.0, 0.0])
+    # The render recorded a soft verdict for the final _run_gate writes (same size).
+    lf = tmp_path / "lf.mp4"
+    lf.write_bytes(b"x" * (1024 * 1024 + 1))
+    write_picture_record(
+        lf, GateResult(gate="picture_quality", passed=False, message="delivered sharpness 50.0")
+    )
     with pytest.raises(RuntimeError, match="delivered sharpness"):
         _run_gate(tmp_path, None, inputs)
 
 
-def test_soft_short_fails_through_the_facade(monkeypatch):
+def test_final_gate_fails_a_final_with_no_picture_record(tmp_path):
+    with pytest.raises(RuntimeError, match="no picture record"):
+        _run_gate(tmp_path, None, {1: (500.0, None, True)})
+
+
+def test_soft_short_fails_through_the_facade(tmp_path):
     from gomoveshift.pipeline.pipeline_validator import PipelineValidator
 
-    _sampler(monkeypatch, [50.0], [0.0])
     pv = PipelineValidator.__new__(PipelineValidator)
     sv = ShortsValidator(MagicMock())
     sv._validate_single_short = lambda p: []
     pv._shorts = sv
-    result = pv.validate_short_files([Path("s.mp4")], source_sharpness=400.0, picture_changed=True)
+    result = pv.validate_short_files(
+        [_soft_short(tmp_path)], source_sharpness=400.0, picture_changed=True
+    )
     assert not result.passed
 
 
@@ -243,22 +267,6 @@ def _episode_state(tmp_path, amount, durations=(300.0, 100.0)):
     state.episode_files = files
     state.file_durations = list(durations)
     return state
-
-
-def test_source_is_remeasured_from_the_episodes_with_the_gate_sampler(tmp_path, monkeypatch):
-    seen = []
-
-    def fake(path, duration, n=5):
-        seen.append((Path(path).name, duration, n))
-        return [1450.1] * n, [0.0152] * n
-
-    monkeypatch.setattr(quality, "sample_delivered_picture", fake)
-    sharp, ring, changed = quality.picture_inputs_from_state(_episode_state(tmp_path, 0.011))
-    assert (sharp, ring, changed) == (1450.1, 0.0152, {1: True})
-    # Duration-weighted share of the gate's frame count, every episode sampled.
-    assert [s[0] for s in seen] == ["episode_00.mp4", "episode_01.mp4"]
-    assert sum(s[2] for s in seen) >= quality.PICTURE_GATE_SAMPLES
-    assert seen[0][2] > seen[1][2]
 
 
 def test_unchanged_picture_never_samples_the_source(tmp_path, monkeypatch):

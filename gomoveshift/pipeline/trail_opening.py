@@ -344,7 +344,12 @@ def _swap(
                 "from_s": lead,
             },
         )
+        old_size = lf.stat().st_size
         os.replace(out, lf)
+        # The body is stream-copied from the gated final: its picture verdict stands.
+        from .validation.longform_validator import carry_picture_record
+
+        carry_picture_record(lf, from_size=old_size, note="trail opening swapped in")
     finally:
         import shutil
 

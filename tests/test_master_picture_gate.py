@@ -42,15 +42,14 @@ def _master(tmp_path, amount):
 
 
 def _sampler(monkeypatch, *, source, master):
-    """Source episodes return ``source``, the master returns ``master`` (sharp, ring)."""
+    """Source episode frames read ``source``, master frames ``master`` (sharp, ring)."""
     calls = []
 
-    def fake(path, duration, n=5):
-        calls.append((Path(path).name, n))
-        sharp, ring = master if Path(path).name.endswith("_master.mp4") else source
-        return [sharp] * n, [ring] * n
+    def fake(path, ts, vf=""):
+        calls.append((Path(path).name, ts))
+        return master if Path(path).name.endswith("_master.mp4") else source
 
-    monkeypatch.setattr(quality, "sample_delivered_picture", fake)
+    monkeypatch.setattr(quality, "frame_picture", fake)
     return calls
 
 
@@ -69,8 +68,11 @@ def test_master_ringing_above_its_source_fails(tmp_path, monkeypatch):
 def test_faithful_master_passes_kingsport_numbers(tmp_path, monkeypatch):
     calls = _sampler(monkeypatch, source=(1450.1, 0.0152), master=(1289.6, 0.0151))
     day_pipeline._gate_master_picture(_batch(tmp_path), _master(tmp_path, 0.011), DATE)
+    # Each master frame is followed by the episode frame it was made from.
     names = [c[0] for c in calls]
-    assert names[-1] == f"day_{DATE}_master.mp4" and "ep_01.mp4" in names
+    assert set(names[0::2]) == {f"day_{DATE}_master.mp4"}
+    assert {"ep_01.mp4", "ep_02.mp4"} <= set(names[1::2])
+    assert len(names) == 2 * quality.PICTURE_GATE_SAMPLES
 
 
 def test_unchanged_picture_samples_nothing(tmp_path, monkeypatch):
