@@ -90,6 +90,30 @@ def _clip_places(record: ShortPublishRecord, segment_id: str) -> list[dict]:
     return places
 
 
+def _clip_towns(record: ShortPublishRecord) -> list[dict]:
+    """The towns the clip's own route record measured for every retained
+    second, as place evidence under the route record's own evidence id.
+
+    A town held for only part of the clip does not name the clip's place."""
+    route = record.route_record or {}
+    retained = float(route.get("retained_seconds") or 0.0)
+    if retained <= 0:
+        return []
+    return [
+        {
+            "evidence_id": p["evidence_id"],
+            "kind": "location",
+            "value": p["name"],
+            "source": route.get("containment_basis") or "retained_gps",
+        }
+        for p in route.get("places") or []
+        if p.get("name")
+        and p.get("evidence_id")
+        and p.get("required")
+        and float(p.get("retained_seconds") or 0.0) >= retained
+    ]
+
+
 def _clip_roads(record: ShortPublishRecord, segment_id: str) -> list[dict]:
     """The clip's own GPS road names as ``kind=road`` evidence. A clip
     with no GPS road yields none, so no road tag can be reviewed for it."""
@@ -105,7 +129,7 @@ def _clip_roads(record: ShortPublishRecord, segment_id: str) -> list[dict]:
 
 
 def _short_text_entries(
-    record: ShortPublishRecord, places: list, roads: list, named, segment: str
+    record: ShortPublishRecord, places: list, roads: list, named, segment_places: list
 ) -> list:
     """The Short's description (one place_line) and tag entries for the review.
 
@@ -124,7 +148,6 @@ def _short_text_entries(
             ["description_no_clip_place"],
             "the Short's title names no clip place for its description to cite",
         )
-    segment_places = [p["evidence_id"] for p in places]
     entries = [
         {
             "surface": "description",
@@ -194,7 +217,8 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
     """Waypost's review of the Short's title, description and tags against its own
     clip's GPS votes.
 
-    The place the title names must be one of the clip's region votes; a title
+    The place the title names must be one of the clip's region votes, or a town
+    its route record measured for every retained second; a title
     naming anything else, or no place, comes back not ``agree``. The approval
     marker is the plan's ``reviewed_plan_hash``; a plan written without one (every
     plan before the builder filled it) is marked with the content hash of what the
@@ -209,21 +233,30 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
     context = short_final_text_context(record)
     payload = record.payloads.youtube
     segment = f"{record.project_name}-short{record.short_index:03d}"
-    places = _clip_places(record, segment)
+    votes = _clip_places(record, segment)
+    measured_towns = _clip_towns(record)
+    places = votes + measured_towns
     roads = _clip_roads(record, segment)
+    towns = {t["value"]: t["evidence_id"] for t in measured_towns}
     named = next(
         (
             p
             for p in places
             if p["value"].lower() in payload.title.lower()
             and short_place_facts(
-                payload.title, p["value"], record.sampled_regions, segment_id=segment
+                payload.title, p["value"], record.sampled_regions, segment_id=segment, towns=towns
             )
         ),
         None,
     )
+    # A title naming a town held for every retained second names the clip's
+    # place; the county votes are the same seconds, coarser. Otherwise the text
+    # must name every region vote, as before.
+    segment_places = [p["evidence_id"] for p in ([named] if named in measured_towns else votes)]
     facts = (
-        short_place_facts(payload.title, named["value"], record.sampled_regions, segment_id=segment)
+        short_place_facts(
+            payload.title, named["value"], record.sampled_regions, segment_id=segment, towns=towns
+        )
         if named
         else None
     )
@@ -255,9 +288,9 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
                 "text": payload.title,
                 "evidence_ids": [named["evidence_id"]] if named else [],
                 "scope": "segment",
-                "segment_places": [p["evidence_id"] for p in places],
+                "segment_places": segment_places,
             },
-            *_short_text_entries(record, places, roads, named, segment),
+            *_short_text_entries(record, places, roads, named, segment_places),
         ],
     }
     # Road evidence backs a tag only: Waypost's route holds locations alone.

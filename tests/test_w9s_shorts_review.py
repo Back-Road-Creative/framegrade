@@ -236,3 +236,40 @@ def test_i8_every_base_tag_is_a_waypost_tag_template():
 
     templates = {t for tid, t in all_templates().items() if tid.startswith("tag.")}
     assert set(BASE_TAGS) <= templates, sorted(set(BASE_TAGS) - templates)
+
+
+def _town_route_record(town, *, seconds=60.0):
+    """A route record that measured ``town`` (in County Kerry) for ``seconds``
+    of a 60 s clip, the way ``route_claims`` writes one."""
+    from gomoveshift.pipeline.route_claims import RouteEvidence, RoutePlace, _Bin
+
+    return RouteEvidence(
+        retained_seconds=60.0, gaps=[], unsettled_seconds=60.0 - seconds,
+        places=[RoutePlace(town, "County Kerry", "Munster", seconds, True, f"ev-{town.lower()}")],
+        bins=[_Bin(seconds, "County Kerry", "Munster", town)],
+        boundary_proofs={}, windows_key="k",
+    ).record()  # fmt: skip
+
+
+def test_measured_town_in_the_title_is_reviewed_and_published(mock_service, queue_conn, tmp_path):
+    """2026-11-16: "Feb 24, 6th stretch: Quebec" (rows 194/198) was refused every
+    hour as naming no clip place, though the clip's own route record measured
+    Quebec for every retained second. A measured town is a clip place."""
+    adapter, record, did, vp = _prepared(mock_service, queue_conn, tmp_path, title="Pellmere drive")
+    record = replace(record, route_record=_town_route_record("Pellmere"))
+    review = build_short_final_text_review(record)
+    assert review["verdict"] == "agree", review["reasons"]
+
+    _publish(adapter, record, queue_conn, did, vp)
+
+    assert _inserts(mock_service) == 1
+    assert _sent(mock_service)["title"] == "Pellmere drive"
+    assert _sent(mock_service)["description"] == "Drive through Pellmere"
+
+
+def test_town_measured_for_part_of_the_clip_is_still_refused(mock_service, queue_conn, tmp_path):
+    """Measured is not enough: a town the clip holds for only part of its
+    retained seconds does not name the clip's place."""
+    adapter, record, did, vp = _prepared(mock_service, queue_conn, tmp_path, title="Pellmere drive")
+    record = replace(record, route_record=_town_route_record("Pellmere", seconds=20.0))
+    _refuse(mock_service, queue_conn, tmp_path, record, adapter, did, vp)
