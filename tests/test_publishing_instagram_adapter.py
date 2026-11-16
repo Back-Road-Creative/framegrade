@@ -37,6 +37,15 @@ from gomoveshift.publishing.queue import (
     transition,
 )
 
+
+@pytest.fixture(autouse=True)
+def _no_real_transcode(monkeypatch):
+    """Adapter tests drive fake bytes; the real transcode has its own tests."""
+    monkeypatch.setattr(
+        "gomoveshift.publishing.instagram_adapter.make_in_spec_bytes", lambda b, **kw: b
+    )
+
+
 FAKE_TOKEN = "EAABsecrettoken12345"  # noqa: S105 — test fixture, not a real credential
 CREDS = {"ig_user_id": "ig-1", "page_access_token": FAKE_TOKEN, "graph_version": "v21.0"}
 
@@ -887,3 +896,67 @@ def test_a_failure_other_than_the_byte_upload_is_not_retried(queue_conn):
     with pytest.raises(InstagramPermanentError, match="bad caption"):
         publish()
     assert len(reels.created) == 1
+
+
+# --- #399: Instagram uploads an in-spec file, gated before any container ---
+
+
+def _upload_recording_reels(*statuses, fail_uploads=0):
+    reels = _FakeReels(*statuses)
+    reels.uploaded = []
+
+    def upload_video(url, video_bytes):
+        reels.uploaded.append(video_bytes)
+        if len(reels.uploaded) <= fail_uploads:
+            raise InstagramUploadError("[rupload http=400] failed")
+
+    reels.upload_video = upload_video
+    return reels
+
+
+def _adapter(queue_conn, reels, prepare):
+    clock = _Clock()
+    adapter = InstagramShortsAdapter(
+        reels, worker_id="w1", sleep=clock.sleep, monotonic=clock.monotonic,
+        prepare_video=prepare,
+    )  # fmt: skip
+    record = _record()
+    did = enqueue(queue_conn, record.project_name, record.short_index, "instagram", "h1")
+    return adapter, record, did
+
+
+def test_the_upload_sends_the_in_spec_bytes_not_the_source(queue_conn):
+    reels = _upload_recording_reels("FINISHED")
+    adapter, record, did = _adapter(queue_conn, reels, lambda b: b"IN-SPEC")
+    adapter.publish(record, conn=queue_conn, delivery_id=did, video_bytes=b"SOURCE")
+    assert reels.uploaded == [b"IN-SPEC"]
+
+
+def test_retries_reuse_the_same_in_spec_file(queue_conn):
+    reels = _upload_recording_reels("FINISHED", fail_uploads=2)
+    made = []
+    adapter, record, did = _adapter(queue_conn, reels, lambda b: made.append(b) or b"IN-SPEC")
+    adapter.publish(record, conn=queue_conn, delivery_id=did, video_bytes=b"SOURCE")
+    assert reels.uploaded == [b"IN-SPEC"] * 3 and len(made) == 1
+
+
+def test_an_out_of_spec_file_is_permanent_and_creates_no_container(queue_conn):
+    from gomoveshift.publishing.instagram_reels_spec import ReelsSpecError
+
+    def refuse(_):
+        raise ReelsSpecError("delivery file breaks the Reels spec: an edit list (elst) is present")
+
+    reels = _upload_recording_reels("FINISHED")
+    adapter, record, did = _adapter(queue_conn, reels, refuse)
+    with pytest.raises(InstagramPermanentError, match="edit list"):
+        adapter.publish(record, conn=queue_conn, delivery_id=did, video_bytes=b"SOURCE")
+    assert reels.created == [] and reels.uploaded == []
+
+
+def test_a_resumed_container_needs_no_transcode(queue_conn):
+    reels = _upload_recording_reels("FINISHED")
+    adapter, record, did = _adapter(queue_conn, reels, lambda b: pytest.fail("transcoded"))
+    transition(queue_conn, did, "queued", "submitting")
+    transition(queue_conn, did, "submitting", "uploaded", platform_upload_id="c-old")
+    adapter.publish(record, conn=queue_conn, delivery_id=did, video_bytes=b"SOURCE")
+    assert reels.uploaded == [] and reels.created == []

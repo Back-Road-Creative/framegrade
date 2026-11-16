@@ -20,6 +20,23 @@ after creation; `ContainerHandle.is_expired()` refuses a stale publish
 before the API call. Graph version: the credential's `graph_version`,
 falling back to `DEFAULT_GRAPH_VERSION` — never unversioned.
 
+**Instagram uploads its own in-spec file, gated before any container.**
+Meta's Reels spec asks for MP4 with no edit list and the moov atom first,
+H.264 or HEVC, progressive 8-bit 4:2:0, closed GOP, VBR at most 25 Mbps,
+AAC at most 48 kHz, 23-60 fps, at most 300 MB. Our rendered Shorts are HEVC
+Main 10 with an `elst` at 27-30 Mbps, and 11 of 16 rows on 2026-11-16 failed
+all 3 tries with `ProcessingFailedError` (#399). So
+`gomoveshift/publishing/instagram_reels_spec.py` transcodes the Short for
+Instagram only (libx264 High, `yuv420p`, `open-gop=0`, `-maxrate 20M`,
+`-movflags +faststart -use_editlist 0`, AAC 48 kHz stereo; size and fps as
+rendered), in a scratch dir it owns and deletes. `gate_file` then checks the
+result (ffprobe plus a walk of the MP4 boxes for `elst` and moov order)
+before `create_container`; a miss raises `InstagramPermanentError` naming
+each broken rule, and no container exists. It is built once per delivery and
+every upload try reuses it; a resumed container needs no transcode. The
+YouTube/other-platform file is never touched. A ~38 s 1080x1920 clip takes
+about 49 s on CPU.
+
 **A failed byte upload starts over on a fresh container.** `rupload`
 answers a failed upload with a `debug_info` envelope (`type`, `message`,
 `retriable`), never a Graph `error` object. `upload_video` classifies it

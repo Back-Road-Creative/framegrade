@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import requests
 
 from gomoveshift.publishing.first_comment import post_graph_comment
+from gomoveshift.publishing.instagram_reels_spec import ReelsSpecError, make_in_spec_bytes
 from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
 from gomoveshift.publishing.models import InstagramPayload, ShortPublishRecord
@@ -371,7 +372,10 @@ class InstagramShortsAdapter:
         *,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        prepare_video: Callable[[bytes], bytes] | None = None,
     ):
+        self._prepare_video = prepare_video
+        self._in_spec: dict[int, bytes] = {}
         self._reels = reels
         self._worker_id = worker_id
         self._sleep = sleep
@@ -409,13 +413,28 @@ class InstagramShortsAdapter:
                 "risk a duplicate media container"
             )
 
+    def _in_spec_bytes(self, delivery_id: int, video_bytes: bytes) -> bytes:
+        """The Reels in-spec delivery bytes, built once per delivery. A failed
+        transcode or gate is permanent and no container exists yet (#399)."""
+        if delivery_id not in self._in_spec:
+            try:
+                self._in_spec[delivery_id] = (self._prepare_video or make_in_spec_bytes)(
+                    video_bytes
+                )
+            except ReelsSpecError as exc:
+                raise InstagramPermanentError(str(exc)) from exc
+        return self._in_spec[delivery_id]
+
     def _create_and_upload(
         self, conn, delivery_id: int, from_status: str, payload, video_bytes: bytes
     ) -> str:
         """Lease, create a container, persist it, upload; returns its id.
         A failed upload starts over on a fresh container, ``UPLOAD_ATTEMPTS``
         tries in all; the last failure is raised. A container that never got
-        its bytes cannot publish, so starting over never risks a duplicate."""
+        its bytes cannot publish, so starting over never risks a duplicate.
+        The in-spec file is made, and gated, before the first container; every
+        try uploads those same bytes."""
+        video_bytes = self._in_spec_bytes(delivery_id, video_bytes)
         for attempt in range(1, UPLOAD_ATTEMPTS + 1):
             self._take_lease(conn, delivery_id)
             transition(conn, delivery_id, from_status, STATUS_SUBMITTING)
@@ -460,6 +479,18 @@ class InstagramShortsAdapter:
             )
         )
 
+        try:
+            return self._publish(
+                record, payload, conn, delivery_id, current_status, video_bytes,
+                container_id, media_id, permalink,
+            )  # fmt: skip
+        finally:
+            self._in_spec.pop(delivery_id, None)
+
+    def _publish(
+        self, record, payload, conn, delivery_id, current_status, video_bytes,
+        container_id, media_id, permalink,
+    ) -> InstagramPublishResult:  # fmt: skip
         created_here = container_id is None
         if created_here:
             container_id = self._create_and_upload(
