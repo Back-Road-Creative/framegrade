@@ -1691,6 +1691,15 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
         "predates that rule. Dry run unless --apply; local files only",
     )
     t.add_argument("--apply", action="store_true", help="Write the sidecars (default: dry run).")
+    b = actions.add_parser(
+        "sync-bracket-short-text",
+        help="Regenerate each queued Short's text in a publish plan whose GPS-less "
+        "bracket-route Shorts name only the label's destination, from the generator and "
+        "the parent LF sidecar's bracket record; a Short the Short review still refuses "
+        "is left untouched. Dry run unless --apply; local files only, no queue writes",
+    )
+    b.add_argument("--sidecar", required=True, metavar="PATH", help="the *_publish_plan.json")
+    b.add_argument("--apply", action="store_true", help="Write the plan (default: dry run).")
     o = actions.add_parser(
         "reslot-overdue-manual",
         help="Move each TikTok row still awaiting a manual post more than 24h past its slot "

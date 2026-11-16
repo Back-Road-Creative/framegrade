@@ -621,6 +621,30 @@ file writes only, never a YouTube call; each write is re-parsed through `load_pu
 logged as one `response_log` `sync_plan_tags` row. Rows already `failed_permanent` are not
 touched; recover those with `recover-terminal` only after confirming nothing posted.
 
+## A queued bracket-route Short's text (`queue sync-bracket-short-text`)
+
+A GPS-less drive's Shorts planned before the bracket-label fix are titled with the label's
+destination alone ("Pennsylvania" for "Virginia to Pennsylvania") and carry no `bracket_route`,
+so the Short review refuses each as `description_no_clip_place`. Rebuild their text from the
+generator and the parent LF sidecar's bracket record:
+
+```bash
+gomoveshift queue sync-bracket-short-text --sidecar <project>_publish_plan.json            # dry run
+gomoveshift queue sync-bracket-short-text --sidecar <project>_publish_plan.json --apply
+```
+
+A Short is rewritten only when it has no route record, its parent LF sidecar
+(`<project>_lf{NN}_youtube.json`, beside the plan) holds a valid `drive_text_inputs.bracket_route`,
+its `sampled_regions` is exactly `[label]`, and its old title carries the plan's own "Nth stretch"
+stamp; anything else is reported `refused` and left untouched. The text comes from
+`SocialGenerator(bracket_route=...)` over the parent LF, assembled by the plan builder: YouTube
+title, description and tags are regenerated and the record is stored on the Short. Instagram,
+Facebook and TikTok text is replaced only where it names the collapsed destination and not the
+label. A rewritten Short must then pass `short_review_refusal`, or it is refused untouched. One
+line per Short (`changed` / `unchanged` / `refused`, old -> new title). Local file writes only
+(no queue row, no platform call); the plan is re-parsed by `load_publish_plan` before it replaces
+the old file, and `reviewed_plan_hash` stays a stored field.
+
 ## Validate problems gate enqueue and dispatch
 
 A `publishing-status --validate` problem used to be a report nobody had to
