@@ -101,6 +101,7 @@ _FREEZE_DURATION_RE = re.compile(r"freeze_duration:\s*([0-9.]+)")
 
 
 PICTURE_SKIPPED_MESSAGE = "skipped: no rendition step changed the picture"
+PICTURE_GATE = "picture_quality"
 
 
 def picture_quality_gate(
@@ -119,18 +120,145 @@ def picture_quality_gate(
     message -- never absent) when no rendition step changed the picture or the
     source sharpness is unmeasured.
     """
-    gate = "picture_quality"
     if not changed or source_sharpness is None:
-        return GateResult(gate=gate, passed=True, message=PICTURE_SKIPPED_MESSAGE)
+        return GateResult(gate=PICTURE_GATE, passed=True, message=PICTURE_SKIPPED_MESSAGE)
     sharp, ring = quality.sample_delivered_picture(
         video_path, duration, quality.PICTURE_GATE_SAMPLES
     )
     if not sharp:
         return GateResult(
-            gate=gate, passed=False, message="no frame could be decoded for the picture check"
+            gate=PICTURE_GATE,
+            passed=False,
+            message="no frame could be decoded for the picture check",
         )
-    delivered = float(statistics.median(sharp))
-    ringing = float(statistics.median(ring))
+    return _judge_picture(
+        float(statistics.median(sharp)),
+        float(statistics.median(ring)),
+        source_sharpness,
+        source_ringing,
+    )
+
+
+def paired_picture_gate(
+    video_path: Path, duration: float, reference_at, *, reference_vf: str = ""
+) -> GateResult:
+    """The picture gate on frames paired with the frames they were made from.
+
+    ``reference_at(t)`` gives ``(file, seconds)`` of the frame delivered second
+    ``t`` was rendered from; ``reference_vf`` gives that frame the delivered
+    file's geometry. Both medians come from the same pairs, so a scene change
+    cannot move one side alone (Mizen 2026-11-16: a faithful master read 335.8
+    against 405.8 on paired frames and failed against 597.5 on unpaired ones).
+    """
+    d_sharp, d_ring, r_sharp, r_ring = quality.sample_paired_picture(
+        video_path, duration, reference_at, quality.PICTURE_GATE_SAMPLES, reference_vf
+    )
+    if not d_sharp:
+        return GateResult(
+            gate=PICTURE_GATE,
+            passed=False,
+            message="no frame pair could be decoded for the picture check",
+        )
+    gate = _judge_picture(
+        float(statistics.median(d_sharp)),
+        float(statistics.median(d_ring)),
+        float(statistics.median(r_sharp)),
+        float(statistics.median(r_ring)),
+    )
+    gate.message += f" on {len(d_sharp)} paired frames"
+    return gate
+
+
+def picture_record_path(video_path: Path) -> Path:
+    """Where a final's render-time picture verdict lives (``<name>.picture_gate.json``)."""
+    video_path = Path(video_path)
+    return video_path.with_name(video_path.name + ".picture_gate.json")
+
+
+def write_picture_record(video_path: Path, gate: GateResult) -> None:
+    """Record ``gate`` for ``video_path`` as it is now (its size binds the record).
+
+    No file, no record: Phase D then fails the missing final on a changed day.
+    """
+    if not Path(video_path).is_file():
+        return
+    picture_record_path(video_path).write_text(
+        json.dumps(
+            {
+                "passed": bool(gate.passed),
+                "message": gate.message,
+                "size": Path(video_path).stat().st_size,
+            }
+        )
+    )
+
+
+def carry_picture_record(video_path: Path, *, from_size: int, note: str) -> None:
+    """Rebind the record of a final whose drive footage was copied into a new file.
+
+    Only a record that described the old file (``from_size``) is carried.
+    """
+    path = picture_record_path(video_path)
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return
+    if record.get("size") != from_size:
+        return
+    record["size"] = Path(video_path).stat().st_size
+    record["message"] = f"{record.get('message', '')} ({note})"
+    path.write_text(json.dumps(record))
+
+
+def recorded_picture_gate(video_path: Path, *, changed: bool) -> GateResult:
+    """The picture verdict ``video_path``'s render recorded, for Phase D.
+
+    Skipped when no rendition step changed the picture. Fails when the record
+    is missing or describes a different file: the final was not checked against
+    the frames it was made from, so it is re-rendered rather than shipped.
+    """
+    if not changed:
+        return GateResult(gate=PICTURE_GATE, passed=True, message=PICTURE_SKIPPED_MESSAGE)
+    name = Path(video_path).name
+    record = current_picture_record(video_path)
+    if record is None and not picture_record_path(video_path).is_file():
+        return GateResult(
+            gate=PICTURE_GATE,
+            passed=False,
+            message=f"no picture record for {name}: rendered before the paired "
+            "picture check; re-render it",
+        )
+    if record is None:
+        return GateResult(
+            gate=PICTURE_GATE,
+            passed=False,
+            message=f"the picture record of {name} describes a different file; re-render it",
+        )
+    return GateResult(
+        gate=PICTURE_GATE, passed=bool(record.get("passed")), message=str(record.get("message"))
+    )
+
+
+def current_picture_record(video_path: Path) -> dict | None:
+    """The picture record of ``video_path`` as it is now, or ``None`` (missing or stale)."""
+    try:
+        record = json.loads(picture_record_path(video_path).read_text())
+        size = Path(video_path).stat().st_size
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or record.get("size") != size:
+        return None
+    return record
+
+
+def _judge_picture(
+    delivered: float,
+    ringing: float,
+    source_sharpness: float,
+    source_ringing: float | None,
+) -> GateResult:
+    """Fail softness beyond the tolerance or ringing above the source's (or RINGING_MAX)."""
+    gate = PICTURE_GATE
     floor = source_sharpness * (1.0 - quality.DELIVERED_SHARPNESS_TOLERANCE)
     problems = []
     if delivered < floor:

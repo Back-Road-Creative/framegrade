@@ -10,7 +10,7 @@ from gomoveshift.pipeline import encoding_constants as ec
 from gomoveshift.pipeline.pipeline_validator import GateResult, PipelineValidationResult
 
 from .ffprobe_client import FFprobeClient
-from .longform_validator import color_tag_issues, picture_quality_gate
+from .longform_validator import color_tag_issues, recorded_picture_gate
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +81,9 @@ class ShortsValidator:
 
         for short_path in short_files:
             short_gates = self._validate_single_short(short_path)
-            # Hard (not advisory). Callers without the day's source sharpness /
-            # picture-changed inputs get the recorded "skipped" gate, never a guess.
-            short_gates.append(
-                picture_quality_gate(
-                    short_path,
-                    self._ffprobe.probe_duration(short_path) if picture_changed else 0.0,
-                    source_sharpness=source_sharpness,
-                    changed=picture_changed,
-                    source_ringing=source_ringing,
-                )
-            )
+            # Hard (not advisory): the verdict the Short's render recorded against
+            # the master through its crop. Unchanged picture -> the "skipped" gate.
+            short_gates.append(recorded_picture_gate(short_path, changed=picture_changed))
             for g in short_gates:
                 gates.append(g)
                 if not g.passed and not _is_advisory(g.gate):

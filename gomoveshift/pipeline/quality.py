@@ -333,6 +333,36 @@ def picture_changed(params) -> bool:
     return any(bool(read(key)) for key in ("stabilise", "stabilize", "upscale"))
 
 
+def gate_timestamps(duration: float, n: int = PICTURE_GATE_SAMPLES) -> list[float]:
+    """The ``n`` evenly spaced seconds the picture gate samples in a ``duration`` file."""
+    span = max(float(duration or 0.0), 0.0)
+    return [span * (i + 0.5) / n for i in range(n)]
+
+
+def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float] | None:
+    """``(sharpness, ringing)`` of the frame at ``ts`` of ``path``, or ``None``.
+
+    ``vf`` runs before the gate's own reduction, so a reference can be given a
+    delivered file's geometry (a Short's crop of the master).
+    """
+    scale = f"scale={int(SHARPEN_DETAIL_MAX_DIM)}:-2"
+    cmd = [
+        "ffmpeg", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", str(path),
+        "-frames:v", "1", "-vf", f"{vf},{scale}" if vf else scale,
+        "-f", "image2pipe", "-c:v", "png", "-",
+    ]  # fmt: skip
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0 or not r.stdout:
+        return None
+    gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
+    if gray is None:
+        return None
+    return sharpness_score(gray), ringing_score(gray)
+
+
 def sample_delivered_picture(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES):
     """``(sharpness_values, ringing_values)`` of ``n`` evenly spaced frames of ``path``.
 
@@ -340,24 +370,48 @@ def sample_delivered_picture(path, duration: float, n: int = SOURCE_SHARPNESS_SA
     """
     sharp: list[float] = []
     ring: list[float] = []
-    for i in range(n):
-        ts = max(duration, 0.0) * (i + 0.5) / n
-        cmd = [
-            "ffmpeg", "-loglevel", "error", "-ss", f"{ts:.3f}", "-i", str(path),
-            "-frames:v", "1", "-vf", f"scale={int(SHARPEN_DETAIL_MAX_DIM)}:-2",
-            "-f", "image2pipe", "-c:v", "png", "-",
-        ]  # fmt: skip
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if r.returncode != 0 or not r.stdout:
-            continue
-        gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
-        if gray is not None:
-            sharp.append(sharpness_score(gray))
-            ring.append(ringing_score(gray))
+    for ts in gate_timestamps(duration, n):
+        got = frame_picture(path, ts)
+        if got is not None:
+            sharp.append(got[0])
+            ring.append(got[1])
     return sharp, ring
+
+
+def timeline_position(files, durations, t: float):
+    """``(file, local_seconds)`` of second ``t`` of the back-to-back join of ``files``.
+
+    A second past the end maps to the last file's end.
+    """
+    files, durations = list(files), [max(float(d), 0.0) for d in durations]
+    start = 0.0
+    for f, d in zip(files, durations):
+        if t < start + d:
+            return f, t - start
+        start += d
+    return files[-1], durations[-1]
+
+
+def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GATE_SAMPLES, vf=""):
+    """Sharpness and ringing of ``n`` delivered frames and the frames they were made from.
+
+    ``reference_at(t)`` gives ``(reference_file, seconds)`` for delivered second
+    ``t``; ``vf`` gives the reference the delivered file's geometry. Returns
+    ``(delivered_sharp, delivered_ring, reference_sharp, reference_ring)`` over
+    the pairs where both frames decoded, so each median comes from the same frames.
+    """
+    out: tuple[list[float], list[float], list[float], list[float]] = ([], [], [], [])
+    for ts in gate_timestamps(duration, n):
+        got = frame_picture(delivered, ts)
+        if got is None:
+            continue
+        ref_path, ref_ts = reference_at(ts)
+        ref = frame_picture(ref_path, ref_ts, vf)
+        if ref is None:
+            continue
+        for values, v in zip(out, (*got, *ref)):
+            values.append(v)
+    return out
 
 
 def sample_delivered_sharpness(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES) -> list:
@@ -401,60 +455,51 @@ def picture_changed_for_day(cache_path) -> bool:
     return any(picture_changed(c) for c in corrections)
 
 
-def sample_source_picture(files, durations, n: int = PICTURE_GATE_SAMPLES):
-    """Median ``(sharpness, ringing)`` of the drive's source files, or ``None``.
+def day_picture_changed(master_path, date: str, master_record: Mapping | None = None) -> bool:
+    """True when a rendition step changed the picture of the day ``master_path`` heads.
 
-    Frames are shared out by duration (every file gets at least one), so a long
-    clip weighs what it runs. ``None`` when a file is missing, the lists do not
-    line up, or nothing decodes: the caller then falls back to the recorded figure.
+    A declared upscale (``upscaled_from``: the day's master record, else the
+    ``.upscale.json`` sidecar the encoder leaves beside the master) or a step in
+    the day's colour cache / picture-steps record. The render-time picture gate
+    and Phase D both ask this, so a final is gated where Phase D expects a record.
     """
-    files, durations = list(files or []), list(durations or [])
-    if not files or len(files) != len(durations) or not all(Path(f).is_file() for f in files):
-        return None
-    total = sum(max(float(d), 0.0) for d in durations)
-    if total <= 0:
-        return None
-    sharp: list[float] = []
-    ring: list[float] = []
-    for f, d in zip(files, durations):
-        share = max(1, math.ceil(n * max(float(d), 0.0) / total))
-        s, r = sample_delivered_picture(f, float(d), share)
-        sharp.extend(s)
-        ring.extend(r)
-    if not sharp:
-        return None
-    return float(statistics.median(sharp)), float(statistics.median(ring))
+    master = Path(master_path)
+    record = dict(master_record or {})
+    if "upscaled_from" not in record:
+        try:
+            record = json.loads(master.with_suffix(".upscale.json").read_text())
+        except (OSError, ValueError):
+            record = {}
+    if isinstance(record, Mapping) and record.get("upscaled_from"):
+        return True
+    cache = master.parent / f"day_{date}_color_cache.json"
+    # Neither record on disk: no step ran (quiet, as the day-master gate is).
+    if not (cache.is_file() or cache.with_name(f"day_{date}_picture_steps.json").is_file()):
+        return False
+    return picture_changed_for_day(cache)
 
 
 def picture_inputs_from_state(state) -> tuple[float | None, float | None, dict[int, bool]]:
-    """``(source_sharpness, source_ringing, {lf_index: picture_changed})`` for the gate.
+    """``(source_sharpness, source_ringing, {lf_index: picture_changed})`` for Phase D.
 
-    When any LF's picture changed, the source is re-measured here from
-    ``state.episode_files`` with the gate's own sampler and frame count, so both
-    sides of the comparison are measured the same way. Phase A's 5-frame
-    ``state.source_sharpness`` is the fallback (median over every measured
-    source, ringing ``None``) when the episodes are gone. TODO(later unit): map
-    each LF to its day's sources.
-    ``picture_changed`` is per day (``DayArtifacts.regular_lf_indices`` -> that
-    day's colour cache next to the day master), fanned out to the day's LFs.
+    ``picture_changed`` is per day (``day_picture_changed`` of each
+    ``DayArtifacts``), fanned out to the day's LFs; Phase D then reads the
+    verdict each final's render recorded. The source is never re-measured here:
+    a drive-wide source figure compares different frames from the delivered
+    file's (Mizen 2026-11-16). The sharpness is Phase A's recorded median, for
+    the log only; ringing is ``None``.
     """
     changed: dict[int, bool] = {}
     for art in getattr(state, "day_artifacts", None) or []:
         master = getattr(art, "master_path", None)
-        record = getattr(art, "master_record", None) or {}
-        day_changed = bool(record.get("upscaled_from")) or (
-            picture_changed_for_day(Path(master).parent / f"day_{art.date}_color_cache.json")
+        record = getattr(art, "master_record", None)
+        day_changed = (
+            day_picture_changed(master, art.date, record if isinstance(record, Mapping) else None)
             if master
-            else False
+            else bool((record or {}).get("upscaled_from"))
         )
         for idx in getattr(art, "regular_lf_indices", None) or []:
             changed[idx] = day_changed
-    if any(changed.values()):
-        measured_now = sample_source_picture(
-            getattr(state, "episode_files", None), getattr(state, "file_durations", None)
-        )
-        if measured_now is not None:
-            return measured_now[0], measured_now[1], changed
     measured = [v for v in (getattr(state, "source_sharpness", None) or []) if v is not None]
     sharpness = float(statistics.median(measured)) if measured else None
     return sharpness, None, changed

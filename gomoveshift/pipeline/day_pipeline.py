@@ -1429,6 +1429,19 @@ def _render_day_shorts(
     # ── Step 5b: burn every gated short (rank-ordered) ────────────
     # render_short_ffmpeg crops + scales to 1080×1920 9:16 AND composites the
     # short-layout OST in one pass (no separate extract_slice / apply_ost).
+    from . import quality as _quality
+    from .ffmpeg_filters import build_crop_filter
+    from .validation import longform_validator as _lv
+
+    # Each Short is judged against the master through the Short's own crop (a
+    # tracked reframe is compared with the centre crop of the same seconds).
+    # A day no step changed gets a skipped record: Phase D asks drive-wide.
+    _short_picture_changed = _quality.day_picture_changed(master_source_for_extract, date)
+    _short_reference_vf = (
+        build_crop_filter(*get_video_dimensions(master_source_for_extract))
+        if _short_picture_changed
+        else ""
+    )
     for short_range, short_duration, short_ost_text in _render_specs:
         rank = short_range.rank
         final_short = shorts_dir / f"short_{rank:02d}.mp4"
@@ -1447,6 +1460,27 @@ def _render_day_shorts(
                 rank,
             )
             continue
+        if _short_picture_changed:
+            _start = float(short_range.start_sec)
+            _gate = _lv.paired_picture_gate(
+                final_short,
+                float(short_duration),
+                lambda t, _s=_start: (master_source_for_extract, _s + t),
+                reference_vf=_short_reference_vf,
+            )
+            _lv.write_picture_record(final_short, _gate)
+            logger.info("Day %s: short %d picture gate: %s", date, rank, _gate.message)
+            if not _gate.passed:
+                raise RuntimeError(
+                    f"Day {date}: {final_short.name} failed the picture gate: {_gate.message}"
+                )
+        else:
+            _lv.write_picture_record(
+                final_short,
+                _lv.GateResult(
+                    gate=_lv.PICTURE_GATE, passed=True, message=_lv.PICTURE_SKIPPED_MESSAGE
+                ),
+            )
         short_paths.append(final_short)
         short_ranges_emitted.append(short_range)
         # Bind this rank's audit entry to the artefact it describes. The entry
@@ -1932,12 +1966,14 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
     """Hard-fail a day whose master came out softer than, or ringing above, its sources.
 
     Runs only when the day's colour cache (beside the master) records a step that
-    changed the picture. The day's episode concats are measured with the same
-    sampler and frame count as the master, so the comparison is like for like.
-    A source that cannot be measured (concat gone) defers to Phase D's gate.
+    changed the picture. Each sampled master second is paired with the same
+    second of the day's episode concats (the master is their back-to-back
+    encode), so both medians come from the same frames. A source that cannot be
+    measured (concat gone) is skipped with a warning; each LF and Short is still
+    checked against the master when it renders.
     """
     from . import quality
-    from .validation.longform_validator import picture_quality_gate
+    from .validation.longform_validator import paired_picture_gate
 
     cache = master_path.parent / f"day_{date}_color_cache.json"
     steps = cache.with_name(f"day_{date}_picture_steps.json")
@@ -1945,22 +1981,15 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
     if not (cache.is_file() or steps.is_file()) or not quality.picture_changed_for_day(cache):
         return
     episodes = list(getattr(day_batch, "episodes", None) or [])
-    source = quality.sample_source_picture(
-        [getattr(ep, "concat_path", None) or "" for ep in episodes],
-        [float(getattr(ep, "total_duration", 0.0) or 0.0) for ep in episodes],
-    )
-    if source is None:
-        logger.warning(
-            "Day %s: day-master picture gate skipped -- sources unmeasurable; Phase D gates it",
-            date,
-        )
+    files = [getattr(ep, "concat_path", None) or "" for ep in episodes]
+    durations = [float(getattr(ep, "total_duration", 0.0) or 0.0) for ep in episodes]
+    if not files or sum(durations) <= 0 or not all(f and Path(f).is_file() for f in files):
+        logger.warning("Day %s: day-master picture gate skipped -- sources unmeasurable", date)
         return
-    gate = picture_quality_gate(
+    gate = paired_picture_gate(
         master_path,
         float(getattr(day_batch, "total_duration", 0.0) or 0.0),
-        source_sharpness=source[0],
-        changed=True,
-        source_ringing=source[1],
+        lambda t: quality.timeline_position(files, durations, t),
     )
     logger.info("Day %s: day-master picture gate: %s", date, gate.message)
     if not gate.passed:
@@ -2553,6 +2582,12 @@ def run_day_pipeline(
             stamp_confirmed(confirmed_file, current_hash)
         logger.info("OST audit gate passed for day %s (%s).", date, reason)
 
+    # Phase D reads each final's render-time picture verdict where this is true.
+    from . import quality as _quality
+    from .validation import longform_validator as _lv
+
+    picture_changed = _quality.day_picture_changed(master_path, date)
+
     for lf_plan in lf_plans or []:
         idx = int(getattr(lf_plan, "index", len(regular_lf_paths) + 1))
         segments = list(getattr(lf_plan, "segments", []) or [])
@@ -2670,6 +2705,8 @@ def run_day_pipeline(
             # a swapped-in trail opening is folded into the stored fingerprint
             and fp_path.read_text().strip()
             == trail_opening.expected_fingerprint(lf_dir, idx, ost_fingerprint)
+            # a final burned before the paired picture check has no record: burn it again
+            and (not picture_changed or _lv.current_picture_record(final_lf) is not None)
         ):
             logger.info(
                 "Day %s: LF %d final is fresh (OST unchanged) — skipping re-burn",
@@ -2813,6 +2850,7 @@ def run_day_pipeline(
                     min_gap_sec=float(_drive_cfg.regular_lf_lower_third_min_gap_sec),
                 )
 
+        _lv.picture_record_path(final_lf).unlink(missing_ok=True)  # this burn replaces it
         # prefer_nvenc=True: the day master just finished on NVENC, so the
         # LF OST re-encode should too. The helper retries the NVENC probe
         # once to ride out post-encode session release (otherwise a busy
@@ -2848,6 +2886,19 @@ def run_day_pipeline(
                 f"OST application failed for LF {idx} ({lf_location}). "
                 f"Input: {prepended}, Output: {final_lf}"
             )
+        # The picture gate, before the photo inserts shift the timeline: each
+        # sampled second of the burned LF against the same second of its input.
+        picture_gate = None
+        if picture_changed:
+            picture_gate = _lv.paired_picture_gate(
+                ost_result, float(probe_media(prepended).duration), lambda t: (prepended, t)
+            )
+            logger.info("Day %s: LF %d picture gate: %s", date, idx, picture_gate.message)
+            if not picture_gate.passed:
+                raise RuntimeError(
+                    f"Day {date}: LF {idx} ({final_lf.name}) failed the picture gate: "
+                    f"{picture_gate.message}"
+                )
         if _lf_inserts:
             splice_day_lf_inserts(
                 ost_result,
@@ -2878,6 +2929,8 @@ def run_day_pipeline(
             )
         except Exception as exc:  # noqa: BLE001 -- the LF is fine; only its trail opening is lost
             logger.warning("Day %s: LF %d lead not recorded (%s)", date, idx, exc)
+        if picture_gate is not None:  # bound to the final as spliced
+            _lv.write_picture_record(ost_result, picture_gate)
         # Persist the burned-OST fingerprint so a later resume can detect this
         # final is fresh and skip the re-burn.
         fp_path.write_text(ost_fingerprint)
