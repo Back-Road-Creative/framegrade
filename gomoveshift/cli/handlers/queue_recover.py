@@ -518,12 +518,39 @@ def _cmd_sync_plan_tags(args, config) -> int:
     return 0
 
 
+def _cmd_sync_bracket_short_text(args, config) -> int:
+    """Regenerate a queued bracket-route Short's text in its publish plan. Local file
+    writes only (no queue database, no platform call); dry run unless ``--apply``."""
+    from gomoveshift.publishing.plan_bracket_sync import sync_bracket_short_text
+
+    try:
+        changes = sync_bracket_short_text(Path(args.sidecar), apply=args.apply)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    for c in changes:
+        label = f"{c.project_name}#{c.short_index}"
+        if c.status == "changed":
+            verb = "changed" if c.written else "dry run: would change"
+            print(f"{verb} {label}: {c.old_title!r} -> {c.new_title!r} [{', '.join(c.fields)}]")
+        elif c.status == "unchanged":
+            print(f"unchanged {label}: {c.old_title!r} ({c.reason})")
+        else:
+            print(f"refused {label}: {c.old_title!r} ({c.reason})")
+    refused = sum(c.status == "refused" for c in changes)
+    changed = sum(c.status == "changed" for c in changes)
+    if not args.apply:
+        print(f"dry run: {changed} Short(s); re-run with --apply to write")
+    return 1 if refused else 0
+
+
 def cmd_queue(args, config) -> int:
     if args.queue_action not in (
         "recover-terminal",
         "mark-missing-remote",
         "sync-plan-titles",
         "sync-plan-tags",
+        "sync-bracket-short-text",
         "reslot-overdue-manual",
         "reslot-overdue-youtube",
         "remeasure-short-route",
@@ -544,6 +571,8 @@ def cmd_queue(args, config) -> int:
         return _cmd_sync_plan_titles(args, config)
     if args.queue_action == "sync-plan-tags":
         return _cmd_sync_plan_tags(args, config)
+    if args.queue_action == "sync-bracket-short-text":
+        return _cmd_sync_bracket_short_text(args, config)
     if args.queue_action == "reslot-overdue-manual":
         from .queue_reslot import cmd_reslot_overdue_manual
 

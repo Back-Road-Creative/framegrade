@@ -176,6 +176,18 @@ def _short_text_entries(
     return entries
 
 
+def _bracket_backed(record: ShortPublishRecord) -> bool:
+    """A GPS-less Short whose one region vote is exactly the label of its valid
+    bracket-route record and which has no route record: the bracket record is its
+    place evidence, so the route-record place gate has nothing to measure."""
+    from ..pipeline.bracket_route import bracket_record_valid
+
+    if record.route_record or not bracket_record_valid(record.bracket_route):
+        return False
+    label = str(record.bracket_route["label"]).strip()
+    return [r.strip() for r in record.sampled_regions] == [label]
+
+
 def short_final_text_context(record: ShortPublishRecord) -> dict:
     """What the Short will send, recomputed from ``record`` now (never read from a
     review), for :func:`check_final_text`. Refuses a Short with no description."""
@@ -195,7 +207,7 @@ def short_final_text_context(record: ShortPublishRecord) -> dict:
         # Zero tolerance: this GPS-bearing Short's title, description and tags are
         # checked against its measured route; none persisted = unverifiable, refused.
         "route_record": record.route_record,
-        "place_record_required": True,
+        "place_record_required": not _bracket_backed(record),
         "source_fingerprint": _digest("src-", [record.media.sha256]),
         "plan_fingerprint": _digest(
             "plan-",
