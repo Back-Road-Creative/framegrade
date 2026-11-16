@@ -142,6 +142,50 @@ def _per_platform_schedule(
     return moved
 
 
+def build_short_payloads(
+    post, *, recording_date: str, parent_id: str, tiktok_privacy_level: str
+) -> PlatformPayloads:
+    """The four platform payloads of one Short from its generated ``post``.
+
+    One place for the plan's text assembly (filmed suffix, parent link, title
+    hashtags), shared by :func:`build_publish_plan` and the queued-Short text sync."""
+    # Same recording-date suffix as the CSV path, MINUS Twitter-length
+    # truncation (only needed for the retired X/Twitter shared column).
+    filmed = f"Filmed {format_recording_date_pretty(recording_date)}."
+    # Each platform reads its OWN composed caption (``post.captions``), falling back
+    # to the legacy shared ``post.caption`` column when the dict lacks the key (an old
+    # social_posts.json sidecar written before per-platform captions, or a caller that
+    # never populated ``captions``).
+    post_captions = getattr(post, "captions", None) or {}
+    legacy_caption = (getattr(post, "caption", "") or "").rstrip()
+
+    def _platform_caption(platform: str) -> str:
+        text = (post_captions.get(platform) or legacy_caption or "").rstrip()
+        return _with_filmed(text, filmed)
+
+    parent_link = f"https://youtu.be/{parent_id}"
+    yt_description = (getattr(post, "youtube_description", "") or "").strip()
+    tags = tuple(
+        t.strip() for t in (getattr(post, "youtube_tags", "") or "").split(",") if t.strip()
+    )
+    yt_desc = f"{yt_description}\n\n{parent_link}" if yt_description else parent_link
+    return PlatformPayloads(
+        youtube=YouTubePayload(
+            title=_title_with_hashtags(getattr(post, "youtube_title", "") or "", yt_description),
+            description=yt_desc,
+            tags=tags,
+            category=getattr(post, "youtube_category", "") or "",
+        ),
+        instagram=InstagramPayload(caption=_platform_caption("instagram")),
+        facebook=FacebookPayload(description=_platform_caption("facebook")),
+        tiktok=TikTokPayload(
+            title=getattr(post, "tiktok_title", "") or "",
+            caption=_platform_caption("tiktok"),
+            privacy_level=tiktok_privacy_level,
+        ),
+    )
+
+
 def build_publish_plan(
     *,
     project_name: str,
@@ -190,50 +234,15 @@ def build_publish_plan(
             recording_date = parent_recording_date_by_short_index.get(short_idx)
             if not isinstance(recording_date, str) or not recording_date.strip():
                 raise ValueError(f"recording date missing for short_index {short_idx}")
-            # Same recording-date suffix as the CSV path, MINUS Twitter-length
-            # truncation (only needed for the retired X/Twitter shared column).
-            filmed = f"Filmed {format_recording_date_pretty(recording_date)}."
-            # Each platform reads its OWN composed caption
-            # (``post.captions``), falling back to the legacy shared
-            # ``post.caption`` column when the dict lacks the key (an old
-            # social_posts.json sidecar written before per-platform captions, or a caller that
-            # never populated ``captions``).
-            post_captions = getattr(post, "captions", None) or {}
-            legacy_caption = (getattr(post, "caption", "") or "").rstrip()
-
-            def _platform_caption(platform: str) -> str:
-                text = (post_captions.get(platform) or legacy_caption or "").rstrip()
-                return _with_filmed(text, filmed)
-
-            instagram_caption = _platform_caption("instagram")
-            facebook_caption = _platform_caption("facebook")
-            tiktok_caption = _platform_caption("tiktok")
             parent_id = parent_lf_video_id_by_short_index.get(short_idx, "")
             parent_publish_iso = parent_publish_at_by_short_index.get(short_idx)
             if not parent_id or not parent_publish_iso:
                 raise ValueError(f"PUBLISH-PLAN-NO-PARENT-ID: short_index {short_idx} has none")
-            parent_link = f"https://youtu.be/{parent_id}"
-            yt_description = (getattr(post, "youtube_description", "") or "").strip()
-            tags = tuple(
-                t.strip() for t in (getattr(post, "youtube_tags", "") or "").split(",") if t.strip()
-            )
-            yt_desc = f"{yt_description}\n\n{parent_link}" if yt_description else parent_link
-            payloads = PlatformPayloads(
-                youtube=YouTubePayload(
-                    title=_title_with_hashtags(
-                        getattr(post, "youtube_title", "") or "", yt_description
-                    ),
-                    description=yt_desc,
-                    tags=tags,
-                    category=getattr(post, "youtube_category", "") or "",
-                ),
-                instagram=InstagramPayload(caption=instagram_caption),
-                facebook=FacebookPayload(description=facebook_caption),
-                tiktok=TikTokPayload(
-                    title=getattr(post, "tiktok_title", "") or "",
-                    caption=tiktok_caption,
-                    privacy_level=tiktok_privacy_level,
-                ),
+            payloads = build_short_payloads(
+                post,
+                recording_date=recording_date,
+                parent_id=parent_id,
+                tiktok_privacy_level=tiktok_privacy_level,
             )
             parent_publish_at = datetime.fromisoformat(parent_publish_iso).astimezone(timezone.utc)
             records.append(
