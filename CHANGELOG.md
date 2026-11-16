@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.100] - 2026-11-16
+
+### Fixed
+
+- Instagram Reels uploads no longer fail `ProcessingFailedError` on Shorts that break Meta's Reels spec (HEVC Main 10, an `elst` edit list, 27-30 Mbps). The Instagram adapter now derives its own H.264 High 8-bit file (closed GOP, VBR capped at 20 Mbps, `+faststart`, no edit list, AAC 48 kHz), gates it with ffprobe and a box walk before any container is created, and uploads those bytes on every retry. An out-of-spec result is `failed_permanent` naming the broken rule. The YouTube file is untouched (#399).
+
 ## [0.3.99] - 2026-11-16
 
 ### Fixed
@@ -1169,7 +1175,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...HEAD
+[0.3.100]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...v0.3.100
 [0.3.99]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...v0.3.99
 [0.3.98]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.97...v0.3.98
 [0.3.97]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.96...v0.3.97
