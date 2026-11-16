@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.98] - 2026-11-16
+
+### Fixed
+
+- The picture gate compared a delivered file's frames with source frames from other scenes, so a faithful day master could fail (Mizen: 335.8 against 405.8 on the same frames, failed against 597.5 on other frames). Each sampled frame is now paired with the frame it was made from: the day master with the same second of the day's episodes, a long-form with its pre-text input, and a Short with the master through the Short's crop. Long-forms and Shorts are checked when they render and write a `<file>.picture_gate.json` record. Phase D and the Shorts validator read that record and no longer re-measure the source, and a final with no current record fails and is re-rendered (docs/pipeline/180-picture-gate.md).
+
 ## [0.3.97] - 2026-11-15
 
 ### Added
@@ -1157,7 +1163,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.97...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...HEAD
+[0.3.98]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.97...v0.3.98
 [0.3.97]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.96...v0.3.97
 [0.3.96]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.95...v0.3.96
 [0.3.95]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.94...v0.3.95
