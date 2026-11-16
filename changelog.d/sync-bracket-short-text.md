@@ -1,3 +1,0 @@
-### Added
-
-- `gomoveshift queue sync-bracket-short-text --sidecar <publish plan> [--apply]` regenerates the text of a queued GPS-less bracket-route Short planned before the label fix (titled "Pennsylvania" for "Virginia to Pennsylvania", refused by the Short review as `description_no_clip_place`): YouTube title, description and tags come from `SocialGenerator(bracket_route=...)` over the parent LF sidecar's bracket record, other platforms' text only where it names the collapsed destination, and the record is stored on the Short. A Short with a route record, an invalid or missing record, a region other than the label, or one the review still refuses is left untouched and reported. Dry run unless `--apply`; local files only.

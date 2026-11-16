@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.101] - 2026-11-16
+
+### Added
+
+- `gomoveshift queue sync-bracket-short-text --sidecar <publish plan> [--apply]` regenerates the text of a queued GPS-less bracket-route Short planned before the label fix (titled "Pennsylvania" for "Virginia to Pennsylvania", refused by the Short review as `description_no_clip_place`): YouTube title, description and tags come from `SocialGenerator(bracket_route=...)` over the parent LF sidecar's bracket record, other platforms' text only where it names the collapsed destination, and the record is stored on the Short. A Short with a route record, an invalid or missing record, a region other than the label, or one the review still refuses is left untouched and reported. Dry run unless `--apply`; local files only.
+
+### Fixed
+
+- A Short of a GPS-less bracket-route drive is titled with the backed label itself ("Mar 5, 3rd stretch: Virginia to Pennsylvania"), not the label's destination alone ("Pennsylvania", an endpoint the record never measured), which the Short review refused as `description_no_clip_place` (nctopa-2026-03-05-rec0063, 21 Shorts). `SocialGenerator` takes `state.bracket_route`: only text that is exactly a valid record's label keeps its "A to B" shape (and is exempt from the direction-framing ban); every other arc still collapses and every other "to X" is still refused. The Short's publish record carries that bracket record, and the Short review judges the label against it instead of a route record such a Short has none of. The label carries no location hashtag (no `#VirginiatoPennsylvania`, no `#Pennsylvania`).
+
 ## [0.3.100] - 2026-11-16
 
 ### Fixed
@@ -1175,7 +1185,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...HEAD
+[0.3.101]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...v0.3.101
 [0.3.100]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...v0.3.100
 [0.3.99]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...v0.3.99
 [0.3.98]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.97...v0.3.98
