@@ -17,6 +17,7 @@ from gomoveshift.pipeline.social_generator import (
     SocialGenerator,
     TitleFacts,
     _arc_safe_anchor,
+    _location_hashtags,
 )
 
 LABEL = "Virginia to Pennsylvania"
@@ -99,3 +100,18 @@ def test_without_a_record_the_label_is_still_refused_as_direction_framing():
         _gen(bracket_route=None)._check_hand_text_place(
             1, HandTitle(title=f"Mar 5: {LABEL}", caption="")
         )
+
+
+def test_backed_bracket_label_emits_no_location_hashtag():
+    # JP 2026-11-16: drop the location hashtag; "#VirginiatoPennsylvania" reads badly.
+    assert _location_hashtags(LABEL, RECORD) == []
+    assert _location_hashtags("Pennsylvania") == ["#Pennsylvania"]
+    assert _location_hashtags(LABEL, None) == ["#Pennsylvania"]
+
+
+def test_no_text_field_of_a_backed_bracket_short_carries_a_place_hashtag():
+    for post in _posts(_gen()):
+        for name, value in vars(post).items():
+            if isinstance(value, str):
+                assert "#Virginiato" not in value, name
+                assert "#Pennsylvania" not in value, name

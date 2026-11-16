@@ -276,9 +276,13 @@ def _location_hashtags(location: str, bracket_route: "Optional[dict]" = None) ->
     ``"#" + loc.replace(" ", "").replace(",", "")`` path is unrepresentable.
     """
     base = _strip_series_suffix(location)
+    # A backed bracket-route label ("Virginia to Pennsylvania") names a leg, not a
+    # place, so it gets no hashtag (JP 2026-11-16: "#VirginiatoPennsylvania" reads
+    # badly); collapsing it to the destination would name an unmeasured endpoint.
     parts = [
-        backed_bracket_label(p, bracket_route) or _arc_safe_anchor(p.strip())
+        _arc_safe_anchor(p.strip())
         for p in base.split(",")
+        if not backed_bracket_label(p, bracket_route)
     ]
     out: list[str] = []
     for part in parts:
@@ -1031,11 +1035,12 @@ class SocialGenerator:
         # Now points to the first (most-specific) component instead of the
         # smashed concatenation. Discovery surfaces should prefer
         # .location_hashtags.
-        self.location_tag = (
-            self.location_hashtags[0][1:]
-            if self.location_hashtags
-            else "".join(c for c in self.location_short if c.isalnum())
-        )
+        if self.location_hashtags:
+            self.location_tag = self.location_hashtags[0][1:]
+        elif backed_bracket_label(self.location_short_full, bracket_route):
+            self.location_tag = ""  # a backed bracket leg gets no hashtag (above)
+        else:
+            self.location_tag = "".join(c for c in self.location_short if c.isalnum())
 
         # Track POI usage within this instance for description deduplication
         self._used_pois: dict[str, int] = {}
@@ -1687,7 +1692,8 @@ class SocialGenerator:
                     optional_hashtags.append(mid)
         else:
             pinned = []
-            optional_hashtags.append(f"#{self.location_tag}")
+            if self.location_tag:
+                optional_hashtags.append(f"#{self.location_tag}")
 
         all_hashtags = fixed_hashtags + optional_hashtags + pinned
         description = f"{base} {' '.join(all_hashtags)}"
