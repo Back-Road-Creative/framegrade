@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.102] - 2026-11-16
+
+### Fixed
+
+- A GPS-less drive labelled by its region alone ("Ireland") no longer fails Phase D after its encode with `description redundancy gate failed … location 'Ireland' appears 4×` (ireland-2025-09-19-early-clonakilty, 12 h lost). The location budget (2×: hook + `📍 Location:`) now counts only the text above the description template's divider; below it the config footer (`▶ Full Ireland playlist`, the cadence line) and the `#Ireland` hashtag name the region by construction. A restatement above the divider still fails.
+
 ## [0.3.101] - 2026-11-16
 
 ### Added
@@ -1185,7 +1191,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...HEAD
+[0.3.102]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...v0.3.102
 [0.3.101]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...v0.3.101
 [0.3.100]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...v0.3.100
 [0.3.99]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.98...v0.3.99
