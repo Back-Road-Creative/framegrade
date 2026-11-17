@@ -17,7 +17,9 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    whose argv or name contains `drive`, or whose log carries the drive orchestrator's logger (real
    drives run through launcher scripts). Row file: `<drive>.json`. A later `succeeded` run of the
    same job name resolves it, and so does a later succeeded drive job under ANY name that shares
-   its `expect` log path or its stages dir (audit failed, publish succeeded).
+   its `expect` log path or its stages dir (audit failed, publish succeeded). A later succeeded
+   heal resume OF that job (`gms-heal-<job name>-<sha7>`, nested once per resume) resolves it by
+   name alone: a resume can run under a moved scratch root, sharing no log or stages dir.
    A job that ended exit 5 (`EXIT_WAITING_AT_GATE`) with `DRIVE WAITING:` as its log's last
    closing line stopped at a human gate (the OST audit) and is not a failure: no row is filed, an
    open one is resolved, so `health heal` never re-resumes it onto the same gate. `health
