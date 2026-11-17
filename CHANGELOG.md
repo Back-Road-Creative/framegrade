@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.105] - 2026-11-17
+
+### Fixed
+
+- A failed drive stayed an open incident after a heal resume of it succeeded, when the resume ran
+  under a moved scratch root and shared no log or stages dir with it. Every new mirror SHA then
+  launched another multi-hour audit-only resume, which held the region's backlog ("one heavy drive
+  at a time"). `health check` now resolves a failed job once a later heal resume named after it
+  (`gms-heal-<job name>-<sha7>`, at any nesting) succeeds.
+
 ## [0.3.104] - 2026-11-17
 
 ### Fixed
@@ -1204,7 +1214,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...HEAD
+[0.3.105]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...v0.3.105
 [0.3.104]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...v0.3.104
 [0.3.103]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...v0.3.103
 [0.3.102]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...v0.3.102
