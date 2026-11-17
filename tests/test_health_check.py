@@ -494,3 +494,44 @@ def test_an_unreadable_backlog_closes_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(check_mod, "_backlog_rows", lambda notes: None)
     result = _run(tmp_path, lambda *a: True)
     assert result["resolved"] == [] and len(result["incidents"]) == 1
+
+
+def _healed(tmp_path, *, heal_name, heal_created=2000.0):
+    """A failed drive and a heal resume of it whose own log and stages dir share nothing with it
+    (the scratch root moved between them), so only the heal job's NAME ties the two."""
+    fail = _log(
+        tmp_path / "fail.log",
+        "project_name=demo-drive-a",
+        f"INFO resume recipe: {tmp_path}/old-scratch/_stages/resume.json",
+        "Drive pipeline failed: x",
+    )
+    ok = _log(
+        tmp_path / "heal.log",
+        "project_name=demo-drive-a",
+        f"INFO resume recipe: {tmp_path}/new-scratch/_stages/resume.json",
+        "all done",
+    )
+    _job(tmp_path / "jobs", "r1", "gms-heal-demo-a-0a4c9ad", fail, created=1000.0)
+    _job(tmp_path / "jobs", "r2", heal_name, ok, state="succeeded", rc=0, created=heal_created)
+
+
+def test_a_later_succeeded_heal_of_the_failed_job_resolves_it_by_name(tmp_path):
+    # Mizen 11-17: bd6769e4 stayed open after three heal resumes of it succeeded, so every new
+    # mirror SHA launched another multi-hour audit-only resume and held the region's backlog.
+    _healed(tmp_path, heal_name="gms-heal-gms-heal-demo-a-0a4c9ad-0d8e035")
+    assert _run(tmp_path, lambda *a: True)["incidents"] == []
+
+
+def test_a_heal_nested_twice_still_resolves_its_origin(tmp_path):
+    _healed(tmp_path, heal_name="gms-heal-gms-heal-gms-heal-demo-a-0a4c9ad-1111111-2222222")
+    assert _run(tmp_path, lambda *a: True)["incidents"] == []
+
+
+def test_a_heal_of_another_job_or_an_earlier_heal_does_not_resolve(tmp_path):
+    _healed(tmp_path, heal_name="gms-heal-gms-heal-demo-b-0a4c9ad-0d8e035")
+    assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
+
+
+def test_a_heal_that_succeeded_before_the_failure_does_not_resolve_it(tmp_path):
+    _healed(tmp_path, heal_name="gms-heal-gms-heal-demo-a-0a4c9ad-0d8e035", heal_created=500.0)
+    assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1

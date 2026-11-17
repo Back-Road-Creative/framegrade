@@ -89,6 +89,23 @@ def _is_drive_job(rec: Dict[str, Any]) -> bool:
     return False
 
 
+#: ``heal.job_name``: a heal resume of job ``<inner>`` is ``gms-heal-<inner>-<sha7>`` (nested once
+#: per resume). A regex here, so this module imports nothing from ``heal``.
+_HEAL_NAME_RE = re.compile(r"^gms-heal-(.+)-[0-9a-f]{7}$")
+
+
+def heal_origins(name: str) -> Set[str]:
+    """The job names a heal resume stands for: every ``<inner>`` it wraps.
+
+    A heal resume's own log and stages dir can share nothing with the drive it resumes (the
+    scratch root moved between them), so its name is the one link that always holds."""
+    out: Set[str] = set()
+    while m := _HEAL_NAME_RE.match(name):
+        name = m.group(1)
+        out.add(name)
+    return out
+
+
 def _links(rec: Dict[str, Any]) -> Tuple[Set[str], Optional[str]]:
     """``(expect log paths, stages dir)`` of a job: what ties it to a sibling run of one drive."""
     logs = {str(p) for p in _expect_logs(rec)}
@@ -136,12 +153,13 @@ def detect(
         if _is_drive_job(rec):
             latest[str(rec.get("name"))] = rec
     incidents: List[Dict[str, Any]] = []
-    # (created_at, log paths, stages dir) of each job that SUCCEEDED, under any name: a later
-    # one sharing a failed drive's log or stages dir recovered it (audit failed -> publish ok).
-    wins: List[Tuple[float, Set[str], Optional[str]]] = []
-    for rec in latest.values():
+    # (created_at, log paths, stages dir, healed job names) of each job that SUCCEEDED, under any
+    # name: a later one sharing a failed drive's log or stages dir recovered it (audit failed ->
+    # publish ok), and so does a later heal resume of that very job.
+    wins: List[Tuple[float, Set[str], Optional[str], Set[str]]] = []
+    for win_name, rec in latest.items():
         if (rec.get("result") or {}).get("state") == "succeeded":
-            wins.append((float(rec.get("created_at") or 0), *_links(rec)))
+            wins.append((float(rec.get("created_at") or 0), *_links(rec), heal_origins(win_name)))
     for name, rec in latest.items():
         result = rec.get("result") or {}
         state = result.get("state")
@@ -172,7 +190,10 @@ def detect(
             continue
         created = float(rec.get("created_at") or 0)
         mine, stages = _links(rec)
-        if any(c > created and ((mine & m) or (stages and stages == s)) for c, m, s in wins):
+        if any(
+            c > created and ((mine & m) or (stages and stages == s) or name in healed)
+            for c, m, s, healed in wins
+        ):
             continue  # recovered by a later run under another job name
         drive = parsed.get("drive") or name
         key = f"drive_failed:{safe_name(drive)}:{run_id}"
