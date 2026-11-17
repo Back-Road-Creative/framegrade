@@ -589,3 +589,95 @@ def test_passes_with_no_stat_lines():
         _meta(_clean_description(), full_drive_stats=["distance"])
     )
     assert result.passed, f"description with no stat lines should pass: {result.message}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Single-word location (a GPS-less drive labelled by its region, "Ireland")
+# ─────────────────────────────────────────────────────────────────────────
+
+REGION_LOCATION = "Ireland"
+
+
+def _region_description(body: str = "") -> str:
+    """The template below the divider names the region by construction: the
+    config footer ("▶ Full Ireland playlist", a cadence line) and the geo
+    hashtag (#Ireland). A one-word location equals that region noun."""
+    return (
+        f"POV drive through {REGION_LOCATION} (45m 45s).\n"
+        f"4K drive through {REGION_LOCATION}.\n"
+        f"\n"
+        f"{body}"
+        f"📍 Location: {REGION_LOCATION}\n"
+        f"🎬 Duration: 45m 45s\n"
+        f"📅 Filmed: Sep 2025\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n"
+        f"🔔 Subscribe for more POV driving videos!\n"
+        f"\n"
+        f"▶ Full Ireland playlist: https://www.youtube.com/playlist?list=PLireland\n"
+        f"New Ireland drive every Sunday\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\n"
+        f"#Ireland #PovDriving #Drive\n"
+    )
+
+
+def test_passes_when_template_below_divider_names_a_one_word_location():
+    """The Clonakilty drive (2026-11-16) failed Phase D after a 12 h encode:
+    location 'Ireland' 4× = hook + 📍 Location + the footer playlist line +
+    the #Ireland hashtag. Footer and hashtags are template text below the
+    divider, not prose restatement, so they do not count."""
+    result = check_description_redundancy(_meta(_region_description(), location=REGION_LOCATION))
+    assert result.passed, result.message
+
+
+def test_below_divider_exclusion_does_not_weaken_prose_location_budget():
+    """Counter-test: a body restating the one-word location above the divider
+    still breaches the 2× budget."""
+    body = f"A drive through {REGION_LOCATION}.\n\n"
+    result = check_description_redundancy(
+        _meta(_region_description(body), location=REGION_LOCATION)
+    )
+    assert not result.passed
+    assert "location 'Ireland' appears 3×" in result.message
+
+
+def test_generated_one_word_location_description_passes_gate(monkeypatch):
+    """End to end: the generator's own description for a GPS-less drive
+    labelled 'Ireland', with the production footer configured, passes."""
+    from gomoveshift.config import Config
+    from gomoveshift.pipeline import longform_metadata
+    from gomoveshift.pipeline.longform_metadata import LongFormMetadataGenerator
+
+    cfg = Config.model_validate(
+        {
+            "drive": {
+                "playlist_url_by_region": {
+                    "ireland": "https://www.youtube.com/playlist?list=PLireland"
+                },
+                "cadence_line_by_region": {"ireland": "New Ireland drive every Sunday"},
+            }
+        }
+    )
+    monkeypatch.setattr(longform_metadata, "_get_config", lambda config_path=None: cfg)
+    with patch.object(LongFormMetadataGenerator, "_init_seo_manager"):
+        with patch.object(LongFormMetadataGenerator, "_init_ledger"):
+            gen = LongFormMetadataGenerator()
+    gen._seo_degraded = True
+    gen._manager = None
+    gen._ledger = None
+    metadata = gen.generate(
+        location=REGION_LOCATION,
+        video_duration=2745.0,
+        project_name="t",
+        trim_ratio=0.9,
+        recording_date="2025-09-19",
+        source_duration=2800.0,
+    )
+    metadata.setdefault("location", REGION_LOCATION)
+    assert "▶ Full Ireland playlist" in metadata["description"]
+    assert "#Ireland" in metadata["description"]
+    result = check_description_redundancy(metadata)
+    assert result.passed, result.message
