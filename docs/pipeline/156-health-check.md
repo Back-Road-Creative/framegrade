@@ -143,13 +143,21 @@ A `--dry-run` pass launches nothing and writes no row, but each would-launch att
 `attempts` carries the exact `argv` (the job-runner wrapper and the rebound drive command), `cwd`,
 `interpreter`, `job_name` and `mirror_sha`, so the resume can be graded before it runs.
 
-Guards (each a recorded skip): (a) this SHA already has a launched attempt; (b) a drive job is
-running (job/1 record with no result, or `pgrep`); (c) the publish slot has passed or is unknown
-(the recipe's `--lf-publish-date`, else the soonest free slot of `gomoveshift schedule`, recorded
-as `slot`); (d) a metadata-gate failure (gate matches `/metadata/i`) when
-`git diff --name-only <staging_sha> <mirror sha> -- GENERATOR_PATHS` is empty
-(`health/heal.py`: the title/longform-metadata/content-validator modules); (e) one push at launch (`health_heal_launched`) and one at
-outcome (`health_heal_outcome`), the latter observed on the next heal pass.
+Guards (each a recorded skip that ends by itself; an open `drive_failed` incident always gets
+another resume, and only an operator hold or an unreadable recipe stops one): (a) retry backoff:
+with n launched attempts of the recipe (counted across every row sharing it) on the current mirror
+SHA and installed version, the next waits `min(3600 * 2**(n-1), 86400)` s (`HEAL_RETRY_BASE_S`,
+`HEAL_RETRY_MAX_S`) after the newest, skip reason `retry backoff: next attempt at <iso>`; a new SHA
+or version retries at once, and pre-flight failures do not count (after `HEAL_PREFLIGHT_RETRIES`
+of them on one code the retry waits the 24 h max from the newest); (b) a drive job is running
+(job/1 record with no result, or `pgrep`); (c) none: the publish slot (the recipe's
+`--lf-publish-date`, else the soonest free slot of `gomoveshift schedule`) is recorded as `slot`
+but never gates, since an audit-only drive keeps only the weekday check and `health backlog` /
+`health publish` claim a fresh slot after a passed audit; (d) a metadata-gate failure (gate
+matches `/metadata/i`) when `git diff --name-only <staging_sha> <mirror sha> -- GENERATOR_PATHS` is
+empty (`health/heal.py`: the title/longform-metadata/content-validator modules) retries once per
+24 h; (e) one push at launch (`health_heal_launched`) and one at outcome (`health_heal_outcome`),
+the latter observed on the next heal pass.
 
 ## `health backlog`: launch the next backlog day
 

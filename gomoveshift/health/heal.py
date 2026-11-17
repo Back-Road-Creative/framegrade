@@ -1,16 +1,26 @@
 """``health heal``: audit-only auto-resume of a failed drive from its own resume recipe.
 
-Per open ``drive_failed`` incident, at most one resume per new mirror SHA and installed
-``gomoveshift-video`` version (the code that will actually run), launched detached
-through the job runner (``job_runner``). It never guesses an argv (no readable recipe = ``refused``) and never
-publishes: it appends ``--skip-upload --no-youtube-upload``. A ``no-auto-resume`` file beside the
-recipe refuses the drive on every SHA (an operator's stop). Guards, each a recorded skip: (a) this
-recipe already has a launched attempt on this SHA under this installed version, (b) a drive job is running, (c) the publish slot has passed
-or is unknown, (d) a metadata-gate failure with no generator change since the failure, (e) install
-pending: the checkout pins a ``gomoveshift-video`` version the venv does not hold yet (the staging
-sync defers the install while a drive runs), so a launch would run the old code.
+An open ``drive_failed`` incident always gets another resume: a failed render is never abandoned.
+Each resume is launched detached through the job runner (``job_runner``). Heal never guesses an
+argv (no readable recipe = ``refused``) and never publishes: it appends
+``--skip-upload --no-youtube-upload``. A ``no-auto-resume`` file beside the recipe refuses the drive
+on every SHA (an operator's stop); that and an unreadable recipe are the only stops.
+Guards, each a recorded skip that ends by itself: (a) retry backoff. With n launched attempts of
+this recipe (counted across every row sharing it) on the current mirror SHA and installed
+``gomoveshift-video`` version (the code that will actually run), the next waits
+``min(HEAL_RETRY_BASE_S * 2**(n-1), HEAL_RETRY_MAX_S)`` (1 h, 2 h, 4 h ... 24 h) after the newest.
+A new SHA or version retries at once. (b) a drive job is running. (c) none: the publish slot is
+recorded, never gating, because an audit-only drive keeps only the weekday check
+(``_launch_anchor_refusal``); ``health backlog`` and ``health publish`` claim a fresh slot after
+a passed audit. (d) a metadata-gate failure with no generator change since the failure retries once
+per ``HEAL_RETRY_MAX_S``. (e) install pending: the checkout pins a ``gomoveshift-video`` version
+the venv does not hold yet (the staging sync defers the install while a drive runs), so a launch
+would run the old code.
 A launch that failed in drive pre-flight (before any encode) is outcome ``preflight_failed``: it does
-not count as launched on its SHA, so the next tick retries, at most ``HEAL_PREFLIGHT_RETRIES`` times.
+not count toward the backoff, so the next tick retries, ``HEAL_PREFLIGHT_RETRIES`` times on the same
+code; then the retry waits ``HEAL_RETRY_MAX_S`` from the newest pre-flight failure, and so on.
+A same-code retry reuses ``job_name(drive, sha)``; ``_outcomes`` matches a job record to an attempt by
+creation time, so each attempt gets its own run's outcome.
 Every attempt is appended to the row's ``resume_attempts``."""
 
 from __future__ import annotations
@@ -20,7 +30,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -40,8 +50,12 @@ GENERATOR_PATHS: Tuple[str, ...] = (
 )
 _METADATA_GATE = re.compile(r"metadata", re.I)
 _STALL_S = "86400"
-#: Pre-flight failures a recipe may retry on one mirror SHA before it waits for a new SHA.
+#: Pre-flight failures a recipe may retry on one code identity before it backs off to the cap.
 HEAL_PREFLIGHT_RETRIES = 8
+#: Retry backoff after a launched attempt on the same code: ``BASE * 2**(n-1)`` seconds after the
+#: newest of n such attempts, capped at ``MAX``. A failed drive is never abandoned.
+HEAL_RETRY_BASE_S = 3600
+HEAL_RETRY_MAX_S = 86400
 #: What the drive logs when pre-flight blocks the run (``orchestrator_preflight``), and the
 #: line that proves an encode phase ran (``orchestrator``): the latter means NOT a pre-flight failure.
 _PREFLIGHT_MARK = "Pre-flight check failed:"
@@ -166,10 +180,16 @@ def launch_argv(
     ]  # fmt: skip
 
 
-def _launch_reason(stale: List[str]) -> str:
+def _retry_wait_s(n: int) -> int:
+    """Seconds to wait after the newest of ``n`` launched attempts on the same code."""
+    return min(HEAL_RETRY_BASE_S * 2 ** (max(1, min(n, 32)) - 1), HEAL_RETRY_MAX_S)
+
+
+def _launch_reason(stale: List[str], retry: int = 0) -> str:
+    why = f"retry {retry + 1} on this code" if retry else "new mirror SHA"
     if stale:
-        return f"new mirror SHA; audit-only full resume (code version changed: {', '.join(stale)})"
-    return "new mirror SHA; audit-only resume"
+        return f"{why}; audit-only full resume (code version changed: {', '.join(stale)})"
+    return f"{why}; audit-only resume"
 
 
 def _default_launcher(argv: List[str], cwd: str) -> Tuple[bool, str]:
@@ -435,26 +455,25 @@ def run_heal(
         had = a.get("installed_version")
         return a.get("mirror_sha") == sha and (had is None or installed is None or had == installed)
 
-    # Guard (a) is per recipe, not per row: ``health check`` files a failed heal job as a row of
-    # its own, and a per-row guard healed that row again on the same SHA, every tick.
-    # A launch that died in pre-flight never started the work: it is retried, up to the cap.
-    def _launched(a: Dict[str, Any]) -> bool:
-        return (
-            _same_code(a)
-            and a.get("action") == "launched"
-            and a.get("outcome") != "preflight_failed"
-        )
-
-    launched_recipes = {
-        r.get("resume_recipe") for r in rows for a in r.get("resume_attempts") or [] if _launched(a)
-    }
-    preflight_fails: Dict[Any, int] = {}
+    # The backoff is per recipe, not per row: ``health check`` files a failed heal job as a row of
+    # its own, and a per-row count healed that row again every tick. A launch that died in
+    # pre-flight never started the work: it is retried, up to the cap, then on the max backoff.
+    launched_at: Dict[Any, List[datetime]] = {}
+    preflight_at: Dict[Any, List[datetime]] = {}
+    last_launch_any: Dict[Any, datetime] = {}  # any code: guard (d)'s "same generators" clock
     for r in rows:
+        rp = r.get("resume_recipe")
         for a in r.get("resume_attempts") or []:
-            if _same_code(a) and a.get("outcome") == "preflight_failed":
-                preflight_fails[r.get("resume_recipe")] = (
-                    preflight_fails.get(r.get("resume_recipe"), 0) + 1
-                )
+            when = _parse_when(a.get("at"))
+            if when is None or a.get("action") != "launched":
+                continue
+            last_launch_any[rp] = max(when, last_launch_any.get(rp, when))
+            if not _same_code(a):
+                continue
+            if a.get("outcome") == "preflight_failed":
+                preflight_at.setdefault(rp, []).append(when)
+            else:
+                launched_at.setdefault(rp, []).append(when)
     for row in rows:
         if row.get("resolved_at"):
             continue
@@ -475,30 +494,49 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif recipe_path in launched_recipes or any(_launched(a) for a in attempts):
-            continue  # guard (a): once per recipe per mirror SHA; silent so a pass is not noise
-        elif preflight_fails.get(recipe_path, 0) >= HEAL_PREFLIGHT_RETRIES:
+        elif launched_at.get(recipe_path) and now < (
+            retry_at := max(launched_at[recipe_path])
+            + timedelta(seconds=_retry_wait_s(len(launched_at[recipe_path])))
+        ):
+            att["reason"] = f"retry backoff: next attempt at {utc_iso(retry_at.timestamp())}"  # (a)
+        elif len(preflight_at.get(recipe_path, ())) >= HEAL_PREFLIGHT_RETRIES and now < (
+            retry_at := max(preflight_at[recipe_path]) + timedelta(seconds=HEAL_RETRY_MAX_S)
+        ):
             att["reason"] = (
-                f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this SHA; "
-                "waiting for a new mirror SHA"
+                f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this code; "
+                f"retry at {utc_iso(retry_at.timestamp())}"
             )
         elif pinned and installed and pinned != installed:
             att["reason"] = f"install pending: checkout pins {pinned}, venv has {installed}"
         elif drive_running(jobs_dir):
             att["reason"] = "a drive job is running"
         else:
+            # Guard (c) is gone: an audit-only resume keeps only the drive CLI's weekday check
+            # (``_launch_anchor_refusal``), so a passed or unknown slot refuses nothing. The slot
+            # is still recorded; ``health backlog`` / ``health publish`` claim a fresh one.
             slot = slot_fn(row, recipe)
             att["slot"] = slot.isoformat() if slot else None
-            if slot is None:
-                att["reason"] = "publish slot unknown"
-            elif now >= slot:
-                att["reason"] = f"publish slot {slot.isoformat()} has passed"
-            elif (
+            if (
                 _METADATA_GATE.search(row.get("gate") or "")
                 and row.get("staging_sha")
                 and (git_changed(row["staging_sha"], sha, GENERATOR_PATHS) == [])
             ):
-                att["reason"] = "metadata gate failed and no generator file changed"
+                # Guard (d): the same failure on unchanged generators retries once per max wait,
+                # counted from the newest launch (any code), else from the first such skip.
+                first_skip = next(
+                    (
+                        _parse_when(a.get("at")) for a in attempts
+                        if str(a.get("reason", "")).startswith("metadata gate failed")
+                    ),
+                    None,
+                )  # fmt: skip
+                since = last_launch_any.get(recipe_path) or first_skip or now
+                retry_at = since + timedelta(seconds=HEAL_RETRY_MAX_S)
+                if now < retry_at:
+                    att["reason"] = (
+                        "metadata gate failed and no generator file changed; "
+                        f"retry at {utc_iso(retry_at.timestamp())}"
+                    )
         bound, cwd = (None, "")
         if att["action"] == "skipped" and not att["reason"]:
             bound, cwd = bind_to_code_root(code_root, recipe["argv"])
@@ -511,6 +549,7 @@ def run_heal(
             env = {**resume.recipe_env(recipe), run_origin.LAUNCHED_BY_ENV: "health-heal"}
             argv = launch_argv(code_root, jobs_dir, name, bound, env=env)
             att["interpreter"] = bound[0]
+            prior = len(launched_at.get(recipe_path, ()))
             if dry_run:  # the exact launch, so the evidence is gradeable before it runs
                 att.update(argv=argv, cwd=cwd, job_name=name, reason="dry run: would launch")
                 out["would_launch"].append(row["key"])
@@ -518,8 +557,9 @@ def run_heal(
                 ok, detail = launcher(argv, cwd)
                 att["job_name"] = name
                 if ok:
-                    att.update(action="launched", reason=_launch_reason(stale))
-                    launched_recipes.add(recipe_path)
+                    att.update(action="launched", reason=_launch_reason(stale, prior))
+                    launched_at.setdefault(recipe_path, []).append(now)
+                    last_launch_any[recipe_path] = now
                 else:
                     att["reason"] = f"launch failed: {detail}"
         if dry_run:

@@ -2008,7 +2008,7 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
     h = sub.add_parser(
         "heal",
         help="Auto-resume failed drives (audit only: --skip-upload --no-youtube-upload) from "
-        "their resume.json, once per new mirror SHA",
+        "their resume.json, retrying on a backoff (1 h doubling to 24 h) until one passes",
     )
     for flag, kind, text in (
         ("--data-root", Path, "Root directory the health state lives under (env GMS_DATA_ROOT)."),
