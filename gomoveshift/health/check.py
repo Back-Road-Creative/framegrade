@@ -83,9 +83,12 @@ def unattended_incidents(
                 key = row.get("resume_recipe") or row["key"]
                 launched[key] = max(when, launched.get(key, when))
     out: List[Dict[str, Any]] = []
-    emitted: set = set()  # one incident per drive, even when several rows share it
+    # one incident per drive: its heal resumes and its stage siblings are that drive
+    emitted: set = set()
     for row in drive_rows:
-        if row["drive"] in emitted:
+        root = min(drives.heal_origins(str(row["drive"])) or {str(row["drive"])}, key=len)
+        group = row.get("resume_recipe") or root
+        if group in emitted or root in emitted:
             continue
         recipe = row.get("resume_recipe")
         attempts = row.get("resume_attempts") or []
@@ -105,16 +108,16 @@ def unattended_incidents(
             continue
         where = " / ".join(x for x in (row.get("phase"), row.get("gate")) if x) or "unknown gate"
         stamp = last or newest or _when(row.get("failed_at"))
-        emitted.add(row["drive"])
+        emitted.update((group, root))
         out.append(
             new_incident(
                 "failure_unattended",
-                f"failure_unattended:{row['drive']}",
-                f"failure_unattended_{safe_name(str(row['drive']))}.json",
+                f"failure_unattended:{root}",
+                f"failure_unattended_{safe_name(root)}.json",
                 now_iso,
-                drive=row["drive"],
+                drive=root,
                 last_attempt_at=stamp.isoformat() if stamp else None,
-                detail=f"Drive {row['drive']} failed at {where} and is unattended: {why}.",
+                detail=f"Drive {root} failed at {where} and is unattended: {why}.",
             )
         )
     return out

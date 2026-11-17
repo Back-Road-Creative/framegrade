@@ -46,12 +46,15 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    open `drive_failed` row is unattended when its newest `launched` attempt (the newest across every
    open row sharing its `resume_recipe`) is older than `UNATTENDED_AFTER_H` = 26 h (the cap plus two
    cron ticks), or it has no attempt and `failed_at` is that old, or its newest attempt is `refused`
-   (heal can never relaunch it). One `failure_unattended` incident per drive (key
-   `failure_unattended:<drive>`, row file `failure_unattended_<drive>.json`) names the drive, the
-   failed phase/gate, the last attempt time and why. It prints as `[failure_unattended] ...`, is
+   (heal can never relaunch it). One `failure_unattended` incident per drive: its heal resumes
+   (`gms-heal-<drive>-<sha7>`, nested) and the rows sharing its `resume_recipe` are that drive, so
+   they raise one alarm named for the original drive (key `failure_unattended:<drive>`, row file
+   `failure_unattended_<drive>.json`). It names the drive, the failed phase/gate, the last attempt time and why. It prints as `[failure_unattended] ...`, is
    pushed once (`health_failure_unattended`) and resolves on a later check once a newer launch lands
    or the drive resolves. An operator hold (`no-auto-resume` beside the recipe) is deliberate: it is
-   reported as a `held` note, never an incident.
+   reported as a `held` note, never an incident. A job the drive's tracked-launcher gate refused
+   (its log carries `run_origin.LAUNCHER_GATE_REFUSAL`) never started its drive, so it files no
+   `drive_failed` row and raises no alarm: the drive is still the backlog's to launch.
 
 A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve against the cwd).
 

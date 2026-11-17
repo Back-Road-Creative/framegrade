@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from gomoveshift import run_origin
 from gomoveshift.health import cadence, run_check
 from gomoveshift.health import check as check_mod
 from gomoveshift.health.drives import parse_log
@@ -716,3 +717,33 @@ def test_two_rows_of_one_drive_file_one_failure_unattended(tmp_path):
     ]  # fmt: skip
     out = unattended_incidents(rows, now, now.isoformat(), [])
     assert [r["key"] for r in out] == ["failure_unattended:demo-drive-a"]
+
+
+def test_a_drive_and_its_heal_resumes_raise_one_alarm_named_for_the_drive(tmp_path):
+    # live 2026-11-17: rec0060-0061 and its 5 heal rows were one drive, six pushes
+    jobs, names = tmp_path / "jobs", ["gms-backlog-demo-x"]
+    names += [f"gms-heal-gms-backlog-demo-x-{sha}" for sha in ("131ed1c", "49f2171")]
+    for i, name in enumerate(names):
+        log = _log(tmp_path / f"{i}.log", "running phase_bc", "ERROR Drive pipeline failed: short")
+        _job(jobs, f"h{i}", name, log, created=T0 + i)
+    _run(tmp_path, lambda *a: True)
+    shared = tmp_path / "stages" / "resume.json"
+    refused = {"at": _hours_ago(1), "action": "refused", "reason": "no readable resume.json"}
+    for name in names:
+        _set(tmp_path, name, refused, recipe=shared)
+    _, sent = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert row["key"] == "failure_unattended:gms-backlog-demo-x"
+    assert [e for e, _ in sent] == ["health_failure_unattended"]
+
+
+def test_a_manual_launch_the_launcher_gate_refused_is_not_a_failed_drive(tmp_path):
+    # live 2026-11-17: gms-publish-rec0063 exited 2 at the gate; the drive itself shipped
+    log = _log(
+        tmp_path / "gate.log",
+        f"error: {run_origin.LAUNCHER_GATE_REFUSAL} -- `gomoveshift health backlog`, ...",
+        "DRIVE FAILED: exit code 2 (see messages above)",
+    )
+    _job(tmp_path / "jobs", "g1", "gms-publish-demo", log, rc=2, created=T0)
+    out = _run(tmp_path, lambda *a: True)
+    assert out["incidents"] == [] and out["new"] == []
