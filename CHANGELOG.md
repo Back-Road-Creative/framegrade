@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.108] - 2026-11-17
+
+### Added
+
+- `health check` files a `failure_unattended` incident, pushed once, for any open failed drive that `health heal` is not retrying: no launched attempt for 26 h, or its newest attempt was refused. It resolves when a newer launch lands or the drive does. A drive under an operator hold (`no-auto-resume`) is reported as a note, not an incident. A drive and its heal resumes raise one alarm, named for the drive. A hand-typed launch that the tracked-launcher gate refused is not a failed drive: it never started one.
+
 ## [0.3.107] - 2026-11-17
 
 ### Changed
@@ -1234,7 +1240,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...HEAD
+[0.3.108]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...v0.3.108
 [0.3.107]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...v0.3.107
 [0.3.106]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...v0.3.106
 [0.3.105]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...v0.3.105
