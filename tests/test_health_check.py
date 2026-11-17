@@ -14,6 +14,8 @@ from gomoveshift.health.store import load_all, new_incident, write_row
 from gomoveshift.publishing.queue import open_queue_db
 
 NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+#: Fixture job times: well inside the 26 h unattended window, ordered as the tests need.
+T0 = NOW.timestamp() - 7200
 
 
 def _job(
@@ -24,7 +26,7 @@ def _job(
     *,
     state="failed",
     rc=1,
-    created=1000.0,
+    created=NOW.timestamp() - 3600,
     argv=("gomoveshift", "drive", "/in/demo"),
 ):
     d = jobs / run_id
@@ -123,7 +125,7 @@ def test_nonzero_exit_needs_marker_when_state_not_failed(tmp_path):
     _job(tmp_path / "jobs", "r2", "drive-b", clean, state="exited", rc=2)
     assert _run(tmp_path, lambda *a: True)["incidents"] == []
     marked = _log(tmp_path / "m.log", "Drive pipeline failed: nope")
-    _job(tmp_path / "jobs", "r3", "drive-c", marked, state="exited", rc=2, created=2000.0)
+    _job(tmp_path / "jobs", "r3", "drive-c", marked, state="exited", rc=2, created=T0 + 2000)
     assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
 
 
@@ -131,7 +133,15 @@ def test_later_successful_run_resolves_incident(tmp_path):
     _failed_drive(tmp_path)
     _run(tmp_path, lambda *a: True)
     ok = _log(tmp_path / "ok.log", "done")
-    _job(tmp_path / "jobs", "r9", "drive-demo-drive-a", ok, state="succeeded", rc=0, created=5000.0)
+    _job(
+        tmp_path / "jobs",
+        "r9",
+        "drive-demo-drive-a",
+        ok,
+        state="succeeded",
+        rc=0,
+        created=NOW.timestamp(),
+    )
     out = _run(tmp_path, lambda *a: True)
     assert out["incidents"] == [] and len(out["resolved"]) == 1
     rows, _ = load_all(tmp_path / "inc")
@@ -278,7 +288,7 @@ def _recovered_pair(tmp_path, *, share):
         *([recipe] if share == "stages" else []),
         "all done",
     )
-    _job(tmp_path / "jobs", "r1", "gms-fri-1002-audit", fail_log, created=1000.0)
+    _job(tmp_path / "jobs", "r1", "gms-fri-1002-audit", fail_log, created=T0 + 1000)
     _job(
         tmp_path / "jobs",
         "r2",
@@ -286,7 +296,7 @@ def _recovered_pair(tmp_path, *, share):
         ok_log,
         state="succeeded",
         rc=0,
-        created=2000.0,
+        created=T0 + 2000,
     )
 
 
@@ -308,7 +318,7 @@ def test_unrelated_later_success_does_not_resolve(tmp_path):
 def test_an_earlier_success_does_not_resolve_a_later_failure(tmp_path):
     _recovered_pair(tmp_path, share="stages")
     (tmp_path / "jobs" / "r2" / "job.json").write_text(
-        (tmp_path / "jobs" / "r2" / "job.json").read_text().replace("2000.0", "500.0")
+        (tmp_path / "jobs" / "r2" / "job.json").read_text().replace(str(T0 + 2000), str(T0 + 500))
     )
     assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
 
@@ -362,11 +372,11 @@ def test_later_success_sharing_the_stages_dir_in_the_own_log_resolves_it(tmp_pat
     rec = f"INFO resume recipe: {tmp_path}/stages/resume.json"
     _job_with_own_log(
         tmp_path, "r1", "gms-a", [rec, "ERROR Drive pipeline failed: x"],
-        expect="/mnt/d/a/**/*.mp4", created=1000.0,
+        expect="/mnt/d/a/**/*.mp4", created=T0 + 1000,
     )  # fmt: skip
     _job_with_own_log(
         tmp_path, "r2", "gms-b", [rec], expect="/mnt/d/b/**/*.mp4",
-        argv=("gomoveshift", "drive", "/in/demo"), state="succeeded", rc=0, created=2000.0,
+        argv=("gomoveshift", "drive", "/in/demo"), state="succeeded", rc=0, created=T0 + 2000,
     )  # fmt: skip
     assert _run(tmp_path, lambda *a: True)["incidents"] == []
 
@@ -379,7 +389,7 @@ def test_an_open_row_filed_without_its_recipe_gains_it_when_detection_finds_it(t
     _job_with_own_log(tmp_path, "r1", "gms-backlog-demo-drive-a", lines, expect=glob)
     (row,) = _run(tmp_path, lambda *a: True)["incidents"]
     assert row["resume_recipe"] is None and row["pushed"]
-    row.update(log_path=None, resume_attempts=[{"action": "refused"}])
+    row.update(log_path=None, resume_attempts=[_ATTEMPT])
     write_row(tmp_path / "inc", row)
     recipe = f"INFO resume recipe: {tmp_path}/stages/resume.json"
     _log(tmp_path / "jobs" / "r1" / "output.log", lines[0], recipe, *lines[1:])
@@ -387,7 +397,7 @@ def test_an_open_row_filed_without_its_recipe_gains_it_when_detection_finds_it(t
     (row,) = load_all(tmp_path / "inc")[0]
     assert row["resume_recipe"] == f"{tmp_path}/stages/resume.json"
     assert row["log_path"] == str(tmp_path / "jobs" / "r1" / "output.log")
-    assert row["resume_attempts"] == [{"action": "refused"}] and row["pushed"]
+    assert row["resume_attempts"] == [_ATTEMPT] and row["pushed"]
     assert out["new"] == [] and out["pushed"] == []
 
 
@@ -496,7 +506,7 @@ def test_an_unreadable_backlog_closes_nothing(tmp_path, monkeypatch):
     assert result["resolved"] == [] and len(result["incidents"]) == 1
 
 
-def _healed(tmp_path, *, heal_name, heal_created=2000.0):
+def _healed(tmp_path, *, heal_name, heal_created=T0 + 2000):
     """A failed drive and a heal resume of it whose own log and stages dir share nothing with it
     (the scratch root moved between them), so only the heal job's NAME ties the two."""
     fail = _log(
@@ -511,7 +521,7 @@ def _healed(tmp_path, *, heal_name, heal_created=2000.0):
         f"INFO resume recipe: {tmp_path}/new-scratch/_stages/resume.json",
         "all done",
     )
-    _job(tmp_path / "jobs", "r1", "gms-heal-demo-a-0a4c9ad", fail, created=1000.0)
+    _job(tmp_path / "jobs", "r1", "gms-heal-demo-a-0a4c9ad", fail, created=T0 + 1000)
     _job(tmp_path / "jobs", "r2", heal_name, ok, state="succeeded", rc=0, created=heal_created)
 
 
@@ -533,5 +543,176 @@ def test_a_heal_of_another_job_or_an_earlier_heal_does_not_resolve(tmp_path):
 
 
 def test_a_heal_that_succeeded_before_the_failure_does_not_resolve_it(tmp_path):
-    _healed(tmp_path, heal_name="gms-heal-gms-heal-demo-a-0a4c9ad-0d8e035", heal_created=500.0)
+    _healed(tmp_path, heal_name="gms-heal-gms-heal-demo-a-0a4c9ad-0d8e035", heal_created=T0 + 500)
     assert len(_run(tmp_path, lambda *a: True)["incidents"]) == 1
+
+
+# A failed drive nobody is retrying must be impossible to miss: heal retries each open
+# drive_failed row at least every 24 h, so a row with no launched attempt for 26 h (the cap plus two
+# cron ticks) is abandoned, as is one heal refused (it can never relaunch it).
+def _hours_ago(h):
+    return (NOW - timedelta(hours=h)).isoformat()
+
+
+_ATTEMPT = {"at": (NOW - timedelta(hours=1)).isoformat(), "action": "launched"}
+
+
+def _two_drives(tmp_path, *names):
+    notify = []
+    for i, name in enumerate(names):
+        log = _log(
+            tmp_path / f"{name}.log",
+            f"project_name={name}",
+            "running phase_d",
+            "ERROR Drive pipeline failed: Audio loudness HARD FAIL",
+        )
+        _job(tmp_path / "jobs", f"r{i}", f"drive-{name}", log)
+    _run(tmp_path, lambda e, i, s: notify.append(e) or True)
+    return notify
+
+
+def _set(tmp_path, drive, *attempts, recipe=None):
+    rows, _ = load_all(tmp_path / "inc")
+    (row,) = [r for r in rows if r["kind"] == "drive_failed" and r["drive"] == drive]
+    row["resume_recipe"] = str(recipe or tmp_path / drive / "resume.json")
+    row["resume_attempts"] = list(attempts)
+    write_row(tmp_path / "inc", row)
+
+
+def _launched(h):
+    return {"at": _hours_ago(h), "action": "launched", "reason": None, "outcome": None}
+
+
+def _unattended(tmp_path):
+    rows, _ = load_all(tmp_path / "inc")
+    return [r for r in rows if r["kind"] == "failure_unattended"]
+
+
+def _recheck(tmp_path):
+    sent = []
+    out = _run(tmp_path, lambda e, i, s: sent.append((e, s)) or True)
+    return out, sent
+
+
+def test_a_launch_older_than_26_hours_files_and_pushes_failure_unattended(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(27))
+    out, sent = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert row["key"] == "failure_unattended:demo-drive-a" and not row.get("resolved_at")
+    assert "demo-drive-a" in row["detail"] and "Audio loudness" in row["detail"]
+    assert _hours_ago(27) in row["detail"] and "26" in row["detail"]
+    assert out["new"] == [row["key"]] and out["pushed"] == [row["key"]]
+    assert [e for e, _ in sent] == ["health_failure_unattended"]
+    assert "demo-drive-a" in sent[0][1]
+    assert row["key"] in [r["key"] for r in out["incidents"]]
+
+
+def test_a_launch_inside_26_hours_is_attended(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(25))
+    out, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+
+
+def test_a_row_with_no_attempt_is_unattended_once_its_failure_is_26_hours_old(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a")
+    rows, _ = load_all(tmp_path / "inc")
+    (row,) = rows
+    row["failed_at"] = _hours_ago(25)
+    write_row(tmp_path / "inc", row)
+    _recheck(tmp_path)
+    assert _unattended(tmp_path) == []
+    row["failed_at"] = _hours_ago(27)
+    write_row(tmp_path / "inc", row)
+    _recheck(tmp_path)
+    assert len(_unattended(tmp_path)) == 1
+
+
+def test_a_recent_launch_on_a_sibling_row_sharing_the_recipe_attends_both(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a", "demo-drive-b")
+    shared = tmp_path / "shared" / "resume.json"
+    _set(tmp_path, "demo-drive-a", _launched(27), recipe=shared)
+    _set(tmp_path, "demo-drive-b", _launched(1), recipe=shared)
+    _, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+
+
+def test_a_refused_newest_attempt_is_unattended_however_recent(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    refused = {"at": _hours_ago(1), "action": "refused", "reason": "no readable recipe"}
+    _set(tmp_path, "demo-drive-a", _launched(2), refused)
+    _, sent = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert "refused" in row["detail"] and "no readable recipe" in row["detail"]
+    assert [e for e, _ in sent] == ["health_failure_unattended"]
+
+
+def test_an_operator_hold_is_reported_held_and_raises_no_alarm(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(40))
+    (tmp_path / "demo-drive-a" / "no-auto-resume").parent.mkdir()
+    (tmp_path / "demo-drive-a" / "no-auto-resume").write_text("validation run")
+    out, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+    assert any("held" in n and "demo-drive-a" in n for n in out["notes"])
+
+
+def test_failure_unattended_resolves_when_the_condition_clears(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(27))
+    _recheck(tmp_path)
+    assert len(_unattended(tmp_path)) == 1
+    _set(tmp_path, "demo-drive-a", _launched(27), _launched(1))
+    out, _ = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert row["resolved_at"] and out["resolved"] == [row["key"]]
+    assert all(r["kind"] != "failure_unattended" for r in out["incidents"])
+
+
+def test_failure_unattended_resolves_when_the_drive_does(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(27))
+    _recheck(tmp_path)
+    log = _log(tmp_path / "ok.log", "project_name=demo-drive-a", "done")
+    _job(
+        tmp_path / "jobs",
+        "r9",
+        "drive-demo-drive-a",
+        log,
+        state="succeeded",
+        rc=0,
+        created=NOW.timestamp() - 60,
+    )
+    out, _ = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert row["resolved_at"] and out["incidents"] == []
+
+
+def test_failure_unattended_is_idempotent_across_checks(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _launched(27))
+    _, first = _recheck(tmp_path)
+    out, again = _recheck(tmp_path)
+    assert len(first) == 1 and again == []
+    assert out["new"] == [] and out["pushed"] == [] and out["resolved"] == []
+    assert len(_unattended(tmp_path)) == 1
+
+
+def test_two_rows_of_one_drive_file_one_failure_unattended(tmp_path):
+    # health check files a failed heal job as its own drive_failed row on the same drive: one alarm.
+    from datetime import datetime, timedelta, timezone
+
+    from gomoveshift.health.check import unattended_incidents
+
+    now = datetime(2026, 11, 17, 21, 0, tzinfo=timezone.utc)
+    old = (now - timedelta(hours=30)).isoformat()
+    recipe = str(tmp_path / "resume.json")
+    rows = [
+        {"key": k, "drive": "demo-drive-a", "resume_recipe": recipe, "failed_at": old,
+         "resume_attempts": [{"at": old, "action": "launched"}]}
+        for k in ("drive_failed:demo-drive-a", "drive_failed:demo-drive-a-heal")
+    ]  # fmt: skip
+    out = unattended_incidents(rows, now, now.isoformat(), [])
+    assert [r["key"] for r in out] == ["failure_unattended:demo-drive-a"]
