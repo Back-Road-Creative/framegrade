@@ -231,3 +231,44 @@ class TestRateLimitBackoff:
         with patch("urllib.request.urlopen", side_effect=fake), patch("time.sleep"):
             _query_overpass(BBOX)
         assert calls == [primary, primary], f"expected an in-place retry, got {calls}"
+
+
+class TestClientTimeout:
+    """The client must outwait the server's own ``[timeout:N]`` budget.
+
+    That budget covers query execution only; a busy mirror queues the request
+    first. On 2026-11-17 overpass-api.de took 29.9 s to answer a one-node query
+    while the client hung up at 25 s, the same number as the budget, so every
+    mirror read as timed out and an Ireland drive failed its place lookup on
+    two runs in a row (Courtmacsherry, jobs 9582dad5 and c78c89dc).
+    """
+
+    def test_the_client_waits_past_the_servers_query_budget(self):
+        primary = ops.OVERPASS_ENDPOINTS[0]
+        seen: list[float] = []
+        fake, _calls = _responder({primary: _RESPONSE})
+
+        def _timed(req, timeout=None):
+            seen.append(timeout)
+            return fake(req, timeout)
+
+        with patch("urllib.request.urlopen", side_effect=_timed):
+            _query_overpass(BBOX)
+        assert seen == [ops.OVERPASS_CLIENT_TIMEOUT]
+        assert ops.OVERPASS_CLIENT_TIMEOUT >= ops.OVERPASS_TIMEOUT + 60, (
+            "the client must leave the server its full query budget plus a queue wait"
+        )
+
+    def test_the_server_budget_in_the_query_is_unchanged(self):
+        """The shared cache is keyed on the query text; the budget stays put."""
+        primary = ops.OVERPASS_ENDPOINTS[0]
+        bodies: list[bytes] = []
+        fake, _calls = _responder({primary: _RESPONSE})
+
+        def _capture(req, timeout=None):
+            bodies.append(req.data)
+            return fake(req, timeout)
+
+        with patch("urllib.request.urlopen", side_effect=_capture):
+            _query_overpass(BBOX)
+        assert b"%5Btimeout%3A25%5D" in bodies[0] or b"[timeout:25]" in bodies[0]

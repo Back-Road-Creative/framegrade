@@ -28,7 +28,11 @@ OVERPASS_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 )
-OVERPASS_TIMEOUT = 25  # seconds (increased for US bounding boxes)
+OVERPASS_TIMEOUT = 25  # seconds: the server-side [timeout:N] query budget (raised for US bboxes)
+# The HTTP read timeout. A busy mirror queues a request BEFORE its query budget
+# starts, so a client that hangs up at the budget itself reads a slow-but-alive
+# mirror as down (overpass-api.de took 29.9 s on a one-node query, 2026-11-17).
+OVERPASS_CLIENT_TIMEOUT = 90  # seconds; > OVERPASS_TIMEOUT + a queue wait
 OVERPASS_RETRY_DELAY = 5  # seconds — the fallback wait when a 429 omits Retry-After
 OVERPASS_RETRY_MAX_SLEEP = 60  # seconds; a mirror asking for an hour is ignored
 OVERPASS_ATTEMPTS_PER_ENDPOINT = 2
@@ -310,7 +314,7 @@ def post_overpass_query(query: str) -> dict:
                         "User-Agent": overpass_user_agent(),
                     },
                 )
-                with urllib.request.urlopen(req, timeout=OVERPASS_TIMEOUT) as resp:
+                with urllib.request.urlopen(req, timeout=OVERPASS_CLIENT_TIMEOUT) as resp:
                     if resp.status != 200:
                         raise OSError(f"Overpass returned HTTP {resp.status}")
                     result = json.loads(resp.read().decode("utf-8"))
