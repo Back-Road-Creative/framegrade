@@ -5,6 +5,20 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.107] - 2026-11-17
+
+### Changed
+
+- `health backlog` no longer stops a whole region at one failed audit. The tick walks the
+  region's `auditing` rows, lists each failed one under `failed_audits` (printed as `failed audit
+  <project>: ...`) and launches the next eligible row, exiting 0. The failed row stays `auditing`
+  for `health heal` to resume, and is published once its audit succeeds. An in-progress, gated or
+  passed audit behind it is handled as before.
+
+### Fixed
+
+- A failed destination place lookup (every Overpass mirror down) no longer drops the LF title to the bare county, which duplicated a live video. The render now raises `PlaceLookupUnavailableError`, a transient failure `health heal` retries; a lookup that answered with no place keeps the fallback, and `--label-dry-run` reports the LF as `place lookup unavailable (transient)`.
+
 ## [0.3.106] - 2026-11-17
 
 ### Changed
@@ -1220,7 +1234,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...HEAD
+[0.3.107]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...v0.3.107
 [0.3.106]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...v0.3.106
 [0.3.105]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...v0.3.105
 [0.3.104]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...v0.3.104
