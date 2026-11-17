@@ -39,6 +39,8 @@ class Rig:
         self.changed: list = []  # git is pathspec-filtered: only generator files can appear
         self.slot = FUTURE
         self.launch_ok = True
+        self.installed = None  # the venv's gomoveshift-video version; None = unknown
+        self.pinned = None  # the checkout's pinned version; None = unknown
         stages = tmp_path / "stages"
         resume.write_recipe(
             stages,
@@ -65,6 +67,8 @@ class Rig:
             git_changed=lambda a, b, paths: self.changed,
             drive_running=lambda jobs: self.running,
             slot_fn=lambda row, recipe: self.slot,
+            installed_version_fn=lambda python: self.installed,
+            pinned_version_fn=lambda code_root: self.pinned,
         )  # fmt: skip
 
     def row(self):
@@ -149,6 +153,59 @@ def test_guard_a_once_per_mirror_sha(tmp_path):
     assert len(rig.row()["resume_attempts"]) == 1  # a repeat skip is not re-recorded
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
     assert len(rig.launches) == 2
+
+
+def test_guard_a_is_keyed_on_the_installed_version_not_the_sha_alone(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed = "0.3.101"
+    rig.run()
+    rig.run()
+    assert len(rig.launches) == 1  # same SHA, same installed version: once
+    assert rig.row()["resume_attempts"][0]["installed_version"] == "0.3.101"
+    rig.installed = "0.3.102"  # the deferred install landed; the SHA did not move
+    rig.run()
+    assert len(rig.launches) == 2
+    assert rig.row()["resume_attempts"][-1]["installed_version"] == "0.3.102"
+    rig.run()
+    assert len(rig.launches) == 2
+
+
+def test_an_attempt_recorded_before_versions_existed_still_blocks_its_sha(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()  # installed unknown: no version recorded as a value
+    rig.installed = "0.3.102"
+    rig.run()
+    assert len(rig.launches) == 1
+
+
+def test_install_pending_refuses_while_the_pin_differs_from_the_venv(tmp_path):
+    rig = Rig(tmp_path)
+    rig.pinned, rig.installed = "0.3.102", "0.3.101"
+    out = rig.run()
+    assert rig.launches == [] and out["launched"] == []
+    att = rig.row()["resume_attempts"][0]
+    assert att["action"] == "skipped"
+    assert att["reason"] == "install pending: checkout pins 0.3.102, venv has 0.3.101"
+    rig.run()
+    assert len(rig.row()["resume_attempts"]) == 1  # an unchanged skip is not re-recorded
+    rig.installed = "0.3.102"  # install landed
+    rig.run()
+    assert len(rig.launches) == 1
+
+
+def test_install_pending_shows_in_the_dry_run(tmp_path):
+    rig = Rig(tmp_path)
+    rig.pinned, rig.installed = "0.3.102", "0.3.101"
+    out = rig.run(dry_run=True)
+    assert out["would_launch"] == []
+    assert out["attempts"][0]["reason"].startswith("install pending:")
+
+
+def test_unknown_pin_or_installed_version_does_not_hold_a_resume(tmp_path):
+    rig = Rig(tmp_path)
+    rig.pinned, rig.installed = None, "0.3.101"
+    rig.run()
+    assert len(rig.launches) == 1
 
 
 def _failed_heal_row(rig: Rig, n: int) -> None:

@@ -1,11 +1,14 @@
 """``health heal``: audit-only auto-resume of a failed drive from its own resume recipe.
 
-Per open ``drive_failed`` incident, at most one resume per new mirror SHA, launched detached
+Per open ``drive_failed`` incident, at most one resume per new mirror SHA and installed
+``gomoveshift-video`` version (the code that will actually run), launched detached
 through the job runner (``job_runner``). It never guesses an argv (no readable recipe = ``refused``) and never
 publishes: it appends ``--skip-upload --no-youtube-upload``. A ``no-auto-resume`` file beside the
 recipe refuses the drive on every SHA (an operator's stop). Guards, each a recorded skip: (a) this
-recipe already has a launched attempt on this SHA, (b) a drive job is running, (c) the publish slot has passed
-or is unknown, (d) a metadata-gate failure with no generator change since the failure.
+recipe already has a launched attempt on this SHA under this installed version, (b) a drive job is running, (c) the publish slot has passed
+or is unknown, (d) a metadata-gate failure with no generator change since the failure, (e) install
+pending: the checkout pins a ``gomoveshift-video`` version the venv does not hold yet (the staging
+sync defers the install while a drive runs), so a launch would run the old code.
 A launch that failed in drive pre-flight (before any encode) is outcome ``preflight_failed``: it does
 not count as launched on its SHA, so the next tick retries, at most ``HEAL_PREFLIGHT_RETRIES`` times.
 Every attempt is appended to the row's ``resume_attempts``."""
@@ -21,9 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import tomllib
+
 from .. import run_origin
 from . import drives, resume
-from .store import code_sha, load_all, new_incident, safe_name, utc_iso, write_row
+from .store import DIST_NAME, code_sha, load_all, new_incident, safe_name, utc_iso, write_row
 
 #: Files whose change can alter a metadata-gate verdict (the title/description generators and
 #: their validator). Repo-root-relative; guard (d) diffs exactly these.
@@ -175,6 +180,30 @@ def _default_launcher(argv: List[str], cwd: str) -> Tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
     return done.returncode == 0, (done.stderr or done.stdout).strip()[-200:]
+
+
+def default_installed_version(python: str) -> Optional[str]:
+    """The ``gomoveshift-video`` version installed in ``python``'s environment, else ``None``
+    (no interpreter, not installed, or the lookup failed)."""
+    code = f"import importlib.metadata as m; print(m.version({DIST_NAME!r}))"
+    try:
+        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
+            [python, "-c", code], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.strip()
+    return out if done.returncode == 0 and out else None
+
+
+def default_pinned_version(code_root: Path) -> Optional[str]:
+    """The ``[project] version`` the code root's ``pyproject.toml`` pins, else ``None``."""
+    try:
+        data = tomllib.loads((Path(code_root) / SERVICE_DIR / "pyproject.toml").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = (data.get("project") or {}).get("version")
+    return version if isinstance(version, str) and version else None
 
 
 def _default_git_changed(
@@ -365,6 +394,8 @@ def run_heal(
     drive_running: Optional[Callable[[Path], bool]] = None,
     slot_fn: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Optional[datetime]]] = None,
     only_key: Optional[str] = None,
+    installed_version_fn: Optional[Callable[[str], Optional[str]]] = None,
+    pinned_version_fn: Optional[Callable[[Path], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """``{"launched", "would_launch", "outcomes", "attempts", "notes"}``. Never raises on input."""
     if notify_fn is None:
@@ -376,6 +407,8 @@ def run_heal(
     git_changed = git_changed or _default_git_changed(code_root)
     drive_running = drive_running or default_drive_running
     slot_fn = slot_fn or default_slot(config, now)
+    installed_version_fn = installed_version_fn or default_installed_version
+    pinned_version_fn = pinned_version_fn or default_pinned_version
     rows, _bad = load_all(incidents_dir)
     rows = [
         r for r in rows
@@ -390,12 +423,24 @@ def run_heal(
         out["notes"].append("mirror SHA unknown: nothing launched")
         return out
 
+    # The code identity a resume runs: the SHA plus the version installed in the interpreter heal
+    # launches. A deferred install leaves the SHA ahead of the venv, so the SHA alone is not it.
+    python = Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python"
+    installed = installed_version_fn(str(python))
+    pinned = pinned_version_fn(Path(code_root))
+
+    def _same_code(a: Dict[str, Any]) -> bool:
+        # An attempt with no recorded version (older row) or an unknown one matches: only two
+        # known, different versions are different code.
+        had = a.get("installed_version")
+        return a.get("mirror_sha") == sha and (had is None or installed is None or had == installed)
+
     # Guard (a) is per recipe, not per row: ``health check`` files a failed heal job as a row of
     # its own, and a per-row guard healed that row again on the same SHA, every tick.
     # A launch that died in pre-flight never started the work: it is retried, up to the cap.
     def _launched(a: Dict[str, Any]) -> bool:
         return (
-            a.get("mirror_sha") == sha
+            _same_code(a)
             and a.get("action") == "launched"
             and a.get("outcome") != "preflight_failed"
         )
@@ -406,7 +451,7 @@ def run_heal(
     preflight_fails: Dict[Any, int] = {}
     for r in rows:
         for a in r.get("resume_attempts") or []:
-            if a.get("mirror_sha") == sha and a.get("outcome") == "preflight_failed":
+            if _same_code(a) and a.get("outcome") == "preflight_failed":
                 preflight_fails[r.get("resume_recipe")] = (
                     preflight_fails.get(r.get("resume_recipe"), 0) + 1
                 )
@@ -415,7 +460,7 @@ def run_heal(
             continue
         attempts: List[Dict[str, Any]] = row.setdefault("resume_attempts", [])
         att: Dict[str, Any] = {
-            "at": now_iso, "mirror_sha": sha, "slot": None, "action": "skipped",
+            "at": now_iso, "mirror_sha": sha, "installed_version": installed, "slot": None, "action": "skipped",
             "reason": "", "job_name": None,
         }  # fmt: skip
         recipe_path = row.get("resume_recipe")
@@ -437,6 +482,8 @@ def run_heal(
                 f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this SHA; "
                 "waiting for a new mirror SHA"
             )
+        elif pinned and installed and pinned != installed:
+            att["reason"] = f"install pending: checkout pins {pinned}, venv has {installed}"
         elif drive_running(jobs_dir):
             att["reason"] = "a drive job is running"
         else:

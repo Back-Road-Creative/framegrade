@@ -78,7 +78,11 @@ saves never move `phase_reached`: an existing recipe stays byte-identical. Writi
 drive (warning only).
 
 **Heal.** `gomoveshift health heal [--dry-run] [--json]` takes open `drive_failed` rows and
-launches at most one resume per recipe per mirror SHA: the recipe argv + `--skip-upload --no-youtube-upload`
+launches at most one resume per recipe per mirror SHA and installed `gomoveshift-video` version (guard (a): a deferred venv
+install leaves the SHA ahead of the code that runs, so a new installed version under the same SHA
+earns a new resume; each attempt records `installed_version`; while the checkout's `pyproject.toml`
+pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`):
+the recipe argv + `--skip-upload --no-youtube-upload`
 (each added only when the recipe lacks it), via
 the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). A failed heal job becomes an
 incident row of its own, but it shares the drive's recipe, so it waits for new code like the
