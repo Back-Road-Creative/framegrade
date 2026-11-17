@@ -31,6 +31,8 @@ Cases covered:
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -283,6 +285,7 @@ def _run_phase(state, run_all_days_impl=None):
 # ── Cases ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.overpass_answers_empty
 class TestShortsPerLfFastPath2:
     """Fast-path #2 (finals-only reconstruction) populates ``shorts_per_lf``.
 

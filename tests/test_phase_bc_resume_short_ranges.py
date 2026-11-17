@@ -18,6 +18,8 @@ equal-split — and the "legacy equal-split" fallback WARN never fires.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 import logging
 from pathlib import Path
@@ -173,6 +175,7 @@ def _run_phase(state):
     return phase
 
 
+@pytest.mark.overpass_answers_empty
 def test_resume_keeps_source_window_buckets_not_equal_split(tmp_path, caplog):
     state = _build_resume_state(tmp_path)
 
@@ -197,6 +200,7 @@ def test_resume_keeps_source_window_buckets_not_equal_split(tmp_path, caplog):
     ), [rec.getMessage() for rec in caplog.records if "equal-split" in rec.getMessage()]
 
 
+@pytest.mark.overpass_answers_empty
 def test_resume_without_sidecar_hard_fails_instead_of_equal_split(tmp_path):
     """Ambiguous shorts↔LF
     attribution (no short_ranges, >1 LF) must hard-fail — the equal-split

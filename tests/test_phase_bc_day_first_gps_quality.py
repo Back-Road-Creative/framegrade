@@ -19,6 +19,7 @@ GPS trackpoints, ``PhaseBCDayFirst.run`` threads them per-LF into
 actually exercised in production.
 """
 
+import pytest
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +92,7 @@ def _trackpoint(ts, lat, lon):
     return GPSTrackpoint(lat=lat, lon=lon, elevation=0.0, timestamp=float(ts))
 
 
+@pytest.mark.overpass_answers_empty
 class TestGPSQualityFilterAtDeriveStage:
     def test_gps_points_by_lf_threaded_and_filter_exercised(self, tmp_path):
         """``PhaseBCDayFirst.run`` must pass ``gps_points_by_lf`` through
