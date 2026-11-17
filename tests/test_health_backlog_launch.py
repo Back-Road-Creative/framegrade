@@ -249,6 +249,31 @@ def test_a_heal_of_a_heal_counts_and_a_failed_one_still_refuses_naming_it(tmp_pa
     assert res["action"] == "refused" and "heal2" in res["reason"]
 
 
+# 2026-11-17: Clonakilty's heal resumes failed overnight; the operator relaunched it with
+# `gms-health-cron.sh heal-recipe <resume.json>`. A recipe-registered row names the drive by its
+# stages dir, so the job was gms-heal-<project>-7e3f368 (no gms-backlog- inside). It succeeded at
+# 05:25 ET, yet the 05:45 tick still refused "audit failed ... job 07d33eab", exit 2.
+
+
+def test_a_recipe_heal_named_after_the_stages_dir_counts_as_the_audit(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "old", "day-a", "failed", 100.0)
+    job(rig, "recipe", "day-a", "succeeded", 200.0, exit_code=0, name="gms-heal-day-a-7e3f368")
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress" in res["reason"]
+
+
+def test_a_bare_project_name_or_another_projects_recipe_heal_is_not_this_audit(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "auditing"))
+    job(rig, "old", "day-a", "failed", 100.0)
+    job(rig, "bare", "day-a", "succeeded", 200.0, exit_code=0, name="day-a")
+    job(rig, "other", "day-a", "succeeded", 300.0, exit_code=0, name="gms-heal-day-ab-7e3f368")
+    res = rig.run()
+    assert res["action"] == "refused" and "old" in res["reason"]
+
+
 def test_another_projects_heal_or_a_longer_project_name_is_not_this_audit(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("day-a", "auditing"))
