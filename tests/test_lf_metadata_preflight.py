@@ -57,6 +57,7 @@ class TestPreflightFunction:
                 assert_lf_metadata_gates_before_encode(_plan(1, 2), state, "A")
 
 
+@pytest.mark.overpass_answers_empty
 class TestRunsBeforeEncode:
     def test_encode_never_entered_when_the_gate_fails(self, tmp_path):
         state, _, _ = _build_state_with_drive_plan(

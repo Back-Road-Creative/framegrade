@@ -326,3 +326,14 @@ class WeatherMeasurementError(RuntimeError):
     fixes the underlying cause (copy source to ext4) or passes
     ``--allow-degraded-weather`` to explicitly accept the fallback.
     """
+
+
+class PlaceLookupUnavailableError(RuntimeError):
+    """Raised at render when the destination POI lookup FAILED (the source raised).
+
+    A title may drop to a county/placeless form only when the record MEASURED no
+    place; a lookup that never ran measured nothing. A resolver that answered with
+    no candidate (``source == "none"``) keeps the fallback; one that raised
+    (``source == "failed"``, e.g. every Overpass endpoint down) stops the drive so
+    ``health heal`` retries it from its stages once the source answers.
+    """

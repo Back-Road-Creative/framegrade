@@ -13,6 +13,8 @@ publishes earliest-first.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,6 +153,7 @@ def _run_phase(state, run_all_days_impl):
     return phase
 
 
+@pytest.mark.overpass_answers_empty
 class TestShortsChronologicalWithinLF:
     """Shorts inside an LF's bucket are sorted by source-time start_sec.
 
@@ -267,6 +270,7 @@ class TestShortsChronologicalWithinLF:
         assert lf2_names == ["short_03.mp4", "short_01.mp4"], f"LF 2 not chronological: {lf2_names}"
 
 
+@pytest.mark.overpass_answers_empty
 class TestLFsChronologicalAcrossDays:
     """Multi-day drive: LF order tracks calendar order, not rank.
 

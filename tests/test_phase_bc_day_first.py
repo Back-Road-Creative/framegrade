@@ -431,6 +431,7 @@ def _detailed_by_lat(lat, lon):
     }[int(lat)].copy()
 
 
+@pytest.mark.overpass_answers_empty
 class TestRealLFPlansThreaded:
     def _write_drive_plan(self, stages_dir: Path, lfs: list) -> Path:
         payload = {
@@ -1713,6 +1714,7 @@ class TestShortsPerLFPopulation:
         assert spl.get(1) == [], f"Expected empty list for LF 1; got {spl.get(1)}"
 
 
+@pytest.mark.overpass_answers_empty
 class TestPerLFLocationsThreadedToRunAllDays:
     """Per-LF OST locations must be computed BEFORE ``run_all_days``
     and threaded through via the ``per_lf_locations_by_date`` kwarg.
@@ -2042,6 +2044,7 @@ class TestPerLFLocationsThreadedToRunAllDays:
 # ── canonical per-LF OST text (state["per_lf_ost_text"]) ──────
 
 
+@pytest.mark.overpass_answers_empty
 class TestPerLFOSTCanonicalText:
     """``state["per_lf_ost_text"]`` is the single source of truth
     for OST burn-in text, YouTube title text, and thumbnail text.

@@ -777,7 +777,10 @@ def hermetic_overpass(request, monkeypatch):
     import binding (e.g. with a patched ``urlopen``) bypass module-attr
     lookup and keep the real function.
 
-    Opt-out: ``@pytest.mark.real_overpass``.
+    Opt-out: ``@pytest.mark.real_overpass``. ``@pytest.mark.overpass_answers_empty``
+    swaps the raise for an empty answer, for a test that renders an LF title but
+    is not about the lookup: a raise there now fails the drive for retry
+    (``PlaceLookupUnavailableError``) instead of falling back to the county.
     """
     if not HAS_GOMOVESHIFT:
         return
@@ -785,6 +788,16 @@ def hermetic_overpass(request, monkeypatch):
         return
     from gomoveshift.pipeline import chapters
     from gomoveshift.pipeline.chapters import overpass_source
+
+    if request.node.get_closest_marker("overpass_answers_empty"):
+        # Overpass answered and found nothing: the resolver reports ``none``
+        # (an honest county fallback), not ``failed`` (fail the drive for retry).
+        def _hermetic_query(*_args, **_kwargs):
+            return {"elements": []}
+
+        monkeypatch.setattr(overpass_source, "_query_overpass", _hermetic_query)
+        monkeypatch.setattr(chapters, "_query_overpass", _hermetic_query)
+        return
 
     def _hermetic_query(*_args, **_kwargs):
         raise RuntimeError(
@@ -1074,6 +1087,11 @@ def pytest_configure(config):
         "real_overpass: opt out of the conftest ``_query_overpass`` stub, "
         "leaving the real function in place (patch ``urlopen`` yourself or "
         "expect live network).",
+    )
+    config.addinivalue_line(
+        "markers",
+        "overpass_answers_empty: the conftest ``_query_overpass`` stub answers "
+        "with no elements instead of raising (lookup worked, found nothing).",
     )
     config.addinivalue_line(
         "markers",

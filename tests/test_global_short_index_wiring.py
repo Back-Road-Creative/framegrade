@@ -31,6 +31,7 @@ from test_phase_d import phase_d_state as phase_d_state  # noqa: E402,F401 -- fi
 # ── Phase BC: state.short_global_index populated after the plan step ───────
 
 
+@pytest.mark.overpass_answers_empty
 class TestPhaseBCAssignsGlobalShortIndex:
     def test_short_global_index_populated_in_plan_order(self, tmp_path):
         state, _, _ = _build_state_with_drive_plan(

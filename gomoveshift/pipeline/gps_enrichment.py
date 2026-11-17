@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from ..models import DrivePlan, ResolvedLocation
+from .exceptions import PlaceLookupUnavailableError
 from .ost_validator import validate_ost
 from .title_builder import (
     build_lf_title,
@@ -65,7 +66,10 @@ def _resolve_lf_destination(lf, outcome: Optional[dict] = None) -> Optional[str]
     pipeline. Returns the destination name or ``None``.
 
     ``outcome`` (optional out-dict) receives ``"source"`` (``overpass`` / ``none``
-    / ``failed``, see ``destination_resolver.resolve_destination``).
+    / ``failed``, see ``destination_resolver.resolve_destination``) and, when the
+    POI source raised, ``"error"`` (its message). The render path raises
+    ``PlaceLookupUnavailableError`` on ``failed`` rather than title from a lookup
+    that never ran.
     """
     if outcome is not None:
         outcome["source"] = "none"
@@ -73,9 +77,18 @@ def _resolve_lf_destination(lf, outcome: Optional[dict] = None) -> Optional[str]
     if not peaks:
         return None
     try:
-        from .destination_resolver import resolve_destination
+        from . import destination_resolver as _dr
 
-        return resolve_destination(peaks, outcome=outcome)
+        def _recording_source(bbox):
+            # Keep the POI source's own error: the resolver only reports "failed".
+            try:
+                return _dr._default_poi_source(bbox)
+            except Exception as src_exc:
+                if outcome is not None:
+                    outcome["error"] = str(src_exc)
+                raise
+
+        return _dr.resolve_destination(peaks, poi_source=_recording_source, outcome=outcome)
     except Exception as exc:  # noqa: BLE001 — degrade to the A→B cascade
         logger.warning(
             "destination_resolver.resolve_destination failed for LF %d: %s",
@@ -609,7 +622,17 @@ def _enrich_per_lf_gps(
             lf_location = day_labels.get(
                 lf_idx, per_day_locations.get(date_key, drive_wide_location)
             )
-            destination = _resolve_lf_destination(lf)
+            dest_out: dict = {}
+            destination = _resolve_lf_destination(lf, dest_out)
+            if dest_out.get("source") == "failed":
+                # The lookup never ran, so it measured no place: a county-only
+                # title here would duplicate a live video. Fail for retry.
+                raise PlaceLookupUnavailableError(
+                    f"LF {lf_idx}: place lookup unavailable "
+                    f"({dest_out.get('error') or 'POI source failed'}). "
+                    "This is transient: `health heal` retries the drive from its stages "
+                    "once the POI source answers."
+                )
             if destination:
                 destination_by_lf[lf_idx] = destination
             day_ost_text[lf_idx] = canonical_lf_ost_text(

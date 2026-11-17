@@ -195,6 +195,7 @@ def _fake_day_artifacts(tmp_path, date, num_regular=2, num_shorts=4):
 # day-first is no longer a configurable mode; it is the only path.
 
 
+@pytest.mark.overpass_answers_empty
 class TestPhaseBcDayFirst:
     """Tests for the new _phase_bc_day_first method."""
 
@@ -506,6 +507,7 @@ class TestRunDispatchWithDayFirst:
         assert "phase_bc_day_first" in result.stages_completed
 
 
+@pytest.mark.overpass_answers_empty
 class TestPerDayLocationDerivation:
     """Multi-day drives must not leak Day 1's
     location onto Day 2's LFs. Phase_bc_day_first must derive a per-day
@@ -706,6 +708,7 @@ class TestPerDayLocationDerivation:
         assert state["per_day_locations"][dates[0]] == "Test Drive, SC"
 
 
+@pytest.mark.overpass_answers_empty
 class TestBuildLfTitleGpsPointsWiring:
     """build_lf_title must receive gps_points so GPS-filtered centroids
     are used instead of segment centroids, which may be contaminated by
