@@ -456,15 +456,20 @@ _HEAL_SHA = re.compile(r"-[0-9a-f]{7}$")
 
 def _is_audit_job(name: Any, project: str) -> bool:
     """``gms-backlog-<project>`` itself, or a heal resume of it (``heal.job_name``, nested once
-    per resume): the run that holds the audit is whichever of them ran last."""
+    per resume): the run that holds the audit is whichever of them ran last.
+
+    A ``health heal --recipe`` resume names the drive by its stages dir, so it is
+    ``gms-heal-<project>-<sha7>``: that resumes the same drive and counts too (a bare
+    ``<project>`` name, never wrapped by a heal, does not)."""
     base = f"gms-backlog-{project}"
     name = str(name or "")
+    healed = False
     while name != base and name.startswith("gms-heal-") and _HEAL_SHA.search(name):
         inner = name[len("gms-heal-") : -8]
         if heal_job_name(inner, name[-7:]) != name:
             return False
-        name = inner
-    return name == base
+        name, healed = inner, True
+    return name == base or (healed and name == project)
 
 
 def _newest_audit(jobs_dir: Path, project: str) -> Optional[Dict[str, Any]]:
