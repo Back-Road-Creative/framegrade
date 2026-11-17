@@ -299,8 +299,6 @@ def _build_metadata_per_lf(
         ``RuntimeError`` so a redundant description can't reach disk
         (hard-fail gate).
     """
-    from ..validation.content_gates import check_description_redundancy
-
     per_lf_locations_override = state.per_lf_locations or {}
     per_lf_resolved = state.per_lf_resolved_location or {}
     per_lf_ost_text_state = state.per_lf_ost_text or {}
@@ -605,11 +603,7 @@ def _build_metadata_per_lf(
         metadata.setdefault("video_duration", lf.total_duration)
         metadata_per_lf[lf.index] = metadata
 
-        _redundancy = check_description_redundancy(metadata)
-        if not _redundancy.passed:
-            raise RuntimeError(
-                f"description redundancy gate failed for LF {lf.index}: {_redundancy.message}"
-            )
+        _assert_description_redundancy(metadata, lf.index)
 
         meta_path = output_base / f"{project_name}_youtube.json"
         atomic_write_json(meta_path, metadata)
@@ -617,6 +611,93 @@ def _build_metadata_per_lf(
         logger.info("  LF %d: %s", lf.index, metadata.get("title", "N/A"))
 
     return metadata_per_lf
+
+
+def _assert_description_redundancy(metadata: dict, lf_index: int, *, prefix: str = "") -> None:
+    """Raise the description-redundancy gate's ``RuntimeError`` for one LF.
+
+    The single call site of ``check_description_redundancy`` for both Phase D
+    and the launch-time preflight, so the error text cannot drift. ``prefix``
+    is prepended verbatim (the preflight marks itself).
+    """
+    from ..validation.content_gates import check_description_redundancy
+
+    result = check_description_redundancy(metadata)
+    if not result.passed:
+        raise RuntimeError(
+            f"{prefix}description redundancy gate failed for LF {lf_index}: {result.message}"
+        )
+
+
+LF_METADATA_PREFLIGHT_PREFIX = "LF-METADATA-PREFLIGHT (before encode): "
+
+
+def assert_lf_metadata_gates_before_encode(drive_plan, state, location: str) -> None:
+    """Refuse to START an encode whose LF metadata would fail Phase D's gate.
+
+    Generates each LF's metadata with the SAME ``LongFormMetadataGenerator.
+    generate`` and the same ``_assert_description_redundancy`` gate Phase D
+    uses, from the inputs known at launch (per-LF location, OST title,
+    recording date, resolved location, regions, GPS presence, inserts,
+    planned duration), so a location string or footer config that trips the
+    gate fails in seconds, not after a multi-hour render. Nothing is written.
+
+    Placeholders for facts that only exist after the render: trim ratio,
+    source duration, distance, elevation, speed, bearing and full-drive
+    stats are left out of the call (None), so the description omits those
+    lines and they cannot trip a gate; chapters are embedded later in D1.5
+    and are excluded from the redundancy count; the duration is the PLANNED
+    ``lf.total_duration``.
+
+    Gate evaluated here: description redundancy. Stays in Phase D only
+    (needs post-render data): ``assert_phase_d_title_quality``,
+    ``refuse_unsupported_title`` and the Waypost final-text review (route
+    record + decided title), the redundancy re-check after the chapter
+    embed, and the metadata-quality / content-safety gates (chapters,
+    captions).
+    """
+    from ..longform_metadata import LongFormMetadataGenerator
+
+    per_lf_locations = state.per_lf_locations or {}
+    per_lf_resolved = state.per_lf_resolved_location or {}
+    per_lf_ost_text = state.per_lf_ost_text or {}
+    per_lf_dates = state.per_lf_recording_date or {}
+    per_lf_regions = state.per_lf_regions or {}
+    per_lf_gpx = state.per_lf_gpx_path or {}
+    evidence = getattr(state, "per_lf_location_evidence", None) or {}
+    lf_inserts = _lf_inserts(state)
+    meta_gen = LongFormMetadataGenerator()
+    for lf in getattr(drive_plan, "regular_lfs", None) or []:
+        lf_location = per_lf_locations.get(lf.index, location)
+        date_val = per_lf_dates.get(lf.index)
+        recording_date: Optional[str] = None
+        if isinstance(date_val, str) and date_val.strip():
+            recording_date = date_val.strip()
+        elif hasattr(date_val, "strftime"):
+            recording_date = date_val.strftime("%Y-%m-%d")
+        regions = per_lf_regions.get(lf.index)
+        part_count = getattr(lf, "part_count", None) or 1
+        metadata = meta_gen.generate(
+            location=lf_location,
+            video_duration=lf.total_duration,
+            project_name=f"preflight_lf{lf.index:02d}",
+            title_override=per_lf_ost_text.get(lf.index) or None,
+            recording_date=recording_date,
+            regions=regions if isinstance(regions, list) else None,
+            has_gps=(
+                per_lf_gpx.get(lf.index) is not None or per_lf_gpx.get(str(lf.index)) is not None
+            ),
+            resolved_location=per_lf_resolved.get(lf.index),
+            insert_count=len(lf_inserts.get(lf.index, [])),
+            location_evidence=evidence.get(lf.index),
+            title_part=(lf.part_index, part_count) if part_count > 1 else None,
+        )
+        # Same stamping Phase D does before its gate.
+        metadata.setdefault("location", lf_location)
+        if recording_date is not None:
+            metadata.setdefault("recording_date", recording_date)
+        metadata.setdefault("video_duration", lf.total_duration)
+        _assert_description_redundancy(metadata, lf.index, prefix=LF_METADATA_PREFLIGHT_PREFIX)
 
 
 def _below_chapter_floor(chapters: list, video_duration: float) -> bool:

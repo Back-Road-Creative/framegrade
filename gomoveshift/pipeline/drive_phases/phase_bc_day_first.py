@@ -592,6 +592,11 @@ class PhaseBCDayFirst:
                 assert_chapter_floor_before_encode(
                     self.config, _chapter_plan, state, drive_wide_location, stages_dir
                 )
+                # Same slot, same reason: a location/footer that trips the
+                # description gate fails here, not after the render.
+                from .phase_d_metadata import assert_lf_metadata_gates_before_encode
+
+                assert_lf_metadata_gates_before_encode(_chapter_plan, state, drive_wide_location)
 
             # The insert flags are per-invocation, so a resume must carry the ones its
             # finished days were rendered with (refused otherwise), and the inserts are
