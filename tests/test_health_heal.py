@@ -145,12 +145,14 @@ def test_no_auto_resume_marker_shows_in_the_dry_run(tmp_path):
     assert out["would_launch"] == [] and out["attempts"][0]["action"] == "refused"
 
 
-def test_guard_a_once_per_mirror_sha(tmp_path):
+def test_guard_a_waits_out_its_backoff_on_one_mirror_sha(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     rig.run()
+    rig.run()
     assert len(rig.launches) == 1
-    assert len(rig.row()["resume_attempts"]) == 1  # a repeat skip is not re-recorded
+    # the backoff skip is recorded once (the owner's rule: waits are visible, never silent)
+    assert len(rig.row()["resume_attempts"]) == 2
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
     assert len(rig.launches) == 2
 
@@ -261,20 +263,24 @@ def test_guard_b_skips_while_a_drive_job_is_running(tmp_path):
     assert len(rig.launches) == 1
 
 
-def test_guard_c_skips_once_the_publish_slot_has_passed(tmp_path):
+def test_guard_c_a_passed_slot_still_launches_the_audit_only_resume(tmp_path):
+    # The drive CLI keeps only the weekday check for an audit-only run (--skip-upload with
+    # --no-youtube-upload; handlers/drive.py `_launch_anchor_refusal`), so a passed slot never
+    # refuses a heal resume; `health backlog`/`health publish` claim a fresh slot afterwards.
     rig = Rig(tmp_path)
     rig.slot = datetime(2026, 1, 9, 12, 0, tzinfo=timezone.utc)
     rig.run()
     att = rig.row()["resume_attempts"][0]
-    assert rig.launches == [] and att["action"] == "skipped" and "slot" in att["reason"]
+    assert len(rig.launches) == 1 and att["action"] == "launched"
     assert att["slot"] == rig.slot.isoformat()
 
 
-def test_guard_c_unknown_slot_is_a_recorded_skip(tmp_path):
+def test_guard_c_an_unknown_slot_still_launches_and_records_no_slot(tmp_path):
     rig = Rig(tmp_path)
     rig.slot = None
     rig.run()
-    assert rig.launches == [] and rig.row()["resume_attempts"][0]["action"] == "skipped"
+    att = rig.row()["resume_attempts"][0]
+    assert len(rig.launches) == 1 and att["action"] == "launched" and att["slot"] is None
 
 
 def test_guard_d_metadata_gate_needs_a_generator_change(tmp_path):
@@ -285,6 +291,26 @@ def test_guard_d_metadata_gate_needs_a_generator_change(tmp_path):
     rig.changed = [heal.GENERATOR_PATHS[0] + "x.py"]
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
     assert len(rig.launches) == 1
+
+
+def test_guard_d_unchanged_generators_retry_once_per_max_wait_never_never(tmp_path):
+    rig = Rig(tmp_path, gate="Metadata quality")
+    rig.run()
+    assert rig.launches == []
+    rig.run(now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S - 60))
+    assert rig.launches == []
+    assert len(rig.row()["resume_attempts"]) == 1  # the repeat skip is not re-recorded
+    rig.run(now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S + 60))
+    assert len(rig.launches) == 1
+    # launched: the next try waits the cap again, even on a new SHA with the same generators
+    rig.run(
+        sha="1234567fedcba", now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S + 3600)
+    )  # pragma: allowlist secret
+    assert len(rig.launches) == 1
+    rig.run(
+        sha="1234567fedcba", now=NOW + timedelta(seconds=2 * heal.HEAL_RETRY_MAX_S + 300)
+    )  # pragma: allowlist secret
+    assert len(rig.launches) == 2
 
 
 def test_guard_d_does_not_hold_back_a_non_metadata_gate(tmp_path):
@@ -469,20 +495,23 @@ def test_unreadable_recipe_is_not_registered(tmp_path):
     assert len(load_all(rig.inc)[0]) == 1
 
 
-def test_recipe_target_still_obeys_the_publish_slot_guard(tmp_path):
-    # --recipe narrows which row heals; it bypasses no guard. A passed or
-    # unknown slot is a recorded skip for that row too.
+def test_recipe_target_still_obeys_the_backoff_and_holds(tmp_path):
+    # --recipe narrows which row heals; it bypasses no guard. A held recipe still refuses and a
+    # launched one still waits out its backoff (a passed or unknown slot is no longer a guard).
     rig = Rig(tmp_path)
-    key = heal.register_recipe(rig.inc, _second_recipe(tmp_path), now_iso="t")
+    second = _second_recipe(tmp_path)
+    key = heal.register_recipe(rig.inc, second, now_iso="t")
     rig.slot = None
     out = rig.run(only_key=key)
-    row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
-    assert rig.launches == [] and out["launched"] == []
-    assert row["resume_attempts"][-1]["reason"] == "publish slot unknown"
-    rig.slot = datetime(2026, 1, 9, 12, 0, tzinfo=timezone.utc)
+    assert out["launched"] == [key]
     rig.run(only_key=key)
+    assert len(rig.launches) == 1
     row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
-    assert rig.launches == [] and "has passed" in row["resume_attempts"][-1]["reason"]
+    assert row["resume_attempts"][-1]["reason"].startswith("retry backoff")
+    (second.parent / resume.HOLD_NAME).write_text("stop\n")
+    rig.run(only_key=key, now=NOW + timedelta(days=3))
+    row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
+    assert len(rig.launches) == 1 and row["resume_attempts"][-1]["action"] == "refused"
 
 
 # A dry run is the pre-launch evidence an operator grades before a resume: it must show the
@@ -727,20 +756,28 @@ def test_a_failure_with_no_log_is_a_plain_failure_not_a_preflight_one(tmp_path):
     assert rig.row()["resume_attempts"][0]["outcome"] == "failed"
 
 
-def test_preflight_retries_are_capped_per_recipe_per_sha(tmp_path):
+def test_preflight_retries_are_capped_then_wait_the_max_backoff_never_forever(tmp_path):
     rig = Rig(tmp_path)
     for n in range(1, heal.HEAL_PREFLIGHT_RETRIES + 1):
         rig.run(now=_tick(n - 1))
         assert len(rig.launches) == n
         _finish_heal_job(rig, n, PREFLIGHT_LOG)
+    last_at = _tick(heal.HEAL_PREFLIGHT_RETRIES - 1)
     rig.run(now=_tick(heal.HEAL_PREFLIGHT_RETRIES))
     rig.run(now=_tick(heal.HEAL_PREFLIGHT_RETRIES + 1))
     assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES
     last = rig.row()["resume_attempts"][-1]
+    retry_at = last_at + timedelta(seconds=heal.HEAL_RETRY_MAX_S)
     assert last["action"] == "skipped"
-    assert last["reason"] == "pre-flight failed 8x on this SHA; waiting for a new mirror SHA"
-    rig.run(sha="1234567fedcba")  # pragma: allowlist secret
+    assert last["reason"] == (
+        f"pre-flight failed 8x on this code; retry at {heal.utc_iso(retry_at.timestamp())}"
+    )
+    rig.run(now=retry_at - timedelta(minutes=5))
+    assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES
+    rig.run(now=retry_at + timedelta(minutes=5))
     assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES + 1
+    rig.run(sha="1234567fedcba", now=retry_at + timedelta(minutes=6))  # pragma: allowlist secret
+    assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES + 2  # new code is immediate
 
 
 def test_a_preflight_failed_retry_still_obeys_the_other_guards(tmp_path):
@@ -770,3 +807,92 @@ def test_the_preflight_detail_is_truncated_to_300_chars(tmp_path):
     rig.running = True
     rig.run(now=_tick(1))
     assert len(rig.row()["resume_attempts"][0]["outcome_detail"]) == 300
+
+
+def _at(seconds: float) -> datetime:
+    return NOW + timedelta(seconds=seconds)
+
+
+def test_same_code_within_the_backoff_does_not_launch_and_names_the_next_attempt(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    rig.run(now=_at(heal.HEAL_RETRY_BASE_S - 60))
+    rig.run(now=_at(heal.HEAL_RETRY_BASE_S - 30))
+    assert len(rig.launches) == 1
+    atts = rig.row()["resume_attempts"]
+    assert [a["action"] for a in atts] == ["launched", "skipped"]  # the repeat skip is deduped
+    assert atts[1]["reason"] == (
+        f"retry backoff: next attempt at {heal.utc_iso(_at(heal.HEAL_RETRY_BASE_S).timestamp())}"
+    )
+
+
+def test_same_code_past_the_backoff_launches_again_on_the_same_job_name(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    rig.run(now=_at(heal.HEAL_RETRY_BASE_S + 60))
+    assert len(rig.launches) == 2
+    names = [a[0][a[0].index("--name") + 1] for a in rig.launches]
+    assert names[0] == names[1] == heal.job_name("demo-drive-a", SHA)
+
+
+def test_the_backoff_doubles_from_one_hour_and_caps_at_a_day(tmp_path):
+    assert (heal.HEAL_RETRY_BASE_S, heal.HEAL_RETRY_MAX_S) == (3600, 86400)
+    rig = Rig(tmp_path)
+    clock = 0.0
+    waits = []
+    for _ in range(8):
+        before = len(rig.launches)
+        rig.run(now=_at(clock))
+        assert len(rig.launches) == before + 1
+        # one second short of the wait: nothing; the next loop, at the wait itself: a launch
+        n = before + 1
+        want = min(3600 * 2 ** (n - 1), 86400)
+        waits.append(want)
+        rig.run(now=_at(clock + want - 1))
+        assert len(rig.launches) == n
+        clock += want
+    assert waits == [3600, 7200, 14400, 28800, 57600, 86400, 86400, 86400]
+
+
+def test_the_backoff_is_counted_across_every_row_sharing_the_recipe(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _failed_heal_row(rig, 1)
+    rig.run(now=_at(3600 + 60))  # attempt 2 (1h after attempt 1)
+    assert len(rig.launches) == 2
+    _failed_heal_row(rig, 2)
+    # n is now 2 for the recipe: the next wait is 2h from the newest attempt, whichever row ran it
+    rig.run(now=_at(3600 + 60 + 7200 - 60))
+    assert len(rig.launches) == 2
+    rig.run(now=_at(3600 + 60 + 7200 + 60))
+    assert len(rig.launches) == 3
+
+
+def test_a_new_sha_still_retries_immediately_inside_the_backoff(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    rig.run(sha="1234567fedcba", now=_at(60))  # pragma: allowlist secret
+    assert len(rig.launches) == 2
+
+
+def test_a_reused_job_name_maps_each_outcome_to_its_own_run_by_time(tmp_path):
+    rig = Rig(tmp_path)
+    name = heal.job_name("demo-drive-a", SHA)
+
+    def finish(run_id, created, state, code):
+        d = rig.jobs / run_id
+        d.mkdir(parents=True)
+        (d / "job.json").write_text(json.dumps({
+            "schema": "job/1", "run_id": run_id, "name": name, "argv": ["x"],
+            "created_at": created.timestamp(), "result": {"state": state, "exit_code": code},
+        }))  # fmt: skip
+        (d / "output.log").write_text(ENCODE_LOG)
+
+    rig.run()
+    finish("a", NOW, "failed", 1)
+    second = _at(heal.HEAL_RETRY_BASE_S + 60)
+    rig.run(now=second)  # records attempt 1 as failed, launches attempt 2
+    finish("b", second, "succeeded", 0)
+    rig.run(now=_at(heal.HEAL_RETRY_BASE_S + 120))
+    atts = rig.row()["resume_attempts"]
+    assert [a["outcome"] for a in atts if a["action"] == "launched"] == ["failed", "succeeded"]
