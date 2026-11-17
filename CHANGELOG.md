@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.104] - 2026-11-17
+
+### Fixed
+
+- `health backlog` ignored a `health heal --recipe` resume when finding a drive's newest audit job: a recipe-registered row names the drive by its stages dir, so the job is `gms-heal-<project>-<sha7>`, not `gms-heal-gms-backlog-<project>-<sha7>`. A recipe resume that succeeded still left every tick refusing `audit failed` on the older failed job. It now counts as the audit; a bare `<project>` name, never wrapped by a heal, still does not.
+
 ## [0.3.103] - 2026-11-17
 
 ### Fixed
@@ -1198,7 +1204,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...HEAD
+[0.3.104]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...v0.3.104
 [0.3.103]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...v0.3.103
 [0.3.102]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...v0.3.102
 [0.3.101]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...v0.3.101
