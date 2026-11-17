@@ -151,7 +151,13 @@ def print_label_dry_run(config: Any, state: Any) -> bool:
             label = f"{dom.name}, {label}"
         print(f"  {idx:>3}  {label}")
         lf_labels[idx] = label
-        collisions += _print_lf_title(ost_text.get(idx) or label, live_titles)
+        if idx in report.get("lookup_unavailable", ()):
+            print(
+                "       place lookup unavailable (transient) -- the render stops for retry "
+                "(`health heal`); the title is not final"
+            )
+        else:
+            collisions += _print_lf_title(ost_text.get(idx) or label, live_titles)
         votes = ", ".join(f"{k}={v}" for k, v in sorted(dom.votes.items(), key=lambda kv: -kv[1]))
         print(f"       county vote: {votes}")
         # Surface the resolved via-road + its per-member vote tally so the
@@ -234,8 +240,10 @@ def _render_ost_text_by_lf(
     full title set). An LF whose derivation fails is omitted; the caller then
     falls back to its own county label.
 
-    ``report`` (``{"path": Path}``) receives ``refused`` and, at ``path``, the
-    per-LF route-claim record -- written before any refusal prints.
+    ``report`` (``{"path": Path}``) receives ``refused``, ``lookup_unavailable``
+    (LF indices whose POI lookup FAILED -- the render will stop for retry, so the
+    fallback title shown here is not what renders) and, at ``path``, the per-LF
+    route-claim record -- written before any refusal prints.
     """
     from ..gps_enrichment import (
         _differentiate_and_revalidate_siblings,
@@ -309,6 +317,9 @@ def _render_ost_text_by_lf(
         refusal = str(exc)
     if report is not None:
         report["refused"] = bool(refusal)
+        report["lookup_unavailable"] = sorted(
+            i for i, src in dest_source.items() if src == "failed"
+        )
         if report.get("path"):
             path = Path(report["path"])
             path.parent.mkdir(parents=True, exist_ok=True)
