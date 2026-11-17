@@ -169,9 +169,14 @@ drive a week. The `covered` noop names the horizon in hours.
 An `auditing` drive whose newest audit job record (`gms-backlog-<project>`, or a `health heal`
 resume of it, `gms-heal-gms-backlog-<project>-<sha7>`, nested once per resume, or a `health heal
 --recipe` resume named by the stages dir, `gms-heal-<project>-<sha7>`) ended in anything but
-`succeeded` (for example `failed` on an ffmpeg error) is `refused`, naming the run id and exit
-code: the failed audit still holds its slot, so the operator relaunches it (the drive resumes
-from its stages) or supersedes it (below); a relaunched job that is running is a `noop` again.
+`succeeded` (for example `failed` on an ffmpeg error) never holds its region: the tick walks the
+region's `auditing` rows in order, lists each failed one under `failed_audits` (project, run id,
+exit code; the text output prints `failed audit <project>: <reason>`), and goes on. The row stays
+`auditing`, `health heal` keeps resuming it from its stages, and once its newest audit
+`succeeded` the publish path below takes it. Behind it, an audit in progress, one at the OST gate
+or a passed one is handled as below, and when every `auditing` row is failed the next eligible
+backlog row launches (exit 0). Only `--supersede` of another row still stops at a failed audit
+(`refused`); superseding the failed row itself is unchanged (below).
 An audit whose newest job stopped at the OST audit gate (exit 5, `DRIVE WAITING:`; every
 placeless drive does, since a no-GPS LF gets no system review) is not failed: it is a `noop`
 naming each `ost_audit_<date>.json` sidecar under its stages and the `.confirmed` marker to
@@ -211,7 +216,8 @@ that window. `launched` is `published: <project> for <slot>`. A claim miss (`no 
 example `outside_lead_window`) is a `noop`, `audit passed: <project> waits for its Waypost slot:
 ...`, and the drive stays `auditing` until a later tick. Any other publish refusal (a stale
 checkpoint, no long-form plan, an older `ready` drive) is `refused`, `publish refused: ...`. A
-running audit, one with no job record, a failed one and one at the OST gate are never published;
+running audit, one with no job record, a failed one and one at the OST gate are never published
+(a failed one is skipped, not a stop);
 `--supersede` of the drive itself is unchanged. `--dry-run` asks `health publish --dry-run`.
 
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one

@@ -185,3 +185,14 @@ def test_the_handler_passes_the_render_horizon(tmp_path, wired):
     wired["_result"] = {"action": "noop", "reason": "covered", "skipped": []}
     assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
     assert wired["horizon_h"] == 1680
+
+
+def test_failed_audits_reach_the_cron_log_and_a_launch_exits_zero(tmp_path, capsys, wired):
+    wired["_result"] = {
+        "action": "launched", "reason": "ire-b for slot", "skipped": [],
+        "failed_audits": [{"project": "ire-a", "reason": "audit failed: ire-a job 1 ended failed"}],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "failed audit ire-a: audit failed: ire-a job 1 ended failed" in out
+    assert out.rstrip().endswith("launched: ire-b for slot")

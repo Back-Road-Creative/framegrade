@@ -3,7 +3,8 @@ LF slot, audit only (``--skip-upload --no-youtube-upload``), through the job run
 
 Order, each a stop: the ``gms-backlog-launch`` lease (held = noop); a running drive (noop); a
 region row already ``auditing`` (noop: that audit owns the next slot, so a repeat call never
-launches a second drive; a failed one whose backlog row was dropped is ``retire``d to ``failed``
+launches a second drive; a failed audit that still has a row is listed under ``failed_audits`` and skipped,
+never a hold on the region, since ``health heal`` resumes it; a failed one whose backlog row was dropped is ``retire``d to ``failed``
 instead, and its recipes get a ``no-auto-resume`` hold so ``health heal`` leaves it dead); the region's free slots inside ``horizon_h`` (``render_horizon_h``) minus its ready
 drives (none left = covered). A drive whose output dir already holds Phase D upload records
 (``_uploaded``) is published: it neither holds nor covers a slot, whatever its store status; the first manifest row not in the store, not in the content ledger,
@@ -485,7 +486,7 @@ def _gate_wait(jobs_dir: Path, rec: Dict[str, Any]) -> Optional[str]:
     return drive_jobs.gate_wait(code, drive_jobs._tail(Path(jobs_dir) / str(rec.get("run_id")) / "output.log"))  # fmt: skip
 
 
-def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
+def _failed_audit(jobs_dir: Path, project: str, hint: bool = True) -> Optional[str]:
     """Refusal text when the newest ``gms-backlog-<project>`` job (or heal resume of it) ended in anything but success
     or a stop at a human gate (``_ost_gate``).
 
@@ -498,9 +499,11 @@ def _failed_audit(jobs_dir: Path, project: str) -> Optional[str]:
     state = result.get("state")
     if state in (None, "running", "succeeded") or _gate_wait(jobs_dir, rec):
         return None
+    text = f"audit failed: {project} job {rec.get('run_id')} ended {state} (exit {result.get('exit_code')})"
+    if not hint:
+        return text
     return (
-        f"audit failed: {project} job {rec.get('run_id')} ended {state} "
-        f"(exit {result.get('exit_code')}); relaunch it (stages resume), or --supersede {project} "
+        f"{text}; relaunch it (stages resume), or --supersede {project} "
         "to set the run aside and launch the row as it now reads"
     )
 
@@ -715,33 +718,36 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     relaunch = None
-    if auditing:
-        failed = _failed_audit(jobs_dir, auditing[0])
-        gate = None if failed else _ost_gate(jobs_dir, stages_root, auditing[0])
-        if gate and auditing[0] == target:
+    for proj in auditing:
+        failed = _failed_audit(jobs_dir, proj)
+        gate = None if failed else _ost_gate(jobs_dir, stages_root, proj)
+        if gate and proj == target:
             failed = gate[0]  # superseding an audit waiting at its gate sets it aside the same way
         elif gate:
-            res["project"] = auditing[0]
+            res["project"] = proj
             if not gate[1]:
                 return {**res, "reason": gate[0]}
-            return _resume_confirmed(res, auditing[0], stages_root, output_root, code_root,
+            return _resume_confirmed(res, proj, stages_root, output_root, code_root,
                                      jobs_dir, dry_run, launcher, installed_version,
                                      latest_version)  # fmt: skip
-        if (
-            not failed
-            and publish
-            and auditing[0] != target
-            and _audit_passed(jobs_dir, auditing[0])
-        ):
-            return _publish_audited(res, auditing[0], publish, dry_run)
+        if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
+            return _publish_audited(res, proj, publish, dry_run)
         if not failed:
-            return {**res, "reason": f"audit in progress: {auditing[0]} holds the next slot"}
-        if auditing[0] != target:
-            return {**res, "action": "refused", "project": auditing[0], "reason": failed}
-        # superseding the failed audit itself: its run is set aside and the row relaunches as
-        # it now reads, re-registering the same store row
-        relaunch, res["relaunch"] = target, failed
-        mine = [d for d in mine if d.project != relaunch]
+            return {**res, "reason": f"audit in progress: {proj} holds the next slot"}
+        if proj == target:
+            # superseding the failed audit itself: its run is set aside and the row relaunches
+            # as it now reads, re-registering the same store row
+            relaunch, res["relaunch"] = target, failed
+            mine = [d for d in mine if d.project != relaunch]
+            break
+        if supersede:  # an explicit supersede of another row still stops at a failed audit
+            return {**res, "action": "refused", "project": proj, "reason": failed}
+        # a failed audit never holds its region: it stays ``auditing`` for ``health heal`` to
+        # resume from its stages (a later passed audit publishes), and the next row launches
+        res.setdefault("failed_audits", []).append({
+            "project": proj,
+            "reason": _failed_audit(jobs_dir, proj, hint=False) + "; health heal keeps retrying it from its stages",
+        })  # fmt: skip
     slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now, horizon_h)
     if slot is None:
         return {**res, "reason": f"covered: every free slot inside {horizon_h} h has a ready drive"}  # fmt: skip
