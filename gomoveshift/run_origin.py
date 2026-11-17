@@ -31,6 +31,9 @@ PUBLISH_LAUNCHER = "health-publish"
 #: Every tracked launcher that may start a render: the backlog, a heal resume, a publish, the console's job
 #: store and the host worker it spools to. A hand-typed CLI run carries none of them.
 LAUNCHERS = (BACKLOG_LAUNCHER, "health-heal", PUBLISH_LAUNCHER, "console", "hostworker")
+#: Opening words of ``drive``'s refusal of an untracked launch. Health's detector matches them: a
+#: refused launch never started its drive, so it is no drive failure (the backlog still owns it).
+LAUNCHER_GATE_REFUSAL = "drive renders start only from a tracked launcher"
 
 
 def _command(argv: Optional[list]) -> list:

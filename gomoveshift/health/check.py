@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -18,7 +18,12 @@ _EVENTS = {
     "lf_slot_uncovered": "health_lf_slot_uncovered",
     "queue_stalled": "health_queue_stalled",
     "placeless_label_unverifiable": "health_placeless_label_unverifiable",
+    "failure_unattended": "health_failure_unattended",
 }
+
+#: ``health heal`` retries every open drive_failed row at least every 24 h (its backoff cap);
+#: a row with no launch for 26 h (that cap plus two cron ticks) is one nothing is retrying.
+UNATTENDED_AFTER_H = 26
 
 _BACKFILL = ("resume_recipe", "log_path")
 
@@ -26,6 +31,8 @@ _BACKFILL = ("resume_recipe", "log_path")
 def _line(row: Dict[str, Any]) -> str:
     if row["kind"] == "drive_failed":
         return drives.summary(row)
+    if row["kind"] == "failure_unattended":
+        return row["detail"]
     if row["kind"] == "lf_slot_unbooked":
         return f"LF slot {row['slot']} ({row['region']}) is inside 48 h with nothing booked and a drive ready."
     if row["kind"] == "lf_slot_uncovered":
@@ -45,6 +52,75 @@ def _line(row: Dict[str, Any]) -> str:
             "--placeless-label by hand only when no bracket exists."
         )
     return f"{row['due_deliveries']} publishing deliveries are due and nothing has touched the queue in {row['quiet_hours']} h."
+
+
+def _when(text: Any) -> Optional[datetime]:
+    try:
+        moment = datetime.fromisoformat(str(text))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def unattended_incidents(
+    drive_rows: List[Dict[str, Any]], now: datetime, now_iso: str, notes: List[str]
+) -> List[Dict[str, Any]]:
+    """Rule 6: one ``failure_unattended`` incident per open drive_failed row nothing is retrying.
+
+    Unattended: the newest ``launched`` attempt across every row sharing the ``resume_recipe``
+    (siblings are one drive's stages) is over ``UNATTENDED_AFTER_H`` old -- or there is none and
+    ``failed_at`` is -- or the row's newest attempt is ``refused`` (heal can never relaunch it).
+    An operator hold (``no-auto-resume``) is deliberate: noted as held, never an alarm."""
+    from . import resume
+    from .store import new_incident, safe_name
+
+    limit = timedelta(hours=UNATTENDED_AFTER_H)
+    launched: Dict[Any, datetime] = {}
+    for row in drive_rows:
+        for att in row.get("resume_attempts") or []:
+            when = _when(att.get("at"))
+            if att.get("action") == "launched" and when:
+                key = row.get("resume_recipe") or row["key"]
+                launched[key] = max(when, launched.get(key, when))
+    out: List[Dict[str, Any]] = []
+    # one incident per drive: its heal resumes and its stage siblings are that drive
+    emitted: set = set()
+    for row in drive_rows:
+        root = min(drives.heal_origins(str(row["drive"])) or {str(row["drive"])}, key=len)
+        group = row.get("resume_recipe") or root
+        if group in emitted or root in emitted:
+            continue
+        recipe = row.get("resume_recipe")
+        attempts = row.get("resume_attempts") or []
+        last = _when(attempts[-1].get("at")) if attempts else None
+        newest = launched.get(recipe or row["key"])
+        if attempts and attempts[-1].get("action") == "refused":
+            reason = attempts[-1].get("reason") or "no reason given"
+            why = f"heal refused it ({reason}) and can never relaunch it"
+        else:
+            ref = newest or _when(row.get("failed_at"))
+            if ref is None or now - ref <= limit:
+                continue
+            what = "last launched attempt" if newest else "failed, with no attempt,"
+            why = f"{what} {ref.isoformat()} is over {UNATTENDED_AFTER_H} h ago and nothing is retrying it"
+        if recipe and resume.is_held(Path(recipe)):
+            notes.append(f"{row['drive']} is held (no-auto-resume): {why}")
+            continue
+        where = " / ".join(x for x in (row.get("phase"), row.get("gate")) if x) or "unknown gate"
+        stamp = last or newest or _when(row.get("failed_at"))
+        emitted.update((group, root))
+        out.append(
+            new_incident(
+                "failure_unattended",
+                f"failure_unattended:{root}",
+                f"failure_unattended_{safe_name(root)}.json",
+                now_iso,
+                drive=root,
+                last_attempt_at=stamp.isoformat() if stamp else None,
+                detail=f"Drive {root} failed at {where} and is unattended: {why}.",
+            )
+        )
+    return out
 
 
 def _next_drives(store: Any, regions: List[str], notes: List[str]) -> Dict[str, Optional[str]]:
@@ -199,6 +275,19 @@ def run_check(
     backlog_rows = _backlog_rows(notes)
     if backlog_rows is not None:
         found["placeless_label_unverifiable"] = placeless_label_incidents(backlog_rows, now_iso)
+
+    live_drives = {r["key"]: r for r in drive_rows}
+    open_drives = [
+        r
+        for r in existing
+        if r.get("kind") == "drive_failed"
+        and not r.get("resolved_at")
+        and r["key"] in live_drives
+        and r.get("job_name") not in succeeded
+    ]
+    seen = {r["key"] for r in open_drives}
+    open_drives += [r for k, r in live_drives.items() if k not in seen and k not in by_key]
+    found["failure_unattended"] = unattended_incidents(open_drives, now, now_iso, notes)
 
     resolved: List[str] = []
     new: List[str] = []

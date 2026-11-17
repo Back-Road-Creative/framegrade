@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .. import run_origin
 from . import resume
 from .store import new_incident, safe_name, utc_iso
 
@@ -170,10 +171,14 @@ def detect(
         marked = False
         recipe: Optional[str] = None
         waiting: Optional[str] = None
+        gate_refused = False
         for lp in logs:
             lines = _tail(lp)
             if lines is None:
                 continue
+            gate_refused = gate_refused or any(
+                run_origin.LAUNCHER_GATE_REFUSAL in ln for ln in lines
+            )
             waiting = waiting or gate_wait(exit_code, lines)
             p = parse_log(lines)
             if p["error"] or log_path is None:
@@ -182,7 +187,12 @@ def detect(
             recipe = resume.parse_recipe_path(lines) or recipe
         # a run waiting at a human gate is not a failure: heal re-resuming it on every mirror
         # SHA only stops it at the same gate; the backlog resumes it once the gate is confirmed
-        failed = not waiting and (state == "failed" or (exit_code not in (None, 0) and marked))
+        # an untracked launch the drive gate refused never started its drive: no drive failure
+        failed = (
+            not waiting
+            and not gate_refused
+            and (state == "failed" or (exit_code not in (None, 0) and marked))
+        )
         run_id = str(rec.get("run_id") or "")
         if not failed:
             if state in ("succeeded",):

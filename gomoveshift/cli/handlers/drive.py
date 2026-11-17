@@ -34,7 +34,7 @@ def _launch_origin_refusal(args) -> str | None:
         return None
     seen = f" (got {run_origin.LAUNCHED_BY_ENV}={launcher!r})" if launcher else ""
     return (
-        "drive renders start only from a tracked launcher -- `gomoveshift health backlog`, a "
+        f"{run_origin.LAUNCHER_GATE_REFUSAL} -- `gomoveshift health backlog`, a "
         f"heal resume, the console or the host worker -- which set {run_origin.LAUNCHED_BY_ENV} "
         f"to one of {', '.join(run_origin.LAUNCHERS)}{seen}. "
         f"Operator override, logged: {ALLOW_MANUAL_DRIVE_ENV}=1."
