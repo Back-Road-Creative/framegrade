@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.106] - 2026-11-17
+
+### Changed
+
+- `health heal` never abandons an open failed drive. The once-per-mirror-SHA rule is now a retry backoff: after n launched attempts of a recipe on the same code, the next waits 1 h, 2 h, 4 h ... up to 24 h from the newest attempt (skip reason `retry backoff: next attempt at <time>`), counted across every row sharing the recipe; a new SHA or installed version still retries at once. After 8 pre-flight failures on one code it retries every 24 h instead of waiting for a new SHA, and a metadata-gate failure on unchanged generators retries every 24 h instead of never. A passed or unknown publish slot no longer skips the resume (an audit-only drive checks only the weekday); the slot is still recorded. An operator hold and an unreadable recipe still stop it. An Ireland drive that failed twice on Overpass timeouts is the case this fixes.
+
 ## [0.3.105] - 2026-11-17
 
 ### Fixed
@@ -1214,7 +1220,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...HEAD
+[0.3.106]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...v0.3.106
 [0.3.105]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.104...v0.3.105
 [0.3.104]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...v0.3.104
 [0.3.103]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...v0.3.103
