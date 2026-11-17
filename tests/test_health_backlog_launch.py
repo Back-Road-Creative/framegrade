@@ -239,14 +239,14 @@ def test_a_heal_resume_that_succeeded_after_the_failed_audit_clears_the_refusal(
     assert res["action"] == "noop" and "audit in progress" in res["reason"]
 
 
-def test_a_heal_of_a_heal_counts_and_a_failed_one_still_refuses_naming_it(tmp_path):
+def test_a_heal_of_a_heal_counts_and_a_failed_one_is_listed_naming_it(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("day-a", "auditing"))
     job(rig, "old", "day-a", "succeeded", 100.0, exit_code=0)
     job(rig, "heal2", "day-a", "failed", 300.0,
         name="gms-heal-gms-heal-gms-backlog-day-a-c4aedcb-49f2171")  # fmt: skip
     res = rig.run()
-    assert res["action"] == "refused" and "heal2" in res["reason"]
+    assert res["action"] == "launched" and "heal2" in res["failed_audits"][0]["reason"], res
 
 
 # 2026-11-17: Clonakilty's heal resumes failed overnight; the operator relaunched it with
@@ -271,7 +271,7 @@ def test_a_bare_project_name_or_another_projects_recipe_heal_is_not_this_audit(t
     job(rig, "bare", "day-a", "succeeded", 200.0, exit_code=0, name="day-a")
     job(rig, "other", "day-a", "succeeded", 300.0, exit_code=0, name="gms-heal-day-ab-7e3f368")
     res = rig.run()
-    assert res["action"] == "refused" and "old" in res["reason"]
+    assert res["action"] == "launched" and "old" in res["failed_audits"][0]["reason"], res
 
 
 def test_another_projects_heal_or_a_longer_project_name_is_not_this_audit(tmp_path):
@@ -282,7 +282,7 @@ def test_another_projects_heal_or_a_longer_project_name_is_not_this_audit(tmp_pa
     job(rig, "c", "day-a", "succeeded", 300.0, exit_code=0, name="gms-backlog-day-a-c4aedcb")
     job(rig, "d", "day-a", "succeeded", 400.0, exit_code=0, name="gms-heal-gms-backlog-day-a")
     res = rig.run()
-    assert res["action"] == "refused" and "old" in res["reason"]
+    assert res["action"] == "launched" and "old" in res["failed_audits"][0]["reason"], res
 
 
 # 2026-11-10: Clonakilty's audit passed at 06:20, then sat ``auditing`` holding Ireland's next
@@ -355,7 +355,7 @@ def test_a_failed_audit_or_one_waiting_at_the_ost_gate_is_never_published(tmp_pa
     rig.drives.append(drive("day-a", "auditing"))
     job(rig, "bad", "day-a", "failed", 100.0)
     rig.publish_result = {"action": "launched", "reason": "x"}
-    assert rig.run()["action"] == "refused" and rig.publishes == []
+    assert rig.run()["action"] == "launched" and rig.publishes == []  # day-b launches instead
     job(rig, "gate", "day-a", "failed", 200.0, exit_code=launch.drive_jobs.EXIT_WAITING_AT_GATE)
     (rig.tmp / "jobs" / "gate" / "output.log").write_text("DRIVE WAITING: OST audit\n")
     rig.run()
@@ -370,15 +370,63 @@ def test_a_running_drive_holds_the_publish_too(tmp_path):
     assert rig.publishes == [] and "running" in res["reason"]
 
 
-def test_an_audit_whose_latest_job_failed_is_refused_naming_the_job(tmp_path):
+# 2026-11-17: ireland-2025-09-19-old-head-courtmacsherry failed on an Overpass outage and every
+# Ireland row behind it was refused, hourly. A failed audit no longer holds its region.
+
+
+def test_a_failed_audit_is_listed_and_the_next_row_launches(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("day-a", "auditing"))
     job(rig, "fbc9336e", "day-a", "failed", 100.0)
     res = rig.run()
-    assert res["action"] == "refused"
-    assert "day-a" in res["reason"] and "fbc9336e" in res["reason"] and "exit 1" in res["reason"]
-    assert not rig.launches and not rig.registered
-    assert launch.exit_code(res) == 2
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    (bad,) = res["failed_audits"]
+    assert bad["project"] == "day-a" and "fbc9336e" in bad["reason"] and "exit 1" in bad["reason"]
+    assert "health heal" in bad["reason"]
+    assert len(rig.launches) == 1 and rig.registered[0]["project"] == "day-b"
+    assert rig.retired == [] and launch.exit_code(res) == 0
+
+
+def test_a_failed_audit_then_one_in_progress_waits_on_the_running_one(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows.append(rig.row("day-c", 3))
+    rig.drives += [drive("day-a", "auditing"), drive("day-b", "auditing")]
+    job(rig, "bad", "day-a", "failed", 100.0)
+    job(rig, "now", "day-b", "running", 200.0)
+    res = rig.run()
+    assert res["action"] == "noop" and "audit in progress: day-b" in res["reason"], res
+    assert [f["project"] for f in res["failed_audits"]] == ["day-a"] and not rig.launches
+
+
+def test_a_failed_audit_then_a_passed_one_publishes_the_passed_one(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives += [drive("day-a", "auditing"), drive("day-b", "auditing")]
+    job(rig, "bad", "day-a", "failed", 100.0)
+    job(rig, "ok", "day-b", "succeeded", 100.0, exit_code=0)
+    rig.publish_result = {"action": "launched", "reason": "day-b for slot"}
+    res = rig.run()
+    assert rig.publishes == [("day-b", False)] and res["action"] == "launched", res
+    assert [f["project"] for f in res["failed_audits"]] == ["day-a"]
+    assert launch.exit_code(res) == 0
+
+
+def test_a_failed_audit_whose_newer_audit_succeeded_is_published(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="launched", reason="day-a for slot")
+    job(rig, "old", "day-a", "failed", 50.0)
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)] and "failed_audits" not in res
+
+
+def test_every_auditing_row_failed_and_no_row_left_is_a_noop_listing_them(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives += [drive("day-a", "auditing"), drive("day-b", "auditing")]
+    job(rig, "a", "day-a", "failed", 100.0)
+    job(rig, "b", "day-b", "failed", 100.0)
+    res = rig.run()
+    assert res["action"] == "noop" and "no eligible backlog row" in res["reason"], res
+    assert [f["project"] for f in res["failed_audits"]] == ["day-a", "day-b"]
+    assert launch.exit_code(res) == 0 and not rig.launches
 
 
 def test_a_relaunched_audit_after_a_failure_is_still_a_noop(tmp_path):
@@ -499,7 +547,8 @@ def test_a_failed_audit_whose_row_is_still_listed_is_never_retired(tmp_path):
     rig = Rig(tmp_path)
     rig.drives.append(drive("day-a", "auditing"))
     job(rig, "fbc9336e", "day-a", "failed", 100.0)
-    assert rig.run()["action"] == "refused" and rig.retired == []
+    res = rig.run()
+    assert res["action"] == "launched" and res["failed_audits"] and rig.retired == []
 
 
 def test_a_rowless_audit_that_is_running_or_unrecorded_is_never_retired(tmp_path):

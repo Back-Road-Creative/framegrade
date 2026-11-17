@@ -165,6 +165,8 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
     else:
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
+        for bad in result.get("failed_audits", []):
+            print(f"failed audit {bad['project']}: {bad['reason']}")
         verb = "would supersede" if args.dry_run else "superseded"  # a dry run moves nothing
         for move in result.get("supersede", {}).get("moves", []):
             print(f"{verb} {move['from']} -> {move['to']}")
