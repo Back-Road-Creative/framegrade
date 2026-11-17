@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.103] - 2026-11-17
+
+### Fixed
+
+- `health heal` allowed one resume per failed drive per git SHA, so a resume launched while the staging sync had advanced the checkout but deferred the venv install ran the old code, failed, and was never retried once the install landed. The once-per guard now keys on the SHA plus the installed `gomoveshift-video` version (recorded as `installed_version` on each attempt), and heal skips with `install pending: checkout pins <v>, venv has <v'>` while the pin and the venv differ.
+- A long-form drive whose location string or footer config trips the description redundancy gate now fails at launch, before the encode, with the same error prefixed `LF-METADATA-PREFLIGHT`. It used to fail in Phase D after a multi-hour render.
+
 ## [0.3.102] - 2026-11-16
 
 ### Fixed
@@ -1191,7 +1198,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.103...HEAD
+[0.3.103]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.102...v0.3.103
 [0.3.102]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.101...v0.3.102
 [0.3.101]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.100...v0.3.101
 [0.3.100]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.99...v0.3.100
