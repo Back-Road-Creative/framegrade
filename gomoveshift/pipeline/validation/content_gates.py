@@ -1579,6 +1579,9 @@ def check_stop_free_windows(
     )
 
 
+#: The divider line the LF description template opens its CTA/footer/hashtag block with.
+_TEMPLATE_DIVIDER = "\u2501" * 24
+
 _FILMED_DATE_RE = re.compile(r"\U0001f4c5\s*Filmed:\s*(\d{4}-\d{2}-\d{2})")
 _BODY_RE = re.compile(
     r"(?<=\n\n)(.+?)(?=\n\n\U0001f4cd Location:)",
@@ -1622,7 +1625,8 @@ def check_description_redundancy(metadata_json: dict) -> GateResult:
 
     Allowed-occurrences table:
       - ``recording_date``         max 1× (📅 Filmed line only)
-      - ``location`` exact string  max 2× (hook + 📍 Location line)
+      - ``location`` exact string  max 2× (hook + 📍 Location line), counted
+        above the template divider only (footer + hashtags name the region)
       - ``source_duration`` pretty max 2× (hook + 🎬 Final cut disclosure)
       - ``video_duration`` pretty  max 2× (hook + 🎬 Final cut disclosure)
       - body line (paragraph between hook and 📍 Location): if non-empty,
@@ -1672,8 +1676,14 @@ def check_description_redundancy(metadata_json: dict) -> GateResult:
     # verbatim there, which would otherwise push the count to 3×. Excluding the
     # SEO line (uniquely marked by the evergreen "4K drive" term) keeps
     # the 2× prose budget intact for genuine restatement.
+    # Only the text above the first template divider is counted: below it sit the
+    # CTA, the config footer ("▶ Full Ireland playlist", a cadence line) and the
+    # geo hashtags, which name the region by construction. A one-word location
+    # (a GPS-less drive labelled "Ireland") equals that noun, so counting them
+    # failed Phase D after the encode on every such drive.
     if location:
-        loc_prose = "\n".join(ln for ln in prose.split("\n") if "4K drive" not in ln)
+        loc_prose = prose.split(_TEMPLATE_DIVIDER, 1)[0]
+        loc_prose = "\n".join(ln for ln in loc_prose.split("\n") if "4K drive" not in ln)
         n = loc_prose.count(location)
         if n > 2:
             violations.append(
