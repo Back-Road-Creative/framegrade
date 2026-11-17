@@ -21,6 +21,7 @@ from gomoveshift.health.store import load_all, new_incident, write_row
 NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
 FUTURE = datetime(2026, 1, 16, 12, 0, tzinfo=timezone.utc)
 SHA = "abcdef1234567890"  # pragma: allowlist secret
+NEW_SHA = "1234567fedcba"  # pragma: allowlist secret
 
 
 class Rig:
@@ -303,13 +304,9 @@ def test_guard_d_unchanged_generators_retry_once_per_max_wait_never_never(tmp_pa
     rig.run(now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S + 60))
     assert len(rig.launches) == 1
     # launched: the next try waits the cap again, even on a new SHA with the same generators
-    rig.run(
-        sha="1234567fedcba", now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S + 3600)
-    )  # pragma: allowlist secret
+    rig.run(sha=NEW_SHA, now=NOW + timedelta(seconds=heal.HEAL_RETRY_MAX_S + 3600))
     assert len(rig.launches) == 1
-    rig.run(
-        sha="1234567fedcba", now=NOW + timedelta(seconds=2 * heal.HEAL_RETRY_MAX_S + 300)
-    )  # pragma: allowlist secret
+    rig.run(sha=NEW_SHA, now=NOW + timedelta(seconds=2 * heal.HEAL_RETRY_MAX_S + 300))
     assert len(rig.launches) == 2
 
 
