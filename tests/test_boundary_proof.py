@@ -133,7 +133,7 @@ def test_pipeline_uses_bounded_county_proof_before_burn_and_records_its_source()
         require_review_support=True,
         review_support_available=True,
     )
-    assert text["2026-02-20"][1] == "Ash County, SC"
+    assert text["2026-02-20"][1] == "Birch & Alder, Ash County, SC"
     claim = measured[1].region_claim("county")
     assert claim["boundary_proof"]["verified"] is True
     assert measured[1].record()["boundary_proofs"]["county"]["sha256"].startswith("b527")

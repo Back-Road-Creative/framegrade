@@ -318,7 +318,14 @@ def _build_metadata_per_lf(
             if int(k) not in _split_idx and int(k) not in pre_render_decisions
         }
         per_lf_titles_override = ensure_unique_titles(
-            _title_map_input, published_titles=known_channel_titles()
+            _title_map_input,
+            published_titles=known_channel_titles(),
+            drive_project=(
+                Path(str(state.source_dir)).stem.replace(" ", "_").lower()
+                if getattr(state, "source_dir", None)
+                else None
+            ),
+            lf_dates=state.per_lf_recording_date,
         )
         per_lf_titles_override.update(
             {int(k): v for k, v in per_lf_ost_text_state.items() if int(k) in _split_idx}

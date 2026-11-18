@@ -1878,10 +1878,34 @@ def append_full_drive_part_suffix(
     return f"{base}{suffix}"
 
 
+def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
+    """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
+    import datetime as _dt
+
+    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
+    if not (drive_project and video_id and raw):
+        return None
+    try:
+        day = _dt.date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+    if video_projects is None:
+        from .longform_metadata import ledger_video_projects
+
+        video_projects = ledger_video_projects()
+    other = (video_projects.get(video_id) or "").strip()
+    if not other or other == drive_project:
+        return None
+    return f"{title} ({day.strftime('%b')} {day.day}, {day.year})"
+
+
 def ensure_unique_titles(
     lf_titles: dict[int, str],
     published_titles: set[str] | None = None,
     published_title_ids: dict[str, str] | None = None,
+    drive_project: str | None = None,
+    lf_dates: dict[int, str] | None = None,
+    video_projects: dict[str, str] | None = None,
 ) -> dict[int, str]:
     """Post-process: append ``(Part N)`` to any duplicate titles.
 
@@ -1916,6 +1940,14 @@ def ensure_unique_titles(
     (optional ``{title: video_id}``) names the live video in the error;
     absent an entry, the local live-catalog snapshot does (read only on
     this refusal path, never the network).
+
+    Cross-drive backstop: when the colliding live video belongs to a DIFFERENT
+    drive project (``video_projects`` ``{video_id: project_name}``, default the
+    content ledger, read only on this refusal path), the LF's measured drive
+    date (``lf_dates`` ``{lf_index: "YYYY-MM-DD"}``) is appended as
+    `` (Sep 19, 2025)`` instead of refusing. It still refuses for the same
+    project (a genuine re-upload), an unknown project (``drive_project`` or the
+    video's), no measured date, or a dated title that also collides.
 
     Titles that are already unique (in-batch and vs the channel) are
     returned unchanged.
@@ -1983,6 +2015,13 @@ def ensure_unique_titles(
                 video_id = (published_title_ids or {}).get(_final(candidate)) or (
                     live_catalog_title_ids().get(_final(candidate))
                 )
+                dated = _cross_drive_dated(
+                    title, lf_dates, lf_idx, drive_project, video_id, video_projects
+                )
+                if dated is not None and _final(dated) not in published | used:
+                    used.add(_final(dated))
+                    result[lf_idx] = dated
+                    continue
                 where = "" if video_id else f" (not in the local {LIVE_CATALOG_SNAPSHOT})"
                 raise PhaseBCExitContractError(
                     f"Title {candidate!r} (LF {lf_idx}) exactly duplicates "

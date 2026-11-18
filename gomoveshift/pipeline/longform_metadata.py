@@ -416,6 +416,21 @@ def live_catalog_title_ids() -> dict[str, str]:
     return ids
 
 
+def ledger_video_projects() -> dict[str, str]:
+    """``{video_id: project_name}`` from the content ledger (rows with both).
+
+    Names the drive behind a live video for the cross-drive title backstop.
+    Never fetches; an unreadable or missing ledger is ``{}``.
+    """
+    from .content_ledger import ContentLedger
+
+    try:
+        entries = ContentLedger.load().entries
+    except Exception:  # noqa: BLE001 - advisory lookup; the caller then refuses
+        return {}
+    return {e.video_id: e.project_name for e in entries if e.video_id and e.project_name}
+
+
 def known_channel_titles() -> set[str]:
     """Every title either source knows is live: the analytics ledger
     (:func:`load_published_titles`) unioned with the live-catalog snapshot

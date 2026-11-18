@@ -545,7 +545,7 @@ def test_phase_d_title_dedupe_sees_catalog_only_titles(tmp_path, monkeypatch):
     )
     captured = {}
 
-    def _fake_unique(titles, published_titles=None):
+    def _fake_unique(titles, published_titles=None, **_kw):
         captured["published"] = set(published_titles or ())
         return {k: v for k, v in titles.items()}
 

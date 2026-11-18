@@ -363,13 +363,13 @@ def _gps_state(overrides=None):
 
 def test_route_claims_write_an_agreeing_record_for_the_burned_text():
     state = _gps_state()
-    # The label falls back to the county before the burn; the record covers
+    # The label falls back to the measured towns (county tail) before the burn; the record covers
     # the fallback text, which is what burns.
     _enrich_into(state, [_lf(1, (0.0, 280.0), (320.0, 580.0))], {1: "Harrow, Westmark"})
     record = state.ost_system_review["2026-01-02"]
     assert record["writer"] == osr.WRITER
     assert record["lf_indices"] == [1]
-    assert record["reviews"]["1"]["ost"] == "Ashby County, Westmark"
+    assert record["reviews"]["1"]["ost"] == "Harrow & Pellmere, Ashby County, Westmark"
     assert record["reviews"]["1"]["verdict"] == "agree"
     assert osr.seal(dict(record)) == record
 
