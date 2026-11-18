@@ -141,10 +141,15 @@ def test_sl4_text_every_part_supports_burns_unchanged_with_no_note(tmp_path):
 def test_sl2_a_part_with_an_omitted_place_is_broadened_on_that_part_only(tmp_path):
     run = _run(tmp_path, _points(_pellmere_in_part2))
     assert run.error is None
-    assert run.meta == {1: "Harrow", 2: "Ashby County, Westmark"}
-    assert [b["location"] for b in run.burns] == ["Harrow", "Ashby County, Westmark"]
+    assert run.meta == {1: "Harrow", 2: "Harrow & Pellmere, Ashby County, Westmark"}
+    assert [b["location"] for b in run.burns] == [
+        "Harrow",
+        "Harrow & Pellmere, Ashby County, Westmark",
+    ]
     rec2 = run.result["records"][1]
-    assert rec2["location"] == "Ashby County, Westmark"  # the thumbnail's title source
+    assert (
+        rec2["location"] == "Harrow & Pellmere, Ashby County, Westmark"
+    )  # the thumbnail's title source
     assert rec2["route_claim"]["part_index"] == 2
     assert "omits 'Pellmere'" in rec2["route_claim"]["reason"]
 
@@ -228,7 +233,10 @@ def test_the_route_record_reaches_the_g_sl_audit(tmp_path):
     run = _run(tmp_path, _points(_pellmere_in_part2), confirmed=False)
     assert isinstance(run.error, OstAuditPendingError) and run.burns == []
     audit = json.loads((tmp_path / f"superlong_ost_audit_{DATE}.json").read_text())
-    assert [p["ost_text"] for p in audit["parts"]] == ["Harrow", "Ashby County, Westmark"]
+    assert [p["ost_text"] for p in audit["parts"]] == [
+        "Harrow",
+        "Harrow & Pellmere, Ashby County, Westmark",
+    ]
 
 
 def _forwards(module, caller, callee, kwarg):

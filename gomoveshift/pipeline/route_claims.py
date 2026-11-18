@@ -1175,6 +1175,48 @@ def _region_candidates(ev: RouteEvidence) -> list:
     return out
 
 
+#: Most places a ``places`` label names (most retained time first).
+PLACES_LABEL_MAX = 2
+
+
+def places_label(ev: RouteEvidence, min_coverage: float = REGION_MIN_COVERAGE) -> Optional[str]:
+    """``"A & B, <region>"`` naming the settlement(s) with the most retained time.
+
+    Only places with at least ``MIN_PLACE_S`` retained seconds qualify, so no place
+    without measured time is named. The region tail is the single county's (state
+    abbreviation, or just the county for a stateless country) else the state's;
+    ``None`` when no place qualifies or no region tail is known. The tail's region
+    must itself hold the whole retained route (``_region_ok``), because a county
+    or state in the tail covers every bin in it. The caller still runs the
+    over-claim checks on the result.
+    """
+    top = sorted(
+        (p for p in ev.places if p.retained_seconds >= MIN_PLACE_S),
+        key=lambda p: -p.retained_seconds,
+    )[:PLACES_LABEL_MAX]
+    if not top:
+        return None
+    tail = None
+    county = next((c for c, _l in _region_candidates(ev) if c["level"] == "county"), None)
+    if county is not None:
+        state = county.get("state")
+        tail = (
+            f"{county['name']}, {US_STATE_ABBREVS.get(state, state)}" if state else county["name"]
+        )
+        # The tail must hold every named place: a town in another county would
+        # be mislabelled by it.
+        if any(p.county != county["name"] for p in top) or _region_ok(county, ev, min_coverage):
+            return None
+    else:
+        state = ev.region_claim("state")
+        tail = state["name"] if state else None
+        if any(p.state != tail for p in top) or (state and _region_ok(state, ev, min_coverage)):
+            return None
+    if tail is None:
+        return None
+    return f"{' & '.join(p.name for p in top)}, {tail}"
+
+
 def select_supported_label(
     label: str,
     ev: RouteEvidence,
@@ -1192,6 +1234,15 @@ def select_supported_label(
         return label, ""
     tried = []
     if not operator:
+        # Narrowest first: the measured towns, then the regions.
+        towns = places_label(ev, min_coverage)
+        if towns:
+            why = label_issues(
+                towns, ev, min_coverage=min_coverage, unknown_floor_s=unknown_floor_s
+            )
+            if not why:
+                return towns, f"{label!r} {'; '.join(issues)} — using {towns!r} (level places)"
+            tried.append(f"{towns!r}: {'; '.join(why)}")
         for claim, candidate in _region_candidates(ev):
             why = _region_ok(claim, ev, min_coverage) or place_text_issues(candidate, ev)
             if not why:
@@ -1366,6 +1417,18 @@ def caption_route_evidence(state, lf_indices) -> dict:
     return out
 
 
+def _label_level(requested: str, ev: Optional["RouteEvidence"], chosen: Optional[str]):
+    """``places``/``county``/``counties``/``state`` when ``chosen`` replaced ``requested``."""
+    if ev is None or not chosen or chosen == requested:
+        return None
+    if chosen == places_label(ev):
+        return "places"
+    for claim, candidate in _region_candidates(ev):
+        if candidate == chosen:
+            return claim["level"]
+    return None
+
+
 def route_claim_outcome(
     idx: int, requested: str, ev: Optional["RouteEvidence"], *, chosen: Optional[str], reason: str
 ) -> dict:
@@ -1377,7 +1440,8 @@ def route_claim_outcome(
     }  # fmt: skip
     return {
         "lf_index": idx, "label_requested": requested, "label": chosen,
-        "refused": chosen is None, "reason": reason, **rec,
+        "refused": chosen is None, "reason": reason,
+        "level": _label_level(requested, ev, chosen), **rec,
     }  # fmt: skip
 
 

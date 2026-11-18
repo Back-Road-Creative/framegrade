@@ -502,6 +502,8 @@ class PhaseBCDayFirst:
                 dict(_preseed_ost_text),
                 published_titles=kit.published_titles() | set(_channel_title_ids),
                 published_title_ids=_channel_title_ids,
+                drive_project=_drive_project(state),
+                lf_dates=_build_per_lf_recording_date_map(lf_plans_by_date),
             )
         _preseed_recording_date = _build_per_lf_recording_date_map(lf_plans_by_date)
         if _preseed_recording_date:
@@ -1144,6 +1146,8 @@ class PhaseBCDayFirst:
             dict(per_lf_ost_text),
             published_titles=kit.published_titles() | set(_channel_title_ids),
             published_title_ids=_channel_title_ids,
+            drive_project=_drive_project(state),
+            lf_dates=per_lf_recording_date,
         )
         state.per_lf_titles = per_lf_titles
 
@@ -1625,6 +1629,12 @@ def _build_drive_stop_mask(config: Config, state) -> Optional[np.ndarray]:
     return mask
 
 
+def _drive_project(state) -> str | None:
+    """The drive's ledger project name (``source_dir`` stem, as Phase D books it)."""
+    src = getattr(state, "source_dir", None)
+    return Path(str(src)).stem.replace(" ", "_").lower() if src else None
+
+
 def _build_per_lf_recording_date_map(lf_plans_by_date) -> dict:
     """Translate ``{date: [lf, ...]}`` (the output of
     ``_partition_lf_plans_by_date``) into ``{lf.index: "YYYY-MM-DD"}``.
@@ -1887,6 +1897,8 @@ def _apply_demoted_labels(
         dict(per_lf_ost_text),
         published_titles=kit.published_titles(),
         published_title_ids=title_ids,
+        drive_project=_drive_project(state),
+        lf_dates=getattr(state, "per_lf_recording_date", None),
     )
 
 

@@ -45,9 +45,9 @@ def test_t2_broadened_label_reaches_the_thumbnail(tmp_path):
     # Retained Harrow + Pellmere footage cannot carry "Harrow" alone.
     out = _enrich([_lf(1, (0.0, 280.0), (320.0, 580.0))], {1: "Harrow, Westmark"})
     ost_text = flatten_ost_text(out.per_lf_ost_text_by_date)
-    assert ost_text == {1: "Ashby County, Westmark"}
+    assert ost_text == {1: "Harrow & Pellmere, Ashby County, Westmark"}
     title = _thumbnail_title(tmp_path, ost_text, meta_title="Harrow, Westmark (Part 1 of 2)")
-    assert title == "Ashby County, Westmark"
+    assert title == "Harrow & Pellmere, Ashby County, Westmark"
 
 
 def test_t1_thumbnail_is_byte_equal_to_the_checked_text_not_the_meta_title(tmp_path):
@@ -69,8 +69,12 @@ def test_broadened_label_also_replaces_the_location_label():
         {1: "Harrow, Westmark"},
         locations={1: "Harrow, Westmark"},
     )
-    assert out.per_lf_ost_text_by_date["2026-01-02"] == {1: "Ashby County, Westmark"}
-    assert out.per_lf_locations_by_date["2026-01-02"] == {1: "Ashby County, Westmark"}
+    assert out.per_lf_ost_text_by_date["2026-01-02"] == {
+        1: "Harrow & Pellmere, Ashby County, Westmark"
+    }
+    assert out.per_lf_locations_by_date["2026-01-02"] == {
+        1: "Harrow & Pellmere, Ashby County, Westmark"
+    }
 
 
 def test_supported_label_keeps_its_location_label():

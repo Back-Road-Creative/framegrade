@@ -75,7 +75,7 @@ def test_route_returning_to_start_is_not_an_a_to_b_endpoint():
 def test_multi_place_route_falls_back_to_contained_county():
     ev = measure_route([_harrow_pellmere_harrow()], _BandGeocoder())
     label, note = select_supported_label("Harrow, Westmark", ev)
-    assert label == "Ashby County, Westmark"
+    assert label == "Harrow & Pellmere, Ashby County, Westmark"
     assert "Pellmere" in note
     claim = ev.region_claim("county")
     assert claim["coverage"] == pytest.approx(1.0)
@@ -159,7 +159,7 @@ def test_unavailable_boundary_refuses_instead_of_guessing():
     claim = ev.region_claim("county")
     assert claim is None or claim["samples_outside"] > 0
     label, _ = select_supported_label("Harrow, Westmark", ev)
-    assert label == "Westmark"
+    assert label == "Harrow & Pellmere, Westmark"
 
 
 def test_geocoder_failure_is_unresolved_time_not_a_place():
@@ -268,7 +268,9 @@ def test_entry_point_persists_the_route_record_for_the_final_text_review():
 
 def test_entry_point_multi_place_falls_back_before_the_burn():
     out = _enrich([_lf(1, (0.0, 280.0), (320.0, 580.0))], {1: "Harrow, Westmark"})
-    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Ashby County, Westmark"
+    assert (
+        out.per_lf_ost_text_by_date["2026-01-02"][1] == "Harrow & Pellmere, Ashby County, Westmark"
+    )
 
 
 def test_entry_point_aggregates_refusals_and_checks_operator_labels():
@@ -309,7 +311,7 @@ def test_label_naming_a_place_the_retained_footage_never_reaches_is_refused():
     lfs = [_lf(1, (0.0, 280.0))]
     labels = {1: "Pellmere & Harrow, Westmark"}
     out = _enrich(lfs, labels)
-    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Ashby County, Westmark"
+    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Harrow, Ashby County, Westmark"
     with pytest.raises(RouteClaimRefusedError) as exc:
         _enrich(lfs, labels, overrides=dict(labels))
     assert "names 'Pellmere'" in str(exc.value)
@@ -383,7 +385,9 @@ def test_d4_2_gap_only_in_excluded_footage_does_not_block():
     del ep[0][0].trackpoints[700:760]  # dropout in footage the LF does not keep
     out = _enrich([_lf(1, (0.0, 280.0), (320.0, 600.0))], {1: "Harrow, Westmark"}, episodes=ep)
     assert out.route_claims_by_lf[1].gaps == []
-    assert out.per_lf_ost_text_by_date["2026-01-02"][1] == "Ashby County, Westmark"
+    assert (
+        out.per_lf_ost_text_by_date["2026-01-02"][1] == "Harrow & Pellmere, Ashby County, Westmark"
+    )
 
 
 # The two D4 gap-measurement tests below check what a gap counts as, not whether a
@@ -541,7 +545,7 @@ def test_dry_run_record_shows_the_broader_label_a_fallback_burns(tmp_path, capsy
     report, blob, out = _dry_run_record(tmp_path, lf, {}, capsys)
     assert report["refused"] is False and blob["refused"] is False
     (rec,) = blob["lfs"]
-    assert rec["refused"] is False and rec["label"] == "Ashby County, Westmark"
+    assert rec["refused"] is False and rec["label"] == "Harrow & Pellmere, Ashby County, Westmark"
     assert rec["label_requested"] == "Harrow, Westmark" and "using" in rec["reason"]
     assert rec["containment_proven"] is False and _RECORD_FIELDS <= set(rec)
     assert "ROUTE-CLAIM REFUSED" not in out
