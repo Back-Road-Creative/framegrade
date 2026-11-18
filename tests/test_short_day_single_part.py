@@ -197,9 +197,20 @@ def test_driveconfig_rejects_bad_short_day_min(bad):
         )
 
 
-def test_driveconfig_rejects_short_day_min_without_part_bounds():
-    with pytest.raises(ValueError, match="full_drive_short_day_min_sec"):
-        DriveConfig(full_drive_short_day_min_sec=SHORT_MIN)
+def test_short_day_min_without_part_bounds_is_inert():
+    # "Comment both part bounds out for one LF per day" must still load: the
+    # short-day floor only lowers a part floor, so with none set it does nothing.
+    d = DriveConfig(full_drive_short_day_min_sec=SHORT_MIN)
+    assert d.full_drive_short_day_min_sec == SHORT_MIN
+
+
+def test_clearing_part_bounds_keeps_the_shipped_drive_config_valid():
+    from pathlib import Path
+
+    cfg = Config.load(Path(__file__).resolve().parents[1] / "config.yaml")
+    drive = cfg.drive
+    drive.full_drive_part_min_sec = drive.full_drive_part_max_sec = None
+    drive.__class__.model_validate(drive.model_dump())  # the drive CLI's re-validate
 
 
 def test_driveconfig_accepts_valid_short_day_min():

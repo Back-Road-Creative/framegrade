@@ -2000,7 +2000,7 @@ class DriveConfig(BaseModel):
     # Optional lower floor for a SHORT day: a day whose kept footage is in
     # [short_day_min, part_min) ships as ONE part holding all its kept ranges
     # (no split). Below it the day is still refused. ``None`` = part_min is
-    # the floor, as before. Needs both part bounds; 0 < short_day_min <= part_min.
+    # the floor, as before. Inert without both part bounds; else 0 < short_day_min <= part_min.
     full_drive_short_day_min_sec: Optional[int] = None
 
     @model_validator(mode="after")
@@ -2017,17 +2017,12 @@ class DriveConfig(BaseModel):
                 f"full_drive_part_max_sec (got {lo}, {hi})"
             )
         short = self.full_drive_short_day_min_sec
-        if short is not None:
-            if lo is None:
-                raise ValueError(
-                    "full_drive_short_day_min_sec needs full_drive_part_min_sec and "
-                    "full_drive_part_max_sec to be set"
-                )
-            if not 0 < short <= lo:
-                raise ValueError(
-                    f"full_drive_short_day_min_sec: need 0 < short_day_min <= "
-                    f"full_drive_part_min_sec (got {short}, {lo})"
-                )
+        # Inert without the part bounds (one LF per day): it only lowers a part floor.
+        if short is not None and lo is not None and not 0 < short <= lo:
+            raise ValueError(
+                f"full_drive_short_day_min_sec: need 0 < short_day_min <= "
+                f"full_drive_part_min_sec (got {short}, {lo})"
+            )
         return self
 
     @model_validator(mode="after")
