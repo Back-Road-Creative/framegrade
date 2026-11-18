@@ -117,6 +117,14 @@ def _assert_no_scored_gaps(valid_episodes: list, file_scores: list) -> None:
             )
 
 
+def _day_floor(drive, part_min):
+    """(name, seconds) of the per-day floor: the short-day key when it is lower."""
+    short = getattr(drive, "full_drive_short_day_min_sec", None)
+    if short is not None and short < part_min:
+        return "full_drive_short_day_min_sec", short
+    return "full_drive_part_min_sec", part_min
+
+
 def _assert_days_clear_gps_gap_floor(
     drive, file_boundaries: list, file_durations: list, episode_dates: list, gps_per_episode: list
 ) -> None:
@@ -138,6 +146,7 @@ def _assert_days_clear_gps_gap_floor(
         return
     if resolve_lf_mode(drive) != "full_drive" or not file_boundaries:
         return
+    floor_name, floor = _day_floor(drive, part_min)
     from ..longform_assembler import _with_gps_gap_mask
     from ..regular_lf_planner import InsufficientFootageError
     from ..route_claims import day_fix_gap_s
@@ -166,11 +175,11 @@ def _assert_days_clear_gps_gap_floor(
             day_scores, day_boundaries, day_gps, np.zeros(len(day_scores), dtype=bool)
         )
         kept = int(np.count_nonzero(~gap))
-        if kept < part_min:
+        if kept < floor:
             raise InsufficientFootageError(
                 f"Day {day}: at most {kept}s of footage survives the GPS-gap cut "
                 f"({len(day_scores) - kept}s has no usable fix within "
-                f"{day_fix_gap_s(day_gps)}s), under full_drive_part_min_sec={part_min}s; the "
+                f"{day_fix_gap_s(day_gps)}s), under {floor_name}={floor}s; the "
                 "stop mask can only cut more, so the drive plan is certain to refuse "
                 "this day. Refused before scoring. Footage is never padded, repeated or "
                 "joined to another day."

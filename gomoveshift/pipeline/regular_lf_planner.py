@@ -326,6 +326,7 @@ def plan_full_drive_parts(
     stop_mask: Optional[np.ndarray],
     part_min_sec: Optional[int] = None,
     part_max_sec: Optional[int] = None,
+    short_day_min_sec: Optional[int] = None,
     day: Optional[str] = None,
 ) -> list[list[RegularLFRange]]:
     """``plan_regular_lfs(mode="full_drive")`` grouped into long-form parts.
@@ -340,6 +341,10 @@ def plan_full_drive_parts(
     raises :class:`InsufficientFootageError` (naming ``day``). There is no
     escape: one LF covers one calendar day, and footage is never padded,
     repeated, slowed or joined to another day.
+
+    ``short_day_min_sec`` (optional, ``<= part_min_sec``) lowers the floor: a
+    day in ``[short_day_min_sec, part_min_sec)`` is ONE part holding every
+    kept range (no split); the 480 s minimum and the ceiling still apply.
     """
     if part_min_sec is None or part_max_sec is None:
         return [
@@ -359,13 +364,19 @@ def plan_full_drive_parts(
         stop_mask=stop_mask,
     )
     kept_sec = sum(r.duration_sec for r in ranges)
-    if kept_sec < part_min_sec:
+    floor_name, floor = "full_drive_part_min_sec", part_min_sec
+    if short_day_min_sec is not None and short_day_min_sec < part_min_sec:
+        floor_name, floor = "full_drive_short_day_min_sec", short_day_min_sec
+    if kept_sec < floor:
         raise InsufficientFootageError(
             f"Day {day or '?'}: kept (stop-masked) footage {kept_sec:.0f}s is under "
-            f"full_drive_part_min_sec={part_min_sec}s. Footage is never padded, "
+            f"{floor_name}={floor}s. Footage is never padded, "
             "repeated or joined to another day."
         )
-    parts = split_ranges_balanced(ranges, min_sec=part_min_sec, max_sec=part_max_sec)
+    if kept_sec < part_min_sec:
+        parts = [list(ranges)]  # short day: one part, never split
+    else:
+        parts = split_ranges_balanced(ranges, min_sec=part_min_sec, max_sec=part_max_sec)
     for i, part in enumerate(parts, 1):
         d = sum(r.duration_sec for r in part)
         if d < min_duration_sec:
