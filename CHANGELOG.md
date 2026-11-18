@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.109] - 2026-11-17
+
+### Fixed
+
+- Overpass requests now wait up to 90 s for an answer instead of 25 s. The 25 s figure is the server's own query budget; a busy mirror queues a request before that budget starts, so the client hung up on mirrors that were slow but answering, and a drive's place lookup failed on every endpoint.
+
 ## [0.3.108] - 2026-11-17
 
 ### Added
@@ -1240,7 +1246,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...HEAD
+[0.3.109]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...v0.3.109
 [0.3.108]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...v0.3.108
 [0.3.107]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...v0.3.107
 [0.3.106]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.105...v0.3.106
