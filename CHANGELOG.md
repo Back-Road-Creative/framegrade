@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.110] - 2026-11-18
+
+### Fixed
+
+- A road-only LF label ("L6099, County Cork") now broadens to the measured towns with the most retained time ("Courtmacsherry & Timoleague, County Cork", level `places`) before falling back to the county, so Cork drives stop colliding on the generic county title. A cross-drive exact title clash gets the drive date (" (Sep 19, 2025)") instead of a permanent refusal; a same-project or undated clash still refuses.
+
 ## [0.3.109] - 2026-11-17
 
 ### Fixed
@@ -1246,7 +1252,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...HEAD
+[0.3.110]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...v0.3.110
 [0.3.109]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...v0.3.109
 [0.3.108]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...v0.3.108
 [0.3.107]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.106...v0.3.107
