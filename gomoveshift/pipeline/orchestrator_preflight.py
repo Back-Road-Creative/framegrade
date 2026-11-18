@@ -219,6 +219,10 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
         # ``DriveConfig.warn_lf_policy_override``): ``plan_full_drive_parts``
         # never runs, so the day is not certain to be refused.
         return None
+    short = getattr(drive, "full_drive_short_day_min_sec", None)
+    floor_name, floor = "full_drive_part_min_sec", part_min
+    if short is not None and short < part_min:
+        floor_name, floor = "full_drive_short_day_min_sec", short
     source_dir = Path(source_dir)
     if not source_dir.is_dir():
         return None  # run_preflight names the missing source dir
@@ -233,10 +237,10 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
             continue
         d = date.fromisoformat(day)
         near = sum(raw.get((d + timedelta(days=k)).isoformat(), 0.0) for k in (-1, 0, 1))
-        if near < part_min:
+        if near < floor:
             return (
                 f"Day {day}: raw source footage {raw[day]:.0f}s is under "
-                f"full_drive_part_min_sec={part_min}s, so the day can never fill a "
+                f"{floor_name}={floor}s, so the day can never fill a "
                 "part. Footage is never padded, repeated or joined to another day. "
                 "Refused before ingest."
             )

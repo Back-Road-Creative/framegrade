@@ -1997,6 +1997,11 @@ class DriveConfig(BaseModel):
     # per day, as before. See ``regular_lf_planner.split_ranges_balanced``.
     full_drive_part_min_sec: Optional[int] = None
     full_drive_part_max_sec: Optional[int] = None
+    # Optional lower floor for a SHORT day: a day whose kept footage is in
+    # [short_day_min, part_min) ships as ONE part holding all its kept ranges
+    # (no split). Below it the day is still refused. ``None`` = part_min is
+    # the floor, as before. Inert without both part bounds; else 0 < short_day_min <= part_min.
+    full_drive_short_day_min_sec: Optional[int] = None
 
     @model_validator(mode="after")
     def _check_full_drive_part_bounds(self) -> "DriveConfig":
@@ -2010,6 +2015,13 @@ class DriveConfig(BaseModel):
             raise ValueError(
                 f"full_drive_part: need 0 < full_drive_part_min_sec <= "
                 f"full_drive_part_max_sec (got {lo}, {hi})"
+            )
+        short = self.full_drive_short_day_min_sec
+        # Inert without the part bounds (one LF per day): it only lowers a part floor.
+        if short is not None and lo is not None and not 0 < short <= lo:
+            raise ValueError(
+                f"full_drive_short_day_min_sec: need 0 < short_day_min <= "
+                f"full_drive_part_min_sec (got {short}, {lo})"
             )
         return self
 

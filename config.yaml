@@ -227,6 +227,8 @@ drive:
   # 91-119 min ships as ONE part. Comment both out for one LF per day.
   full_drive_part_min_sec: 3600
   full_drive_part_max_sec: 5400
+  # A day of 45-59 min (>= this floor, under part_min) ships as ONE part.
+  full_drive_short_day_min_sec: 2700
   # Per-day STOP mask. A per-second veto built from GPS
   # speed (falling back to optical motion where speed is unmeasurable)
   # structurally excludes parked/roadside seconds from the shorts and LF

@@ -2330,6 +2330,7 @@ def run_day_pipeline(
                 stop_mask=stop_mask,
                 part_min_sec=part_min,
                 part_max_sec=part_max,
+                short_day_min_sec=getattr(_drive, "full_drive_short_day_min_sec", None),
                 day=date,
             )
         else:

@@ -1307,6 +1307,7 @@ class LongFormAssembler:
                 stop_mask=day_stop_mask,
                 part_min_sec=part_min,
                 part_max_sec=part_max,
+                short_day_min_sec=getattr(self.config, "full_drive_short_day_min_sec", None),
                 day=date,
             )
             parts = [p for p in parts if p]
