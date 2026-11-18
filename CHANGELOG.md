@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.111] - 2026-11-18
+
+### Added
+
+- `full_drive_short_day_min_sec` (drive config, optional, `0 < value <= full_drive_part_min_sec`, inert unless both part bounds are set): a day whose kept footage is in `[short_day_min, part_min)` ships as one long-form instead of being refused. The sample `config.yaml` sets 2700, so a 45-59 min day ships as one part. The planner, the Phase-A GPS-gap pre-gate and the preflight/backlog refusal all use the same lower floor; a day under it is still refused, and footage is never padded, repeated or joined to another day.
+
 ## [0.3.110] - 2026-11-18
 
 ### Fixed
@@ -1252,7 +1258,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.111...HEAD
+[0.3.111]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...v0.3.111
 [0.3.110]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...v0.3.110
 [0.3.109]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...v0.3.109
 [0.3.108]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.107...v0.3.108
