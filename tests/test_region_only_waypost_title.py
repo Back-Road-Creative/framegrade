@@ -91,3 +91,32 @@ def test_stateless_county_label_with_its_country_is_a_waypost_region_decision():
     assert decision["chosen_title"] == "County Cork, Ireland in 4K"
     assert decision["reason"] == "insufficient_evidence"
     assert decision["candidates"][0]["template_id"] == "region_only_lf"
+
+
+def test_cross_drive_dated_county_label_keeps_its_region_facts():
+    """``ensure_unique_titles`` dates a county label that exactly duplicates a
+    different drive's live title ("County Cork, Ireland (Sep 19, 2025)"). The
+    pre-render gate must still award that label the county's region facts, not
+    refuse the encode with ``facts_unavailable`` (Courtmacsherry, 2026-11-19)."""
+    decision = approve_retained_title("County Cork, Ireland (Sep 19, 2025)", _cork_route(), None)
+    assert decision["chosen_title"] == "County Cork, Ireland (Sep 19, 2025) in 4K"
+    assert decision["reason"] == "insufficient_evidence"
+    assert decision["candidates"][0]["template_id"] == "region_only_lf"
+
+
+def test_the_gate_strips_exactly_the_date_the_dedup_appends():
+    from gomoveshift.pipeline.title_builder import _cross_drive_dated, strip_drive_date
+
+    dated = _cross_drive_dated(
+        "County Cork, Ireland", {1: "2025-09-07"}, 1, "this-drive", "vid", {"vid": "other-drive"}
+    )
+    assert dated == "County Cork, Ireland (Sep 7, 2025)"
+    assert strip_drive_date(dated) == "County Cork, Ireland"
+    for kept in ("County Cork, Ireland (Part 2)", "County Cork, Ireland", "Sep 7, 2025"):
+        assert strip_drive_date(kept) == kept
+
+
+def test_a_dated_wrong_county_still_has_no_region_facts(monkeypatch):
+    monkeypatch.delenv("GMS_ALLOW_UNPROVEN_TITLE", raising=False)
+    with pytest.raises(PreRenderTitleError):
+        approve_retained_title("County Kerry, Ireland (Sep 19, 2025)", _cork_route(), None)

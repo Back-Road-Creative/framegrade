@@ -303,6 +303,7 @@ def _region_only_title_facts(label: str, baseline: str, route_evidence, suffix: 
     from .final_text_record import _region_id
     from .geo_constants import US_STATE_ABBREVS
     from .route_claims import REGION_MIN_COVERAGE, _region_ok, region_label
+    from .title_builder import strip_drive_date
 
     for level in ("county", "counties", "state"):
         claim = route_evidence.region_claim(level)
@@ -331,7 +332,9 @@ def _region_only_title_facts(label: str, baseline: str, route_evidence, suffix: 
         else:
             labels = {name, US_STATE_ABBREVS.get(name, name)}
             evidence_name = label
-        if label.casefold() not in {item.casefold() for item in labels}:
+        # A cross-drive dated label ("County Cork, Ireland (Sep 19, 2025)") is
+        # the same region award; the date only keeps the title unique.
+        if strip_drive_date(label).casefold() not in {item.casefold() for item in labels}:
             continue
         return TitleFacts(
             format="longform",
