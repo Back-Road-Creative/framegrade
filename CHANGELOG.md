@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.112] - 2026-11-19
+
+### Fixed
+
+- A cross-drive dated county label (`County Cork, Ireland (Sep 19, 2025)`) keeps its region facts at the pre-render title gate instead of refusing the encode with `facts_unavailable`; the gate removes exactly the date suffix the uniqueness backstop appends before matching the county award.
+
 ## [0.3.111] - 2026-11-18
 
 ### Added
@@ -1258,7 +1264,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.111...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...HEAD
+[0.3.112]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.111...v0.3.112
 [0.3.111]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...v0.3.111
 [0.3.110]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...v0.3.110
 [0.3.109]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.108...v0.3.109
