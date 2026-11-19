@@ -538,6 +538,23 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple
     )  # fmt: skip
 
 
+# ``publish.JOB_PREFIX`` (publish imports this module, so the name is repeated here; a test pins it)
+PUBLISH_JOB_PREFIX = "gms-publish-"
+
+
+def _failed_publish(jobs_dir: Path, project: str) -> bool:
+    """The newest ``gms-publish-<project>`` job (Phase D after a passed audit) ended failed."""
+    name = PUBLISH_JOB_PREFIX + project
+    recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
+    if not recs:
+        return False
+    result = max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result") or {}
+    state, code = result.get("state"), result.get("exit_code")
+    return state == "failed" or (
+        state not in (None, "running", "succeeded") and code not in (None, 0)
+    )
+
+
 def _audit_passed(jobs_dir: Path, project: str) -> bool:
     rec = _newest_audit(jobs_dir, project)
     return rec is not None and (rec.get("result") or {}).get("state") == "succeeded"
@@ -717,6 +734,11 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     # resume of a dead drive would otherwise land before every tick and keep it unheld forever
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
+    # a passed audit whose publish failed (``health check`` closed the claim ``failed``) is
+    # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork)
+    for proj in sorted(d.project for d in mine if d.status == "failed" and d.project in listed):
+        if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
+            return _publish_audited(res, proj, publish, dry_run)
     relaunch = None
     for proj in auditing:
         failed = _failed_audit(jobs_dir, proj)

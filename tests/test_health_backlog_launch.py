@@ -310,6 +310,62 @@ def test_a_succeeded_audit_is_published_by_the_backlog_tick(tmp_path):
     assert launch.exit_code(res) == 0
 
 
+# 2026-11-19: Kerry-to-Cork's audit passed and its publish job (Phase D) failed at 08:01 ET on a
+# venv rebuilt under it. ``health check`` closed the claim ``failed`` and every later backlog tick
+# skipped it "in the schedule store (failed)": an audited drive's publish was abandoned. A listed
+# drive whose newest publish job failed is published again (``health publish`` reopens it).
+
+
+def _failed_publish(rig, state="failed", **publish_result):
+    rig.drives.append(drive("day-a", "failed"))
+    job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "pub", "day-a", state, 200.0, name="gms-publish-day-a")
+    rig.publish_result = publish_result or {"action": "launched", "reason": "day-a for slot"}
+
+
+def test_a_failed_publish_of_a_listed_drive_is_published_again(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig)
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)]
+    assert res["action"] == "launched" and res["project"] == "day-a", res
+    assert not rig.launches and not rig.registered
+
+
+def test_a_failed_publish_retry_dry_run_asks_for_the_dry_run(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
+    assert rig.run(dry_run=True)["action"] == "would_publish"
+    assert rig.publishes == [("day-a", True)]
+
+
+def test_a_failed_drive_with_no_failed_publish_is_not_published(tmp_path):
+    # set ``failed`` by hand, or its publish job is still running: never re-published
+    for state in (None, "running"):
+        rig = Rig(tmp_path / str(state))
+        rig.drives.append(drive("day-a", "failed"))
+        job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+        if state:
+            job(rig, "pub", "day-a", state, 200.0, name="gms-publish-day-a")
+        rig.publish_result = {"action": "launched", "reason": "x"}
+        rig.run()
+        assert rig.publishes == []
+
+
+def test_a_failed_publish_waits_for_a_running_drive(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig)
+    rig.running = True
+    res = rig.run()
+    assert rig.publishes == [] and "running" in res["reason"]
+
+
+def test_publish_job_prefix_matches_the_publisher():
+    from gomoveshift.health import publish
+
+    assert launch.PUBLISH_JOB_PREFIX == publish.JOB_PREFIX
+
+
 def test_a_slot_outside_the_lead_window_waits_and_is_not_a_failure(tmp_path):
     rig = Rig(tmp_path)
     _audited(rig, action="refused",
