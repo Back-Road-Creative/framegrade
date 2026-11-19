@@ -243,6 +243,13 @@ running audit, one with no job record, a failed one and one at the OST gate are 
 (a failed one is skipped, not a stop);
 `--supersede` of the drive itself is unchanged. `--dry-run` asks `health publish --dry-run`.
 
+**Failed publish.** A drive still in the backlog whose store row is `failed` because its newest
+`gms-publish-<project>` job failed (its audit succeeded) is handed to `health publish` again, before
+the `auditing` drives; `health publish` reopens it (`failed -> auditing -> ready`) and claims a slot.
+A `failed` row with no failed publish job (set by hand, or a publish still running) is left alone.
+Before, the tick skipped it `in the schedule store (failed)` and the audited drive never aired
+(Kerry-to-Cork, 2026-11-19). Tests: `tests/test_health_backlog_launch.py`.
+
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one
 free-space figure. Staging needs `max(30 GB, sources × 3.0)` and output 50 GB; free equal to need
 passes. The ×3.0 is preflight's `PEAK_CACHE_FACTOR` (`estimate_peak_cache_gb`): the episode
