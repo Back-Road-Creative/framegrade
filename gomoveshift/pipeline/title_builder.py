@@ -1878,6 +1878,17 @@ def append_full_drive_part_suffix(
     return f"{base}{suffix}"
 
 
+# The `` (Mon D, YYYY)`` suffix ``_cross_drive_dated`` appends, and only that.
+_DRIVE_DATE_SUFFIX_RE = re.compile(
+    r" \((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [1-9][0-9]?, [0-9]{4}\)$"
+)
+
+
+def strip_drive_date(label: str) -> str:
+    """``label`` without the drive-date suffix ``_cross_drive_dated`` adds; else unchanged."""
+    return _DRIVE_DATE_SUFFIX_RE.sub("", label)
+
+
 def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
     """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
     import datetime as _dt
