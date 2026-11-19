@@ -598,7 +598,12 @@ class PhaseBCDayFirst:
                 # description gate fails here, not after the render.
                 from .phase_d_metadata import assert_lf_metadata_gates_before_encode
 
-                assert_lf_metadata_gates_before_encode(_chapter_plan, state, drive_wide_location)
+                assert_lf_metadata_gates_before_encode(
+                    _chapter_plan,
+                    state,
+                    drive_wide_location,
+                    labels_by_date=per_lf_locations_by_date,
+                )
 
             # The insert flags are per-invocation, so a resume must carry the ones its
             # finished days were rendered with (refused otherwise), and the inserts are

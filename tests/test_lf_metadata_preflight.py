@@ -94,3 +94,33 @@ class TestRunsBeforeEncode:
         src = inspect.getsource(phase_bc_day_first.PhaseBCDayFirst.run)
         assert "assert_lf_metadata_gates_before_encode(" in src
         assert src.index("assert_lf_metadata_gates_before_encode(") < src.index("run_all_days(")
+
+
+class TestLaunchLabels:
+    """A resumed drive has no ``state.per_lf_locations`` yet (Phase B+C sets it after
+    ``run_all_days``) and a county-fallback drive's drive-wide label is "": the gate must use
+    the per-LF labels Phase B+C derives at launch, the ones Phase D will read
+    (Courtmacsherry / Galley Head, 2026-11-19: ``location is empty`` every heal tick)."""
+
+    def test_launch_labels_used_when_state_has_none(self):
+        state = make_state(per_lf_locations=None, per_lf_recording_date={1: "2025-09-19"})
+        assert_lf_metadata_gates_before_encode(
+            _plan(1), state, "", labels_by_date={"2025-09-19": {1: "County Cork, Ireland"}}
+        )
+
+    def test_launch_label_wins_over_a_stale_state_label(self):
+        state = make_state(per_lf_locations={1: ""}, per_lf_recording_date={1: "2025-09-19"})
+        assert_lf_metadata_gates_before_encode(
+            _plan(1), state, "", labels_by_date={"2025-09-19": {1: "County Cork, Ireland"}}
+        )
+
+    def test_no_label_anywhere_still_refuses(self):
+        state = make_state(per_lf_locations=None)
+        with pytest.raises(ValueError, match="location is empty"):
+            assert_lf_metadata_gates_before_encode(_plan(1), state, "", labels_by_date={})
+
+    def test_phase_bc_hands_the_gate_its_launch_labels(self):
+        src = inspect.getsource(phase_bc_day_first.PhaseBCDayFirst.run)
+        call = src[src.index("assert_lf_metadata_gates_before_encode(") :]
+        call = call[: call.index(")") + 1]
+        assert "labels_by_date=per_lf_locations_by_date" in call

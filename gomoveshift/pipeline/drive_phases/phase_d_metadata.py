@@ -639,7 +639,9 @@ def _assert_description_redundancy(metadata: dict, lf_index: int, *, prefix: str
 LF_METADATA_PREFLIGHT_PREFIX = "LF-METADATA-PREFLIGHT (before encode): "
 
 
-def assert_lf_metadata_gates_before_encode(drive_plan, state, location: str) -> None:
+def assert_lf_metadata_gates_before_encode(
+    drive_plan, state, location: str, labels_by_date: Optional[dict] = None
+) -> None:
     """Refuse to START an encode whose LF metadata would fail Phase D's gate.
 
     Generates each LF's metadata with the SAME ``LongFormMetadataGenerator.
@@ -665,7 +667,12 @@ def assert_lf_metadata_gates_before_encode(drive_plan, state, location: str) -> 
     """
     from ..longform_metadata import LongFormMetadataGenerator
 
-    per_lf_locations = state.per_lf_locations or {}
+    # ``labels_by_date`` is Phase B+C's launch-time ``per_lf_locations_by_date``, the labels it
+    # writes to ``state.per_lf_locations`` after ``run_all_days`` and Phase D reads. A resumed
+    # drive has none in state yet, and a county-fallback drive's drive-wide label is "".
+    per_lf_locations = dict(state.per_lf_locations or {})
+    for day_labels in (labels_by_date or {}).values():
+        per_lf_locations.update(day_labels or {})
     per_lf_resolved = state.per_lf_resolved_location or {}
     per_lf_ost_text = state.per_lf_ost_text or {}
     per_lf_dates = state.per_lf_recording_date or {}
