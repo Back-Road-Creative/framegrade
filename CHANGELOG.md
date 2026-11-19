@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.113] - 2026-11-19
+
+### Fixed
+
+- `health backlog` publishes a drive again when its audit passed and its publish job failed. Before, the store row stayed `failed` and every tick skipped it, so the audited drive never aired.
+- The launch-time LF metadata gate now uses each LF's launch-time label, the one Phase D will read. A resumed county-fallback drive (empty drive-wide label, no labels in state yet) used to fail every retry with `LongFormMetadataGenerator.generate: location is empty`.
+
 ## [0.3.112] - 2026-11-19
 
 ### Fixed
@@ -1264,7 +1271,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.113...HEAD
+[0.3.113]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...v0.3.113
 [0.3.112]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.111...v0.3.112
 [0.3.111]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...v0.3.111
 [0.3.110]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.109...v0.3.110
