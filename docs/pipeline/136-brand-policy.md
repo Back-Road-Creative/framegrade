@@ -119,6 +119,28 @@ carry the block itself to keep the experiment running.
   never 0. The outcome was Reel reach until 2026-11-14 (#385): Graph answers no per-Reel reach for
   the live Page, so every arm sat at n=0.
   `experiments.arm_results` returns the same data for a caller that wants the numbers.
+- **Shorts arms and decision record** (`experiments.py`, YouTube Shorts): the factors are
+  `yt_title_body` and `yt_hashtag_set` (`SHORTS_FACTORS`), tagged in the sidecar's
+  `experiment_arms` like any other experiment. `assign_stratified_arm` gives a new Short the arm
+  its (project, slot) stratum holds fewest of (ties on a sha256 of factor, project, slot, short
+  and arm), so arm counts differ by at most one within a stratum. The outcome is
+  `youtube_outcome`: the measured observation nearest 72 h after posting (within 12 h) supplies
+  `views` and `avg_view_percentage`; a Short counts once `posted + 72 h <= today - 2 d`, and
+  unreported retention is unknown, never 0. `metrics collect` prints, after the `EXPERIMENT`
+  lines, one `ARM_DECISION factor= arm= decision= n= min_n= score= reference= gap= reason=` line
+  per arm (plus `retest_days=` for a pause). Each Short's views are divided by its project's
+  median (projects holding two or more arms and a non-zero median only); an arm's score is the
+  median ratio and its reference the median score of the other arms holding `min_n` (the
+  `caption_ranking` pool-median policy). `INSUFFICIENT_EVIDENCE` below `min_n` or with no
+  reference; otherwise a gap (reference / score) of `min_gap` that also holds in each
+  chronological half of the arm's Shorts is `demote`, or `pause` at `pause_gap` when the arm's
+  median retention is known and no better than the others'; anything else is `hold`. The record
+  only reports: it changes no text sent to YouTube. A paused arm is re-tested every
+  `retest_days` (`pause_retest_due`). Thresholds: `policy.arm_thresholds` (`min_n` 36,
+  `min_gap` 3.0, `pause_gap` 6.0, `retest_days` 28; named `DEFAULT_*` constants, JP-approved
+  conservative defaults), no other keys. Weekly volume stays Waypost's (`volume_decide`,
+  `docs/social-metrics-volume.md`); the nightly wrapper reads this record from the same
+  `metrics collect` output.
 - **Caption opener ids** (`social_generator.caption_template_id`): every composed caption also
   records which opener template it was built from, as `SocialPost.caption_templates`
   (`{platform: id}`), then `PublishRecord.caption_templates` in the sidecar, with the same
