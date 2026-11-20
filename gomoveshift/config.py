@@ -57,18 +57,30 @@ RETIRED_CONFIG_KEYS = (
 WAYPOST_OWNED_DRIVE_KEYS = ("long_form_publish_days", "long_form_publish_time")
 
 
+#: Retired keys already warned about in this process: the hourly tick loads the config many
+#: times, and one warning per key per process is enough to name it.
+_WARNED_RETIRED_KEYS: set = set()
+
+
+def _warn_retired_once(key: str) -> None:
+    if key in _WARNED_RETIRED_KEYS:
+        return
+    _WARNED_RETIRED_KEYS.add(key)
+    logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+
+
 def _warn_on_retired_keys(raw: dict) -> None:
-    """Warn once per leftover retired key under ``drive:`` (never raises), and remove the
-    Waypost-owned transport keys so a file value cannot set the cadence."""
+    """Warn once per process per leftover retired key under ``drive:`` (never raises), and
+    remove the Waypost-owned transport keys so a file value cannot set the cadence."""
     drive = raw.get("drive")
     if not isinstance(drive, dict):
         return
     for key in RETIRED_CONFIG_KEYS:
         if key in drive:
-            logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+            _warn_retired_once(key)
     for key in WAYPOST_OWNED_DRIVE_KEYS:
         if key in drive:
-            logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+            _warn_retired_once(key)
             del drive[key]
 
 
