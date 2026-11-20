@@ -1,0 +1,3 @@
+### Fixed
+
+- `health backlog` relaunches a failed drive from source once its failure fingerprint changes. A `failed` store row (or an `auditing` one with a failed or missing audit) with no readable `resume.json`, which `health heal` could never reach (rec0060-0061), has its stale stage and output dirs moved to `_superseded/`, is re-registered `auditing` and launches on that tick, by the same class and fingerprint rules as heal. A legacy unstamped row gets one launch; an unchanged fingerprint gets none and one deduped `refused` record. Published, booked and receipt-holding rows are never touched.

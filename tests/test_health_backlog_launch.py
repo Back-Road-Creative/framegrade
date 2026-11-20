@@ -57,6 +57,7 @@ class Rig:
         self.gates: list = []
         self.publish_result = None  # set -> run_backlog gets a publisher returning it
         self.publishes: list = []
+        self.relaunch = None  # a ``launch.FailedRelaunch`` -> run_backlog gets it
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -108,6 +109,7 @@ class Rig:
             latest_version=lambda: self.latest,
             **({"supersede": self.supersede} if self.supersede else {}),
             **({"publish": self.publish} if self.publish_result else {}),
+            **({"failed_relaunch": self.relaunch} if self.relaunch else {}),
         )  # fmt: skip
 
     def publish(self, project, dry_run):

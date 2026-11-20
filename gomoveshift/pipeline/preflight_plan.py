@@ -342,6 +342,8 @@ class PreflightPlan:
     wall_clock_breakdown: dict[str, int] = field(default_factory=dict)
     fast_skipped: list[str] = field(default_factory=list)
     calibration: "CalibrationRecord | None" = None
+    # Where the estimate's per-phase numbers came from (printed on the estimate line).
+    rate_source: str = "built-in constants"
     # One line per requested insert (``--insert-photos`` / ``--insert-clip``).
     insert_lines: list[str] = field(default_factory=list)
 
@@ -602,8 +604,15 @@ def _estimate_wall_clock(
     rows: Iterable[PlanRow],
     state: Any,
     calibration: "CalibrationRecord | None" = None,
+    rates: Optional[dict[str, dict[str, float]]] = None,
 ) -> tuple[int, dict[str, int]]:
     """Heuristic wall-clock estimate.
+
+    ``rates`` is :func:`phase_timing.recorded_rates` output. A phase with a
+    recorded median replaces its constant: ``phase_a`` and ``phase_d`` by
+    wall seconds, the day phase (``phase_bc_day_first``) by seconds per day
+    times the days to run, reported under ``master`` (LF, short and superlong
+    time is inside that measured phase, so those read 0).
 
     Returns ``(total_seconds, breakdown_dict)``. Breakdown keys:
     ``phase_a``, ``master``, ``lfs``, ``shorts``, ``superlong``, ``phase_d``.
@@ -698,6 +707,15 @@ def _estimate_wall_clock(
             * int(estimate_short_encode_seconds(_DEFAULT_SHORT_DURATION_SEC))
         )
 
+    if rates:
+        if phase_a_sec and "phase_a" in rates:
+            phase_a_sec = int(rates["phase_a"]["sec_per_unit"])
+        if phase_d_sec and "phase_d" in rates:
+            phase_d_sec = int(rates["phase_d"]["sec_per_unit"])
+        if days_to_run and "phase_bc_day_first" in rates:
+            master_sec = int(rates["phase_bc_day_first"]["sec_per_unit"] * days_to_run)
+            lfs_sec = shorts_sec = superlong_sec = 0
+
     breakdown = {
         "phase_a": phase_a_sec,
         "master": master_sec,
@@ -713,6 +731,14 @@ def _estimate_wall_clock(
 _LOAD_CALIBRATION: Any = object()  # sentinel: "kwarg omitted -> load the saved record"
 
 
+def _rate_source(rates: dict[str, dict[str, float]]) -> str:
+    if not rates:
+        return "built-in constants"
+    fewest = int(min(r["samples"] for r in rates.values()))
+    n = len(rates)
+    return f"recorded rates ({n} phase{'s' if n != 1 else ''}, {fewest} run min)"
+
+
 def build_plan(
     state: Any,
     stages_dir: Path,
@@ -720,6 +746,7 @@ def build_plan(
     fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
     insert_lines: Optional[list[str]] = None,
+    record_paths: Optional[Sequence[Path]] = None,
 ) -> PreflightPlan:
     """Inspect state + the stages directory and return a plan snapshot.
 
@@ -739,13 +766,19 @@ def build_plan(
     for date in _collect_day_dates(state):
         rows.append(_day_row(state, stages_dir, date, probe_duration_fn))
     rows.append(_phase_d_row(state, stages_dir))
-    total, breakdown = _estimate_wall_clock(rows, state, calibration)
+    from .phase_timing import discover_record_paths, recorded_rates
+
+    rates = recorded_rates(
+        record_paths if record_paths is not None else discover_record_paths(stages_dir)
+    )
+    total, breakdown = _estimate_wall_clock(rows, state, calibration, rates)
     return PreflightPlan(
         rows=rows,
         wall_clock_estimate_seconds=total,
         wall_clock_breakdown=breakdown,
         fast_skipped=list(fast_skipped),
         calibration=calibration,
+        rate_source=_rate_source(rates),
         insert_lines=list(insert_lines or []),
     )
 
@@ -791,6 +824,7 @@ def _render_plan_lines(plan: PreflightPlan) -> list[str]:
     if plan.insert_lines:
         lines.append(f"  Inserts ({len(plan.insert_lines)}):")
         lines.extend(f"    {line}" for line in plan.insert_lines)
+    lines.append(f"  Phase rates: {plan.rate_source}")
     lines.append(_eta_basis_line(plan.calibration))
     lines.append(
         f"  Estimated wall-clock: {_format_duration(plan.wall_clock_estimate_seconds)} "
@@ -809,6 +843,7 @@ def print_plan(
     fast_skipped: Sequence[str] = (),
     calibration: Any = _LOAD_CALIBRATION,
     insert_lines: Optional[list[str]] = None,
+    record_paths: Optional[Sequence[Path]] = None,
 ) -> PreflightPlan:
     """Render the plan for ``state`` to ``out`` (defaults to ``sys.stdout``).
 
@@ -825,6 +860,7 @@ def print_plan(
         fast_skipped=fast_skipped,
         calibration=calibration,
         insert_lines=insert_lines,
+        record_paths=record_paths,
     )
     for line in _render_plan_lines(plan):
         print(line, file=out)

@@ -50,6 +50,7 @@ from .orchestrator_fingerprint import (
 )
 from .orchestrator_preflight import run_preflight_and_prompt
 from .ost_audit_sidecar import OstAuditPendingError
+from .phase_timing import RECORD_NAME, PhaseTimingRecorder
 from .review_gate import ReviewFailedError, ReviewGate
 from .state_invariants import assert_resume_state_coherent, resume_invariants
 from .youtube_sidecar import load_sidecar, save_sidecar
@@ -985,6 +986,23 @@ class DrivePipelineOrchestrator:
                 except Exception as e:  # noqa: BLE001 -- a registry write never fails the save
                     logger.warning("clip claims not recorded: %s", e)
 
+    @staticmethod
+    def _phase_recorder(state_file: Path) -> PhaseTimingRecorder:
+        """Recorder for ``phase_timings.json`` beside the checkpoint (A5)."""
+        return PhaseTimingRecorder(Path(state_file).parent / RECORD_NAME)
+
+    @staticmethod
+    def _phase_units(phase_name: str, state) -> dict:
+        """Work count a phase covers, so its wall time becomes a rate. The day
+        phase covers one unit per planned day."""
+        if phase_name == "phase_bc_day_first":
+            from .preflight_plan import _collect_day_dates
+
+            days = len(_collect_day_dates(state))
+            if days:
+                return {"units": days, "unit": "day"}
+        return {}
+
     def _load_state(self, state_file: Path) -> Optional[PipelineState]:
         return load_drive_state(state_file)
 
@@ -1597,7 +1615,8 @@ class DrivePipelineOrchestrator:
             if self.config.drive.preview:
                 if "phase_a" not in resumed_phases:
                     t0 = time.time()
-                    self._phase_a_ingest_and_analyze(state)
+                    with self._phase_recorder(state_file).phase("phase_a"):
+                        self._phase_a_ingest_and_analyze(state)
                     timings["phase_a"] = time.time() - t0
                     ok, reason = self._phase_produced_required_artifacts("phase_a", state)
                     if ok:
@@ -2033,7 +2052,10 @@ class DrivePipelineOrchestrator:
                 logger.info(
                     "PHASE START %s (%d/%d)", phase_name, len(stages_completed) + 1, len(phase_defs)
                 )
-                phase_fn(state)
+                with self._phase_recorder(state_file).phase(
+                    phase_name, **self._phase_units(phase_name, state)
+                ):
+                    phase_fn(state)
                 timings[phase_name] = time.time() - t0
                 logger.info("PHASE DONE %s in %.0fs", phase_name, timings[phase_name])
                 ok, reason = self._phase_produced_required_artifacts(phase_name, state)
