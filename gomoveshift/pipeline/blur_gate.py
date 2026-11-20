@@ -352,8 +352,8 @@ def repair_swap_error(sidecar: Optional[Path]) -> Optional[str]:
     return (
         "BLUR GATE (repair swap): a cabin repair was interrupted between replacing the "
         f"privacy mask and its detection sidecar ({Path(sidecar).name}), so the two may "
-        "disagree. Re-run blur_detection (--fresh) to rebuild the mask and the detection "
-        "together."
+        "disagree. The next day-master run re-detects automatically (the mask cache refuses "
+        "this pair); a stage run needs blur_detection --fresh to rebuild both together."
     )
 
 

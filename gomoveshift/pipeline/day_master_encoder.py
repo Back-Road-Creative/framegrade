@@ -1339,6 +1339,11 @@ def _cabin_gate_with_repair(
     spent = 0
     for _ in range(rounds):
         added = _repair_cabin_leaks(raw_concat, config, mask_path, regions_sidecar)
+        swap_err = blur_gate.repair_swap_error(regions_sidecar)
+        if swap_err:
+            # The swap was interrupted: the mask may be new beside an old sidecar, so a
+            # gate pass on the mask alone proves nothing about the pair. Refuse.
+            return swap_err
         err = blur_gate.check_day_master_cabin_coverage(config, raw_concat, mask_path)
         if not err:
             return None
@@ -1346,7 +1351,10 @@ def _cabin_gate_with_repair(
             # No detector was built, so the windowed detection never ran (only the
             # gate's own leaked boxes were covered). That is not a tried repair: it is
             # not counted or recorded, so a retry once the model loads gets every round.
-            return f"{err} (cabin repair: detector unavailable, repair not attempted)"
+            return (
+                f"{err} (cabin repair: detector unavailable, windowed detection not run "
+                "(no vehicle detector); leaked boxes covered)"
+            )
         spent += 1
         if not added:
             # The mask did not change (the repair raised, or had no leak report), so another
@@ -1356,6 +1364,24 @@ def _cabin_gate_with_repair(
     if spent:
         blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent, repair_key=key)
     return err
+
+
+def _write_durable(path: Path, text: str) -> None:
+    """Write ``text`` and fsync it and its directory, so the journal marker is on disk
+    before the first replace. The directory fsync is best effort (some filesystems
+    refuse it)."""
+    with open(path, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        dfd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 class _Added(int):
@@ -1471,12 +1497,21 @@ def _repair_cabin_leaks(
         br.write_sidecar(tmp_sidecar, timeline)
         # Journal first: a crash between the two replaces leaves the marker, which
         # fails closed downstream instead of pairing a new mask with an old sidecar.
-        pending.write_text(json.dumps({"mask": mask_path.name, "sidecar": regions_sidecar.name}))
+        _write_durable(
+            pending, json.dumps({"mask": mask_path.name, "sidecar": regions_sidecar.name})
+        )
         os.replace(tmp_mask, mask_path)
         os.replace(tmp_sidecar, regions_sidecar)
         pending.unlink(missing_ok=True)
     except Exception as exc:
-        logger.warning("cabin leak repair failed, keeping the original mask: %s", exc)
+        if pending.exists():
+            logger.warning(
+                "cabin leak repair failed during the mask/sidecar swap; the mask may "
+                "already be replaced and the pair is refused until re-detection: %s",
+                exc,
+            )
+        else:
+            logger.warning("cabin leak repair failed, keeping the original mask: %s", exc)
         return 0
     finally:
         tmp_mask.unlink(missing_ok=True)
@@ -1777,6 +1812,11 @@ def encode_day_master(
         cabin_err = _cabin_gate_with_repair(graded_src, cfg, blur_mask_path, regions_sidecar)
         if cabin_err:
             raise blur_gate.BlurGateError(cabin_err)
+        # A repair swaps the mask and the sidecar after the first pairing check; prove
+        # the pair again before the irreversible encode.
+        pairing_err = blur_gate.frame_pairing_error(graded_src, blur_mask_path, regions_sidecar)
+        if pairing_err:
+            raise blur_gate.BlurGateError(pairing_err)
     # Use ``<stem>.tmp<suffix>`` (e.g. ``day_2025-01-15_master.tmp.mp4``) rather
     # than ``<name><suffix>.tmp`` so the real container extension stays at the
     # tail. ffmpeg infers the output muxer from the trailing extension; with

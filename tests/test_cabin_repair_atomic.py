@@ -122,3 +122,96 @@ class TestDetectorlessRoundIsNotSpent:
         verdicts = iter(["BLUR GATE (cabin): leak", None])
         monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda *a: next(verdicts))
         assert dme._cabin_gate_with_repair(raw, cfg, mask, sidecar) is None
+
+    def test_one_round_with_no_detector_records_nothing(self, tmp_path, monkeypatch):
+        raw, mask, sidecar, cfg, calls = self._wire(tmp_path, monkeypatch, rounds=1)
+        err = dme._cabin_gate_with_repair(raw, cfg, mask, sidecar)
+        assert err and "detector unavailable" in err and "leaked boxes covered" in err
+        assert calls["recorded"] == []
+
+
+class TestHalfSwappedPairNeverReachesTheEncode:
+    def _wire_gate(self, tmp_path, monkeypatch):
+        raw, mask, sidecar, cfg, _, _ = _helper._setup(tmp_path, monkeypatch, [50])
+        cfg.drive.blur_cabin_repair_rounds = 2
+        verdicts = iter(["BLUR GATE (cabin): 1 of 9 EXPOSED", None, None])
+        monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda *a: next(verdicts))
+        monkeypatch.setattr(blur_gate, "cabin_repair_failure", lambda *a, **k: None)
+        monkeypatch.setattr(blur_gate, "record_cabin_repair_failure", lambda *a, **k: None)
+        _fail_second_replace(monkeypatch, sidecar)
+        return raw, mask, sidecar, cfg
+
+    def test_the_gate_refuses_when_the_swap_is_interrupted_inside_the_loop(
+        self, tmp_path, monkeypatch
+    ):
+        raw, mask, sidecar, cfg = self._wire_gate(tmp_path, monkeypatch)
+        err = dme._cabin_gate_with_repair(raw, cfg, mask, sidecar)
+        # The new mask would pass the gate on its own; the pair must still be refused.
+        assert err and "repair swap" in err
+
+    def test_the_encode_re_proves_the_pair_after_the_cabin_gate(self, tmp_path, monkeypatch):
+        mask = tmp_path / "day_2026-02-24_blur_mask.mkv"
+        cap = _blur_tests._mock_encode(monkeypatch)
+        monkeypatch.setattr(dme, "_build_day_blur_mask", lambda *a, **k: mask)
+        monkeypatch.setattr(dme, "_cabin_gate_with_repair", lambda *a: None)
+        calls = []
+
+        def _pairing(*a, **k):
+            calls.append(1)
+            return None if len(calls) == 1 else "BLUR GATE (frame pairing): half-swapped"
+
+        monkeypatch.setattr(blur_gate, "frame_pairing_error", _pairing)
+        with pytest.raises(blur_gate.BlurGateError, match="half-swapped"):
+            dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=Config())
+        assert len(calls) == 2 and cap == {}
+
+
+class TestStaleMarkerRecovery:
+    """A marker left by an interrupted swap makes ``_build_day_blur_mask`` re-detect
+    instead of reusing the cached pair, and the fresh pair clears the marker."""
+
+    def _build(self, tmp_path, monkeypatch):
+        raw = tmp_path / "day_2026-02-24_raw.mp4"
+        raw.write_bytes(b"raw")
+        veh = tmp_path / "veh.onnx"
+        veh.write_bytes(b"model")
+        mask = tmp_path / "day_2026-02-24_blur_mask.mkv"
+        sidecar = tmp_path / "day_2026-02-24_blur_regions.json"
+        detected = []
+
+        def _detect(path, **k):
+            detected.append(1)
+            return {0: [(1, 1, 4, 4)]}, 10, 0, 0
+
+        def _materialize(timeline, out_path, *a, **k):
+            Path(out_path).write_bytes(b"mask")
+            return out_path
+
+        monkeypatch.setattr("redactcam.detect_and_track", _detect)
+        monkeypatch.setattr("redactcam.materialize_mask_video", _materialize)
+        monkeypatch.setattr("redactcam.timeline.probe_video", lambda p: (10.0, 10, 64, 48))
+        monkeypatch.setattr("gomoveshift.analysis.resolve_vehicle_model", lambda d: veh)
+        monkeypatch.setattr("gomoveshift.analysis.resolve_face_model", lambda d: None)
+        monkeypatch.setattr("gomoveshift.analysis.resolve_plate_model", lambda d: None)
+        monkeypatch.setattr("gomoveshift.analysis.resolve_person_model", lambda d: None)
+        monkeypatch.setattr(dme, "_counts_allow_reuse", lambda *a, **k: True)
+        cfg = Config()
+
+        def build():
+            return dme._build_day_blur_mask(raw, cfg, mask, sidecar, "2026-02-24")
+
+        return build, detected, sidecar
+
+    def test_a_marker_forces_re_detection_and_is_cleared(self, tmp_path, monkeypatch):
+        build, detected, sidecar = self._build(tmp_path, monkeypatch)
+        build()
+        assert len(detected) == 1
+        build()
+        assert len(detected) == 1  # control: an intact pair is reused
+        marker = blur_gate.repair_swap_pending_path(sidecar)
+        marker.write_text("{}")
+        build()
+        assert len(detected) == 2  # the cache refused the possibly mismatched pair
+        assert not marker.exists()  # and the fresh pair cleared the marker
+        build()
+        assert len(detected) == 2  # the rebuilt pair is reused again
