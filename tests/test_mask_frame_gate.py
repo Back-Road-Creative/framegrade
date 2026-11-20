@@ -6,6 +6,7 @@ probe is patched."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,12 +21,10 @@ from tests.test_publish_command import CAD, NOW, Rig
 DATE = "2025-09-16"
 
 
-@pytest.fixture(autouse=True)
-def incidents(tmp_path, monkeypatch):
-    d = tmp_path / "incidents"
-    monkeypatch.setenv("GMS_HEALTH_INCIDENTS_DIR", str(d))
-    monkeypatch.setenv("GMS_DATA_ROOT", str(tmp_path))
-    return d
+@pytest.fixture
+def incidents():
+    """The conftest-isolated incidents dir (``GMS_HEALTH_INCIDENTS_DIR``)."""
+    return Path(os.environ["GMS_HEALTH_INCIDENTS_DIR"])
 
 
 def make_day(stages: Path, sidecar=306385, raw=True, date=DATE) -> Path:
@@ -176,3 +175,47 @@ def test_phase_d_audit_pass_is_not_gated(tmp_path, monkeypatch):
         metadata_per_lf=None, drive_schedule=None, social_posts_per_lf=None, upload_manifests=None,
     )  # fmt: skip
     phase_d.PhaseD(config=SimpleNamespace()).run(state)
+
+
+# ── health check must survive the row; tests must not write into the checkout ──
+
+
+def _run_check(tmp_path, incidents, notify):
+    from datetime import datetime, timezone
+
+    from gomoveshift.health.check import run_check
+
+    return run_check(
+        SimpleNamespace(seo=SimpleNamespace(storage_path="relative/seo")),
+        incidents_dir=incidents, jobs_dir=tmp_path / "jobs", code_root=tmp_path,
+        staging_sha="abc123", now=datetime(2026, 11, 20, 12, tzinfo=timezone.utc),
+        notify_fn=notify,
+    )  # fmt: skip
+
+
+def test_health_check_pushes_a_mask_incident_with_its_detail_line(tmp_path, monkeypatch, incidents):
+    make_day(tmp_path / "st")
+    probe(monkeypatch, 306377)
+    gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    sent = []
+    res = _run_check(tmp_path, incidents, lambda ev, payload, text: sent.append(text) or True)
+    (row,) = [r for r in rows(incidents) if r["kind"] == "mask_index_mismatch"]
+    assert row["pushed"] is True and res["pushed"] == [row["key"]]
+    assert sent == [row["detail"]]
+    assert "kerry" in sent[0] and DATE in sent[0] and "306385" in sent[0] and "306377" in sent[0]
+
+
+def test_incident_line_without_detail_keeps_the_due_deliveries_text():
+    from gomoveshift.health.check import _line
+
+    row = {"kind": "queue_stalled", "due_deliveries": 3, "quiet_hours": 5}
+    assert _line(row) == "3 publishing deliveries are due and nothing has touched the queue in 5 h."
+
+
+def test_tests_cannot_write_into_the_checkout_gms_dir(tmp_path, monkeypatch, incidents):
+    make_day(tmp_path / "st")
+    probe(monkeypatch, 306377)
+    gate.mask_frame_refusal(tmp_path / "st", drive="isolation-probe")
+    assert len(rows(incidents)) == 1
+    repo = Path(__file__).resolve().parents[1]
+    assert not list((repo / "gms" / "incidents").glob("*isolation-probe*"))

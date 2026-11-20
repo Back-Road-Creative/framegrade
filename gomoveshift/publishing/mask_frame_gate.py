@@ -131,7 +131,7 @@ def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> 
     write_row(
         incidents_dir,
         new_incident(KIND, _key(drive, row["date"]), path.name, utc_iso(), drive=drive,
-                     day=row["date"], error=text, **{k: v for k, v in row.items() if k != "date"}),
+                     day=row["date"], error=text, detail=text, **{k: v for k, v in row.items() if k != "date"}),
     )  # fmt: skip
 
 

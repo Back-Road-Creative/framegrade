@@ -51,6 +51,8 @@ def _line(row: Dict[str, Any]) -> str:
             "Give it bracket_gpx (the fixes files of the drives before and after) instead; run "
             "--placeless-label by hand only when no bracket exists."
         )
+    if row.get("detail"):
+        return str(row["detail"])
     return f"{row['due_deliveries']} publishing deliveries are due and nothing has touched the queue in {row['quiet_hours']} h."
 
 
