@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.123] - 2026-11-20
+
+### Changed
+
+- The cabin gate's second pass after a repair now re-measures the first pass's recorded sightings against the repaired mask (decoding only the mask, never the source or a detector) instead of re-decoding and re-detecting the whole source. A full pass records every sighting beside the mask (`*_cabin_sightings.json`) under the cabin signature minus the mask fingerprint; any missing, partial, unreadable or mismatching record (signature or build, decoded mask length) falls back to a full pass and logs why. The verdict and leak report are the same a full pass would give.
+- The re-measure decodes the whole repaired mask and requires its decoded length to match the record (a truncated mask with an intact header runs the full pass), and the record is bound to the redactcam commit, onnxruntime and cv2 versions and ORT providers too.
+- The sightings record is written only by a full pass that found a leak, and takes its frame count from the mask, so a passing drive pays no extra decode. The re-measure reads every sampled frame like the verifier, and the build identity now always includes the imported redactcam source hash, the providers a session would use and the CPU-allowed setting; an unidentifiable build never matches.
+- The re-measure also runs in full when a recorded box lies outside the recorded frame, the sampling step reads the source fps before the first grab, and numpy joins the build identity.
+
 ## [0.3.122] - 2026-11-20
 
 ### Added
@@ -1386,7 +1395,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.123...HEAD
+[0.3.123]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...v0.3.123
 [0.3.122]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...v0.3.122
 [0.3.121]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...v0.3.121
 [0.3.120]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...v0.3.120
