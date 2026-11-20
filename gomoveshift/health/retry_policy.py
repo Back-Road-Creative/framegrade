@@ -36,6 +36,16 @@ CLASS_TABLE: Tuple[Tuple["re.Pattern[str]", str], ...] = tuple(
         ),  # pipeline/exceptions.py:141
         (r"DriveUploadError|DriveCredentialError", PUBLISH_ONLY),  # pipeline/uploader.py:52,56
         # deterministic: the same inputs fail the same way
+        # an interrupted cabin-repair swap: the marker makes the next run re-detect
+        (r"BLUR GATE \(repair swap\)", TRANSIENT),  # pipeline/blur_gate.py repair_swap_error
+        # a privacy detection that FAILED (not a leak or a refusal) on a host cause: the
+        # retry re-runs detection and every gate, so it can never encode unproven
+        (
+            r"(?s)BLUR GATE: privacy detection failed .*(?:No space left on device|ENOSPC|"
+            r"Cannot allocate memory|error code: -12|ENOMEM|[Oo]ut of memory|\bKilled\b|"
+            r"Input/output error|\[Errno 5\]|[Dd]rive offline|drive is offline)",
+            TRANSIENT,
+        ),  # pipeline/day_master_encoder.py _build_day_blur_mask
         (r"BLUR GATE|BlurGateError", DETERMINISTIC),  # pipeline/blur_gate.py:486, inserts.py:271
         (
             r"final-text review refused|FinalTextReviewError|PublicationGateError",

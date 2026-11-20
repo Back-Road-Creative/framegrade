@@ -336,6 +336,28 @@ def sidecar_frame_count(sidecar: Optional[Path]) -> int:
     return -1 if tl is None else int(tl.source_frame_count)
 
 
+def repair_swap_pending_path(sidecar: Path) -> Path:
+    """Journal beside the regions sidecar: it exists only while a cabin repair is
+    replacing the mask and the sidecar (two files, so never one atomic step), or when
+    that swap was interrupted. While it exists the pair may disagree."""
+    sidecar = Path(sidecar)
+    return sidecar.with_name(sidecar.stem + "_repair_swap_pending.json")
+
+
+def repair_swap_error(sidecar: Optional[Path]) -> Optional[str]:
+    """Error when a cabin repair's mask/sidecar swap never finished, else ``None``.
+    Fails closed: the mask and the regions may then be from different repairs."""
+    if sidecar is None or not repair_swap_pending_path(sidecar).exists():
+        return None
+    return (
+        "BLUR GATE (repair swap): a cabin repair was interrupted between replacing the "
+        f"privacy mask and its detection sidecar ({Path(sidecar).name}), so the two may "
+        "disagree. The day-master run rebuilds the pair in place once; if that is refused "
+        "too, the next run re-detects automatically (the mask cache refuses this pair) and "
+        "health heal retries it. A stage run needs blur_detection --fresh."
+    )
+
+
 def frame_pairing_error(
     video: Path, mask: Optional[Path], sidecar: Optional[Path]
 ) -> Optional[str]:
@@ -345,6 +367,9 @@ def frame_pairing_error(
     uncountable input reads as ``-1`` and so also blocks."""
     if mask is None:
         return None  # mask readiness is its own gate
+    swap_err = repair_swap_error(sidecar)
+    if swap_err:
+        return swap_err
     counts = (
         container_frame_count(Path(video)),
         container_frame_count(Path(mask)),
