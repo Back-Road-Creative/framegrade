@@ -36,6 +36,7 @@ from ...publishing.experiments import (
     decision_lines,
     shorts_arm_outcomes,
     tagged_arms,
+    write_arm_decisions,
 )
 from ...publishing.plan_io import load_publish_plan
 from ...publishing.queue import (
@@ -295,8 +296,9 @@ def _report_shorts_arm_decisions(config, brand: str) -> None:
     """Print one ``ARM_DECISION ...`` line per arm of each YouTube Shorts factor
     (title body, hashtag set): ``hold`` / ``demote`` / ``pause`` /
     ``INSUFFICIENT_EVIDENCE``, from 72 h outcomes and the brand's
-    ``policy.arm_thresholds`` (``publishing/experiments.py``). Reporting only:
-    a failure is logged and swallowed, never failing the collection."""
+    ``policy.arm_thresholds`` (``publishing/experiments.py``), then record them in
+    ``<seo storage>/shorts_arm_decisions.json`` once every factor is decided. Changes no
+    text: a failure is logged and swallowed, never failing the collection."""
     try:
         thresholds = load_arm_thresholds(brand)
         storage_path = Path(config.seo.storage_path)
@@ -312,17 +314,21 @@ def _report_shorts_arm_decisions(config, brand: str) -> None:
 
             records = TrackingStore().load_all_records()
             youtube_times = _youtube_publish_times(conn)
+            every: list = []
             for factor in SHORTS_FACTORS:
                 rows = shorts_arm_outcomes(
                     factor, records, arms_for_project, youtube_times, date.today()
                 )
                 seen = tagged_arms(factor, records, arms_for_project)
-                for line in decision_lines(
-                    factor, decide_shorts_arms(factor, rows, thresholds, seen), thresholds
-                ):
+                decided = decide_shorts_arms(factor, rows, thresholds, seen)
+                every.extend(decided)
+                for line in decision_lines(factor, decided, thresholds):
                     print(line)
         finally:
             conn.close()
+        # Only a run that decided every factor refreshes the record's ``decided_at``: health's
+        # ``seo_feedback_stale`` reads a missing refresh as the alarm.
+        write_arm_decisions(storage_path, every)
     except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
         logger.warning("shorts arm decision report skipped: %s", exc)
 

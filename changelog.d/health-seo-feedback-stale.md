@@ -1,0 +1,4 @@
+### Added
+
+- `gomoveshift metrics collect` now records the Shorts arm decisions in `<seo storage>/shorts_arm_decisions.json` (`schema`, `decided_at`, one entry per arm) once every factor is decided; a run that fails part-way leaves the old `decided_at`. The `ARM_DECISION` lines are unchanged.
+- `gomoveshift health check` rule 12, `seo_feedback_stale`, files an incident when the decisions file is missing, unreadable or over 36 h old (`seo_feedback_stale:decisions`), when a settled YouTube Short posted in the last 28 days has null views or average view percentage (`seo_feedback_stale:metrics:<project>:<index>`), or when a queued YouTube Short outside the 24 h sync lead time still repeats the previous Short's place text or carries a demoted or paused arm (`seo_feedback_stale:queued:<project>:<index>`). Each resolves when it clears; an unreadable input is a note and keeps its open incidents live. See `docs/seo-feedback-stale.md`.

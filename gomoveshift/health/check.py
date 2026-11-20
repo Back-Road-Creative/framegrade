@@ -26,6 +26,7 @@ _EVENTS = {
     "backlog_store_orphan": "health_backlog_store_orphan",
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
+    "seo_feedback_stale": "health_seo_feedback_stale",
 }
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -537,6 +538,57 @@ def _bad_run_rows(
         return None
 
 
+def _seo_feedback_rows(
+    config: Any, tracking_root: Optional[Path], now: datetime, now_iso: str, notes: List[str]
+) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
+    """Rule 12 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
+    condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
+    could not be read: their open incidents stay live, never closed by an unreadable source.
+    A missing decisions file is not held: it is condition (a)'s finding."""
+    from . import seo_feedback as sf  # noqa: PLC0415
+
+    storage = Path(config.seo.storage_path)
+    if not storage.is_absolute():
+        notes.append("seo.storage_path is relative; rule 12 (seo_feedback_stale) not evaluated")
+        return None, []
+    rows: List[Dict[str, Any]] = []
+    held: List[str] = []
+    try:
+        rows += sf.decisions_incidents(storage, now, now_iso)
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"seo_feedback_stale decisions not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_DECISIONS)
+    try:
+        from ..tracking.store import TrackingStore  # noqa: PLC0415
+
+        store = TrackingStore(tracking_root)
+        records = [store.load(p) for p in store.list_projects()]
+        rows += sf.metrics_incidents(records, now.date(), now_iso)
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_METRICS)
+    db = storage / "social_queue.sqlite3"
+    demoted = sf.load_demoted(storage)
+    if demoted is None:
+        notes.append(
+            "seo_feedback_stale queued: decisions file unreadable, demoted arms not judged; "
+            "its open queued incidents stay live"
+        )
+        held.append(sf.KEY_QUEUED)
+    if db.exists():
+        try:
+            queued, queued_held = sf.queued_incidents(db, demoted, now, now_iso, notes)
+            rows += queued
+            held += queued_held
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"seo_feedback_stale queued not evaluated: {type(exc).__name__}: {exc}")
+            held.append(sf.KEY_QUEUED)
+    else:
+        notes.append("social_queue.sqlite3 absent: seo_feedback_stale queued not evaluated")
+        held.append(sf.KEY_QUEUED)
+    return rows, held
+
+
 def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[Dict[str, str]]:
     """Close the Waypost claims of finished ``health publish`` jobs (idempotent)."""
     if not Path(config.seo.storage_path).is_absolute():
@@ -602,6 +654,10 @@ def run_check(
     if bad_run is not None:
         found["short_bad_run"] = bad_run
 
+    seo_rows, seo_held = _seo_feedback_rows(config, tracking_root, now, now_iso, notes)
+    if seo_rows is not None:
+        found["seo_feedback_stale"] = seo_rows
+
     live_drives = {r["key"]: r for r in drive_rows}
     open_drives = [
         r
@@ -629,6 +685,10 @@ def run_check(
             from .accounting import norm  # noqa: PLC0415
 
             gone = gone and norm(str(row.get("directory", ""))) not in held_dirs
+        if kind == "seo_feedback_stale" and any(
+            row["key"] == p or row["key"].startswith(p + ":") for p in seo_held
+        ):
+            gone = False  # that condition's input was unreadable: it could not be re-judged
         if kind == "drive_failed" and row.get("job_name") in succeeded:
             gone = True
         if gone:

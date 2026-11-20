@@ -122,6 +122,18 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    no timeout) is a note naming it, never a finding and never "empty": its open incidents stay
    open, so a drive that goes offline and returns does not close and re-notify them.
 
+12. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
+   Three conditions, each its own key and its own resolution: `seo_feedback_stale:decisions`
+   (`shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
+   h), `seo_feedback_stale:metrics:<project>:<index>` (a settled YouTube Short, posted within
+   `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage`) and
+   `seo_feedback_stale:queued:<project>:<index>` (a queued YouTube row at least
+   `SYNC_LEAD_TIME` away that still repeats the previous Short's place text although the clip
+   measured another, or carries a demoted arm). Pushed once as `health_seo_feedback_stale`;
+   detection only. An unreadable tracking record, queue or sidecar is a note and keeps that
+   condition's open incidents live; a missing decisions file is condition (a)'s finding. Detail:
+   `docs/seo-feedback-stale.md`.
+
 **`drive_backlog_excluded.yaml`** sits beside `drive_backlog.yaml`
 (`paths.drive_backlog_excluded_path()`). It is a separate file on purpose: the backlog loader and
 `seo-manager schedule backlog-next` never read it, so an exclusion can never launch. A top-level
@@ -159,7 +171,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -167,7 +179,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), `project`, `short_index`, `missing` (metrics), or `delivery_id`, `project`, `short_index`, `scheduled_at`, `causes` (queued).
 
 ## Resume recipe and `health heal`
 

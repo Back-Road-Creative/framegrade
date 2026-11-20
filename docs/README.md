@@ -63,6 +63,7 @@ to read them.
 - [social-metrics-observations.md](social-metrics-observations.md): comparable metrics versus honestly missing ones.
 - [social-metrics-long-form.md](social-metrics-long-form.md): long-form tracking.
 - [social-metrics-volume.md](social-metrics-volume.md): volume and cadence are decided by Waypost.
+- [seo-feedback-stale.md](seo-feedback-stale.md): the `seo_feedback_stale` health rule and `shorts_arm_decisions.json`.
 - [social-metrics-best-times.md](social-metrics-best-times.md): the best-time table.
 - [social-metrics-decline.md](social-metrics-decline.md): platform decline detection.
 - [social-metrics-anomaly.md](social-metrics-anomaly.md): post-level anomaly detection.

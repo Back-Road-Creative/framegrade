@@ -33,6 +33,7 @@ text to send (the caption/title generator does), and no LLM is involved.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import statistics
 from collections import Counter
@@ -680,3 +681,62 @@ def decision_lines(
             line += f" retest_days={thresholds.retest_days}"
         lines.append(line)
     return lines
+
+
+#: ``metrics collect`` writes the arm decisions here (under ``seo.storage_path``) once every
+#: factor has been decided; ``health check`` rule ``seo_feedback_stale`` reads it back.
+ARM_DECISIONS_FILENAME = "shorts_arm_decisions.json"
+ARM_DECISIONS_SCHEMA = 1
+
+
+def _json_num(value: Optional[float]) -> Any:
+    return "inf" if value is not None and math.isinf(value) else value
+
+
+def write_arm_decisions(
+    storage: Any, decisions: Sequence[ArmDecision], now: Optional[datetime] = None
+) -> Any:
+    """Write ``{"schema", "decided_at", "decisions"}`` atomically to
+    ``<storage>/shorts_arm_decisions.json``. The caller passes the decisions of EVERY factor:
+    ``decided_at`` is the freshness stamp, so a partial run must not call this."""
+    from pathlib import Path
+
+    from ..pipeline._atomic_write import atomic_write_json
+
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    payload = {
+        "schema": ARM_DECISIONS_SCHEMA,
+        "decided_at": stamp,
+        "decisions": [
+            {
+                "factor": d.factor,
+                "arm": d.arm,
+                "decision": d.decision,
+                "n": d.n,
+                "score": _json_num(d.score),
+                "reference": _json_num(d.reference),
+                "gap": _json_num(d.gap),
+                "reason": d.reason,
+            }
+            for d in decisions
+        ],
+    }
+    path = Path(storage) / ARM_DECISIONS_FILENAME
+    atomic_write_json(path, payload, sort_keys=True)
+    return path
+
+
+def read_arm_decisions(storage: Any) -> Dict[str, Any]:
+    """The persisted record. Raises ``OSError`` (absent / unreadable) or ``ValueError`` (not
+    the schema above, or ``decided_at`` not an ISO time) -- the caller decides what that means."""
+    from pathlib import Path
+
+    raw = json.loads((Path(storage) / ARM_DECISIONS_FILENAME).read_text(encoding="utf-8"))
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema") != ARM_DECISIONS_SCHEMA
+        or not isinstance(raw.get("decisions"), list)
+    ):
+        raise ValueError("not a shorts_arm_decisions record")
+    datetime.fromisoformat(str(raw.get("decided_at")))
+    return raw
