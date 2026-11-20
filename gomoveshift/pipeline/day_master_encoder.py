@@ -1306,7 +1306,8 @@ def _cabin_gate_with_repair(
     raw_concat: Path, config: Config, mask_path: Path, regions_sidecar: Path
 ) -> Optional[str]:
     """Run the cabin gate; on a leak, up to ``blur_cabin_repair_rounds`` rounds of
-    repair then a FULL gate pass. Returns ``None`` only when a gate pass is clean,
+    repair then a gate pass (re-measured from the recorded
+    sightings when they still apply, else full). Returns ``None`` only when a gate pass is clean,
     otherwise the gate's last error (the caller raises it). Every repair is followed
     by a real gate pass; nothing here ever turns an error into a pass.
 

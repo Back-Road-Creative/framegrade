@@ -546,56 +546,109 @@ def record_cabin_repair_failure(
 #: sightings a later re-measure needs. The real leaks are then re-derived with the real
 #: threshold, by the same ``coverage < min_coverage`` comparison the library makes.
 _ALL_SIGHTINGS_COVERAGE = 2.0
-_SIGHTINGS_SCHEMA = 1
+_SIGHTINGS_SCHEMA = 2
 
 
 def cabin_sightings_path(mask: Path) -> Path:
     """Where the gate's full pass persists EVERY sighting it measured (not only the leaks),
-    beside the mask. It is keyed on the source, models, config and renderer but not on the
-    mask, so a repaired mask can be re-measured against it without re-detecting the source."""
+    beside the mask. It is keyed on the source, models, config, renderer and build but not
+    on the mask, so a repaired mask can be re-measured against it without re-detecting the
+    source."""
     return mask.with_name(f"{mask.stem}_cabin_sightings.json")
 
 
+def _redactcam_build() -> str:
+    """The installed redactcam BUILD. Its version string is not bumped per commit, so the
+    pinned commit (from the dist's ``direct_url.json``) is used, else a hash of the two
+    modules that decide what a sighting is."""
+    import hashlib
+    import json as _json
+    from importlib import metadata
+
+    try:
+        raw = metadata.distribution("redactcam").read_text("direct_url.json")
+        commit = (_json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+        if commit:
+            return f"commit:{commit}"
+    except Exception:  # noqa: BLE001 - falls through to the content hash
+        pass
+    try:
+        import redactcam
+
+        root = Path(redactcam.__file__).parent
+        h = hashlib.sha256()
+        for name in ("coverage.py", "detect.py"):
+            h.update((root / name).read_bytes())
+        return f"sha256:{h.hexdigest()}"
+    except Exception:  # noqa: BLE001 - an unidentifiable build never matches a record
+        return "unknown"
+
+
+def _build_identity() -> dict:
+    """What decides a detection's output beyond source, models and config."""
+    out = {"redactcam_build": _redactcam_build()}
+    try:
+        import onnxruntime
+
+        out["onnxruntime"] = onnxruntime.__version__
+        out["providers"] = list(onnxruntime.get_available_providers())
+    except Exception:  # noqa: BLE001
+        out["onnxruntime"], out["providers"] = "absent", []
+    try:
+        import cv2
+
+        out["cv2"] = cv2.__version__
+    except Exception:  # noqa: BLE001
+        out["cv2"] = "absent"
+    return out
+
+
 def _signature_sans_mask(signature: dict) -> dict:
-    return {k: v for k, v in signature.items() if k != "mask_fp"}
+    sig = {k: v for k, v in signature.items() if k != "mask_fp"}
+    sig["build"] = _build_identity()
+    return sig
 
 
-def _video_geometry(path: Path) -> Optional[tuple]:
-    """``(width, height, frame_count)`` from the container header, or ``None`` when the
-    file cannot be opened or reports nothing usable."""
+def _decode_stats(path: Path) -> Optional[tuple]:
+    """``(decoded_frame_count, height, width)`` by decoding the whole file, the height and
+    width from the first DECODED frame; ``None`` when it cannot be opened or yields no
+    frame. Header counts are not trusted: a truncated file keeps its header."""
     import cv2
 
     cap = cv2.VideoCapture(str(path))
     try:
         if not cap.isOpened():
             return None
-        geo = (
-            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-        )
+        n, shape = 0, None
+        while cap.grab():
+            if shape is None:
+                ok, frame = cap.retrieve()
+                if not ok:
+                    return None
+                shape = frame.shape[:2]
+            n += 1
     finally:
         cap.release()
-    return geo if all(v > 0 for v in geo) else None
+    return None if shape is None else (n, shape[0], shape[1])
 
 
 def _write_cabin_sightings(path: Path, signature: dict, video: Path, mask: Path, rep, sightings):
     """Persist every sighting of a full pass, atomically (tmp file + replace) so a crash
     leaves either no record or a whole one. Any failure just means the next pass runs in
     full; a record is an optimisation and never the gate."""
-    path.unlink(missing_ok=True)
     try:
-        src, msk = _video_geometry(video), _video_geometry(mask)
-        if src is None or msk is None:
-            logger.info("cabin sightings not recorded: source/mask geometry unreadable")
+        path.unlink(missing_ok=True)
+        src, msk = _decode_stats(video), _decode_stats(mask)
+        if src is None or msk is None or src[0] != msk[0]:
+            logger.info("cabin sightings not recorded: source/mask do not decode alike")
             return
         payload = {
             "schema": _SIGHTINGS_SCHEMA,
-            "complete": True,
             "signature": _signature_sans_mask(signature),
-            "frame_w": src[0],
             "frame_h": src[1],
-            "mask_frames": msk[2],
+            "frame_w": src[2],
+            "source_frames": src[0],
+            "mask_frames": msk[0],
             "vehicle_frames": rep.vehicle_frames,
             "plate_corroborated": bool(rep.plate_corroborated),
             "sighting_count": len(sightings),
@@ -607,7 +660,7 @@ def _write_cabin_sightings(path: Path, signature: dict, video: Path, mask: Path,
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload))
         os.replace(tmp, path)
-    except (OSError, TypeError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - the record can never decide or crash the gate
         logger.warning("could not write cabin sightings %s: %s", path, exc)
 
 
@@ -615,14 +668,15 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
     """Why ``rec`` cannot be used as a re-measure record, or ``None`` when it can."""
     if not isinstance(rec, dict):
         return "record unreadable"
-    if rec.get("schema") != _SIGHTINGS_SCHEMA or rec.get("complete") is not True:
+    if rec.get("schema") != _SIGHTINGS_SCHEMA:
         return "record partial or of another schema"
     if rec.get("signature") != sig_core:
-        return "signature differs (source, models, config or renderer changed)"
+        return "signature differs (source, models, config, renderer or build changed)"
     items = rec.get("sightings")
     ints = (
         rec.get("frame_w"),
         rec.get("frame_h"),
+        rec.get("source_frames"),
         rec.get("mask_frames"),
         rec.get("vehicle_frames"),
     )
@@ -630,6 +684,7 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
         not isinstance(items, list)
         or rec.get("sighting_count") != len(items)
         or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints)
+        or rec["source_frames"] != rec["mask_frames"]
     ):
         return "record partial"
     for it in items:
@@ -649,9 +704,10 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
 def _remeasure_cabin(mask: Path, sig_core: dict, cabin_frac: float, min_coverage: float):
     """Re-measure the recorded sightings against the CURRENT mask only: no source decode,
     no detection. Returns ``(report, None)``, or ``(None, reason)`` when a full pass must
-    run instead. Sightings depend only on source, models and config (all in the record's
-    signature), so the current mask's coverage at those frames is exactly what a full pass
-    would measure; the repaired mask need not contain the old one."""
+    run instead. Sightings depend only on source, models, config and build (all in the
+    record's signature), so the current mask's coverage at those frames is what a full
+    pass would measure. The whole mask is decoded (even with no sightings) and its DECODED
+    length must equal the record's, so a truncated mask never passes on an intact header."""
     import cv2
     from redactcam import CoverageReport, Leak
     from redactcam.coverage import cabin_region
@@ -662,38 +718,34 @@ def _remeasure_cabin(mask: Path, sig_core: dict, cabin_frac: float, min_coverage
     bad = _valid_sightings(rec, sig_core)
     if bad:
         return None, bad
-    geo = _video_geometry(mask)
-    if geo is None:
-        return None, "mask unreadable"
-    if geo[2] != rec["mask_frames"]:
-        return None, f"mask frame count {geo[2]} differs from the record's {rec['mask_frames']}"
     items = rec["sightings"]
+    by_frame: dict = {}
+    for i, it in enumerate(items):
+        by_frame.setdefault(it["frame"], []).append(i)
     cov: dict = {}
-    if items:
-        by_frame: dict = {}
-        for i, it in enumerate(items):
-            by_frame.setdefault(it["frame"], []).append(i)
-        last = max(by_frame)
-        cap = cv2.VideoCapture(str(mask))
-        try:
-            for idx in range(last + 1):
-                if not cap.grab():
-                    return None, f"mask ended at frame {idx} before the record's frame {last}"
-                if idx not in by_frame:
-                    continue
+    cap = cv2.VideoCapture(str(mask))
+    try:
+        if not cap.isOpened():
+            return None, "mask unreadable"
+        decoded = 0
+        while cap.grab():
+            if decoded in by_frame:
                 ok, m = cap.retrieve()
                 if not ok:
-                    return None, f"mask frame {idx} unreadable"
+                    return None, f"mask frame {decoded} unreadable"
                 mgray = m if m.ndim == 2 else m[:, :, 0]
-                for i in by_frame[idx]:
+                for i in by_frame[decoded]:
                     x0, y0, x1, y1 = cabin_region(
                         tuple(items[i]["box"]), cabin_frac, rec["frame_w"], rec["frame_h"]
                     )
                     if x1 <= x0 or y1 <= y0:
                         return None, "recorded sighting has an empty cabin region"
                     cov[i] = float((mgray[y0:y1, x0:x1] > 0).mean())
-        finally:
-            cap.release()
+            decoded += 1
+    finally:
+        cap.release()
+    if decoded != rec["mask_frames"]:
+        return None, f"mask decodes {decoded} frames, the record has {rec['mask_frames']}"
     leaks = [
         Leak(it["frame"], cov[i], tuple(it["box"]))
         for i, it in enumerate(items)
