@@ -295,6 +295,12 @@ def load_publish_plan(sidecar_path: Union[str, Path]) -> PublishPlan:
             "is a publish_preview (not_for_publish): a review-only payload preview "
             "with placeholder parent ids, never a plan",
         )
+    return plan_from_raw(raw, path)
+
+
+def plan_from_raw(raw: Any, path: Path) -> PublishPlan:
+    """The :class:`PublishPlan` of an already-parsed sidecar ``raw`` (``path`` names it in
+    errors only; nothing is read or written)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("shorts"), list):
         raise _fail(path, "missing a 'shorts' list")
     plan = PublishPlan(shorts=tuple(_record(r, path, i) for i, r in enumerate(raw["shorts"])))

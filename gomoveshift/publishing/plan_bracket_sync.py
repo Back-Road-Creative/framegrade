@@ -28,6 +28,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -104,14 +105,16 @@ def _generate_lf(
     location: str,
     lf_index: int,
     *,
-    pinned_arms: Optional[Dict[int, dict]] = None,
+    spooled_texts: Optional[dict] = None,
+    experiment_today: Optional[date] = None,
+    previous_places_at: Optional[Dict[int, dict]] = None,
 ) -> list:
     """Phase D's per-LF generation (``generate_all``) over ``lf_shorts``.
 
     With a bracket ``record``, those it may rewrite carry the label as location/regions
     and the rest are generated and discarded. Without one (``queue_short_text``), an
-    eligible Short keeps its own sampled regions, roads and route record, and its
-    ``pinned_arms`` entry (by ``short_index``) stands in for a fresh arm assignment."""
+    eligible Short keeps its own sampled regions, roads and route record. The bracket
+    path reads no queue text (``spooled_texts`` ``{}``) and takes today's date."""
     from gomoveshift.pipeline.social_generator import SocialGenerator, TitleFacts
 
     label = str(record["label"]).strip() if record else None
@@ -119,9 +122,9 @@ def _generate_lf(
         location=location,
         project_name=f"{lf_shorts[0]['project_name']}_lf{lf_index:02d}",
         series_part=lf_index,
-        spooled_texts={},  # never read the queue database
+        spooled_texts={} if spooled_texts is None else spooled_texts,
+        experiment_today=experiment_today,
         **({"bracket_route": record} if record else {}),
-        **({"pinned_arms": pinned_arms} if pinned_arms else {}),
     )
     facts, locs, regions, roads, routes = [], [], [], [], []
     for s in lf_shorts:
@@ -150,6 +153,7 @@ def _generate_lf(
         per_short_regions=regions,
         per_short_roads=roads,
         per_short_route_records=routes,
+        previous_places_at=previous_places_at,
     )
 
 

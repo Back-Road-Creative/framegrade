@@ -239,7 +239,7 @@ def _cmd_metrics_collect(args, config) -> int:
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     _report_caption_experiments(config, brand)
-    _sync_queued_short_text(config, _report_shorts_arm_decisions(config, brand))
+    _report_shorts_arm_decisions(config, brand)
     _write_caption_evidence(config)
     _write_title_evidence(config)
     return 0
@@ -291,73 +291,40 @@ def _youtube_publish_times(conn) -> dict:
     return times
 
 
-def shorts_arm_decisions(config, brand: str):
-    """``({factor: [ArmDecision]}, thresholds)`` for each YouTube Shorts factor, from 72 h
-    outcomes and the brand's ``policy.arm_thresholds``. Raises on any failure."""
-    thresholds = load_arm_thresholds(brand)
-    storage_path = Path(config.seo.storage_path)
-    conn = open_queue_db(storage_path)
-    try:
-        lookup = _sidecar_lookup(conn, storage_path)
-
-        def arms_for_project(project):
-            path = lookup(project)
-            if path is None:
-                return None
-            return {s.short_index: s.experiment_arms for s in load_publish_plan(path).shorts}
-
-        records = TrackingStore().load_all_records()
-        youtube_times = _youtube_publish_times(conn)
-        out = {}
-        for factor in SHORTS_FACTORS:
-            rows = shorts_arm_outcomes(
-                factor, records, arms_for_project, youtube_times, date.today()
-            )
-            seen = tagged_arms(factor, records, arms_for_project)
-            out[factor] = decide_shorts_arms(factor, rows, thresholds, seen)
-        return out, thresholds
-    finally:
-        conn.close()
-
-
-def _report_shorts_arm_decisions(config, brand: str):
+def _report_shorts_arm_decisions(config, brand: str) -> None:
     """Print one ``ARM_DECISION ...`` line per arm of each YouTube Shorts factor
     (title body, hashtag set): ``hold`` / ``demote`` / ``pause`` /
     ``INSUFFICIENT_EVIDENCE``, from 72 h outcomes and the brand's
     ``policy.arm_thresholds`` (``publishing/experiments.py``). Reporting only:
-    a failure is logged and swallowed, never failing the collection. Returns the
-    decisions per factor (``None`` after a failure)."""
+    a failure is logged and swallowed, never failing the collection."""
     try:
-        decisions, thresholds = shorts_arm_decisions(config, brand)
-        for factor, found in decisions.items():
-            for line in decision_lines(factor, found, thresholds):
-                print(line)
-        return decisions
-    except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
-        logger.warning("shorts arm decision report skipped: %s", exc)
-        return None
-
-
-def _sync_queued_short_text(config, decisions) -> None:
-    """Right after the arm decisions: re-write each queued Short's text with the current
-    generator and those decisions (``publishing/queue_short_text.py``). Skipped without
-    decisions (an arm could not be checked); a failure is logged and swallowed."""
-    if decisions is None:
-        print("SYNC_SHORT_TEXT skipped: arm decisions unavailable")
-        return
-    try:
-        from ...publishing.queue_short_text import arm_decision_map, sync_short_text
-
-        conn = open_queue_db(Path(config.seo.storage_path))
+        thresholds = load_arm_thresholds(brand)
+        storage_path = Path(config.seo.storage_path)
+        conn = open_queue_db(storage_path)
         try:
-            changes = sync_short_text(conn, arm_decision_map(decisions), apply=True)
+            lookup = _sidecar_lookup(conn, storage_path)
+
+            def arms_for_project(project):
+                path = lookup(project)
+                if path is None:
+                    return None
+                return {s.short_index: s.experiment_arms for s in load_publish_plan(path).shorts}
+
+            records = TrackingStore().load_all_records()
+            youtube_times = _youtube_publish_times(conn)
+            for factor in SHORTS_FACTORS:
+                rows = shorts_arm_outcomes(
+                    factor, records, arms_for_project, youtube_times, date.today()
+                )
+                seen = tagged_arms(factor, records, arms_for_project)
+                for line in decision_lines(
+                    factor, decide_shorts_arms(factor, rows, thresholds, seen), thresholds
+                ):
+                    print(line)
         finally:
             conn.close()
-        done = sum(c.status == "changed" for c in changes)
-        refused = sum(c.status == "refused" for c in changes)
-        print(f"SYNC_SHORT_TEXT changed={done} refused={refused} rows={len(changes)}")
-    except Exception as exc:  # noqa: BLE001 - the sync must never fail the collection
-        logger.warning("queued short text sync skipped: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
+        logger.warning("shorts arm decision report skipped: %s", exc)
 
 
 def _write_caption_evidence(config) -> None:

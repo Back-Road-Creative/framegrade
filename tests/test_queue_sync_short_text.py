@@ -1,21 +1,17 @@
-"""``gomoveshift queue sync-short-text`` re-writes queued Shorts with the current generator.
-
-Plan unit C5: a Short queued before a generator fix or an arm decision keeps its old text.
-The sync regenerates title, description and tags of every queued YouTube Short whose slot
-is more than 24 h away, keeps the stamp, date, slot and arm tags, re-runs the Short review,
-moves the plan hash and keeps the old one in ``response_log``. All data is synthetic."""
+"""``sync_short_text`` re-writes queued Shorts with the current generator (plan unit C5).
+Slot more than 24 h away, stamp, date, slot and arms kept, Short review re-run, plan hash moved
+with the old one in ``response_log``. All data is synthetic."""
 
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 
 from test_place_gate import Geo, _win
 
-from gomoveshift.cli.handlers.queue_recover import cmd_queue
 from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.pipeline.route_claims import measure_route
 from gomoveshift.publishing import queue_short_text as qst
@@ -129,7 +125,7 @@ def _hashes(conn):
 
 def test_a_changed_short_is_rewritten_and_passes_the_review(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["changed", "changed"]
     for c in changes:
         rec = _youtube(plan, c.short_index)
@@ -145,7 +141,7 @@ def test_a_short_inside_the_lead_time_is_skipped(tmp_path):
     hours = SYNC_LEAD_TIME.total_seconds() / 3600
     plan, conn = _world(tmp_path, [_short(1, hours_ahead=hours - 1), _short(2)])
     before = json.loads(plan.read_text())["shorts"][0]
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["inside_lead_time", "changed"]
     assert json.loads(plan.read_text())["shorts"][0] == before
 
@@ -161,7 +157,7 @@ def test_a_short_the_review_refuses_is_left_untouched(tmp_path, monkeypatch):
     )
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
     before = json.loads(plan.read_text())["shorts"][0]
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["refused", "changed"]
     assert "title_unreviewable" in changes[0].reason
     assert json.loads(plan.read_text())["shorts"][0] == before
@@ -170,36 +166,10 @@ def test_a_short_the_review_refuses_is_left_untouched(tmp_path, monkeypatch):
 
 def test_the_title_obeys_the_no_repeated_place_rule(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
-    sync_short_text(conn, {}, apply=True, now=NOW)
+    sync_short_text(conn, apply=True, now=NOW)
     t1, t2 = (_youtube(plan, n).payloads.youtube.title for n in (1, 2))
     body = [t.split(": ", 1)[1] for t in (t1, t2)]
     assert body[0] != body[1]
-
-
-def test_a_demoted_arm_is_not_chosen_and_the_tag_follows(tmp_path):
-    arms = {"yt_title_body": "A"}
-    decisions = {"yt_title_body": {"A": "demote", "B": "hold", "C": "pause"}}
-    plan, conn = _world(tmp_path, [_short(1, arms=arms)])
-    changes = sync_short_text(conn, decisions, apply=True, now=NOW)
-    assert changes[0].status == "changed"
-    assert "experiment_arms" in changes[0].fields
-    assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "B"}
-
-
-def test_every_arm_barred_leaves_the_short_unchanged(tmp_path):
-    decisions = {"yt_title_body": {"A": "demote", "B": "pause"}}
-    plan, conn = _world(tmp_path, [_short(1)])
-    before = plan.read_text()
-    changes = sync_short_text(conn, decisions, apply=True, now=NOW)
-    assert changes[0].status == "refused"
-    assert "no other arm is open" in changes[0].reason
-    assert plan.read_text() == before
-
-
-def test_no_decision_keeps_the_current_arm(tmp_path):
-    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "A"})])
-    sync_short_text(conn, {"yt_title_body": {"B": "hold"}}, apply=True, now=NOW)
-    assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "A"}
 
 
 def test_a_facebook_row_sharing_the_record_blocks_the_write_when_refused(tmp_path, monkeypatch):
@@ -210,7 +180,7 @@ def test_a_facebook_row_sharing_the_record_blocks_the_write_when_refused(tmp_pat
         youtube_adapter, "short_review_refusal", lambda record: "place_unreviewable"
     )
     before = plan.read_text()
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["refused"]
     assert plan.read_text() == before
     assert set(_hashes(conn).values()) == {OLD_HASH}
@@ -218,7 +188,7 @@ def test_a_facebook_row_sharing_the_record_blocks_the_write_when_refused(tmp_pat
 
 def test_the_sharing_rows_move_to_the_new_hash_together(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook", "instagram"))
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     new = _youtube(plan, 1).reviewed_plan_hash
     assert new != OLD_HASH == changes[0].old_hash and changes[0].new_hash == new
     assert set(_hashes(conn).values()) == {new}
@@ -227,7 +197,7 @@ def test_the_sharing_rows_move_to_the_new_hash_together(tmp_path):
 def test_dry_run_writes_nothing(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
     before = plan.read_text()
-    changes = sync_short_text(conn, {}, apply=False, now=NOW)
+    changes = sync_short_text(conn, apply=False, now=NOW)
     assert [c.status for c in changes] == ["changed", "changed"]
     assert not any(c.written for c in changes)
     assert plan.read_text() == before
@@ -238,9 +208,9 @@ def test_dry_run_writes_nothing(tmp_path):
 
 def test_a_second_run_is_a_no_op(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
-    sync_short_text(conn, {}, apply=True, now=NOW)
+    sync_short_text(conn, apply=True, now=NOW)
     after_first = plan.read_text()
-    again = sync_short_text(conn, {}, apply=True, now=NOW)
+    again = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in again] == ["unchanged", "unchanged"]
     assert sum(c.status == "changed" for c in again) == 0
     assert plan.read_text() == after_first
@@ -250,7 +220,7 @@ def test_a_second_run_is_a_no_op(tmp_path):
 def test_stamp_date_slot_and_arm_tags_are_preserved(tmp_path):
     plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "A", "fb_hashtags": "B"})])
     old = json.loads(plan.read_text())["shorts"][0]
-    sync_short_text(conn, {}, apply=True, now=NOW)
+    sync_short_text(conn, apply=True, now=NOW)
     new = json.loads(plan.read_text())["shorts"][0]
     assert new["recording_date"] == old["recording_date"]
     assert new["schedule"] == old["schedule"]
@@ -262,7 +232,7 @@ def test_stamp_date_slot_and_arm_tags_are_preserved(tmp_path):
 
 def test_the_old_plan_hash_is_kept_in_an_audit_record(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
-    sync_short_text(conn, {}, apply=True, now=NOW)
+    sync_short_text(conn, apply=True, now=NOW)
     row = conn.execute("SELECT * FROM response_log WHERE action = 'sync_short_text'").fetchone()
     audit = json.loads(row["reason"])
     assert audit["old_plan_hash"] == OLD_HASH
@@ -275,29 +245,149 @@ def test_a_published_row_is_never_touched(tmp_path):
     conn.execute("UPDATE deliveries SET status = 'published' WHERE short_index = 1")
     conn.commit()
     before = json.loads(plan.read_text())["shorts"][0]
-    changes = sync_short_text(conn, {}, apply=True, now=NOW)
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.short_index for c in changes] == [2]
     assert json.loads(plan.read_text())["shorts"][0] == before
 
 
-def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
-    soon = datetime.now(timezone.utc) + timedelta(days=3)
-    schedule = {
-        "display_timezone": "America/New_York",
-        "scheduled_at_utc": soon.isoformat(),
-        "scheduled_at_utc_by_platform": {},
-    }
-    plan, conn = _world(tmp_path, [_short(1, schedule=schedule)])
-    conn.close()
-    from gomoveshift.cli.handlers import metrics
+def _where(conn, short_index, platform, **cols):
+    sets = ", ".join(f"{k} = ?" for k in cols)
+    conn.execute(
+        f"UPDATE deliveries SET {sets} WHERE short_index = ? AND platform = ?",  # noqa: S608
+        (*cols.values(), short_index, platform),
+    )
+    conn.commit()
 
-    monkeypatch.setattr(metrics, "shorts_arm_decisions", lambda config, brand: ({}, None))
-    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
-    args = SimpleNamespace(queue_action="sync-short-text", apply=False)
+
+def _named_first(n=1):
+    """A Short whose STORED title and description name the county the generator opens with."""
+    short = _short(n)
+    yt = short["payloads"]["youtube"]
+    yt["title"] = f"Mar 5, {ORDINALS[n - 1]} stretch: Ashby County #Shorts"
+    return short
+
+
+def _two(tmp_path, platforms=("youtube",)):
+    return _world(tmp_path, [_short(1), _short(2)], platforms=platforms)
+
+
+def _untouched(world, mutate):
+    """Run the sync after ``mutate(conn)``; assert nothing moved; return the changes."""
+    plan, conn = world
+    mutate(conn)
     before = plan.read_text()
-    assert cmd_queue(args, config) == 0
-    assert "dry run: would change" in capsys.readouterr().out
+    changes = sync_short_text(conn, apply=True, now=NOW)
     assert plan.read_text() == before
-    args.apply = True
-    assert cmd_queue(args, config) == 0
-    assert plan.read_text() != before
+    assert set(_hashes(conn).values()) == {OLD_HASH}
+    return changes
+
+
+@pytest.mark.parametrize("status", ["published", "uploading"])
+def test_the_place_chain_is_seeded_from_the_stored_text_of_a_sibling(tmp_path, status):
+    plan, conn = _world(tmp_path, [_named_first(), _short(2)])
+    _where(conn, 1, "youtube", status=status)  # published / in flight: not rewritten
+    sync_short_text(conn, apply=True, now=NOW)
+    yt = _youtube(plan, 2).payloads.youtube
+    assert "Harrow" in yt.title and "Ashby County" not in yt.title.split(" #")[0]
+    assert "through Harrow" in yt.description
+    assert _youtube(plan, 1).payloads.youtube.title.endswith("Ashby County #Shorts")
+
+
+def test_the_sync_pins_the_generator_date_to_the_plan(tmp_path, monkeypatch):
+    seen = []
+    real = qst._generate_lf
+    monkeypatch.setattr(
+        qst, "_generate_lf", lambda *a, **kw: seen.append(kw["experiment_today"]) or real(*a, **kw)
+    )
+    # a plan date that is not today, so a generator left on date.today() cannot pass
+    stale = "2026-11-18T10:00:00+00:00"
+    _, conn = _world(tmp_path, [_short(1, parent_lf_publish_at=stale)])
+    sync_short_text(conn, apply=False, now=NOW)
+    assert seen == [datetime(2026, 11, 18).date()]
+
+
+@pytest.mark.parametrize(
+    "cols",
+    [
+        {"status": "awaiting_facebook_reconcile"},
+        {"lease_owner": "w1", "lease_expires_at": (NOW + timedelta(hours=1)).isoformat()},
+        {"scheduled_at": None},
+        {"scheduled_at": (NOW + timedelta(hours=2)).isoformat()},
+        {"recovers_delivery_id": 1},
+    ],
+    ids=["in_flight", "leased", "null_slot", "slot_in_lead_time", "recovery_row"],
+)
+def test_a_sibling_row_that_is_not_safe_refuses_the_whole_short(tmp_path, cols):
+    world = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
+    changes = _untouched(world, lambda c: _where(c, 1, "facebook", **cols))
+    assert [c.status for c in changes] == ["refused"]
+    assert "facebook row" in changes[0].reason
+
+
+def test_a_leased_youtube_row_is_not_selected_and_a_lapsed_lease_is(tmp_path):
+    _, conn = _two(tmp_path)
+    live = (NOW + timedelta(hours=1)).isoformat()
+    _where(conn, 1, "youtube", lease_owner="w1", lease_expires_at=live)
+    _where(
+        conn,
+        2,
+        "youtube",
+        lease_owner="w1",
+        lease_expires_at=(NOW - timedelta(hours=1)).isoformat(),
+    )
+    assert [c.short_index for c in sync_short_text(conn, apply=False, now=NOW)] == [2]
+
+
+def test_the_update_leaves_updated_at_alone(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
+    before = {r["platform"]: r["updated_at"] for r in conn.execute("SELECT * FROM deliveries")}
+    sync_short_text(conn, apply=True, now=NOW)
+    after = {r["platform"]: r["updated_at"] for r in conn.execute("SELECT * FROM deliveries")}
+    assert before == after
+
+
+def test_a_lease_taken_after_planning_keeps_that_row_out_of_the_update(tmp_path, monkeypatch):
+    plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
+    real = qst._sidecar_changes
+
+    def leased_late(*a):
+        out = real(*a)
+        live = (NOW + timedelta(hours=1)).isoformat()
+        _where(conn, 1, "facebook", lease_owner="w1", lease_expires_at=live)
+        return out
+
+    monkeypatch.setattr(qst, "_sidecar_changes", leased_late)
+    sync_short_text(conn, apply=True, now=NOW)
+    assert _hashes(conn)[(1, "facebook")] == OLD_HASH != _hashes(conn)[(1, "youtube")]
+    audit = json.loads(conn.execute("SELECT reason FROM response_log").fetchone()[0])
+    assert audit["rows_moved"] == 1
+
+
+def test_experiment_arms_are_kept_exactly_as_stored(tmp_path):
+    arms = {"yt_title_body": "Z", "yt_hashtag_set": "Q"}
+    plan, conn = _world(tmp_path, [_short(1, arms=arms)])
+    sync_short_text(conn, apply=True, now=NOW)
+    assert _youtube(plan, 1).experiment_arms == arms
+
+
+def _converged(plan, conn):
+    side = {s.short_index: s.reviewed_plan_hash for s in load_publish_plan(plan).shorts}
+    return all(
+        side[r["short_index"]] == r["plan_hash"] for r in conn.execute("SELECT * FROM deliveries")
+    )
+
+
+def test_a_dry_run_writes_no_file_at_all(tmp_path):
+    _, conn = _two(tmp_path)
+    seen = set(os.listdir(tmp_path))
+    sync_short_text(conn, apply=False, now=NOW)
+    assert set(os.listdir(tmp_path)) == seen
+
+
+def test_the_queue_update_matches_the_rows_raw_sidecar_path(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    raw = f"{plan.parent}/./{plan.name}"
+    conn.execute("UPDATE deliveries SET sidecar_path = ?", (raw,))
+    conn.commit()
+    sync_short_text(conn, apply=True, now=NOW)
+    assert _converged(plan, conn)

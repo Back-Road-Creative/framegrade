@@ -1700,15 +1700,6 @@ def _add_queue_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     b.add_argument("--sidecar", required=True, metavar="PATH", help="the *_publish_plan.json")
     b.add_argument("--apply", action="store_true", help="Write the plan (default: dry run).")
-    ss = actions.add_parser(
-        "sync-short-text",
-        help="Re-write each queued YouTube Short's title, description and tags (slot more "
-        "than 24h away) with the current generator and the latest experiment-arm decisions; "
-        "a Short the Short review refuses is left untouched. Moves the Short's plan hash "
-        "and keeps the old one in response_log. Dry run unless --apply; nightly metrics "
-        "runs it with --apply",
-    )
-    ss.add_argument("--apply", action="store_true", help="Write the plans (default: dry run).")
     o = actions.add_parser(
         "reslot-overdue-manual",
         help="Move each TikTok row still awaiting a manual post more than 24h past its slot "
