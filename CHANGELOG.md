@@ -5,6 +5,23 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.119] - 2026-11-20
+
+### Added
+
+- Stage roots with no backlog row get an owner record with an expiry (`gomoveshift/health/stage_owners.json`; `mizen-remeasure` held for framegrade#398). `health backlog` appends an expired root to the host-cleanup release list, whose file name is now one constant (`stage_owners.STAGES_RELEASE_LIST_NAME`, pinned by a test), and prints roots that have neither a row nor a record.
+- A backlog launch refused for lack of staging or output space opens a `backlog_storage_refused` health incident (pushed once); a later tick that launches or finds the space resolves it.
+
+### Fixed
+
+- A Short the final-text review would refuse at dispatch is now refused at enqueue: it is left
+  out of the queue (all platforms), raises one `short_review_refused` health incident naming
+  the reason, and the plan's other Shorts still enqueue. `enqueue-plan` lists the refusals on a
+  dry run and on `--apply`. Before, it sat queued, burnt its attempts and lost its slot.
+- The plan builder drops a Short's unreviewable YouTube tags (`reviewable_short_tags`, the
+  `sync-plan-tags` filter) before the plan hash is taken, so a Short whose only fault was a tag
+  now passes.
+
 ## [0.3.118] - 2026-11-20
 
 ### Added
@@ -1340,7 +1357,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...HEAD
+[0.3.119]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...v0.3.119
 [0.3.118]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...v0.3.118
 [0.3.117]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.116...v0.3.117
 [0.3.116]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...v0.3.116
