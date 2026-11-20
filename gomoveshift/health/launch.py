@@ -43,7 +43,7 @@ from . import drives as drive_jobs
 from . import resume, retry_policy
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
-from .heal import job_name as heal_job_name
+from .heal import wrap_name as heal_job_name
 from .resume import HOLD_NAME, is_held
 from .store import load_all, new_incident, safe_name, utc_iso, write_row
 
@@ -656,16 +656,17 @@ PUBLISH_JOB_PREFIX = "gms-publish-"
 
 
 def _failed_publish(jobs_dir: Path, project: str) -> bool:
-    """The newest ``gms-publish-<project>`` job (Phase D after a passed audit) ended failed."""
+    """The newest ``gms-publish-<project>`` job (Phase D after a passed audit) ended in anything
+    but success: failed, or cancelled, stalled or killed with no exit code."""
     name = PUBLISH_JOB_PREFIX + project
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
         return False
     result = max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result") or {}
-    state, code = result.get("state"), result.get("exit_code")
-    return state == "failed" or (
-        state not in (None, "running", "succeeded") and code not in (None, 0)
-    )
+    state = result.get("state")
+    # any terminal state but success is a dead publish: a job the runner cancelled, stalled or
+    # killed carries no exit code, so keying on the code alone left Kerry-to-Cork unpublished
+    return state not in (None, "running", "succeeded")
 
 
 def _audit_passed(jobs_dir: Path, project: str) -> bool:

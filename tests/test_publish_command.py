@@ -406,3 +406,40 @@ def test_a_render_with_no_readable_long_form_plan_is_refused_before_any_write(tm
     res = rig.run()
     assert res["action"] == "refused" and "drive_plan.json" in res["reason"], res
     assert rig.snapshot() == before and not rig.launches
+
+
+# -- an ``auditing`` drive already uploaded (ace-basin, 2026-11-20): published, never retired -----
+
+
+def _receipt(rig, project, *, publish_at="2026-10-27T20:00:00+00:00", video_id="XIT4"):
+    out = rig.out / project
+    (out / "src").mkdir(parents=True, exist_ok=True)
+    body = {"1": {"video_id": video_id, **({"publish_at": publish_at} if publish_at else {})}}
+    (out / "src" / "youtube_uploads.json").write_text(json.dumps(body))
+    return out
+
+
+def test_retire_uploaded_closes_an_auditing_drive_that_holds_an_upload_receipt(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit("ace-basin", status="auditing", recipe=False)
+    _receipt(rig, "ace-basin")
+    assert publish.retire_uploaded(rig.store, now=NOW) == [{"project": "ace-basin", "status": "complete"}]  # fmt: skip
+    assert rig.store.drive("ace-basin").status == "complete"
+    assert publish.retire_uploaded(rig.store, now=NOW) == []  # idempotent
+
+
+def test_retire_uploaded_never_retires_an_auditing_drive_without_a_usable_receipt(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit("no-receipt", status="auditing", recipe=False)
+    rig.audit("no-date", status="auditing", recipe=False)
+    _receipt(rig, "no-date", publish_at=None)  # a video id Waypost cannot book
+    assert publish.retire_uploaded(rig.store, now=NOW) == []
+    assert rig.store.drive("no-receipt").status == "auditing"
+    assert rig.store.drive("no-date").status == "auditing"
+
+
+def test_reconcile_publishes_also_retires_an_auditing_drive_that_was_uploaded(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit("ace-basin", status="auditing", recipe=False)
+    _receipt(rig, "ace-basin")
+    assert publish.reconcile_publishes(rig.store, rig.jobs) == [{"project": "ace-basin", "status": "complete"}]  # fmt: skip

@@ -206,13 +206,15 @@ def run_publish(
 
 
 def retire_uploaded(store: Any, *, now: Optional[datetime] = None) -> List[Dict[str, str]]:
-    """Close each ``ready`` drive that was uploaded outside a claim, from its receipts: Waypost
-    books each LF at its ``publish_at``, adopts a booking of the same video under a stray name
-    (the run dir), and marks the drive ``complete``, so it no longer sits first in the claim line.
-    A receipt Waypost cannot book (no ``publish_at``, a clash) leaves the drive ``ready``."""
+    """Close each ``ready`` or ``auditing`` drive that was uploaded outside a claim, from its
+    receipts: Waypost books each LF at its ``publish_at``, adopts a booking of the same video under
+    a stray name (the run dir), and marks the drive ``complete``, so it no longer sits first in the
+    claim line. An ``auditing`` drive is the same evidence (ace-basin, 2026-11-20: published, still
+    ``auditing``). Never without a receipt: one Waypost cannot book (no ``publish_at``, a clash)
+    leaves the drive as it is."""
     done: List[Dict[str, str]] = []
     for d in store.all_drives():
-        held = upload_receipts(d.output_dir) if d.status == "ready" else {}
+        held = upload_receipts(d.output_dir) if d.status in ("ready", "auditing") else {}
         if not held:
             continue
         try:
