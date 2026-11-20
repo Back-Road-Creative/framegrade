@@ -1,0 +1,12 @@
+{
+  "schema": "gms-stage-owners/1",
+  "roots": [
+    {
+      "name": "mizen-remeasure",
+      "owner": "JP",
+      "reason": "stage root held as evidence for the Mizen re-measure; no drive_backlog.yaml row owns it",
+      "issue": "framegrade#398",
+      "expires": "2026-12-18"
+    }
+  ]
+}

@@ -22,6 +22,7 @@ _EVENTS = {
     "queued_short_refused": "health_queued_short_refused",
     "delivery_failed_permanent": "health_delivery_failed_permanent",
     "short_bad_run": "health_short_bad_run",
+    "backlog_storage_refused": "health_backlog_storage_refused",
 }
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -57,6 +58,11 @@ def _line(row: Dict[str, Any]) -> str:
             f"{row['scheduled_at']}) failed permanently ({row['error_class']}); its slot is not "
             "refilled and it is not retried. dispatch-queue requeues a review refusal once the "
             "review passes."
+        )
+    if row["kind"] == "backlog_storage_refused":
+        return (
+            f"health backlog could not launch {row.get('project') or 'the next row'} for "
+            f"{row['region']}: {row['reason']}. No {row['region']} drive launches until space is freed."
         )
     if row["kind"] == "lf_slot_unbooked":
         return f"LF slot {row['slot']} ({row['region']}) is inside 48 h with nothing booked and a drive ready."
