@@ -9,7 +9,10 @@ title, description and tags back to the publish-plan sidecar.
 
 Kept as it was: the title stamp (``"<date>, Nth stretch"``), recording date, schedule,
 media, and ``experiment_arms`` exactly as stored (the sync never picks, swaps or excludes
-an arm: arm exclusion waits for a generator that consumes the Shorts arms).
+an arm). The generator renders each Short's stored Shorts arms (``SHORTS_FACTORS``)
+verbatim; a Short whose known stored arm the regenerated text no longer carries is refused,
+so the experiment is never mislabeled (an arm id outside ``SHORTS_ARMS`` is never rendered
+and stays as stored).
 
 A Short is refused whole (nothing written) when any delivery row of it, on any platform,
 is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at``, or has a
@@ -42,7 +45,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .plan_bracket_sync import _generate_lf, _ordinal
+from .experiments import SHORTS_ARMS
+from .plan_bracket_sync import _generate_lf, _ordinal, _stored_arms
 from .plan_io import load_publish_plan, plan_from_raw
 from .queue import TERMINAL_STATUSES
 
@@ -251,6 +255,17 @@ def _generate(
                     posts.update(run([pos]))
                 except Exception as one:  # the generator's own refusal is the reason
                     refused[pos] = f"generator: {one}"
+    for pos in list(posts):
+        # A stored arm the text no longer carries would mislabel the experiment.
+        carried = getattr(posts[pos], "experiment_arms", None) or {}
+        lost = {
+            f: a
+            for f, a in _stored_arms(shorts[pos]).items()
+            if a in SHORTS_ARMS.get(f, ()) and carried.get(f) != a
+        }
+        if lost:
+            del posts[pos]
+            refused[pos] = f"stored arm(s) {lost!r} can no longer be rendered by the generator"
     return posts, refused
 
 
