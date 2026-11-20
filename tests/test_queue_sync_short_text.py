@@ -480,6 +480,35 @@ def test_a_payload_over_a_platform_limit_is_refused(tmp_path, monkeypatch):
     assert plan.read_text() == before
 
 
+PROJECT2 = "nctopa-2026-03-06-rec0071"
+
+
+def _other(conn, tmp_path, published=False):
+    """A second plan (own directory and project) queued in the same database."""
+    d = tmp_path / "other"
+    d.mkdir()
+    (d / f"{PROJECT2}_lf01_youtube.json").write_text(json.dumps({"location": REGION}))
+    short = _short(1, project_name=PROJECT2)
+    short["payloads"]["youtube"]["title"] = "Mar 5, 1st stretch: zebra words #Shorts"
+    plan = d / f"{PROJECT2}_publish_plan.json"
+    plan.write_text(json.dumps({"shorts": [short]}, sort_keys=True, indent=2) + "\n")
+    enqueue(
+        conn,
+        PROJECT2,
+        1,
+        "youtube",
+        short["reviewed_plan_hash"],
+        sidecar_path=str(plan),
+        scheduled_at=short["schedule"]["scheduled_at_utc"],
+    )
+    if published:  # not in the sync set, so its text is the queue's RECENT text
+        conn.execute(
+            "UPDATE deliveries SET status = 'published' WHERE project_name = ?", (PROJECT2,)
+        )
+        conn.commit()
+    return plan
+
+
 def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
     seen = {}
     real = anti_spam_gate.check_batch
@@ -487,8 +516,32 @@ def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
         anti_spam_gate, "check_batch", lambda r, **kw: seen.update(kw) or real(r, **kw)
     )
     _, conn = _two(tmp_path)
+    _other(conn, tmp_path, published=True)
     sync_short_text(conn, apply=False, now=NOW, per_location_cap=1)
-    assert seen["per_location_cap"] == 1 and seen["recent_texts"] == {}
+    assert seen["per_location_cap"] == 1
+    assert any("zebra words" in text for text in seen["recent_texts"]["youtube"])
+
+
+def test_two_sidecars_dry_run_and_apply_agree_and_a_second_apply_is_a_no_op(tmp_path, monkeypatch):
+    _, conn = _two(tmp_path)
+    _other(conn, tmp_path)
+    excluded = []
+    real = anti_spam_gate.recent_platform_texts
+    monkeypatch.setattr(
+        anti_spam_gate,
+        "recent_platform_texts",
+        lambda c, **kw: excluded.append(kw["exclude_projects"]) or real(c, **kw),
+    )
+
+    def key(changes):
+        return [(c.delivery_id, c.status, c.new_title, c.new_hash) for c in changes]
+
+    dry = sync_short_text(conn, apply=False, now=NOW)
+    applied = sync_short_text(conn, apply=True, now=NOW)
+    assert key(dry) == key(applied) and {c.status for c in applied} == {"changed"}
+    assert excluded == [{PROJECT, PROJECT2}] * 2  # once per run, for the whole sync set
+    again = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in again] == ["unchanged"] * 3
 
 
 def test_a_hand_titled_short_is_left_alone(tmp_path):
@@ -563,3 +616,80 @@ def test_the_cli_exits_non_zero_when_a_short_is_refused(tmp_path):
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
     args = SimpleNamespace(queue_action="sync-short-text", apply=True)
     assert cmd_queue(args, config) == 1
+
+
+def test_a_row_on_a_hash_this_sync_never_wrote_is_refused_not_moved(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    sync_short_text(conn, apply=True, now=NOW)
+    foreign = "e" * 64  # a Phase D re-plan: no audit row of ours names it
+    conn.execute("UPDATE deliveries SET plan_hash = ?", (foreign,))
+    conn.commit()
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["refused"] and "unknown" in changes[0].reason
+    assert plan.read_text() == before and set(_hashes(conn).values()) == {foreign}
+
+
+def test_a_rewritten_short_does_not_repeat_the_place_of_a_kept_successor(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1), _named_first(2)])
+    _where(conn, 2, "youtube", status="published")  # kept as stored, names Ashby County
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["refused"] and "next Short" in changes[0].reason
+    assert plan.read_text() == before
+
+
+@pytest.mark.parametrize("gate", ["assert_plan_text_grammar", "assert_shorts_metadata_in_region"])
+def test_a_plan_text_gate_that_raises_refuses_the_short(tmp_path, monkeypatch, gate):
+    from gomoveshift.publishing import plan_gates
+
+    def boom(by_lf):
+        raise AssertionError(f"{gate} says no")
+
+    monkeypatch.setattr(plan_gates, gate, boom)
+    plan, conn = _two(tmp_path)
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert {c.status for c in changes} == {"refused"} and f"{gate} says no" in changes[0].reason
+    assert plan.read_text() == before
+
+
+def test_a_generator_failure_for_one_short_refuses_only_that_short(tmp_path, monkeypatch):
+    real = qst._generate_lf
+
+    def flaky(view, *a, **kw):
+        live = [s["short_index"] for s in view if not s.get("_skip")]
+        if len(live) > 1 or live == [2]:
+            raise ValueError("no title for this Short")
+        return real(view, *a, **kw)
+
+    monkeypatch.setattr(qst, "_generate_lf", flaky)
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "no title for this Short" in changes[1].reason
+    assert "old words" in _youtube(plan, 2).payloads.youtube.title
+
+
+def test_a_terminal_row_already_on_the_new_hash_refuses_the_short(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    new_hash = sync_short_text(conn, apply=False, now=NOW)[0].new_hash
+    row = dict(conn.execute("SELECT * FROM deliveries").fetchone())
+    row.update(id=None, plan_hash=new_hash, status="failed_permanent")
+    conn.execute(
+        f"INSERT INTO deliveries ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",  # noqa: S608
+        tuple(row.values()),
+    )
+    conn.commit()
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["refused"] and "already holds" in changes[0].reason
+    assert plan.read_text() == before
+
+
+def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
+    plan, conn = _two(tmp_path)  # two Shorts, one location, one sidecar
+    changes = sync_short_text(conn, apply=False, now=NOW, per_location_cap=1)
+    assert any("location-cap" in c.reason for c in changes if c.status == "refused")

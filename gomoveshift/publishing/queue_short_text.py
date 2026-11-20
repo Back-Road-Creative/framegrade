@@ -16,8 +16,7 @@ is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at``,
 slot inside the lead time, or when a recovery row exists. A Short with a hand title
 (``<plan dir>/social/titles.yaml``, as Phase D reads it) is reported ``unchanged`` /
 ``hand_title``. The no-repeated-place chain is seeded from the STORED text of the Short
-before each rewritten one, and the generator's date is pinned to the LF's publish date,
-so a rerun with the same generator changes nothing.
+before each rewritten one, and the generator's date is pinned to the LF's publish date.
 
 Each rewritten Short must pass ``short_review_refusal``, ``models.validate_payloads`` and
 ``anti_spam_gate.check_batch`` (the gates enqueue runs, with the queue's recent text);
@@ -215,19 +214,20 @@ def _generate(
         live = [p for p in mine if p not in refused]
         if not live:
             continue
-        seeds = {
-            i: _stored_places(shorts[positions[i - 2]], location) if i > 1 else {}
-            for i in range(1, len(positions) + 1)
-            if i == 1 or positions[i - 2] not in live
-        }
         dates = [str(shorts[p].get("parent_lf_publish_at") or "")[:10] for p in positions]
         try:
             today = date.fromisoformat(min(d for d in dates if d))
         except ValueError:
             today = date.fromisoformat(shorts[positions[0]]["recording_date"])
-        view = [{**shorts[p], "_skip": p not in live} for p in positions]
-        try:
-            generated = _generate_lf(
+
+        def run(which: List[int]) -> Dict[int, object]:
+            seeds = {
+                i: _stored_places(shorts[positions[i - 2]], location) if i > 1 else {}
+                for i in range(1, len(positions) + 1)
+                if i == 1 or positions[i - 2] not in which
+            }
+            view = [{**shorts[p], "_skip": p not in which} for p in positions]
+            made = _generate_lf(
                 view,
                 record,
                 location,
@@ -236,19 +236,35 @@ def _generate(
                 experiment_today=today,
                 previous_places_at=seeds,
             )
-        except Exception as exc:  # the generator's own refusal is the reason
+            return {p: g for p, g in zip(positions, made) if p in which}
+
+        try:
+            posts.update(run(live))
+        except Exception as exc:  # one Short may be what the generator refuses: ask alone
+            if len(live) == 1:
+                refused[live[0]] = f"generator: {exc}"
+                continue
             for pos in live:
-                refused[pos] = f"generator: {exc}"
-            continue
-        posts.update({p: g for p, g in zip(positions, generated) if p in live})
+                try:
+                    posts.update(run([pos]))
+                except Exception as one:  # the generator's own refusal is the reason
+                    refused[pos] = f"generator: {one}"
     return posts, refused
 
 
 def _gate_refusals(
-    plan, positions: List[int], spooled: dict, per_location_cap: Optional[int]
+    plan,
+    positions: List[int],
+    posts: Dict[int, object],
+    shorts: List[dict],
+    spooled: dict,
+    per_location_cap: Optional[int],
 ) -> Dict[int, str]:
     """Why each rewritten position fails the gates enqueue runs: the Short review,
-    ``validate_payloads`` and ``check_batch`` (over the whole trial plan)."""
+    ``validate_payloads``, the plan-text gates (``plan_gates``, on the generator's post as
+    ``build_publish_plan`` calls them) and ``check_batch`` over THIS sidecar's trial plan
+    (not enqueue's multi-sidecar batch)."""
+    from . import plan_gates
     from .anti_spam_gate import check_batch
     from .models import PayloadLimitError, validate_payloads
     from .youtube_adapter import short_review_refusal
@@ -266,6 +282,13 @@ def _gate_refusals(
         except PayloadLimitError as exc:
             out[pos] = f"payload limit: {exc}"
             continue
+        by_lf = {int(shorts[pos]["lf_index"]): [posts[pos]]}
+        try:
+            plan_gates.assert_shorts_metadata_in_region(by_lf)
+            plan_gates.assert_plan_text_grammar(by_lf)
+        except AssertionError as exc:
+            out[pos] = f"plan gate: {exc}"
+            continue
         hit = [
             v
             for v in batch
@@ -276,15 +299,83 @@ def _gate_refusals(
     return out
 
 
+def _audited_old_hashes(conn: sqlite3.Connection, row, new_hash: str) -> Set[str]:
+    """Plan hashes this sync itself moved the Short's rows away from, to ``new_hash``
+    (its own ``response_log`` rows): the only stale hashes a later run may reconcile."""
+    out: Set[str] = set()
+    for (reason,) in conn.execute(
+        "SELECT reason FROM response_log WHERE action = 'sync_short_text'"
+    ):
+        try:
+            note = json.loads(reason)
+        except (TypeError, ValueError):
+            continue
+        if (
+            isinstance(note, dict)
+            and note.get("project") == row["project_name"]
+            and note.get("short_index") == row["short_index"]
+            and note.get("new_plan_hash") == new_hash
+        ):
+            out.add(str(note.get("old_plan_hash")))
+    return out
+
+
+def _hash_taken(siblings, conn: sqlite3.Connection, new_hash: str) -> str:
+    """Name a row (terminal or not) that already holds ``new_hash`` on a platform whose
+    non-terminal row would move to it: the queue's UNIQUE key would refuse that move."""
+    for r in siblings:
+        if r["status"] in TERMINAL_STATUSES:
+            continue
+        other = conn.execute(
+            "SELECT id, platform FROM deliveries WHERE project_name = ? AND short_index = ? "
+            "AND platform = ? AND plan_hash = ? AND id != ?",
+            (r["project_name"], r["short_index"], r["platform"], new_hash, r["id"]),
+        ).fetchone()
+        if other:
+            return f"{other['platform']} row {other['id']}"
+    return ""
+
+
+def _successor_clashes(
+    sidecar: Path, shorts: List[dict], rewritten: Dict[int, dict], moving: Set[int]
+) -> Dict[int, str]:
+    """A rewritten Short whose place equals the stored place of the NEXT Short in its LF,
+    when that Short is not itself being rewritten (the generator only looks backwards)."""
+    from gomoveshift.pipeline.social_generator import _norm
+
+    out: Dict[int, str] = {}
+    for pos, new in rewritten.items():
+        later = sorted(
+            (
+                (int(s["short_index"]), p)
+                for p, s in enumerate(shorts)
+                if s["project_name"] == new["project_name"]
+                and int(s["lf_index"]) == int(new["lf_index"])
+                and int(s["short_index"]) > int(new["short_index"])
+            )
+        )
+        if not later or later[0][1] in moving:
+            continue
+        _, location, _ = _lf_inputs(sidecar.parent, new["project_name"], int(new["lf_index"]))
+        mine = _stored_places(new, location)
+        theirs = _stored_places(shorts[later[0][1]], location)
+        shared = [k for k in mine if k in theirs and _norm(mine[k]) == _norm(theirs[k])]
+        if shared:
+            out[pos] = f"its {shared[0]} place repeats the next Short's"
+    return out
+
+
 def _sidecar_changes(
     conn: sqlite3.Connection,
     sidecar: Path,
     rows: List[sqlite3.Row],
     now: datetime,
     per_location_cap: Optional[int],
+    spooled: dict,
 ) -> Tuple[Dict[int, ShortTextChange], Dict[int, dict], str]:
     """Per YouTube row id: its verdict; the rewritten Short for each ``changed`` one
-    (keyed by position in the plan); the sidecar's sha256. Nothing is written here."""
+    (keyed by position in the plan); the sidecar's sha256. ``spooled`` is the queue's recent
+    text, read once per run. Nothing is written here."""
     from gomoveshift.pipeline.social_generator import load_hand_titles
 
     body = sidecar.read_bytes()
@@ -336,10 +427,6 @@ def _sidecar_changes(
     if not targets:
         return verdict, {}, sha
 
-    projects = {s["project_name"] for s in shorts}
-    from .anti_spam_gate import recent_platform_texts
-
-    spooled = recent_platform_texts(conn, exclude_projects=projects)
     active: Set[int] = set(targets)
     rewritten: Dict[int, dict] = {}
     fields_of: Dict[int, Tuple[str, ...]] = {}
@@ -357,12 +444,18 @@ def _sidecar_changes(
             else:
                 unchanged.add(pos)
         again = set(refused)
+        clash = _successor_clashes(sidecar, shorts, rewritten, set(rewritten))
+        for pos, why in clash.items():
+            settle(targets[pos], pos, "refused", why)
+            active.discard(pos)
+        again |= set(clash)
+        rewritten = {p: n for p, n in rewritten.items() if p not in clash}
         if rewritten:
             trial = copy.deepcopy(raw)
             for pos, new in rewritten.items():
                 trial["shorts"][pos] = new
             plan = plan_from_raw(trial, sidecar)
-            bad = _gate_refusals(plan, list(rewritten), spooled, per_location_cap)
+            bad = _gate_refusals(plan, list(rewritten), posts, shorts, spooled, per_location_cap)
             for pos, why in bad.items():
                 settle(targets[pos], pos, "refused", why)
                 active.discard(pos)
@@ -378,7 +471,16 @@ def _sidecar_changes(
                 if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] != sidecar_hash
             }
         )
-        if stale:
+        written = _audited_old_hashes(conn, targets[pos], sidecar_hash)
+        foreign = [h for h in stale if h not in written]
+        if foreign:
+            settle(
+                targets[pos],
+                pos,
+                "refused",
+                f"a queue row's plan hash {foreign[0][:12]} is unknown",
+            )
+        elif stale:
             settle(
                 targets[pos],
                 pos,
@@ -398,11 +500,15 @@ def _sidecar_changes(
             for r in siblings[pos]
             if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] not in (old, new_hash)
         ]
-        if odd:
+        taken = _hash_taken(siblings[pos], conn, new_hash)
+        if odd or taken:
             del rewritten[pos]
-            settle(
-                targets[pos], pos, "refused", f"a queue row's plan hash {odd[0][:12]} is unknown"
+            why = (
+                f"a queue row's plan hash {odd[0][:12]} is unknown"
+                if odd
+                else f"{taken} already holds the new plan hash"
             )
+            settle(targets[pos], pos, "refused", why)
             continue
         settle(
             targets[pos],
@@ -504,6 +610,11 @@ def sync_short_text(
     for row in rows:
         by_sidecar.setdefault(row["sidecar_path"], []).append(row)
     verdicts: Dict[int, ShortTextChange] = {}
+    from .anti_spam_gate import recent_platform_texts
+
+    # read once, excluding every project in this run, so the verdicts do not depend on the
+    # order the sidecars are visited or on what an earlier apply already wrote
+    spooled = recent_platform_texts(conn, exclude_projects={r["project_name"] for r in rows})
 
     def refuse_all(group, why):
         for row in group:
@@ -521,7 +632,9 @@ def sync_short_text(
     for path, group in by_sidecar.items():
         sidecar = Path(path)
         try:
-            verdict, rewritten, sha = _sidecar_changes(conn, sidecar, group, now, per_location_cap)
+            verdict, rewritten, sha = _sidecar_changes(
+                conn, sidecar, group, now, per_location_cap, spooled
+            )
         except (OSError, ValueError, LookupError) as exc:
             refuse_all(group, f"sidecar unusable: {exc}")
             continue
