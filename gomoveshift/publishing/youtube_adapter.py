@@ -28,6 +28,8 @@ from ..pipeline.location_evidence import _evidence_id
 from ..pipeline.playlist_resolver import resolve_playlist, short_region
 from ..pipeline.title_decision import decide_title, short_place_facts
 from .asset_plan import review_hash
+from .clip_place_evidence import clip_places as _clip_places
+from .clip_place_evidence import clip_towns as _clip_towns
 from .models import ShortPublishRecord, YouTubePayload
 from .queue import NEXT_ATTEMPT_PLATFORM_DEFERRAL as PLATFORM_DEFERRAL
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
@@ -64,54 +66,12 @@ _sleep = time.sleep
 
 #: The one surface a Short's review covers: the title as published.
 SHORT_SURFACE = "short_title"
-_PLACE_SOURCE = "clip_gps_vote"
 _ROAD_SOURCE = "clip_gps_road"
 
 
 def _digest(prefix: str, payload) -> str:
     body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return prefix + hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-def _clip_places(record: ShortPublishRecord, segment_id: str) -> list[dict]:
-    """The clip's own GPS region votes (``"County, State"``) as place evidence."""
-    places = []
-    for label in record.sampled_regions:
-        county, _, state = (part.strip() for part in label.partition(","))
-        if county:
-            places.append(
-                {
-                    "evidence_id": _evidence_id(segment_id, county, county, state, _PLACE_SOURCE),
-                    "kind": "location",
-                    "value": county,
-                    "source": _PLACE_SOURCE,
-                }
-            )
-    return places
-
-
-def _clip_towns(record: ShortPublishRecord) -> list[dict]:
-    """The towns the clip's own route record measured for every retained
-    second, as place evidence under the route record's own evidence id.
-
-    A town held for only part of the clip does not name the clip's place."""
-    route = record.route_record or {}
-    retained = float(route.get("retained_seconds") or 0.0)
-    if retained <= 0:
-        return []
-    return [
-        {
-            "evidence_id": p["evidence_id"],
-            "kind": "location",
-            "value": p["name"],
-            "source": route.get("containment_basis") or "retained_gps",
-        }
-        for p in route.get("places") or []
-        if p.get("name")
-        and p.get("evidence_id")
-        and p.get("required")
-        and float(p.get("retained_seconds") or 0.0) >= retained
-    ]
 
 
 def _clip_roads(record: ShortPublishRecord, segment_id: str) -> list[dict]:

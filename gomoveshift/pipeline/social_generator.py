@@ -505,8 +505,8 @@ TITLE_FRAME_TEMPLATES = [
 # Within a project, and from one publish day to the next, a Short's place body
 # must differ from the previous Short's whenever its own clip measured another
 # place. Robust by construction: candidates are only places the Short's
-# final-text review already accepts (``youtube_adapter._clip_towns`` /
-# ``_clip_places``: a town held for every retained second, a county the clip's GPS
+# final-text review already accepts (``publishing.clip_place_evidence.clip_towns`` /
+# ``clip_places``: a town held for every retained second, a county the clip's GPS
 # voted) plus the clip's measured road, offered to the DESCRIPTION line only (the
 # review refuses a road named in a title: it cites the title's one place, and a
 # road is evidence for a tag only). Nothing is ever guessed.
@@ -575,13 +575,13 @@ def measured_places(
     """The clip's measured ``(kind, body)`` places, town, road, county order, each
     once. Towns and counties come from the same functions the Short's review
     reads, so every town/county here is one the review accepts."""
-    from ..publishing.youtube_adapter import _clip_places, _clip_towns
+    from ..publishing.clip_place_evidence import clip_places, clip_towns
 
     rec = SimpleNamespace(sampled_regions=tuple(regions), route_record=dict(route_record or {}))
     found = (
-        [(KIND_TOWN, t["value"]) for t in _clip_towns(rec)]
+        [(KIND_TOWN, t["value"]) for t in clip_towns(rec)]
         + [(KIND_ROAD, r.strip()) for r in roads if r and r.strip()]
-        + [(KIND_COUNTY, c["value"]) for c in _clip_places(rec, "")]
+        + [(KIND_COUNTY, c["value"]) for c in clip_places(rec, "")]
     )
     out: "list[tuple[str, str]]" = []
     seen: set = set()
@@ -595,10 +595,10 @@ def measured_places(
 def town_evidence(route_record: Optional[Mapping]) -> "dict[str, str]":
     """Town name -> evidence id for the towns the review accepts (``towns=`` of
     ``title_decision.short_place_facts``)."""
-    from ..publishing.youtube_adapter import _clip_towns
+    from ..publishing.clip_place_evidence import clip_towns
 
     rec = SimpleNamespace(route_record=dict(route_record or {}))
-    return {t["value"]: t["evidence_id"] for t in _clip_towns(rec)}
+    return {t["value"]: t["evidence_id"] for t in clip_towns(rec)}
 
 
 # ─── Stamped titles (drive path) ─────────────────────────────────────

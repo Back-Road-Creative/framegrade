@@ -264,7 +264,7 @@ another place. The previous short is the one before it in `generate_all`, or
 bodies) for the first.
 
 - Candidates, today's text first then most specific first: town, road, county. Towns and
-  counties come from `youtube_adapter._clip_towns` / `_clip_places` (the places the short's
+  counties come from `publishing/clip_place_evidence.clip_towns` / `clip_places` (the places the short's
   final-text review accepts: a town held for every retained second, a county the clip's GPS
   voted), so a varied title cannot be refused by that review. A road is a **description-only**
   candidate: the review cites one place in a title and treats a road as tag evidence, so a road in
