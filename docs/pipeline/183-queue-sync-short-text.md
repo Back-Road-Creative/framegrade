@@ -1,10 +1,9 @@
-## Queued Shorts follow the current generator: `sync_short_text`
+## Queued Shorts follow the current generator: `queue sync-short-text`
 
 A queued Short keeps the text the generator made when it was queued, so a generator fix never
-reached it. `sync_short_text(conn, apply=...)` in `gomoveshift/publishing/queue_short_text.py`
-rewrites those rows. Dry run unless `apply`, and a dry run writes no file. The
-`gomoveshift queue sync-short-text` command arrives with the next change; nothing calls this
-function yet.
+reached it. `gomoveshift queue sync-short-text [--apply]` rewrites those rows. Dry run unless
+`--apply`, and a dry run writes no file. Exits 1 when any Short is refused or any sidecar is
+unusable.
 
 It touches every `queued`, unleased YouTube row whose slot is more than 24 hours away
 (`SYNC_LEAD_TIME` in `gomoveshift/publishing/queue_short_text.py`), regenerating title,
@@ -14,16 +13,44 @@ now also usable without a bracket record). The title stamp, recording date, sche
 
 The whole Short is refused (nothing written) when any delivery row of it, on any platform, is
 neither `queued` nor terminal, holds a live lease, has no `scheduled_at`, or has a slot inside
-the lead time, or when a recovery row exists.
+the lead time, or when a recovery row exists. A Short with a hand title in
+`<plan dir>/social/titles.yaml` (the file Phase D reads) is `unchanged` with reason `hand_title`.
 
 The no-repeated-place chain is seeded from the stored title and description of the Short before
 each rewritten one, not from regenerated text, and the generator's date is the LF's
 `parent_lf_publish_at`. Each rewritten Short
-must pass `short_review_refusal`; a refused one is left unchanged and reported.
+must pass `short_review_refusal`, `models.validate_payloads` and `anti_spam_gate.check_batch`
+(with the queue's recent text and the brand's `per_location_cap`), the gates enqueue runs, plus
+`plan_gates.assert_plan_text_grammar` and `assert_shorts_metadata_in_region` on the new post;
+a refused one is left unchanged and reported. `check_batch` runs over the one sidecar's Shorts,
+not enqueue's multi-sidecar batch, so the location cap is counted within that sidecar. The
+queue's recent text is snapshotted once per sidecar, before anything is applied, excluding only
+that sidecar's own projects (other queued projects' text is seen), so dry run and apply give
+the same verdicts. One more `check_batch` then runs over every Short the run rewrites, across
+sidecars, and refuses the later offender in place before any apply. A single sidecar re-run is
+a no-op with the same generator, queue and title ledger (the ledger and title snapshot are read
+inside the generator, not snapshotted); two sidecars that share a place each see the other's
+text, so their description leads can still change on a later run.
+A Short is also refused when its final place equals its neighbour's final place in the LF
+(new text if rewritten, stored otherwise; the later of two rewritten ones), when the generator
+refuses it alone (the LF is retried Short by Short; Shorts not being rewritten ride along as
+discarded stamped stand-ins, so their own composition cannot fail the others), or when a row on
+the same platform already holds the new plan hash (the queue's UNIQUE key; also checked before a
+reconcile).
 
-A changed Short gets `reviewed_plan_hash` recomputed (`asset_plan.review_hash`). The sidecar is
-written to a temp file and replaced inside the queue transaction, which moves the plan hash of
-the Short's non-terminal, unleased rows (`updated_at` is not touched) and writes the audit row
-(`response_log`, `action` = sync_short_text, old hash kept).
+A changed Short gets `reviewed_plan_hash` recomputed (`asset_plan.review_hash`). The audit row
+(`response_log`, `action` = sync_short_text, old hash kept) and the queue update (non-terminal,
+unleased rows; `updated_at` is not touched) commit first, then the sidecar is replaced through a
+temp file, after a sha256 check that it did not change meanwhile. The queue update must move
+every row it planned to; if a row was leased meanwhile it moves fewer, the whole sidecar's
+transaction rolls back (no audit row, no replace) and the sidecar is refused ("a row was leased
+during the write"). A crash between the two leaves the sidecar old and the queue new; the next
+run converges even if the generator has moved on (a row on a hash this sync's audit row moved
+from the sidecar's own is accepted). Each run also
+moves a queued row still on a stale hash to the sidecar's when the sidecar already holds the
+synced text and this sync's own audit row names that old and new hash (`reconciled`, with an
+audit row); a row on any other hash refuses the Short ("plan hash ... is unknown"). A residual
+race remains between the sha256 check and the replace; a concurrent writer in that window is
+not detected.
 
 Tests: `tests/test_queue_sync_short_text.py`.
