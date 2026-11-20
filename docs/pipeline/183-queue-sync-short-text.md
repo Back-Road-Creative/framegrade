@@ -24,18 +24,29 @@ must pass `short_review_refusal`, `models.validate_payloads` and `anti_spam_gate
 `plan_gates.assert_plan_text_grammar` and `assert_shorts_metadata_in_region` on the new post;
 a refused one is left unchanged and reported. `check_batch` runs over the one sidecar's Shorts,
 not enqueue's multi-sidecar batch, so the location cap is counted within that sidecar. The
-queue's recent text is read once per run, excluding every project in the sync set, so dry run
-and apply give the same verdicts and a second apply is a no-op, with the same generator, queue
-and title ledger (the ledger and title snapshot are read inside the generator, not snapshotted).
-A Short is also refused when its new place repeats the stored place of the next, unrewritten
-Short, when the generator refuses it alone (the LF is retried Short by Short), or when a row
-on the same platform already holds the new plan hash (the queue's UNIQUE key).
+queue's recent text is snapshotted once per sidecar, before anything is applied, excluding only
+that sidecar's own projects (other queued projects' text is seen), so dry run and apply give
+the same verdicts. One more `check_batch` then runs over every Short the run rewrites, across
+sidecars, and refuses the later offender in place before any apply. A single sidecar re-run is
+a no-op with the same generator, queue and title ledger (the ledger and title snapshot are read
+inside the generator, not snapshotted); two sidecars that share a place each see the other's
+text, so their description leads can still change on a later run.
+A Short is also refused when its final place equals its neighbour's final place in the LF
+(new text if rewritten, stored otherwise; the later of two rewritten ones), when the generator
+refuses it alone (the LF is retried Short by Short; Shorts not being rewritten ride along as
+discarded stamped stand-ins, so their own composition cannot fail the others), or when a row on
+the same platform already holds the new plan hash (the queue's UNIQUE key; also checked before a
+reconcile).
 
 A changed Short gets `reviewed_plan_hash` recomputed (`asset_plan.review_hash`). The audit row
 (`response_log`, `action` = sync_short_text, old hash kept) and the queue update (non-terminal,
 unleased rows; `updated_at` is not touched) commit first, then the sidecar is replaced through a
-temp file, after a sha256 check that it did not change meanwhile. A crash between the two leaves
-the sidecar old and the queue new; the next run writes the same text and converges. Each run also
+temp file, after a sha256 check that it did not change meanwhile. The queue update must move
+every row it planned to; if a row was leased meanwhile it moves fewer, the whole sidecar's
+transaction rolls back (no audit row, no replace) and the sidecar is refused ("a row was leased
+during the write"). A crash between the two leaves the sidecar old and the queue new; the next
+run converges even if the generator has moved on (a row on a hash this sync's audit row moved
+from the sidecar's own is accepted). Each run also
 moves a queued row still on a stale hash to the sidecar's when the sidecar already holds the
 synced text and this sync's own audit row names that old and new hash (`reconciled`, with an
 audit row); a row on any other hash refuses the Short ("plan hash ... is unknown"). A residual

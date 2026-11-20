@@ -350,7 +350,7 @@ def test_the_update_leaves_updated_at_alone(tmp_path):
     assert before == after
 
 
-def test_a_lease_taken_after_planning_keeps_that_row_out_of_the_update(tmp_path, monkeypatch):
+def test_a_row_leased_between_the_read_and_the_write_rolls_the_sidecar_back(tmp_path, monkeypatch):
     plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
     real = qst._sidecar_changes
 
@@ -361,10 +361,12 @@ def test_a_lease_taken_after_planning_keeps_that_row_out_of_the_update(tmp_path,
         return out
 
     monkeypatch.setattr(qst, "_sidecar_changes", leased_late)
-    sync_short_text(conn, apply=True, now=NOW)
-    assert _hashes(conn)[(1, "facebook")] == OLD_HASH != _hashes(conn)[(1, "youtube")]
-    audit = json.loads(conn.execute("SELECT reason FROM response_log").fetchone()[0])
-    assert audit["rows_moved"] == 1
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["refused"]
+    assert "a row was leased during the write" in changes[0].reason
+    assert plan.read_text() == before and set(_hashes(conn).values()) == {OLD_HASH}
+    assert conn.execute("SELECT COUNT(*) FROM response_log").fetchone()[0] == 0
 
 
 def test_experiment_arms_are_kept_exactly_as_stored(tmp_path):
@@ -483,13 +485,13 @@ def test_a_payload_over_a_platform_limit_is_refused(tmp_path, monkeypatch):
 PROJECT2 = "nctopa-2026-03-06-rec0071"
 
 
-def _other(conn, tmp_path, published=False):
+def _other(conn, tmp_path, published=False, day=6):
     """A second plan (own directory and project) queued in the same database."""
     d = tmp_path / "other"
     d.mkdir()
     (d / f"{PROJECT2}_lf01_youtube.json").write_text(json.dumps({"location": REGION}))
-    short = _short(1, project_name=PROJECT2)
-    short["payloads"]["youtube"]["title"] = "Mar 5, 1st stretch: zebra words #Shorts"
+    short = _short(1, project_name=PROJECT2, recording_date=f"2026-03-0{day}")
+    short["payloads"]["youtube"]["title"] = f"Mar {day}, 1st stretch: zebra words #Shorts"
     plan = d / f"{PROJECT2}_publish_plan.json"
     plan.write_text(json.dumps({"shorts": [short]}, sort_keys=True, indent=2) + "\n")
     enqueue(
@@ -522,7 +524,7 @@ def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
     assert any("zebra words" in text for text in seen["recent_texts"]["youtube"])
 
 
-def test_two_sidecars_dry_run_and_apply_agree_and_a_second_apply_is_a_no_op(tmp_path, monkeypatch):
+def test_two_sidecars_dry_run_and_apply_agree_on_a_snapshot_per_sidecar(tmp_path, monkeypatch):
     _, conn = _two(tmp_path)
     _other(conn, tmp_path)
     excluded = []
@@ -539,9 +541,7 @@ def test_two_sidecars_dry_run_and_apply_agree_and_a_second_apply_is_a_no_op(tmp_
     dry = sync_short_text(conn, apply=False, now=NOW)
     applied = sync_short_text(conn, apply=True, now=NOW)
     assert key(dry) == key(applied) and {c.status for c in applied} == {"changed"}
-    assert excluded == [{PROJECT, PROJECT2}] * 2  # once per run, for the whole sync set
-    again = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in again] == ["unchanged"] * 3
+    assert sorted(map(sorted, excluded)) == [[PROJECT]] * 2 + [[PROJECT2]] * 2  # per sidecar
 
 
 def test_a_hand_titled_short_is_left_alone(tmp_path):
@@ -658,7 +658,7 @@ def test_a_generator_failure_for_one_short_refuses_only_that_short(tmp_path, mon
     real = qst._generate_lf
 
     def flaky(view, *a, **kw):
-        live = [s["short_index"] for s in view if not s.get("_skip")]
+        live = [s["short_index"] for s in view if not s.get("_discard")]
         if len(live) > 1 or live == [2]:
             raise ValueError("no title for this Short")
         return real(view, *a, **kw)
@@ -693,3 +693,83 @@ def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
     plan, conn = _two(tmp_path)  # two Shorts, one location, one sidecar
     changes = sync_short_text(conn, apply=False, now=NOW, per_location_cap=1)
     assert any("location-cap" in c.reason for c in changes if c.status == "refused")
+
+
+def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    _other(conn, tmp_path, day=5)  # same day and place, so the same text
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "anti-spam gate" in changes[1].reason
+    assert changes[0].written
+
+
+def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    sync_short_text(conn, apply=True, now=NOW)
+    new_hash = _hashes(conn)[(1, "youtube")]
+    row = dict(conn.execute("SELECT * FROM deliveries").fetchone())
+    conn.execute("UPDATE deliveries SET plan_hash = ?", (OLD_HASH,))
+    row.update(id=None, plan_hash=new_hash, status="failed_permanent")
+    conn.execute(
+        f"INSERT INTO deliveries ({', '.join(row)}) VALUES ({', '.join('?' for _ in row)})",  # noqa: S608
+        tuple(row.values()),
+    )
+    conn.commit()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["refused"] and "already holds" in changes[0].reason
+
+
+def test_a_crash_then_a_generator_change_still_converges(tmp_path, monkeypatch):
+    plan, conn = _world(tmp_path, [_short(1)])
+
+    def die(*a):
+        raise _Crash
+
+    monkeypatch.setattr(qst.os, "replace", die)
+    with pytest.raises(_Crash):
+        sync_short_text(conn, apply=True, now=NOW)
+    monkeypatch.undo()
+    real = qst._youtube_text
+    monkeypatch.setattr(
+        qst,
+        "_youtube_text",
+        lambda s, p: {**real(s, p), "tags": real(s, p)["tags"][::-1]},
+    )  # the generator moved on after the crash
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["changed"] and _converged(plan, conn)
+
+
+def test_a_skipped_short_that_cannot_compose_does_not_refuse_the_live_one(tmp_path, monkeypatch):
+    from gomoveshift.pipeline.social_generator import SocialGenerator
+
+    real = SocialGenerator.generate_post
+
+    def post(self, i, weather=None, **kw):
+        if kw.get("title_facts") is None:
+            raise ValueError("legacy composition raised")
+        return real(self, i, weather, **kw)
+
+    monkeypatch.setattr(SocialGenerator, "generate_post", post)
+    plan, conn = _world(tmp_path, [_short(1), _short(2)])
+    conn.execute("UPDATE deliveries SET status = 'published' WHERE short_index = 1")
+    conn.commit()
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    assert [c.status for c in changes] == ["changed"] and changes[0].short_index == 2
+
+
+def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypatch):
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        return real(view, *a, **kw)
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "place repeats" in changes[1].reason
