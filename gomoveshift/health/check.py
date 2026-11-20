@@ -21,6 +21,8 @@ _EVENTS = {
     "failure_unattended": "health_failure_unattended",
     "queued_short_refused": "health_queued_short_refused",
     "delivery_failed_permanent": "health_delivery_failed_permanent",
+    "short_bad_run": "health_short_bad_run",
+    "backlog_storage_refused": "health_backlog_storage_refused",
 }
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -35,6 +37,13 @@ FAILED_PERMANENT_NEW_WITHIN_H = 72
 #: ``health heal`` retries every open drive_failed row at least every 24 h (its backoff cap);
 #: a row with no launch for 26 h (that cap plus two cron ticks) is one nothing is retrying.
 UNATTENDED_AFTER_H = 26
+
+#: Consecutive failed launches (no success between) that alarm a drive however recent the last
+#: launch. Three matches the transient retry budget (``retry_policy.BUDGET``): a drive that has
+#: relaunched three times and failed each time is not being healed, and the 26 h clock never
+#: fires on it because every relaunch refreshes it (Courtmacsherry, 2026-11-17..19: ~10 failed
+#: resumes across 9 SHAs with the alarm marked resolved).
+UNATTENDED_AFTER_FAILURES = 3
 
 _BACKFILL = ("resume_recipe", "log_path")
 
@@ -57,6 +66,11 @@ def _line(row: Dict[str, Any]) -> str:
             "refilled and it is not retried. dispatch-queue requeues a review refusal once the "
             "review passes."
         )
+    if row["kind"] == "backlog_storage_refused":
+        return (
+            f"health backlog could not launch {row.get('project') or 'the next row'} for "
+            f"{row['region']}: {row['reason']}. No {row['region']} drive launches until space is freed."
+        )
     if row["kind"] == "lf_slot_unbooked":
         return f"LF slot {row['slot']} ({row['region']}) is inside 48 h with nothing booked and a drive ready."
     if row["kind"] == "lf_slot_uncovered":
@@ -75,6 +89,12 @@ def _line(row: Dict[str, Any]) -> str:
             "Give it bracket_gpx (the fixes files of the drives before and after) instead; run "
             "--placeless-label by hand only when no bracket exists."
         )
+    if row["kind"] == "short_bad_run":
+        runs = ", ".join(f"{s['project']}#{s['index']} ({s['views']})" for s in row["shorts"])
+        return (
+            f"{row['n']} settled Shorts in a row are under {row['threshold_views']:g} day-7 views "
+            f"(channel median {row['median_views']:g}): {runs}; causes are in the incident row."
+        )
     if row.get("detail"):
         return str(row["detail"])
     return f"{row['due_deliveries']} publishing deliveries are due and nothing has touched the queue in {row['quiet_hours']} h."
@@ -86,6 +106,41 @@ def _when(text: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _failed_streak(attempts: List[Dict[str, Any]]) -> int:
+    """Consecutive launched attempts whose run failed, newest back to the last success. A launch
+    still running, a refusal and a pre-flight failure (no work started) neither add nor reset."""
+    timed = [(w, a) for a in attempts if (w := _when(a.get("at"))) is not None]
+    streak = 0
+    for _w, att in sorted(timed, key=lambda t: t[0], reverse=True):
+        if att.get("action") != "launched":
+            continue
+        if att.get("outcome") == "succeeded":
+            break
+        if att.get("outcome") == "failed":
+            streak += 1
+    return streak
+
+
+def _budget_spent(rows: List[Dict[str, Any]], attempts: List[Dict[str, Any]]) -> Optional[str]:
+    """The retry policy's own refusal text when the drive's failure class has used its launches
+    under the fingerprint it failed under, and the newest launch is over (so no relaunch is due);
+    else ``None``. Publish-only is heal's refusal by design (``health publish`` owns it), and a
+    row filed before fingerprints has no class: neither is a spent budget."""
+    from . import retry_policy
+
+    stamped = [r for r in rows if (r.get("failure_fingerprint") or {}).get("hash")]
+    if not stamped:
+        return None
+    stamp = max(stamped, key=lambda r: str(r.get("failed_at") or ""))["failure_fingerprint"]
+    klass, fph = stamp.get("class") or retry_policy.UNKNOWN, stamp["hash"]
+    launches = [a for a in attempts if a.get("action") == "launched"]
+    used = retry_policy.launched_count(launches, fph)
+    newest = max(launches, key=lambda a: str(a.get("at") or ""), default=None)
+    if klass == retry_policy.PUBLISH_ONLY or not used or (newest or {}).get("outcome") != "failed":
+        return None
+    return retry_policy.refusal(klass, fph, launched=used, failed_under=False)
 
 
 def unattended_incidents(
@@ -102,6 +157,9 @@ def unattended_incidents(
 
     limit = timedelta(hours=UNATTENDED_AFTER_H)
     launched: Dict[Any, datetime] = {}
+    by_group: Dict[Any, List[Dict[str, Any]]] = {}
+    for row in drive_rows:
+        by_group.setdefault(row.get("resume_recipe") or row["key"], []).append(row)
     for row in drive_rows:
         for att in row.get("resume_attempts") or []:
             when = _when(att.get("at"))
@@ -120,9 +178,19 @@ def unattended_incidents(
         attempts = row.get("resume_attempts") or []
         last = _when(attempts[-1].get("at")) if attempts else None
         newest = launched.get(recipe or row["key"])
+        group_rows = by_group.get(recipe or row["key"], [row])
+        group_atts = [a for r in group_rows for a in r.get("resume_attempts") or []]
+        streak, spent = _failed_streak(group_atts), _budget_spent(group_rows, group_atts)
         if attempts and attempts[-1].get("action") == "refused":
             reason = attempts[-1].get("reason") or "no reason given"
             why = f"heal refused it ({reason}) and can never relaunch it"
+        elif streak >= UNATTENDED_AFTER_FAILURES:
+            why = (
+                f"its last {streak} launches in a row failed (alarm at "
+                f"{UNATTENDED_AFTER_FAILURES}) and heal is not fixing it"
+            )
+        elif spent:
+            why = f"its retry budget is spent ({spent})"
         else:
             ref = newest or _when(row.get("failed_at"))
             if ref is None or now - ref <= limit:
@@ -358,6 +426,24 @@ def _cadence_rows(
     return found
 
 
+def _bad_run_rows(
+    config: Any, tracking_root: Optional[Path], now: datetime, now_iso: str, notes: List[str]
+) -> Optional[List[Dict[str, Any]]]:
+    """Rule 9, or ``None`` (noted) when it could not run: an unreadable record proves nothing
+    either way, so it must not close an open incident."""
+    storage = Path(config.seo.storage_path)
+    if not storage.is_absolute():
+        notes.append("seo.storage_path is relative; rule 9 (short_bad_run) not evaluated")
+        return None
+    try:
+        from .bad_run import bad_run_rows
+
+        return bad_run_rows(storage, tracking_root, now.date(), now_iso)
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"rule 9 (short_bad_run) not evaluated: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[Dict[str, str]]:
     """Close the Waypost claims of finished ``health publish`` jobs (idempotent)."""
     if not Path(config.seo.storage_path).is_absolute():
@@ -388,6 +474,7 @@ def run_check(
     code_root: Path,
     staging_sha: Optional[str] = None,
     ledger_path: Optional[Path] = None,
+    tracking_root: Optional[Path] = None,
     now: Optional[datetime] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
     stamp_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -414,6 +501,10 @@ def run_check(
     backlog_rows = _backlog_rows(notes)
     if backlog_rows is not None:
         found["placeless_label_unverifiable"] = placeless_label_incidents(backlog_rows, now_iso)
+
+    bad_run = _bad_run_rows(config, tracking_root, now, now_iso, notes)
+    if bad_run is not None:
+        found["short_bad_run"] = bad_run
 
     live_drives = {r["key"]: r for r in drive_rows}
     open_drives = [
@@ -452,6 +543,11 @@ def run_check(
                 if fill:
                     prior.update(fill)
                     write_row(incidents_dir, prior)
+                continue
+            if prior is not None and prior.get("resolution_reason"):
+                # ``health heal`` closed it with a recorded reason (a recipe-less publish/heal
+                # job that is never resumable); re-filing it from the same failed job would
+                # undo that closure every tick.
                 continue
             write_row(incidents_dir, row)
             by_key[row["key"]] = row

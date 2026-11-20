@@ -215,6 +215,19 @@ exactly the file that produced the row, never a directory guess.
   `enqueue()`'s `sqlite3.IntegrityError` — the reader re-raises as
   `DeliveryPlanConflictError`, naming the project, short index, platform,
   and both the active and incoming `plan_hash`. Never swallowed.
+- **Final-text review at enqueue**: for every Short routed to YouTube, the reader asks
+  `youtube_adapter.short_review_refusal` (the review dispatch runs) before spooling. A
+  refused Short is enqueued on no platform; it is listed in `EnqueueResult.refused` and
+  raises one `short_review_refused` health incident (`health.store.new_incident`, key
+  `short_review_refused:<project>:<short_index>`, one open row however often enqueue
+  re-runs, replaced only when the reason changes). The plan's other Shorts still enqueue.
+  The row carries a `detail` line (project, Short index, reason) that `health check` pushes.
+  The refused Shorts are also left out of `enqueue-plan`'s rolling-ceiling and anti-spam counts.
+  `enqueue_from_plan_sidecar(..., review=False)` skips the check. `enqueue-plan`
+  prints the refusals on a dry run (writing nothing) and on `--apply` (`refused=N`).
+  The plan builder (`plan_builder.build_publish_plan`) first drops a Short's unreviewable
+  tags with `reviewable_short_tags`, the filter `queue sync-plan-tags` applies, and logs
+  a warning for a Short that still fails.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises
@@ -715,7 +728,7 @@ The console's Publishing tab has a matching "Enqueue a standalone asset" form
 
 ## Real go-public time, held rows and one Short per hour
 
-- **`platform_live`.** `platform_published_at` holds the scheduled slot only while `published_at_source=platform_scheduled`. `youtube_adapter.confirm_scheduled_live(conn, service)` asks `videos.list(part=status,snippet)` for each such row whose slot has passed; `live_publish_time` accepts an item only when `status.privacyStatus` is `public` and returns `snippet.publishedAt`. `queue.record_live_publish` then rewrites the row to `platform_live` with that time in `platform_published_at`; a video still private stays on the scheduled source. `recorded_publish_time` hands tracking the confirmed time, so `posted_at` stops being the upload moment. Nothing calls the sweep on a schedule yet: it is a function, not a cron.
+- **`platform_live`.** `platform_published_at` holds the scheduled slot only while `published_at_source=platform_scheduled`. `youtube_adapter.confirm_scheduled_live(conn, service)` asks `videos.list(part=status,snippet)` for each such row whose slot has passed; `live_publish_time` accepts an item only when `status.privacyStatus` is `public` and returns `snippet.publishedAt`. `queue.record_live_publish` then rewrites the row to `platform_live` with that time in `platform_published_at`; a video still private stays on the scheduled source. `recorded_publish_time` hands tracking the confirmed time, so `posted_at` stops being the upload moment. Every non-dry-run `dispatch-queue` tick runs the sweep once after dispatch, with the tick's own queue connection and the same YouTube credential path as the first-comment drain (built lazily, only when a row is due), and logs `CONFIRMED_LIVE count=<n>`. A dry run makes no API call; a tick without YouTube routed `first_party` logs `CONFIRMED_LIVE skipped`; an API or auth error logs one `CONFIRMED_LIVE failed` warning, leaves the exit code alone, and is retried on the next tick.
 - **Held past its slot.** A due row skipped by the validate hold or the privacy hold has no transition and no attempt, so it looked like an idle queue. The validate hold is per `(platform, project)`, not per row, so one problem row parks every healthy sibling of its project. When a held row is more than `dispatch.HELD_PAST_SLOT_MARGIN` (2 h) past `scheduled_at`, `drain_queue` writes one `delivery_held_past_slot` row under `incidents_dir` (default the health incidents dir): key `delivery_held_past_slot:<id>`, `pushed=False`, a plain `detail` line. An open row is not rewritten.
 - **One Short per hour.** `drain_queue` never releases two YouTube Shorts in one clock hour (UTC). The second due row, or one sharing its hour with an uploaded/published Short, moves to the next free hour at the same minute: sidecar `publishAt` (`plan_title_sync.write_plan_slot`) first, then `queue.reschedule_delivery`. `DrainResult.moved_same_hour` counts them.
 

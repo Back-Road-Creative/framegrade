@@ -133,7 +133,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
 def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     from datetime import datetime, timezone
 
-    from ...health import publish
+    from ...health import publish, stage_owners
 
     if args.supersede and not args.reason:
         raise SystemExit("health backlog: --supersede needs --reason")
@@ -155,6 +155,9 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
         horizon_h=launch.render_horizon_h(config),
+        latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
+        incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
+        release_list=stage_owners.release_list_path(root),
         failed_relaunch=launch.FailedRelaunch(
             incidents_dir, args.stages_root,
             fingerprint_fn=launch.default_fingerprint_fn(config, code_root), now=now,
@@ -184,6 +187,12 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
             state = "ok" if row["ok"] else "SHORT"
             print(f"storage dev {row['device']}: {row['free_gb']:.1f} GB free, need "
                   f"{row['need_gb']:.1f} GB [{state}] ({'; '.join(row['uses'])})")  # fmt: skip
+        roots = result.get("stage_roots", {})
+        verb = "would list" if args.dry_run else "listed"
+        for name in roots.get("listed", []):
+            print(f"{verb} stage root {name} for release (owner record expired)")
+        for name in roots.get("unowned", []):
+            print(f"unowned stage root {name}: no backlog row and no owner record")
         if result.get("storage_bound"):
             print(f"bound: {result['storage_bound']}")
         print(f"{result['action']}: {result['reason']}")

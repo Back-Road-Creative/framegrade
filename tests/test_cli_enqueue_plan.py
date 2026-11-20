@@ -876,3 +876,12 @@ def test_a_cancelled_delivery_frees_its_cadence_slot_but_a_published_one_does_no
 
     # published(1) + this plan's 1 == the ceiling; the cancelled row is not counted.
     assert rc == 0
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)

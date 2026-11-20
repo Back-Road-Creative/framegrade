@@ -85,6 +85,7 @@ def _make_test_home() -> str:
 
 
 _TEST_HOME = _make_test_home()
+
 os.environ["HOME"] = _TEST_HOME
 # Windows reads the home directory from USERPROFILE, not HOME.
 os.environ["USERPROFILE"] = _TEST_HOME
@@ -185,6 +186,14 @@ def isolate_media_admission_from_operator(tmp_path_factory):
     mp.setenv("GMS_NIGHT_ADMISSION_LOCK", str(root / "heavy.lock"))
     yield
     mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def reset_retired_key_warning_memo():
+    """``RETIRED_CONFIG_KEY`` logs once per process; each test starts with nothing warned."""
+    from gomoveshift import config as _config
+
+    _config._WARNED_RETIRED_KEYS.clear()
 
 
 @pytest.fixture(autouse=True)

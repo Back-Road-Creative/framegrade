@@ -4,6 +4,8 @@ gate logs which rung set the effective ceiling."""
 
 from __future__ import annotations
 
+import pytest
+
 import hashlib
 import logging
 import tempfile
@@ -211,3 +213,12 @@ def test_effective_ceiling_rung_is_config_when_brand_does_not_cap(tmp_path, capl
     assert rc == 0
     messages = [r.message for r in caplog.records if "rolling week ceiling" in r.message]
     assert any("5" in m and "rung=config" in m for m in messages)
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)

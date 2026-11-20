@@ -49,6 +49,7 @@ from ...publishing.enqueue_from_plan import (
     PublishPlanSidecarError,
     enqueue_from_plan_sidecar,
     select_capped_shorts,
+    sidecar_review_refusals,
 )
 from ...publishing.media_fingerprint import MediaVerificationError, verify_media
 from ...publishing.models import PayloadLimitError, validate_payloads
@@ -269,6 +270,17 @@ def _validate_gate_refuses(conn, args, config, sidecars, max_shorts) -> bool:
     return True
 
 
+def _refused_keys(sidecars: List[Path], max_shorts: int | None) -> set:
+    """``(project, short_index)`` of every Short the final-text review refuses: enqueue
+    leaves them out, so the ceiling and anti-spam gates must not count them."""
+    keys: set = set()
+    for path in sidecars:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        capped = [r for r in select_capped_shorts(raw["shorts"], max_shorts) if isinstance(r, dict)]
+        keys.update(sidecar_review_refusals(path, capped))
+    return keys
+
+
 def _planned_deliveries(
     sidecars: List[Path], max_shorts: int | None
 ) -> List[Tuple[str, str, int, datetime]]:
@@ -277,9 +289,12 @@ def _planned_deliveries(
     ``select_capped_shorts`` selection ``_media_verification_errors`` already
     uses, so the ceiling never counts a short the cap would defer anyway."""
     planned: List[Tuple[str, str, int, datetime]] = []
+    refused = _refused_keys(sidecars, max_shorts)
     for path in sidecars:
         plan = load_publish_plan(path)
         for record in select_capped_shorts(list(plan.shorts), max_shorts):
+            if (record.project_name, record.short_index) in refused:
+                continue
             for platform in record.routes.selected:
                 planned.append(
                     (
@@ -298,9 +313,14 @@ def _planned_records(sidecars: List[Path], max_shorts: int | None) -> List:
     pre-spool gates use, so the anti-spam gate never counts a short the cap
     would defer anyway."""
     records: List = []
+    refused = _refused_keys(sidecars, max_shorts)
     for path in sidecars:
         plan = load_publish_plan(path)
-        records.extend(select_capped_shorts(list(plan.shorts), max_shorts))
+        records.extend(
+            r
+            for r in select_capped_shorts(list(plan.shorts), max_shorts)
+            if (r.project_name, r.short_index) not in refused
+        )
     return records
 
 
@@ -407,6 +427,18 @@ def _register_enqueued_shorts_in_tracking(spooled: List) -> None:
             )
 
 
+def _review_refusal_lines(sidecars: List[Path], max_shorts: int | None) -> List[str]:
+    """One line per Short the final-text review would refuse at dispatch: enqueue
+    leaves it out of the queue and raises an incident (``enqueue_from_plan``)."""
+    lines: List[str] = []
+    for path in sidecars:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        capped = [r for r in select_capped_shorts(raw["shorts"], max_shorts) if isinstance(r, dict)]
+        for (project, index), reason in sorted(sidecar_review_refusals(path, capped).items()):
+            lines.append(f"  project={project} short_index={index}: {reason}")
+    return lines
+
+
 def cmd_enqueue_plan(args, config) -> int:
     state_path = Path(args.state_path).resolve()
 
@@ -461,6 +493,16 @@ def cmd_enqueue_plan(args, config) -> int:
     shadow = bool(getattr(args, "shadow", False))
     if shadow:
         print("SHADOW run: these deliveries will be spooled UNPUBLISHABLE.")
+
+    try:
+        refusal_lines = _review_refusal_lines(sidecars, max_shorts)
+    except PublishPlanSidecarError as exc:
+        print(f"Error: {exc}")
+        return 1
+    if refusal_lines:
+        verb = "were" if args.apply else "would be"
+        print(f"Final-text review refuses these short(s); they {verb} left out of the queue:")
+        print("\n".join(refusal_lines))
 
     if not args.apply:
         print("\nDRY RUN - nothing was written to the queue. Re-run with --apply.")
@@ -584,7 +626,7 @@ def cmd_enqueue_plan(args, config) -> int:
                 print(f"  index={v.index}{platform} rule={v.rule}: {v.detail}")
             return 1
 
-        total_new = total_existing = total_deferred = 0
+        total_new = total_existing = total_deferred = total_refused = 0
         for path in sidecars:
             try:
                 plan = load_publish_plan(path)
@@ -603,6 +645,7 @@ def cmd_enqueue_plan(args, config) -> int:
                 _register_enqueued_shorts_in_tracking(
                     select_capped_shorts(list(plan.shorts), max_shorts)
                 )
+            total_refused += result.refused_count
             total_new += result.enqueued_count
             total_existing += result.already_present_count
             deferred = plan_size - len(select_capped_shorts(list(range(plan_size)), max_shorts))
@@ -613,9 +656,12 @@ def cmd_enqueue_plan(args, config) -> int:
             )
             if deferred:
                 line += f" deferred={deferred}"
+            if result.refused_count:
+                line += f" refused={result.refused_count}"
             print(line)
         suffix = " (SHADOW - none of these can ever publish)" if shadow else ""
         tail = f" deferred={total_deferred}" if total_deferred else ""
+        tail += f" refused={total_refused}" if total_refused else ""
         print(f"\nenqueued={total_new} already_present={total_existing}{tail}{suffix}")
         return 0
     finally:

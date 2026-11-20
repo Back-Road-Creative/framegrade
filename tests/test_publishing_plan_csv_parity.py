@@ -32,7 +32,7 @@ def _post(short_index: int) -> SimpleNamespace:
         caption=f"Rolling through County Kerry, clip {short_index}",
         youtube_title=f"County Kerry Drive #{short_index}",
         youtube_category="24",
-        youtube_tags=f"County Kerry,road trip {short_index}",
+        youtube_tags="County Kerry",
         youtube_description=f"A short drive through the hills, part {short_index}.",
         tiktok_title=f"tt {short_index}",
         pinterest_board="drives",

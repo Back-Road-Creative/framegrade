@@ -57,18 +57,30 @@ RETIRED_CONFIG_KEYS = (
 WAYPOST_OWNED_DRIVE_KEYS = ("long_form_publish_days", "long_form_publish_time")
 
 
+#: Retired keys already warned about in this process: the hourly tick loads the config many
+#: times, and one warning per key per process is enough to name it.
+_WARNED_RETIRED_KEYS: set = set()
+
+
+def _warn_retired_once(key: str) -> None:
+    if key in _WARNED_RETIRED_KEYS:
+        return
+    _WARNED_RETIRED_KEYS.add(key)
+    logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+
+
 def _warn_on_retired_keys(raw: dict) -> None:
-    """Warn once per leftover retired key under ``drive:`` (never raises), and remove the
-    Waypost-owned transport keys so a file value cannot set the cadence."""
+    """Warn once per process per leftover retired key under ``drive:`` (never raises), and
+    remove the Waypost-owned transport keys so a file value cannot set the cadence."""
     drive = raw.get("drive")
     if not isinstance(drive, dict):
         return
     for key in RETIRED_CONFIG_KEYS:
         if key in drive:
-            logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+            _warn_retired_once(key)
     for key in WAYPOST_OWNED_DRIVE_KEYS:
         if key in drive:
-            logger.warning("RETIRED_CONFIG_KEY key=%s (retired: Waypost decides)", key)
+            _warn_retired_once(key)
             del drive[key]
 
 
@@ -1707,6 +1719,10 @@ class DriveConfig(BaseModel):
     # blur_coverage). Bypassed by --skip-blur / blur_vehicle_cabin_frac=0.
     blur_cabin_gate_sample_fps: float = 4.0
     blur_cabin_gate_min_coverage: float = 0.5
+    # Day-master cabin-leak repair rounds: each is one targeted repair followed by a full
+    # gate pass; the encode runs only on a pass, and the gate error is raised after this
+    # many failed rounds. 0 = no repair (the first leak stops the run).
+    blur_cabin_repair_rounds: int = 2
     # WHOLE-PERSON blur (a person standing OUTSIDE the vehicle must not get only a
     # face blur — their body/pose is still identifying). The COCO detector
     # (person class 0 — same yolo11n model the vehicle detector uses) boxes the FULL

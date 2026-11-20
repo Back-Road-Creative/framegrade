@@ -110,3 +110,24 @@ an audit-only drive for any free slot inside the render horizon (the wider of 7 
 (`docs/pipeline/156-health-check.md`). Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
 claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
+
+The tick reads the framegrade release list (the version-pin check, `git ls-remote --tags`) at most
+once per 24 h (`launch.LATEST_VERSION_TTL`): the answer is cached in `<data root>/release-latest.json`
+and reused on a network failure while it is under 7 days old; with no usable cache a failure still
+refuses the launch ("cannot determine the latest framegrade release"). `RETIRED_CONFIG_KEY` logs
+once per process per key. Not built: launching in one region while heal resumes a drive in another.
+Each drive's staging fills its own device, so that overlap is unsafe until B6's storage check
+(`storage_plan`) is the precondition for it; it stays off until measured.
+
+### Stage roots with no backlog row
+
+A stage root kept on purpose with no `drive_backlog.yaml` row (today: `mizen-remeasure`, held as
+evidence for framegrade#398) needs an owner record in `gomoveshift/health/stage_owners.json`
+(`gms-stage-owners/1`): `name`, `owner`, `reason`, `issue`, `expires` (an ISO date). A record
+missing a field, with a bad date or a repeated name is refused, never guessed past. The day after
+`expires`, `health backlog` appends the name to `<data root>/host-cleanup/gms-stages-release.list`
+(`stage_owners.STAGES_RELEASE_LIST_NAME`, with a comment naming the issue and owner); removal is
+the host-cleanup rule 7c, which keeps every hold it has (running spool job, `.keep`, live lease,
+process inside). The file name is the one `_ops/host-cleanup.sh` reads (`GMS_STAGES_RELEASE`); a
+test pins the literal. Extending a hold means editing `expires` in the same PR that cites the
+issue. A root with no row and no record is printed as `unowned stage root` on every tick.
