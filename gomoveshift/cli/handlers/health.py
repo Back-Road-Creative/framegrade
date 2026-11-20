@@ -30,7 +30,7 @@ def cmd_health(args, config) -> int:
     if args.health_command == "heal":
         return _cmd_heal(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "backlog":
-        return _cmd_backlog(args, config, root, jobs_dir)
+        return _cmd_backlog(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "publish":
         return _cmd_publish(args, config, root, jobs_dir)
     result = run_check(
@@ -130,7 +130,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
     return 2 if result["action"] == "refused" else 0
 
 
-def _cmd_backlog(args, config, root, jobs_dir) -> int:
+def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     from datetime import datetime, timezone
 
     from ...health import publish
@@ -155,6 +155,11 @@ def _cmd_backlog(args, config, root, jobs_dir) -> int:
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
         horizon_h=launch.render_horizon_h(config),
+        failed_relaunch=launch.FailedRelaunch(
+            incidents_dir, args.stages_root,
+            fingerprint_fn=launch.default_fingerprint_fn(config, code_root), now=now,
+            dry_run=args.dry_run,
+        ),
         publish=publish.backlog_publisher(
             config, region=region, stages_root=args.stages_root, code_root=code_root,
             jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,

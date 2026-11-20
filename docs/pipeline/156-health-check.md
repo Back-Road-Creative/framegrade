@@ -192,6 +192,18 @@ the latter observed on the next heal pass.
 [--dry-run] [--json]` launches at most one audit-only drive for the region's next uncovered LF
 slot. The hourly `bin/gms-health-cron.sh` tick (workspaces) calls it per region; an operator may too. Exit 2 on `refused`, else 0.
 
+**Failed row, no resume (relaunch from source).** `health heal` resumes only a drive with a readable
+`resume.json`, so a `failed` store row (or an `auditing` one whose newest audit failed or has no job
+record) whose stage dir holds none (rec0060-0061: `calibration.json` only) was reached by nothing.
+`launch.FailedRelaunch` asks `retry_policy.refusal` (the same class, fingerprint and budget rules as heal) whether a
+relaunch is due: the failure's fingerprint (`failure_fingerprint` on its `drive_failed` incident row) against the one now,
+a legacy row (no stamp, or no incident row) getting one launch. Due: the stale stage and output dirs move to
+`_superseded/` (the `--supersede` helper), the row is re-registered `auditing` and it launches from source on that tick,
+no operator command. Not due: nothing moves, and one `refused` attempt (deduped per fingerprint and reason) lands in
+`resume_attempts` of the project's `backlog_relaunch` incident row, written already resolved, as is each launch. Never a
+published row (upload receipt), a booked or `ready` row, or one in the content ledger; a drive running still blocks it
+(one heavy drive at a time), and a running audit is never replaced. `--dry-run` plans the moves and writes nothing.
+
 **Selection.** The region's free LF slots inside the render horizon (from `build_schedule_report`) are
 sorted; every `ready` or `auditing` drive in `schedule.sqlite3` covers one, and the first slot
 left over is the target. An `auditing` drive for the region, or a drive job already running

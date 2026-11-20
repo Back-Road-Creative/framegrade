@@ -40,11 +40,12 @@ from ..pipeline.validation.content_gates import (
     placeless_label_problem,
 )
 from . import drives as drive_jobs
-from . import resume
+from . import resume, retry_policy
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
 from .heal import job_name as heal_job_name
 from .resume import HOLD_NAME, is_held
+from .store import load_all, new_incident, safe_name, utc_iso, write_row
 
 LEASE_NAME = "gms-backlog-launch"
 #: Where ``supersede`` moves a row's stale stage root and output dir (beside the live ones, so the
@@ -55,6 +56,9 @@ SUPERSEDE_RECORD = "superseded.json"
 #: that run is dead by record, so ``cleanup --abandoned`` reclaims it as it does a superseded one.
 RETIRED_HOLD_PREFIX = "retired by health backlog: "
 GAVE_UP_HOLD = "store row failed and no backlog row; health backlog gave it up"
+#: The incident-dir row that records ``FailedRelaunch`` attempts (``resume_attempts``, as heal's);
+#: written resolved so ``health check`` neither pushes nor lists it.
+RELAUNCH_KIND = "backlog_relaunch"
 #: Names the lease script (``acquire NAME TTL WHAT`` / ``release NAME``; exit 3 = held).
 LEASE_SCRIPT_ENV = "GMS_LEASE_SCRIPT"
 DEFAULT_LEASE_SCRIPT = Path("bin") / "lease.sh"
@@ -393,6 +397,110 @@ def _uploads_refusal(project, out: Path) -> str:
     return ""
 
 
+class FailedRelaunch:
+    """Is a failed drive due a relaunch from source? Heal only resumes a drive that has a readable
+    ``resume.json``; one without (calibration.json only) is never reached by anything, so
+    ``health backlog`` relaunches it when ``retry_policy.refusal`` allows: its class and the
+    fingerprint its failure was filed under (``failure_fingerprint``, stamped by ``health
+    check``) against the one now. A row with no stamp (or no incident row) is legacy: one launch.
+    Each attempt is a ``resume_attempts`` entry on the project's ``RELAUNCH_KIND`` row; a refusal
+    is recorded once per fingerprint and reason. A dry run writes nothing.
+
+    ``fingerprint_fn(project, phase)`` is the current fingerprint (``retry_policy.fingerprint``)."""
+
+    def __init__(self, incidents_dir, stages_root, *, fingerprint_fn, now, dry_run=False):
+        self.dir, self.stages_root = Path(incidents_dir), Path(stages_root)
+        self.fingerprint_fn, self.now, self.dry_run = fingerprint_fn, now, dry_run
+        self._fph: Dict[str, str] = {}
+        self._klass: Dict[str, str] = {}
+
+    def _rows(self, project: str):
+        rows, _bad = load_all(self.dir)
+        key = f"{RELAUNCH_KIND}:{safe_name(project)}"
+        failed = [r for r in rows if r.get("kind") == "drive_failed" and r.get("drive") == project]
+        return failed, next((r for r in rows if r.get("key") == key), None)
+
+    def _resumable(self, project: str) -> bool:
+        """A readable recipe under the project's stages: ``health heal`` resumes it, not us."""
+        found = self.stages_root.glob(f"{project}/**/_stages/resume.json")
+        return any(resume.read_recipe(p) is not None for p in found)
+
+    def due(self, project: str) -> Optional[str]:
+        """The reason to relaunch ``project`` from source now, else ``None`` (a refusal is
+        recorded unless this is a dry run)."""
+        if self._resumable(project):
+            return None
+        failed, ledger = self._rows(project)
+        failed.sort(key=lambda r: str(r.get("failed_at") or r.get("detected_at") or ""))
+        newest = failed[-1] if failed else {}
+        phase = newest.get("phase")
+        fph = retry_policy.fingerprint_hash(self.fingerprint_fn(project, phase))
+        stamped = {(r.get("failure_fingerprint") or {}).get("hash") for r in failed} - {None}
+        stamp = newest.get("failure_fingerprint") or {}
+        klass = stamp.get("class") or (
+            retry_policy.classify_failure(newest.get("error"), phase, newest.get("gate"))
+            if newest else retry_policy.UNKNOWN
+        )  # fmt: skip
+        attempts = (ledger or {}).get("resume_attempts") or []
+        why = retry_policy.refusal(
+            klass, fph, launched=retry_policy.launched_count(attempts, fph),
+            failed_under=fph in stamped,
+        )  # fmt: skip
+        self._fph[project], self._klass[project] = fph, klass
+        if why is None:
+            note = "legacy row, no failure fingerprint" if not stamped else "fingerprint changed"
+            return f"{klass} failure, fingerprint {fph[:12]}: {note}; relaunching from source"
+        self._record(project, "refused", why, ledger)
+        return None
+
+    def record_launch(self, project: str, reason: str) -> None:
+        self._record(project, "launched", reason, self._rows(project)[1])
+
+    def _record(self, project: str, action: str, reason: str, ledger) -> None:
+        if self.dry_run:
+            return
+        now_iso = utc_iso(self.now.timestamp())
+        ledger = ledger or new_incident(
+            RELAUNCH_KIND, f"{RELAUNCH_KIND}:{safe_name(project)}",
+            f"backlog-relaunch-{safe_name(project)}.json", now_iso, drive=project,
+            resume_attempts=[],
+        )  # fmt: skip
+        ledger["pushed"], ledger["resolved_at"] = True, ledger.get("resolved_at") or now_iso
+        attempts = ledger.setdefault("resume_attempts", [])
+        att = {
+            "at": now_iso, "action": action, "reason": reason, "fp_hash": self._fph.get(project),
+            "failure_class": self._klass.get(project),
+        }  # fmt: skip
+        if (
+            action == "refused"
+            and attempts
+            and all(attempts[-1].get(k) == att[k] for k in ("fp_hash", "action", "reason"))
+        ):
+            return
+        attempts.append(att)
+        write_row(self.dir, ledger)
+
+
+def default_fingerprint_fn(config: Any, code_root: Path) -> Callable[[str, Any], Dict[str, Any]]:
+    """The fingerprint of the code and inputs a launch would run now: the service interpreter's
+    versions (read once), the project's manifest row, the drive config and the failed phase."""
+    python = str(Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python")
+    versions: Dict[str, Any] = {}
+
+    def fingerprint_fn(project: str, phase: Any) -> Dict[str, Any]:
+        if not versions:
+            versions.update(
+                gomoveshift=retry_policy.default_installed_version(python),
+                **retry_policy.default_sibling_versions(python),
+            )
+        return retry_policy.fingerprint(
+            versions=versions, manifest_sha=retry_policy.default_manifest_sha({"drive": project}),
+            config_sha=retry_policy.default_config_sha(config), phase=phase,
+        )  # fmt: skip
+
+    return fingerprint_fn
+
+
 def _supersede_plan(
     project, stages_root, output_root, now, siblings: Sequence[str] = ()
 ) -> Tuple[List[Dict[str, str]], str]:
@@ -484,6 +592,11 @@ def _gate_wait(jobs_dir: Path, rec: Dict[str, Any]) -> Optional[str]:
     if code != drive_jobs.EXIT_WAITING_AT_GATE:
         return None
     return drive_jobs.gate_wait(code, drive_jobs._tail(Path(jobs_dir) / str(rec.get("run_id")) / "output.log"))  # fmt: skip
+
+
+def _audit_running(jobs_dir: Path, project: str) -> bool:
+    rec = _newest_audit(jobs_dir, project)
+    return bool(rec) and (rec.get("result") or {}).get("state") == "running"
 
 
 def _failed_audit(jobs_dir: Path, project: str, hint: bool = True) -> Optional[str]:
@@ -686,6 +799,7 @@ def run_backlog(
     supersede: Optional[Tuple[str, str]] = None,
     publish: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
     horizon_h: int = COVERAGE_HORIZON_H,
+    failed_relaunch: Optional[FailedRelaunch] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
@@ -694,7 +808,8 @@ def run_backlog(
         return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
                     drive_running, preflight, render_gate, launcher, register, retire, disk,
-                    installed_version, latest_version, supersede, publish, horizon_h)  # fmt: skip
+                    installed_version, latest_version, supersede, publish, horizon_h,
+                    failed_relaunch)  # fmt: skip
     finally:
         if not dry_run:
             lease_release()
@@ -703,7 +818,7 @@ def run_backlog(
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede, publish,
-         horizon_h):  # fmt: skip
+         horizon_h, failed_relaunch=None):  # fmt: skip
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -739,7 +854,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     for proj in sorted(d.project for d in mine if d.status == "failed" and d.project in listed):
         if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
             return _publish_audited(res, proj, publish, dry_run)
-    relaunch = None
+    relaunch, auto = None, False
     for proj in auditing:
         failed = _failed_audit(jobs_dir, proj)
         gate = None if failed else _ost_gate(jobs_dir, stages_root, proj)
@@ -754,6 +869,15 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                                      latest_version)  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
             return _publish_audited(res, proj, publish, dry_run)
+        if (
+            failed_relaunch is not None and not supersede and not _audit_running(jobs_dir, proj)
+            and (why := failed_relaunch.due(proj))
+        ):  # fmt: skip
+            # the failure's inputs changed (or it was never fingerprinted): relaunch from source
+            supersede, target, auto = (proj, why), proj, True
+            relaunch, res["relaunch"] = proj, why
+            mine = [d for d in mine if d.project != relaunch]
+            break
         if not failed:
             return {**res, "reason": f"audit in progress: {proj} holds the next slot"}
         if proj == target:
@@ -770,6 +894,19 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             "project": proj,
             "reason": _failed_audit(jobs_dir, proj, hint=False) + "; health heal keeps retrying it from its stages",
         })  # fmt: skip
+    if relaunch is None and failed_relaunch is not None and not supersede:
+        # a failed store row heal cannot resume (no readable resume.json) is set aside and
+        # launched from source once ``FailedRelaunch`` says its failure fingerprint changed
+        for proj in (r.project for r in rows if r.region == region):
+            if any(d.project == proj and d.status == "failed" for d in mine) and (
+                why := failed_relaunch.due(proj)
+            ):
+                supersede, target, auto = (proj, why), proj, True
+                relaunch, res["relaunch"] = proj, why
+                mine = [d for d in mine if d.project != relaunch]
+                break
+    if auto:
+        rows = [r for r in rows if r.project == target]
     slot = _slot_target(free_slots, sum(d.status == "ready" for d in mine), now, horizon_h)
     if slot is None:
         return {**res, "reason": f"covered: every free slot inside {horizon_h} h has a ready drive"}  # fmt: skip
@@ -889,6 +1026,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         output_dir=str(out_dir), mirror_sha=mirror_sha, lf_mode=row.lf_mode,
         ingest_mode=row.ingest_mode,
     )  # fmt: skip
+    if auto:
+        failed_relaunch.record_launch(row.project, res["relaunch"])
     return {**res, "action": "launched", "reason": f"{row.project} for {res['slot']}"}
 
 
