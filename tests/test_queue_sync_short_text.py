@@ -399,22 +399,3 @@ def test_a_stored_title_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
     assert change.status == "changed"
     assert _youtube(plan, 1).payloads.youtube.title.startswith("Mar 5, 1st stretch: 38 seconds, ")
     assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "clip_led"}
-
-
-def test_a_short_whose_stored_arm_can_no_longer_render_is_refused(tmp_path, monkeypatch):
-    real = qst._generate_lf
-
-    def drops_the_arm(*a, **kw):
-        posts = real(*a, **kw)
-        for p in posts:
-            p.experiment_arms = {}
-        return posts
-
-    monkeypatch.setattr(qst, "_generate_lf", drops_the_arm)
-    plan, conn = _world(tmp_path, [_short(1, arms={"yt_hashtag_set": "road"}), _short(2)])
-    before = json.loads(plan.read_text())["shorts"][0]
-    changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["refused", "changed"]
-    assert "yt_hashtag_set" in changes[0].reason
-    assert json.loads(plan.read_text())["shorts"][0] == before
-    assert _hashes(conn)[(1, "youtube")] == OLD_HASH

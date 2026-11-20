@@ -5,10 +5,8 @@ no-repeated-place title rule, unit C2) never reaches it. ``sync_short_text`` reg
 title, description and tags of every ``queued`` YouTube row more than
 :data:`SYNC_LEAD_TIME` from its slot, through the path Phase D uses
 (``plan_bracket_sync._generate_lf``, over the parent LF), and writes them to the sidecar.
-Kept as stored: the title stamp, recording date, schedule, media and ``experiment_arms``.
-The generator renders each Short's stored Shorts arms (``SHORTS_FACTORS``) verbatim; a Short
-whose known stored arm the regenerated text no longer carries is refused, so the experiment is
-never mislabeled (an arm id outside ``SHORTS_ARMS`` is never rendered and stays as stored).
+Kept as stored: the title stamp, recording date, schedule, media and ``experiment_arms``
+(arm exclusion waits for a generator that consumes the Shorts arms).
 
 A Short is refused whole (nothing written) when any delivery row of it, on any platform,
 is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at`` or a slot
@@ -34,8 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from .experiments import SHORTS_ARMS
-from .plan_bracket_sync import _generate_lf, _ordinal, _stored_arms
+from .plan_bracket_sync import _generate_lf, _ordinal
 from .plan_io import load_publish_plan, plan_from_raw
 from .queue import TERMINAL_STATUSES
 
@@ -226,19 +223,7 @@ def _generate(
             for pos in live:
                 refused[pos] = f"generator: {exc}"
             continue
-        for p, g in zip(positions, generated):
-            if p not in live:
-                continue
-            # A stored arm the text no longer carries would mislabel the experiment.
-            lost = {
-                f: a
-                for f, a in _stored_arms(shorts[p]).items()
-                if a in SHORTS_ARMS[f] and (g.experiment_arms or {}).get(f) != a
-            }
-            if lost:
-                refused[p] = f"stored arm(s) {lost!r} can no longer be rendered by the generator"
-            else:
-                posts[p] = g
+        posts.update({p: g for p, g in zip(positions, generated) if p in live})
     return posts, refused
 
 

@@ -154,7 +154,7 @@ carry the block itself to keep the experiment running.
   (`SHORTS_FACTORS` only) to `generate_all(per_short_shorts_arms=...)`, which renders them
   verbatim, and refuses a Short whose stored arm the generator can no longer render (hand title,
   place not verified, unknown arm, no usable text) rather than write text that disagrees with
-  the stored arm.
+  the stored arm. `queue sync-short-text` shares the same `_generate_lf`, so it renders them too.
   **Power of the hashtag factor.** `plan_builder._title_with_hashtags` copies hashtags from the
   END of the description into the visible title, so the arm's tags (which come first) reach the
   title only when the Short has no terrain and no mid-location tag (the title takes at most
