@@ -111,6 +111,14 @@ an audit-only drive for any free slot inside the render horizon (the wider of 7 
 claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
 
+The tick reads the framegrade release list (the version-pin check, `git ls-remote --tags`) at most
+once per 24 h (`launch.LATEST_VERSION_TTL`): the answer is cached in `<data root>/release-latest.json`
+and reused on a network failure while it is under 7 days old; with no usable cache a failure still
+refuses the launch ("cannot determine the latest framegrade release"). `RETIRED_CONFIG_KEY` logs
+once per process per key. Not built: launching in one region while heal resumes a drive in another.
+Each drive's staging fills its own device, so that overlap is unsafe until B6's storage check
+(`storage_plan`) is the precondition for it; it stays off until measured.
+
 ### Stage roots with no backlog row
 
 A stage root kept on purpose with no `drive_backlog.yaml` row (today: `mizen-remeasure`, held as

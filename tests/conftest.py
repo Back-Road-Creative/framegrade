@@ -189,6 +189,14 @@ def isolate_media_admission_from_operator(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def reset_retired_key_warning_memo():
+    """``RETIRED_CONFIG_KEY`` logs once per process; each test starts with nothing warned."""
+    from gomoveshift import config as _config
+
+    _config._WARNED_RETIRED_KEYS.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolate_health_incidents_from_workspace(tmp_path_factory, monkeypatch):
     """No test may write health incident rows into the checkout's ``gms/incidents``:
     ``store.default_incidents_dir`` honours ``GMS_HEALTH_INCIDENTS_DIR`` (store.py:53-55)."""
