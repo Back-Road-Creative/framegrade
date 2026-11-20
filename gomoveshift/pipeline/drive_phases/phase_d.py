@@ -1278,6 +1278,16 @@ class PhaseD:
             force_sidecar_reset=force_sidecar_reset,
         )
 
+        # Upload run only: a day whose blur mask frame count differs from its source (or cannot
+        # be proven equal) never publishes. No override; a re-render rewrites the sidecar.
+        if state.youtube_upload and not skip_youtube_upload:
+            from ...publishing.mask_frame_gate import assert_mask_frame_counts_agree
+
+            assert_mask_frame_counts_agree(
+                Path(state.stages_base or (output_base / "_stages")),
+                drive=Path(state.source_dir).stem.replace(" ", "_").lower(),
+            )
+
         if not drive_plan or not drive_plan.regular_lfs:
             logger.warning("Phase D: No qualifying segments — drive_plan is empty, skipping")
             logger.warning(

@@ -28,6 +28,7 @@ from seo_manager.scheduling.claim import Claim, claim_or_reason
 from seo_manager.scheduling.store import SlotTaken, StaleDrive
 
 from .. import run_origin
+from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
 from .launch import _uploaded, default_launcher, upload_receipts
@@ -127,6 +128,9 @@ def run_publish(
     if stale:
         return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
                        "re-run); re-audit it (health heal) before publishing")  # fmt: skip
+    masks = mask_frame_refusal(recipe_path.parent, drive=project, record=not dry_run)
+    if masks:
+        return _refuse(res, f"{project} blur mask does not match its source: {masks}")
     lf_count = rendered_lf_count(recipe_path)
     if lf_count is None:
         return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip
