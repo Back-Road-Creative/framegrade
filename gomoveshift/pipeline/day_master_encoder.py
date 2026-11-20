@@ -1250,6 +1250,9 @@ CABIN_REPAIR_WINDOW_S = 2.0
 # Frames either side a repaired cabin box is also held for, so a frame the detector
 # drops between two it caught still gets blurred.
 CABIN_REPAIR_HOLD_FRAMES = 2
+# Bump whenever the repair's behaviour changes: a failed-repair record made by an older
+# repair then misses and the heal retry repairs again instead of refusing.
+CABIN_REPAIR_VERSION = 1
 
 
 def _leak_windows(frames: list[int], half: int, frame_count: int) -> list[tuple[int, int]]:
@@ -1313,10 +1316,22 @@ def _cabin_gate_with_repair(
     err = blur_gate.check_day_master_cabin_coverage(config, raw_concat, mask_path)
     if not err:
         return None
-    if blur_gate.cabin_repair_failure(config, raw_concat, mask_path) is not None:
-        logger.warning("  cabin repair already failed on these exact inputs; not repeating it")
-        return err
     rounds = max(0, int(getattr(config.drive, "blur_cabin_repair_rounds", 2)))
+    key = {
+        "version": CABIN_REPAIR_VERSION,
+        "rounds": rounds,
+        "window_s": CABIN_REPAIR_WINDOW_S,
+        "hold_frames": CABIN_REPAIR_HOLD_FRAMES,
+    }
+    spent_before = blur_gate.cabin_repair_failure(config, raw_concat, mask_path, repair_key=key)
+    if spent_before is not None:
+        logger.warning(
+            "  cabin repair budget already spent on this mask (%s round(s), same repair "
+            "version and settings); not repeating it. Raise drive.blur_cabin_repair_rounds, "
+            "ship a repair change, or rebuild the mask to try again",
+            spent_before.get("rounds"),
+        )
+        return err
     spent = 0
     for _ in range(rounds):
         added = _repair_cabin_leaks(raw_concat, config, mask_path, regions_sidecar)
@@ -1330,7 +1345,7 @@ def _cabin_gate_with_repair(
             # NOT recorded: a heal retry runs the repair again rather than refusing at once.
             return err
     if spent:
-        blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent)
+        blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent, repair_key=key)
     return err
 
 

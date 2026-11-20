@@ -497,10 +497,15 @@ def cabin_signature(config, video: Path, mask: Optional[Path]) -> Optional[dict]
     )
 
 
-def cabin_repair_failure(config, video: Path, mask: Optional[Path]) -> Optional[dict]:
+def cabin_repair_failure(
+    config, video: Path, mask: Optional[Path], repair_key: Optional[dict] = None
+) -> Optional[dict]:
     """The recorded failed repair for exactly this source, models, config, mask and
     renderer, else ``None``. It lives in the cabin verdict beside the gate's own error
     and is read only when the verdict's signature matches, so any changed input misses.
+
+    ``repair_key`` names the repair itself (its version and settings); a record made
+    under a different key misses, so raising the rounds or shipping a new repair retries.
 
     It can only make a caller refuse sooner: it never reports a pass."""
     if mask is None:
@@ -510,10 +515,14 @@ def cabin_repair_failure(config, video: Path, mask: Optional[Path]) -> Optional[
     if sig is None or not cached or cached.get("signature") != sig or not cached.get("error"):
         return None
     failed = cached.get("repair_failed")
-    return failed if isinstance(failed, dict) else None
+    if not isinstance(failed, dict) or failed.get("repair_key") != repair_key:
+        return None
+    return failed
 
 
-def record_cabin_repair_failure(config, video: Path, mask: Path, rounds: int) -> None:
+def record_cabin_repair_failure(
+    config, video: Path, mask: Path, rounds: int, repair_key: Optional[dict] = None
+) -> None:
     """Record ``rounds`` spent and the last leaks on the verdict that the gate just
     wrote for the mask as it now stands. A verdict that is not a matching failure is
     left alone."""
@@ -523,7 +532,11 @@ def record_cabin_repair_failure(config, video: Path, mask: Path, rounds: int) ->
     if sig is None or not cached or cached.get("signature") != sig or not cached.get("error"):
         return
     report = load_cached_json(cabin_leak_report_path(mask)) or {}
-    cached["repair_failed"] = {"rounds": int(rounds), "leaks": report.get("leaks", [])}
+    cached["repair_failed"] = {
+        "rounds": int(rounds),
+        "leaks": report.get("leaks", []),
+        "repair_key": repair_key,
+    }
     save_cache_json(path, cached)
 
 

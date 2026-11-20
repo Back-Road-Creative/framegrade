@@ -467,12 +467,16 @@ class TestCabinGateRepairsItsOwnLeaks:
             calls["check"] += 1
             return verdicts[calls["check"] - 1]
 
-        monkeypatch.setattr(blur_gate, "cabin_repair_failure", lambda *a, **k: failure)
-        monkeypatch.setattr(
-            blur_gate,
-            "record_cabin_repair_failure",
-            lambda config, video, mask, rounds: calls["recorded"].append(rounds),
-        )
+        def _lookup(config, video, mask, repair_key=None):
+            calls["lookup_key"] = repair_key
+            return failure
+
+        def _record(config, video, mask, rounds, repair_key=None):
+            calls["recorded"].append(rounds)
+            calls["record_key"] = repair_key
+
+        monkeypatch.setattr(blur_gate, "cabin_repair_failure", _lookup)
+        monkeypatch.setattr(blur_gate, "record_cabin_repair_failure", _record)
 
         def _repair(raw, cfg, mask, sidecar):
             calls["repair"].append((raw, mask, sidecar))
@@ -543,6 +547,25 @@ class TestCabinGateRepairsItsOwnLeaks:
         with pytest.raises(blur_gate.BlurGateError, match="STILL"):
             dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
         assert calls["recorded"] == [2]
+
+    def test_the_record_is_keyed_on_the_repair_settings_and_version(self, tmp_path, monkeypatch):
+        _cap, _, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): A", "BLUR GATE (cabin): B", "BLUR GATE (cabin): C"],
+            4,
+        )
+        cfg = Config()
+        cfg.drive.blur_cabin_repair_rounds = 2
+        with pytest.raises(blur_gate.BlurGateError):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=cfg)
+        key = {
+            "version": dme.CABIN_REPAIR_VERSION,
+            "rounds": 2,
+            "window_s": dme.CABIN_REPAIR_WINDOW_S,
+            "hold_frames": dme.CABIN_REPAIR_HOLD_FRAMES,
+        }
+        assert calls["lookup_key"] == key and calls["record_key"] == key
 
     def test_round_two_runs_when_round_one_still_leaks(self, tmp_path, monkeypatch):
         cap, mask_path, calls = self._wire(

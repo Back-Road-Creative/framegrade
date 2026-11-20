@@ -574,6 +574,23 @@ class TestFailedRepairIsRecordedInTheVerdict:
         mask.write_bytes(b"\x00" * 64)
         assert blur_gate.cabin_repair_failure(config, video, mask) is None
 
+    def test_a_changed_repair_setting_or_version_misses(self, tmp_path, monkeypatch):
+        """Raising the rounds or shipping a new repair must retry, never refuse on the old
+        record: the record carries the repair's own key and a different key misses."""
+        config, video, mask = self._fail_gate(tmp_path, monkeypatch)
+        key = {"version": 1, "rounds": 2, "window_s": 2.0, "hold_frames": 2}
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2, repair_key=key)
+        assert blur_gate.cabin_repair_failure(config, video, mask, repair_key=dict(key))
+        assert (
+            blur_gate.cabin_repair_failure(config, video, mask, repair_key={**key, "rounds": 4})
+            is None
+        )
+        assert (
+            blur_gate.cabin_repair_failure(config, video, mask, repair_key={**key, "version": 2})
+            is None
+        )
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+
     def test_a_new_renderer_misses(self, tmp_path, monkeypatch):
         config, video, mask = self._fail_gate(tmp_path, monkeypatch)
         blur_gate.record_cabin_repair_failure(config, video, mask, 2)
