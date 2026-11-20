@@ -572,6 +572,14 @@ def test_the_queue_update_matches_the_rows_raw_sidecar_path(tmp_path):
     assert _converged(plan, conn)
 
 
+def test_a_stored_title_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
+    [change] = sync_short_text(conn, apply=True, now=NOW)
+    assert change.status == "changed"
+    assert _youtube(plan, 1).payloads.youtube.title.startswith("Mar 5, 1st stretch: 38 seconds, ")
+    assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "clip_led"}
+
+
 def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
     plan, conn = _two(tmp_path)
     real = qst._sidecar_changes

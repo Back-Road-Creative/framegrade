@@ -99,6 +99,13 @@ def _ordinal(short: dict) -> Optional[int]:
     return int(m.group(1)) if title.startswith(stamp + ":") else None
 
 
+def _stored_arms(short: dict) -> dict:
+    """The Shorts-experiment arms (``SHORTS_FACTORS``) the plan recorded for ``short``."""
+    from .experiments import SHORTS_FACTORS
+
+    return {f: a for f, a in (short.get("experiment_arms") or {}).items() if f in SHORTS_FACTORS}
+
+
 def _generate_lf(
     lf_shorts: List[dict],
     record: Optional[dict],
@@ -156,6 +163,8 @@ def _generate_lf(
         per_short_roads=roads,
         per_short_route_records=routes,
         previous_places_at=previous_places_at,
+        # Each Short's stored arms, rendered verbatim: text must keep matching them.
+        per_short_shorts_arms=[{} if s.get("_skip") else _stored_arms(s) for s in lf_shorts],
     )
 
 
@@ -258,6 +267,15 @@ def sync_bracket_short_text(sidecar: Path, *, apply: bool) -> List[BracketShortC
                 continue
             if not getattr(post, "bracket_route", None):
                 verdict[pos] = ("refused", "generator did not back the label with the record")
+                continue
+            stored = _stored_arms(shorts[pos])
+            lost = {f: a for f, a in stored.items() if (post.experiment_arms or {}).get(f) != a}
+            if lost:
+                verdict[pos] = (
+                    "refused",
+                    f"stored arm(s) {lost!r} can no longer be rendered by the generator "
+                    "(hand title, place not verified, unknown arm, or no usable text)",
+                )
                 continue
             new, fields = _rewrite(shorts[pos], post, record)
             if fields:
