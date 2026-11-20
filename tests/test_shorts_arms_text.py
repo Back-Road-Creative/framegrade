@@ -192,27 +192,27 @@ def test_hashtag_set_arms_change_the_description_as_specified():
 GOLDEN = Path(__file__).parent / "fixtures" / "shorts_text_origin_main.json"
 
 
-def _fake_evidence_ids(obj, seen=None):
-    """``obj`` with each ``claim_evidence`` id replaced by ``evidence-N`` (N = order of
-    first appearance), so the fixture holds no hex the secret scan reads as a key while
-    the test still checks which claims share evidence."""
+_HEX = re.compile(r"[0-9a-f]{8,}")
+
+
+def _fake_hex(obj, seen=None):
+    """``obj`` with every all-hex string (an evidence id, a caption template hash), key or
+    value, replaced by ``hex-N`` (N = order of first appearance), so the fixture holds no
+    hex the secret scan reads as a key while the test still checks which values repeat."""
     seen = {} if seen is None else seen
+    if isinstance(obj, str):
+        return seen.setdefault(obj, f"hex-{len(seen)}") if _HEX.fullmatch(obj) else obj
     if isinstance(obj, dict):
-        return {
-            k: [seen.setdefault(e, f"evidence-{len(seen)}") for e in v]
-            if k == "claim_evidence"
-            else _fake_evidence_ids(v, seen)
-            for k, v in obj.items()
-        }
+        return {_fake_hex(k, seen): _fake_hex(v, seen) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_fake_evidence_ids(v, seen) for v in obj]
+        return [_fake_hex(v, seen) for v in obj]
     return obj
 
 
 def test_no_arm_renders_byte_identical_to_origin_main():
     """``tests/fixtures/shorts_text_origin_main.json`` was generated from origin/main
     (e2eae14) before arms existed: 3 places x (no facts, place_ok, not place_ok) x 2 Shorts,
-    spooled texts and the experiment date pinned, evidence ids faked (``_fake_evidence_ids``).
+    spooled texts and the experiment date pinned, hex ids faked (``_fake_hex``).
     Arms off must reproduce it exactly."""
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
     places = {key.split("|")[0] for key in golden}
@@ -243,7 +243,7 @@ def test_no_arm_renders_byte_identical_to_origin_main():
                 **kw,
             )
             got = json.loads(json.dumps([_dict(p) for p in posts], sort_keys=True, default=str))
-            got = _fake_evidence_ids(got)
+            got = _fake_hex(got)
             assert got == expected, key
 
 
