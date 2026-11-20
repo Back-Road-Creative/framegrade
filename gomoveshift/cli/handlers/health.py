@@ -155,6 +155,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
         horizon_h=launch.render_horizon_h(config),
+        latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
         incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
         release_list=stage_owners.release_list_path(root),
         failed_relaunch=launch.FailedRelaunch(

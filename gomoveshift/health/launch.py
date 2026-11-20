@@ -110,6 +110,57 @@ def default_latest_version() -> str:
     return latest_release_from_tags(done.stdout)
 
 
+LATEST_VERSION_CACHE_NAME = "release-latest.json"
+#: The release list is read at most this often; the hourly tick reuses the cached answer in between.
+LATEST_VERSION_TTL = timedelta(hours=24)
+#: A network failure falls back to a cached answer no older than this; older, the failure stands.
+LATEST_VERSION_MAX_STALE = timedelta(days=7)
+
+
+def cached_latest_version(
+    cache_path: Path,
+    fetch: Callable[[], str] = default_latest_version,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> Callable[[], str]:
+    """``fetch`` behind a JSON cache at ``cache_path``: inside ``LATEST_VERSION_TTL`` the cached
+    version is returned with no fetch; past it, fetch and rewrite. A fetch failure uses the cache
+    while it is within ``LATEST_VERSION_MAX_STALE``, else re-raises exactly what ``fetch`` raised
+    (so ``stale_pin_reason`` refuses as it does with no cache)."""
+
+    def read() -> Optional[Tuple[str, datetime]]:
+        try:
+            data = json.loads(Path(cache_path).read_text())
+            version = data["version"]
+            fetched = datetime.fromisoformat(data["fetched_at"])
+            if not isinstance(version, str) or not re.fullmatch(r"\d+(\.\d+)*", version):
+                return None
+            return version, fetched
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def latest() -> str:
+        now = clock()
+        cached = read()
+        if cached and timedelta(0) <= now - cached[1] < LATEST_VERSION_TTL:
+            return cached[0]
+        try:
+            version = fetch()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if cached and timedelta(0) <= now - cached[1] <= LATEST_VERSION_MAX_STALE:
+                return cached[0]
+            raise
+        try:
+            Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(cache_path).write_text(
+                json.dumps({"version": version, "fetched_at": now.isoformat()})
+            )
+        except OSError:
+            pass  # a cache that cannot be written only costs the next tick a fetch
+        return version
+
+    return latest
+
+
 def default_installed_version(python: Path) -> Optional[str]:
     """``gomoveshift.__version__`` of the interpreter that will render (its venv's pin)."""
     try:
