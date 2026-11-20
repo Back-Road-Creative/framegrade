@@ -5,6 +5,43 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.117] - 2026-11-20
+
+### Added
+
+- `gomoveshift health check` rule 9, a fast guard for a bad Shorts run. When the newest 3 settled YouTube Shorts each fall under a quarter of the channel's trailing median day-7 views, it raises one `short_bad_run` incident listing each Short with the causes recorded data shows: delivery status, duplicate place text (marked `c5_fixable`), late or bunched publish, place text against the sidecar's measured county, and missing metrics. It changes nothing itself.
+- The drive orchestrator now records wall time per phase (start, end, seconds, work units and frames/s when known) in `phase_timings.json` beside the checkpoint, and preflight's wall-clock estimate uses the median of those recorded rates when any exist, falling back to the built-in constants otherwise. A new `Phase rates:` line in the plan says which source the estimate used.
+- `metrics collect` prints an `ARM_DECISION` line per arm of the YouTube Shorts title-body (`yt_title_body`) and hashtag-set (`yt_hashtag_set`) factors: `hold`, `demote`, `pause` or `INSUFFICIENT_EVIDENCE`, from each Short's 72 h views and average view percentage on within-project medians. It acts only on a clear, repeated gap (default: 36 settled Shorts per arm, a 3x median gap; `policy.arm_thresholds` overrides) and a paused arm is re-tested every 28 days. `experiments.assign_stratified_arm` balances arms within a project and slot. The record changes no text sent to YouTube. The 72 h window is timed from YouTube's own publish time (delivery queue), not the last platform's; `arm_thresholds` is parsed only by the report, never by `load_brand_policy`.
+
+### Changed
+
+- redactcam pinned to `b0861b2`: the decode emits exactly the container's frames and raises when the count differs.
+- Recorded the long-form opening-segment-only title burn as dropped (`docs/pipeline/182-lf-title-burn-segment-dropped.md`): the `regular_lf` burn also draws the full-length URL watermark and re-attenuates the whole audio track, so a stream-copied body would change the published LF. No code changed.
+- A Short's title and description now name a different measured place than the previous Short's when its clip has one (a town held for every retained second or a county for the title; also the clip's road for the description). With no other measured place the text is unchanged and the Short records `no_alternative` in `place_variety`. `social_generator.choose_place_body` is the pure chooser.
+
+### Fixed
+
+- `health backlog` relaunches a failed drive from source once its failure fingerprint changes. A `failed` store row (or an `auditing` one with a failed or missing audit) with no readable `resume.json`, which `health heal` could never reach (rec0060-0061), has its stale stage and output dirs moved to `_superseded/`, is re-registered `auditing` and launches on that tick, by the same class and fingerprint rules as heal. A legacy unstamped row gets one launch; an unchanged fingerprint gets none and one deduped `refused` record. Published, booked and receipt-holding rows are never touched.
+- The privacy mask was paired with the picture by timestamp, so a source with timestamp gaps took each frame's blur from the wrong frame. The blur encode now retimes mask and picture to frame-index time, so mask frame `j` is picture frame `j`.
+- A blur run now stops, naming all three numbers, unless the source frame count, the mask frame count and the detection sidecar's `source_frame_count` agree. This runs before the cabin gate and before the encode.
+- A detection sidecar or mask built on a different frame count is rebuilt instead of reused, so a day detected before this fix does not fail the gate on every retry.
+- The cabin verdict and the day-mask reuse evidence now include the redactcam version and decode mode (`REDACTCAM_DECODE`).
+- `health heal` no longer relaunches a failed drive because the mirror gained an unrelated commit. Each attempt records a failure fingerprint (installed `gomoveshift-video`, `seo_manager` and `redactcam` versions, the drive's manifest row, the drive config, the failed phase) and a class (`deterministic`, `transient`, `publish_only`, `unknown`). Deterministic failures wait for the fingerprint to change, transient ones retry up to 3 times, unknown ones once, and publish-only ones are refused with a recorded reason. `health check` stamps the fingerprint when it files the row; a row filed before fingerprints gets one launch under the current one instead of being refused forever.
+- Publishing now blocks a day whose blur mask frame count differs from its source's. A drive rendered before the redactcam frame-count fix carries a mask a few frames longer than the picture, so the blur lags it. `health publish`, the backlog republish and Phase D's upload run refuse such a day, naming it and both counts, and record one `mask_index_mismatch` incident per drive-day. A missing sidecar, a missing count or an unprobeable source also refuses (`mask_frame_count_unknown`). There is no override; a re-render that rewrites the sidecar clears it.
+- A scheduled YouTube Short now records the time YouTube confirmed it public (new source `platform_live`) and tracking `posted_at` follows it, instead of the upload moment or the slot. A row held past its slot by more than 2 hours raises a `delivery_held_past_slot` incident, and dispatch moves a second Short due in the same clock hour to the next free slot.
+- `retire_uploaded` also retires an `auditing` drive that holds an upload receipt (ace-basin: published, still `auditing`); never without a receipt.
+- The backlog publish retry treats a publish job that ended `cancelled`, `stalled` or `killed` with no exit code as failed, so a failed row with a passed audit and no receipt is published again (Kerry-to-Cork). It retries the publish, never the render.
+- `health heal` closes a recipe-less incident whose job is a publish or heal job, with a recorded `resolution_reason`, instead of refusing it every tick. A heal of a heal reuses the base drive name instead of nesting `gms-heal-` names.
+
+## [0.3.116] - 2026-11-20
+
+### Fixed
+
+- A queued YouTube Short the review still refuses inside 48 h of its slot no longer burns the slot: `dispatch-queue` hands the slot to the next ready Short (printing `QUEUE_SLOT <id> <old> -> <new> <reason>`) and moves the refused row after the last queued slot on the daily grid. It also requeues a `failed_permanent` review refusal that now passes, never JP's kept rows (98, 102, 106, 110, 114).
+- The health check gains the `delivery_failed_permanent` rule: a new `failed_permanent` YouTube delivery raises an incident.
+- A Short's `videos.insert` now carries `recordingDetails.recordingDate`, the measured filmed-on date on its publish record (a blank date sends nothing), as long-form and superlong uploads already did.
+- Every upload sends `snippet.defaultAudioLanguage`, from the same config value as `defaultLanguage` (`drive.youtube_default_language`).
+
 ## [0.3.115] - 2026-11-20
 
 ### Fixed
@@ -1288,7 +1325,9 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...HEAD
+[0.3.117]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.116...v0.3.117
+[0.3.116]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...v0.3.116
 [0.3.115]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.114...v0.3.115
 [0.3.114]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.113...v0.3.114
 [0.3.113]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...v0.3.113

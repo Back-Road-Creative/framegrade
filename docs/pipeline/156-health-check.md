@@ -41,12 +41,22 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    scenery, weather, time-of-day or road-kind words in the label. An
    absent or unreadable backlog closes nothing. Row file: `placeless_label_<project>.json`.
 
+   A `drive_failed` row that `health heal` closed with a `resolution_reason` (a recipe-less
+   publish or heal job, never resumable) stays closed: the check does not re-file it from the same
+   failed job. A row resolved without a reason is re-filed while its job is still failed.
+
 6. **Failed drive left unattended.** `health heal` retries every open `drive_failed` row on a
    backoff capped at 24 h; this rule is the independent alarm should anything still let one sit. An
    open `drive_failed` row is unattended when its newest `launched` attempt (the newest across every
    open row sharing its `resume_recipe`) is older than `UNATTENDED_AFTER_H` = 26 h (the cap plus two
    cron ticks), or it has no attempt and `failed_at` is that old, or its newest attempt is `refused`
-   (heal can never relaunch it). One `failure_unattended` incident per drive: its heal resumes
+   (heal can never relaunch it). It is also unattended, however recent the last launch, when the
+   drive's last `UNATTENDED_AFTER_FAILURES` = 3 launches in a row failed (a `succeeded` launch resets
+   the count; a refusal, a running launch and a pre-flight failure neither add nor reset), or when
+   the retry policy (`retry_policy.refusal`) says the budget of the failure class is spent under the
+   fingerprint the row was filed with and the newest launch failed (publish-only failures and rows
+   filed before fingerprints are exempt). The incident text names which condition fired and the
+   count. One `failure_unattended` incident per drive: its heal resumes
    (`gms-heal-<drive>-<sha7>`, nested) and the rows sharing its `resume_recipe` are that drive, so
    they raise one alarm named for the original drive (key `failure_unattended:<drive>`, row file
    `failure_unattended_<drive>.json`). It names the drive, the failed phase/gate, the last attempt time and why. It prints as `[failure_unattended] ...`, is
