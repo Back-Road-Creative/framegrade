@@ -767,3 +767,22 @@ def test_check_stamps_the_failure_fingerprint_on_the_row_it_files(tmp_path):
     _run(tmp_path, lambda e, i, s: True, stamp_fn=lambda r: {"hash": "h2"})
     row = json.loads((tmp_path / "inc" / "demo-drive-a.json").read_text())
     assert row["failure_fingerprint"]["hash"] == "h1" and stamped == [row["key"]]  # filed once
+
+
+def test_a_backlog_storage_refusal_row_is_pushed_once_with_its_own_line(tmp_path):
+    from gomoveshift.health import launch
+    from gomoveshift.health.store import new_incident, write_row
+
+    row = new_incident(
+        launch.STORAGE_KIND, f"{launch.STORAGE_KIND}:usa", "backlog_storage_refused_usa.json",
+        NOW.isoformat(), region="usa", project="day-a", reason="storage: 5.0 GB free < 30.0 GB",
+    )  # fmt: skip
+    write_row(tmp_path / "inc", row)
+    sent = []
+    out = _run(tmp_path, lambda e, p, t: sent.append((e, t)) or True)
+    assert [e for e, _ in sent] == ["health_backlog_storage_refused"]
+    assert "usa" in sent[0][1] and "day-a" in sent[0][1] and "5.0 GB free" in sent[0][1]
+    assert out["resolved"] == []  # only a backlog launch resolves it, never a check pass
+    sent.clear()
+    _run(tmp_path, lambda e, p, t: sent.append(e) or True)
+    assert sent == []

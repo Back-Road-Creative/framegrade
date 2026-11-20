@@ -19,6 +19,7 @@ _EVENTS = {
     "queue_stalled": "health_queue_stalled",
     "placeless_label_unverifiable": "health_placeless_label_unverifiable",
     "failure_unattended": "health_failure_unattended",
+    "backlog_storage_refused": "health_backlog_storage_refused",
 }
 
 #: ``health heal`` retries every open drive_failed row at least every 24 h (its backoff cap);
@@ -33,6 +34,11 @@ def _line(row: Dict[str, Any]) -> str:
         return drives.summary(row)
     if row["kind"] == "failure_unattended":
         return row["detail"]
+    if row["kind"] == "backlog_storage_refused":
+        return (
+            f"health backlog could not launch {row.get('project') or 'the next row'} for "
+            f"{row['region']}: {row['reason']}. No {row['region']} drive launches until space is freed."
+        )
     if row["kind"] == "lf_slot_unbooked":
         return f"LF slot {row['slot']} ({row['region']}) is inside 48 h with nothing booked and a drive ready."
     if row["kind"] == "lf_slot_uncovered":

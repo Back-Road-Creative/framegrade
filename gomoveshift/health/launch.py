@@ -41,6 +41,7 @@ from ..pipeline.validation.content_gates import (
 )
 from . import drives as drive_jobs
 from . import resume, retry_policy
+from . import stage_owners as owners_mod
 from .cadence import COVERAGE_HORIZON_H, _aware
 from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
 from .heal import wrap_name as heal_job_name
@@ -59,6 +60,9 @@ GAVE_UP_HOLD = "store row failed and no backlog row; health backlog gave it up"
 #: The incident-dir row that records ``FailedRelaunch`` attempts (``resume_attempts``, as heal's);
 #: written resolved so ``health check`` neither pushes nor lists it.
 RELAUNCH_KIND = "backlog_relaunch"
+#: The incident-dir row raised while a region's launch is refused for lack of staging/output
+#: space (one open row per region); the next backlog tick that finds the space resolves it.
+STORAGE_KIND = "backlog_storage_refused"
 #: Names the lease script (``acquire NAME TTL WHAT`` / ``release NAME``; exit 3 = held).
 LEASE_SCRIPT_ENV = "GMS_LEASE_SCRIPT"
 DEFAULT_LEASE_SCRIPT = Path("bin") / "lease.sh"
@@ -801,19 +805,69 @@ def run_backlog(
     publish: Optional[Callable[[str, bool], Dict[str, Any]]] = None,
     horizon_h: int = COVERAGE_HORIZON_H,
     failed_relaunch: Optional[FailedRelaunch] = None,
+    incidents_dir: Optional[Path] = None,
+    stage_owners: Optional[Sequence[owners_mod.Owner]] = None,
+    release_list: Optional[Path] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
         return {**res, "reason": f"lease {LEASE_NAME} is held by another launch"}
     try:
-        return _run(res, region, rows, drives, free_slots, known_projects, stages_root,
+        out = _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
                     drive_running, preflight, render_gate, launcher, register, retire, disk,
                     installed_version, latest_version, supersede, publish, horizon_h,
                     failed_relaunch)  # fmt: skip
+        if stage_owners is not None:
+            out["stage_roots"] = _stage_roots(
+                stages_root, rows, drives, stage_owners, release_list, now, dry_run
+            )
+        if incidents_dir is not None:
+            _storage_incident(Path(incidents_dir), region, out, now, dry_run)
+        return out
     finally:
         if not dry_run:
             lease_release()
+
+
+def _stage_roots(stages_root, rows, drives, owners, release_list, now, dry_run) -> Dict[str, Any]:
+    """Owner-record upkeep for stage roots no manifest row owns: the expired records' roots are
+    appended to the host-cleanup release list (a dry run only names them), and every root with
+    neither a row, a store drive nor an owner record is reported."""
+    today = now.astimezone(timezone.utc).date()
+    known = {r.project for r in rows} | {d.project for d in drives}
+    due = [o for o in owners_mod.expired(owners, today) if (Path(stages_root) / o.name).is_dir()]
+    listed = [o.name for o in due]
+    if release_list is not None and not dry_run:
+        listed = owners_mod.list_for_release(Path(release_list), due, today)
+    return {
+        "listed": listed,
+        "unowned": owners_mod.unowned_roots(Path(stages_root), known, owners),
+    }
+
+
+def _storage_incident(incidents_dir, region, res, now, dry_run) -> None:
+    """The region's ``STORAGE_KIND`` row: opened (once) by a launch refused for space, resolved by
+    a tick that launches or measures every device as having room. A refusal for another reason,
+    or a noop that never measured, leaves it as it is. A dry run writes nothing."""
+    if dry_run:
+        return
+    key = f"{STORAGE_KIND}:{region}"
+    rows, _bad = load_all(incidents_dir)
+    open_row = next((r for r in rows if r.get("key") == key and not r.get("resolved_at")), None)
+    now_iso = utc_iso(now.timestamp())
+    if str(res.get("reason", "")).startswith("storage:") and res.get("action") == "refused":
+        if open_row is None:
+            write_row(incidents_dir, new_incident(
+                STORAGE_KIND, key, f"backlog_storage_refused_{safe_name(region)}.json", now_iso,
+                region=region, project=res.get("project"), reason=res["reason"],
+            ))  # fmt: skip
+        return
+    storage = res.get("storage")
+    roomy = res.get("action") == "launched" or (storage and all(s["ok"] for s in storage))
+    if open_row is not None and roomy:
+        open_row["resolved_at"] = now_iso
+        write_row(incidents_dir, open_row)
 
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
