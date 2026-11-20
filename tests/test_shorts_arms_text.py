@@ -4,6 +4,7 @@ every variant passes the gates the legacy text passes. All data is synthetic."""
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import sys
 from pathlib import Path
@@ -12,6 +13,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_publishing_plan_builder import _build  # noqa: E402
+from test_sync_bracket_short_text import _short, _write  # noqa: E402
+from test_sync_bracket_short_text import _records as _plan_records  # noqa: E402
+
+from datetime import date  # noqa: E402
 
 from gomoveshift.pipeline import longform_metadata as lm  # noqa: E402
 from gomoveshift.pipeline.content_validator import ContentValidator  # noqa: E402
@@ -30,6 +35,7 @@ from gomoveshift.publishing.experiments import (  # noqa: E402
     SHORTS_TITLE_BODY_ARMS,
     assign_shorts_arms,
 )
+from gomoveshift.publishing.plan_bracket_sync import sync_bracket_short_text  # noqa: E402
 from gomoveshift.publishing.plan_gates import (  # noqa: E402
     assert_plan_text_grammar,
     assert_shorts_metadata_in_region,
@@ -176,11 +182,43 @@ def test_hashtag_set_arms_change_the_description_as_specified():
                     assert not set(other_tags) & set(tags) - set(SHORTS_HASHTAG_SET_ARMS[arm])
 
 
-def test_no_arm_renders_byte_identical_to_legacy():
-    legacy = _all(_gen(), _facts())
-    flagged_off = _all(_gen(), _facts(), shorts_arms_enabled=False)
-    assert [_dict(p) for p in legacy] == [_dict(p) for p in flagged_off]
-    assert all(not set(SHORTS_FACTORS) & set(p.experiment_arms) for p in legacy)
+GOLDEN = Path(__file__).parent / "fixtures" / "shorts_text_origin_main.json"
+
+
+def test_no_arm_renders_byte_identical_to_origin_main():
+    """``tests/fixtures/shorts_text_origin_main.json`` was generated from origin/main
+    (e2eae14) before arms existed: 3 places x (no facts, place_ok, not place_ok) x 2 Shorts,
+    spooled texts and the experiment date pinned. Arms off must reproduce it exactly."""
+    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    places = {key.split("|")[0] for key in golden}
+    assert len(places) == 3 and any("Llanfair" in p for p in places)
+    assert any("St. Mary's" in p for p in places)
+    modes = {"facts_none": None, "place_ok": True, "place_not_ok": False}
+    for key, expected in golden.items():
+        place, mode = key.split("|")
+        ok = modes[mode]
+        facts = (
+            None
+            if ok is None
+            else [TitleFacts(date=DATE, ordinal=k, secs=41, place_ok=ok) for k in (1, 2)]
+        )
+        for kw in ({}, {"shorts_arms_enabled": False}):
+            gen = SocialGenerator(
+                location=place,
+                project_name="golden",
+                series_part=1,
+                experiment_today=date(2026, 9, 14),
+                spooled_texts={},
+            )
+            posts = gen.generate_all(
+                num_shorts=2,
+                per_short_locations=[place] * 2,
+                per_short_regions=[[place]] * 2,
+                per_short_title_facts=facts,
+                **kw,
+            )
+            got = json.loads(json.dumps([_dict(p) for p in posts], sort_keys=True, default=str))
+            assert got == expected, key
 
 
 def test_unknown_arm_renders_as_legacy_and_is_not_stored():
@@ -199,14 +237,24 @@ def test_pov_hashtag_arm_equals_the_legacy_description():
     assert _gen()._build_youtube_description(2, hashtag_arm="road") != legacy
 
 
-def test_a_factor_the_text_cannot_carry_is_not_assigned(tmp_path):
-    # No verified place: no title-body arm, hashtag arm still rendered.
-    posts = _all(_gen(), _facts(place_ok=False), shorts_arms_enabled=False)
+def test_a_factor_the_text_cannot_carry_is_not_assigned():
+    # No verified place: no title-body arm, hashtag arm still assigned and rendered.
+    posts = _all(_gen(), _facts(place_ok=False), shorts_arms_enabled=True)
+    assert posts
+    for post in posts:
+        assert "yt_title_body" not in post.experiment_arms
+        arm = post.experiment_arms["yt_hashtag_set"]
+        assert set(SHORTS_HASHTAG_SET_ARMS[arm]) <= set(
+            re.findall(r"#\w+", post.youtube_description)
+        )
+    assert {p.experiment_arms["yt_hashtag_set"] for p in posts} == set(SHORTS_HASHTAG_SET_ARMS)
+    # No facts at all: the stamped title is not composed, so no title-body arm either.
+    bare = _all(_gen(), [None] * 3, shorts_arms_enabled=True)
+    assert all("yt_title_body" not in p.experiment_arms for p in bare)
     gen = _gen()
     assert gen._shorts_arm_factors(1, TitleFacts(DATE, 1, 41, False)) == ["yt_hashtag_set"]
     assert gen._shorts_arm_factors(1, None) == ["yt_hashtag_set"]
     assert gen._shorts_arm_factors(1, TitleFacts(DATE, 1, 41, True)) == list(SHORTS_FACTORS)
-    assert posts
 
 
 # --- every variant passes the existing gates ---------------------------------
@@ -263,3 +311,244 @@ def test_arms_are_persisted_on_the_plan_and_survive_the_sidecar(tmp_path):
     path.write_text(_serialize_publish_plan(plan), encoding="utf-8")
     loaded = load_publish_plan(path)
     assert [r.experiment_arms for r in loaded.shorts] == [p.experiment_arms for p in posts]
+
+
+# --- explicit arms: regeneration renders the stored arms, never assigns ------
+
+
+def test_explicit_per_short_arms_are_rendered_verbatim_and_never_assigned():
+    stored = [
+        {"yt_title_body": "clip_led", "yt_hashtag_set": "road"},
+        {},
+        {"yt_hashtag_set": "pov"},
+    ]
+    posts = _all(_gen(), _facts(3), per_short_shorts_arms=stored)
+    assert posts[0].youtube_title.split(": ", 1)[1].startswith("41 seconds")
+    assert "#RoadTrip #OpenRoad" in posts[0].youtube_description
+    assert posts[0].experiment_arms["yt_title_body"] == "clip_led"
+    assert not set(SHORTS_FACTORS) & set(posts[1].experiment_arms)
+    assert posts[1].youtube_description == _all(_gen(), _facts(3))[1].youtube_description
+    assert "yt_title_body" not in posts[2].experiment_arms
+    assert posts[2].experiment_arms["yt_hashtag_set"] == "pov"
+    with pytest.raises(ValueError):
+        _all(_gen(), _facts(3), per_short_shorts_arms=stored[:2])
+    with pytest.raises(ValueError):
+        _all(_gen(), _facts(3), per_short_shorts_arms=stored, shorts_arms_enabled=True)
+
+
+def _stored_arms_plan(tmp_path, arms):
+    return _write(tmp_path, [_short(1, experiment_arms=arms)])
+
+
+def test_bracket_sync_keeps_text_matching_the_stored_arms(tmp_path):
+    arms = {"fb_hashtags": "A", "yt_title_body": "clip_led", "yt_hashtag_set": "road"}
+    plan = _stored_arms_plan(tmp_path, arms)
+    changes = sync_bracket_short_text(plan, apply=True)
+    assert changes[0].status == "changed", changes[0].reason
+    rec = _plan_records(plan)[0]
+    assert rec.experiment_arms == arms
+    body = rec.payloads.youtube.title.split(": ", 1)[1]
+    assert body.startswith("38 seconds, "), body
+    assert "#RoadTrip #OpenRoad" in rec.payloads.youtube.description
+    assert "#POVDriving" not in rec.payloads.youtube.description
+
+
+def test_bracket_sync_place_led_and_pov_arms_render_their_own_text(tmp_path):
+    arms = {"yt_title_body": "place_led", "yt_hashtag_set": "pov"}
+    plan = _stored_arms_plan(tmp_path, arms)
+    assert sync_bracket_short_text(plan, apply=True)[0].status == "changed"
+    rec = _plan_records(plan)[0]
+    assert rec.experiment_arms == arms
+    assert "seconds" not in rec.payloads.youtube.title
+    assert "#POVDriving" in rec.payloads.youtube.description
+    assert "#RoadTrip" not in rec.payloads.youtube.description
+
+
+@pytest.mark.parametrize("arms", [{"yt_hashtag_set": "nope"}, {"yt_title_body": "nope"}])
+def test_bracket_sync_refuses_a_stored_arm_it_can_no_longer_render(tmp_path, arms):
+    plan = _stored_arms_plan(tmp_path, arms)
+    before = plan.read_text()
+    changes = sync_bracket_short_text(plan, apply=True)
+    assert changes[0].status == "refused"
+    assert "arm" in changes[0].reason
+    assert plan.read_text() == before
+
+
+# --- one history, one stratum per base project --------------------------------
+
+
+def test_phase_d_pattern_balances_each_stratum_across_long_forms():
+    """The real per-long-form call pattern: one ``generate_all`` per LF (project
+    ``<base>_lfNN``) with one shared history, 5 Shorts at day positions 1-5."""
+    history: dict = {}
+    posts = []
+    for lf in range(1, 9):
+        gen = SocialGenerator(
+            location=LABEL, project_name=f"drive_lf{lf:02d}", series_part=lf, spooled_texts={}
+        )
+        n = 5
+        posts += gen.generate_all(
+            num_shorts=n,
+            per_short_locations=[LABEL] * n,
+            per_short_regions=[REGIONS] * n,
+            per_short_title_facts=_facts(n),
+            global_indexes=[lf * 10 + k for k in range(n)],
+            shorts_arms_enabled=True,
+            shorts_arm_history=history,
+        )
+    assert len(posts) == 40
+    for factor, arms in SHORTS_ARMS.items():
+        by_slot: dict = {}
+        for k, post in enumerate(posts):
+            by_slot.setdefault(k % 5, []).append(post.experiment_arms[factor])
+        for slot, got in by_slot.items():
+            counts = [got.count(a) for a in arms]
+            assert max(counts) - min(counts) <= 1, (factor, slot, counts)
+    assert {key[1] for key in history} == {"drive"}, "strata use the base project"
+
+
+def test_phase_d_hands_one_shared_history_to_every_long_form(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from gomoveshift.pipeline.drive_phases.phase_d_scheduling import _build_social_posts_per_lf
+
+    seen = []
+
+    def gen_all(num_shorts, index_offset, **kw):
+        seen.append(kw["shorts_arm_history"])
+        return [
+            SimpleNamespace(short_index=index_offset + i, to_dict=dict) for i in range(num_shorts)
+        ]
+
+    inst = MagicMock()
+    inst.generate_all.side_effect = gen_all
+    _build_social_posts_per_lf(
+        social_gen_cls=MagicMock(return_value=inst),
+        drive_plan=SimpleNamespace(
+            regular_lfs=[SimpleNamespace(index=1), SimpleNamespace(index=2)]
+        ),
+        shorts_per_lf={1: ["a"], 2: ["b"]},
+        per_lf_locations_override={1: "x", 2: "x"},
+        project_base="p",
+        output_base=tmp_path,
+    )
+    assert len(seen) == 2 and seen[0] is seen[1] and isinstance(seen[0], dict)
+
+
+# --- the stored hashtag arm is always in the rendered description -------------
+
+LONG_COUNTY = "Llanfairpwllgwyngyllgogerychwyrndrobwll County, Pennsylvania"
+LONG_POI = "Snowdonia National Park Visitor Centre and Adventure Trailhead"
+
+
+@pytest.mark.parametrize("arm", sorted(SHORTS_HASHTAG_SET_ARMS))
+def test_hashtag_arm_tags_survive_a_long_place_description(arm):
+    gen = SocialGenerator(location=LONG_COUNTY, project_name="p", series_part=1, spooled_texts={})
+    gen.nearest_poi = LONG_POI
+    description = gen._build_youtube_description(1, hashtag_arm=arm)
+    assert len(description) <= 200
+    tags = set(re.findall(r"#\w+", description))
+    assert set(SHORTS_HASHTAG_SET_ARMS[arm]) <= tags, description
+
+
+def test_long_place_arms_differ_and_stored_arm_matches_the_text():
+    texts = {}
+    for arm in SHORTS_HASHTAG_SET_ARMS:
+        gen = SocialGenerator(
+            location=LONG_COUNTY, project_name="p", series_part=1, spooled_texts={}
+        )
+        gen.nearest_poi = LONG_POI
+        post = gen.generate_post(
+            1,
+            title_facts=TitleFacts(DATE, 1, 41, True),
+            shorts_arms={"yt_hashtag_set": arm},
+        )
+        tags = set(re.findall(r"#\w+", post.youtube_description))
+        recorded = post.experiment_arms.get("yt_hashtag_set")
+        if recorded:
+            assert set(SHORTS_HASHTAG_SET_ARMS[recorded]) <= tags
+        texts[arm] = post.youtube_description
+    assert len(set(texts.values())) == len(texts)
+
+
+# --- title bodies: place-named only, never a duplicate, never cut mid-word ----
+
+
+def test_a_title_arm_is_never_taken_over_place_free_text():
+    gen = _gen()
+    facts = TitleFacts(DATE, 2, 41, False)
+    plain = gen._compose_stamped_title(facts, "titles", 100)
+    for arm in SHORTS_TITLE_BODY_ARMS:
+        assert gen._compose_stamped_title(facts, "titles", 100, title_body_arm=arm) == plain
+
+
+def test_every_arm_body_colliding_with_the_ledger_drops_the_arm(monkeypatch):
+    facts = TitleFacts(DATE, 1, 41, True)
+    taken = {"Sep 14, 1st stretch: 41 seconds, Wythe County, Virginia"}
+    free = _gen().generate_post(1, title_facts=facts, shorts_arms={"yt_title_body": "clip_led"})
+    stamp = free.youtube_title.split(":", 1)[0]
+    taken = {f"{stamp}: 41 seconds, {_gen().location_short}".lower()}
+    monkeypatch.setattr(lm, "load_published_titles", lambda: taken)
+    post = _gen().generate_post(1, title_facts=facts, shorts_arms={"yt_title_body": "clip_led"})
+    assert post.youtube_title.split(" #", 1)[0].lower() not in taken
+    assert "yt_title_body" not in post.experiment_arms
+    # a colliding body of a two-body arm still leaves the arm in place
+    taken2 = {f"{stamp}: {_gen().location_short}".lower()}
+    monkeypatch.setattr(lm, "load_published_titles", lambda: taken2)
+    post = _gen().generate_post(1, title_facts=facts, shorts_arms={"yt_title_body": "place_led"})
+    assert post.experiment_arms["yt_title_body"] == "place_led"
+    assert post.youtube_title.split(" #", 1)[0].lower() not in taken2
+
+
+def test_an_arm_body_that_would_be_cut_mid_word_is_skipped_or_the_arm_dropped():
+    place = "Llanfairpwllgwyngyllgogerychwyrndrobwllllantysiliogogogoch Community Council"
+    gen = SocialGenerator(location=place, project_name="p", series_part=1, spooled_texts={})
+    facts = TitleFacts(DATE, 1, 41, True)
+    stamp_len = len("Sep 14, 1st stretch: ")
+    assert stamp_len + len(place) <= 100 < stamp_len + len(place) + len(", on a Monday")
+    place_led = gen.generate_post(1, title_facts=facts, shorts_arms={"yt_title_body": "place_led"})
+    title = place_led.youtube_title.split(" #", 1)[0]
+    assert title.endswith(place), title  # the body that fits, whole
+    assert place_led.experiment_arms["yt_title_body"] == "place_led"
+    clip_led = gen.generate_post(1, title_facts=facts, shorts_arms={"yt_title_body": "clip_led"})
+    assert "yt_title_body" not in clip_led.experiment_arms  # no clip_led body fits
+
+
+def test_every_title_variant_passes_the_gates_with_a_long_place():
+    county = "Llanfairpwllgwyngyllgogerychwyrndrobwll County"
+    label = f"{county}, Pennsylvania"
+    validator = ContentValidator()
+    for arm in SHORTS_TITLE_BODY_ARMS:
+        gen = SocialGenerator(location=label, project_name="p", series_part=1, spooled_texts={})
+        posts = gen.generate_all(
+            num_shorts=2,
+            per_short_locations=[label] * 2,
+            per_short_regions=[[label]] * 2,
+            per_short_title_facts=_facts(2),
+            per_short_shorts_arms=[{"yt_title_body": arm}] * 2,
+        )
+        for post in posts:
+            assert len(post.youtube_title) <= 100
+            assert not post.youtube_title.rstrip().endswith(("…", "..."))
+            validator.enforce(
+                titles=[post.youtube_title, post.tiktok_title],
+                captions=[c for c in (post.caption, post.first_comment) if c],
+                descriptions=[post.youtube_description],
+            )
+        plan = _build(
+            posts=posts,
+            parent_recording_date_by_short_index={p.short_index: DATE for p in posts},
+        )
+        from gomoveshift.pipeline.route_claims import RouteEvidence, _Bin
+
+        bins = [_Bin(60.0, county, "Pennsylvania", None)]
+        for record in plan.shorts:
+            record = dataclasses.replace(
+                record,
+                route_record=RouteEvidence(
+                    retained_seconds=60.0, gaps=[], places=[], unsettled_seconds=0.0,
+                    bins=bins, boundary_proofs={}, windows_key="k",
+                ).record(),
+            )  # fmt: skip
+            assert short_review_refusal(record) is None, (arm, record.payloads.youtube.title)

@@ -1273,8 +1273,9 @@ class SocialGenerator:
             weekday=weekday_name(facts.date),
         )
         bodies = STAMPED_BODY_TEMPLATES if named else STAMPED_PLACE_FREE_TEMPLATES
-        if named and title_body_arm in SHORTS_TITLE_BODY_ARMS:
-            bodies = list(SHORTS_TITLE_BODY_ARMS[title_body_arm])
+        arm_bodies = self._arm_title_bodies(facts, place, title_body_arm, max_len)
+        if arm_bodies:
+            bodies = arm_bodies
         start = (facts.ordinal + self._project_seed(seed_suffix)) % len(bodies)
 
         from .longform_metadata import load_published_titles
@@ -1286,6 +1287,30 @@ class SocialGenerator:
             if candidate.strip().lower() not in published:
                 return candidate
         return f"{stamp}: {bodies[start].format_map(slots)}"[:max_len]
+
+    def _arm_title_bodies(
+        self, facts: TitleFacts, place: Optional[str], arm: Optional[str], max_len: int
+    ) -> "list[str]":
+        """The ``arm``'s body templates that make a usable title for ``facts``: the
+        title names a verified place, the whole title fits ``max_len`` (never cut
+        mid-word) and is not already published. ``[]`` means the arm cannot be
+        carried, so the caller drops it and walks the full template set."""
+        place = place or self.location_short
+        if arm not in SHORTS_TITLE_BODY_ARMS or not (facts.place_ok and place):
+            return []
+        from .longform_metadata import load_published_titles
+
+        stamp = title_stamp(facts.date, facts.ordinal)
+        slots = defaultdict(
+            str, location=place, secs=str(facts.secs), weekday=weekday_name(facts.date)
+        )
+        published = {t.strip().lower() for t in load_published_titles()}
+        usable = []
+        for body in SHORTS_TITLE_BODY_ARMS[arm]:
+            candidate = f"{stamp}: {body.format_map(slots)}"
+            if len(candidate) <= max_len and candidate.strip().lower() not in published:
+                usable.append(body)
+        return usable
 
     def _compose_title(
         self,
@@ -1835,7 +1860,8 @@ class SocialGenerator:
         # shorts are 1080x1920 (never 4K), so the claim would be false.
         # #ScenicDrive removed: unverifiable genre claim (scenic-purge).
         fixed_hashtags = ["#Shorts"]
-        optional_hashtags = list(SHORTS_HASHTAG_SET_ARMS.get(hashtag_arm or "", ("#POVDriving",)))
+        arm_tags = list(SHORTS_HASHTAG_SET_ARMS.get(hashtag_arm or "", ()))
+        optional_hashtags = arm_tags or ["#POVDriving"]
         terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
         if terrain_ht:
             optional_hashtags.append(terrain_ht[0])
@@ -1860,9 +1886,14 @@ class SocialGenerator:
             self._assert_region_present(short_index, "youtube description", description)
             return description
 
-        # Drop optional hashtags from the end until it fits
-        while optional_hashtags and len(description) > 200:
-            optional_hashtags.pop()
+        # Drop optional hashtags from the end until it fits; an assigned arm's
+        # tags are never dropped (the stored arm must match the rendered text).
+        protected = {t.lower() for t in arm_tags}
+        while len(description) > 200:
+            droppable = [i for i, t in enumerate(optional_hashtags) if t.lower() not in protected]
+            if not droppable:
+                break
+            optional_hashtags.pop(droppable[-1])
             all_hashtags = fixed_hashtags + optional_hashtags + pinned
             description = f"{base} {' '.join(all_hashtags)}"
 
@@ -1873,7 +1904,7 @@ class SocialGenerator:
         # when the first token itself overruns (no whitespace to break on).
         from gomoveshift.pipeline.text_format import truncate_for_platforms
 
-        if pinned and len(description) > 200:
+        if (pinned or arm_tags) and len(description) > 200:
             tag_block = " ".join(all_hashtags)
             base = truncate_for_platforms(
                 base, twitter_enabled=True, limit=max(200 - len(tag_block) - 1, 1)
@@ -2299,6 +2330,15 @@ class SocialGenerator:
             title_place, desc_place, desc_kind, variety = self._choose_places(
                 previous_places or {}, route_record
             )
+        if "yt_title_body" in shorts_arms and not self._arm_title_bodies(
+            title_facts,
+            title_place.body if title_place else None,
+            shorts_arms["yt_title_body"],
+            100,
+        ):
+            # No body of the arm is a usable title (all published, or too long to
+            # fit whole): the arm is dropped, never a duplicate or a cut title.
+            del shorts_arms["yt_title_body"], arms["yt_title_body"]
         for attempt in range(max_attempts):
             # Vary the seed on retries so we pick different hooks/titles
             rng = self._get_rng(short_index + attempt * 1000)
@@ -2338,6 +2378,7 @@ class SocialGenerator:
                 if hand is not None
                 else self._pick_tiktok_title(rng, short_index, title_facts)
             )
+            pois_before = dict(self._used_pois)
             youtube_description = self._build_youtube_description(
                 short_index,
                 interactive=interactive,
@@ -2345,6 +2386,17 @@ class SocialGenerator:
                 place_kind=desc_kind,
                 hashtag_arm=shorts_arms.get("yt_hashtag_set"),
             )
+            hashtag_arm = shorts_arms.get("yt_hashtag_set")
+            if hashtag_arm and not set(SHORTS_HASHTAG_SET_ARMS[hashtag_arm]) <= set(
+                re.findall(r"#\w+", youtube_description)
+            ):
+                # The length limit cut an arm tag: never record an arm the final
+                # description does not carry. Render the legacy set instead.
+                del shorts_arms["yt_hashtag_set"], arms["yt_hashtag_set"]
+                self._used_pois = pois_before
+                youtube_description = self._build_youtube_description(
+                    short_index, interactive=interactive, place=desc_place, place_kind=desc_kind
+                )
 
             baseline = title[:100]  # YT max 100
             place_facts = None
@@ -2510,6 +2562,8 @@ class SocialGenerator:
         per_short_title_facts: Optional[Sequence[Optional[TitleFacts]]] = None,
         previous_places: "Optional[Mapping[str, str]]" = None,
         shorts_arms_enabled: bool = False,
+        shorts_arm_history: "Optional[dict[tuple[str, str, str], list[str]]]" = None,
+        per_short_shorts_arms: "Optional[Sequence[Optional[Mapping[str, str]]]]" = None,
     ) -> List[SocialPost]:
         """
         Generate unique social posts for all shorts.
@@ -2553,6 +2607,19 @@ class SocialGenerator:
                 this project and the Short's position in its day) and render them.
                 Deterministic for the same inputs; ``False`` keeps today's text.
 
+            shorts_arm_history: The running ``assign_shorts_arms`` record. Pass ONE
+                dict to every per-long-form call of a drive so each stratum
+                (the base project, with its ``_lfNN`` suffix stripped, and the
+                Short's position in its day) is balanced across the whole drive;
+                ``None`` starts a fresh one for this call only.
+
+            per_short_shorts_arms: Explicit ``{factor: arm}`` per Short (a stored
+                ``experiment_arms`` filtered to ``SHORTS_FACTORS``), rendered
+                verbatim; no arm is ever assigned. An arm the text can no longer
+                carry is absent from the post's ``experiment_arms``, which the
+                caller compares to refuse the Short. Length ``num_shorts``; not
+                combinable with ``shorts_arms_enabled``.
+
             previous_places: ``{"title": body, "description": body}`` of the Short
                 published just before the first of these (the previous publish day's
                 last Short), from its ``SocialPost.place_variety``. Each Short after
@@ -2590,7 +2657,16 @@ class SocialGenerator:
 
         posts = []
         previous = dict(previous_places or {})
-        arm_history: "dict[tuple[str, str, str], list[str]]" = {}
+        if per_short_shorts_arms is not None:
+            if shorts_arms_enabled:
+                raise ValueError("per_short_shorts_arms and shorts_arms_enabled are exclusive")
+            if len(per_short_shorts_arms) != num_shorts:
+                raise ValueError(
+                    f"per_short_shorts_arms has {len(per_short_shorts_arms)} entries, "
+                    f"expected num_shorts={num_shorts}"
+                )
+        arm_history = {} if shorts_arm_history is None else shorts_arm_history
+        arm_project = re.sub(r"_lf\d+$", "", self.project_name)
         for i in range(1, num_shorts + 1):
             weather = None
             if weather_results and i - 1 < len(weather_results):
@@ -2626,16 +2702,17 @@ class SocialGenerator:
                 if per_short_route_records and i - 1 < len(per_short_route_records)
                 else None
             )
-            shorts_arms = (
-                assign_shorts_arms(
-                    (self.project_name, f"day-position-{facts.ordinal if facts else 0}"),
+            if per_short_shorts_arms is not None:
+                shorts_arms = dict(per_short_shorts_arms[i - 1] or {})
+            elif shorts_arms_enabled:
+                shorts_arms = assign_shorts_arms(
+                    (arm_project, f"day-position-{facts.ordinal if facts else 0}"),
                     global_idx,
                     arm_history,
                     gen._shorts_arm_factors(global_idx, facts),
                 )
-                if shorts_arms_enabled
-                else None
-            )
+            else:
+                shorts_arms = None
             post = gen.generate_post(
                 i,
                 weather,

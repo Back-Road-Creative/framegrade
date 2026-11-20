@@ -976,6 +976,9 @@ def _build_social_posts_per_lf(
     overrides_by_idx = {int(k): v for k, v in (per_lf_overrides or {}).items() if v}
     social_posts_per_lf: dict[int, list] = {}
     global_index_offset = 0
+    # One arm history for the whole drive: each long-form gets its own generator
+    # (``<base>_lfNN``), so a per-call history would balance nothing.
+    shorts_arm_history: dict = {}
     for lf in drive_plan.regular_lfs:
         lf_shorts = shorts_per_lf.get(lf.index, [])
         num_shorts = len(lf_shorts)
@@ -1084,6 +1087,7 @@ def _build_social_posts_per_lf(
             per_short_roads=_per_short_sidecar_roads(lf_shorts),
             per_short_route_records=_per_short_sidecar_route_records(lf_shorts),
             shorts_arms_enabled=True,
+            shorts_arm_history=shorts_arm_history,
         )
         social_posts_per_lf[lf.index] = posts
         global_index_offset += len(posts)
