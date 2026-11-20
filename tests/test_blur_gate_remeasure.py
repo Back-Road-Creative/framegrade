@@ -346,7 +346,7 @@ class TestAgainstTheRealVerifier:
         blur_gate.check_day_master_cabin_coverage(cfg, video, mask)
         rec = json.loads(blur_gate.cabin_sightings_path(mask).read_text())
         assert (rec["frame_w"], rec["frame_h"]) == (CW, CH)
-        assert rec["source_frames"] == CN and rec["mask_frames"] == CN
+        assert rec["mask_frames"] == CN and "source_frames" not in rec
         assert "complete" not in rec
 
 
@@ -402,3 +402,145 @@ class TestAFailureInsideTheOptimisationNeverDecides:
         assert err and "EXPOSED" in err and len(rep["leaks"]) == 2
         assert not blur_gate.cabin_sightings_path(mask).exists()
         assert blur_gate.load_cached_json(blur_gate.cabin_verdict_path(mask))["error"] == err
+
+
+class TestNoExtraSourceDecode:
+    def _spy(self, monkeypatch):
+        seen = []
+        real_fn = blur_gate._decode_stats
+
+        def spy(path):
+            seen.append(Path(path).name)
+            return real_fn(path)
+
+        monkeypatch.setattr(blur_gate, "_decode_stats", spy)
+        return seen
+
+    def test_a_passing_full_pass_writes_no_record_and_decodes_nothing_extra(
+        self, tmp_path, fake, monkeypatch
+    ):
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask, white=[(2, 0, 0, W, H), (5, 0, 0, W, H)])
+        seen = self._spy(monkeypatch)
+        err, _ = _gate(config, video, mask)
+        assert err is None and fake.calls == 1
+        assert seen == [] and not blur_gate.cabin_sightings_path(mask).exists()
+
+    def test_a_leak_pass_takes_n_from_the_mask_and_never_decodes_the_source(
+        self, tmp_path, fake, monkeypatch
+    ):
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask)
+        seen = self._spy(monkeypatch)
+        _gate(config, video, mask)
+        assert seen == [mask.name], "only the mask may be fully decoded"
+        rec = json.loads(blur_gate.cabin_sightings_path(mask).read_text())
+        assert rec["mask_frames"] == N and (rec["frame_w"], rec["frame_h"]) == (W, H)
+        assert rec["step"] >= 1
+
+    def test_a_stale_record_is_removed_by_a_passing_full_pass(self, tmp_path, fake):
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask)
+        _gate(config, video, mask)
+        assert blur_gate.cabin_sightings_path(mask).exists()
+        _mask(mask, white=[(2, 0, 0, W, H), (5, 0, 0, W, H)], frames=N + 1)  # forces full pass
+        err, _ = _gate(config, video, mask)
+        assert err is None and not blur_gate.cabin_sightings_path(mask).exists()
+
+
+class TestRealVerifierContract:
+    def test_a_mask_shorter_than_its_source_is_refused_by_the_full_pass(self, real):
+        """Design depends on this: a full pass that succeeds proves decoded(source) ==
+        decoded(mask), so the mask's decoded count N IS the source's. Holds at the pinned
+        redactcam (b0861b2 / 143b3be), which CI installs. The stale local venv (1937312)
+        ends silently on a short mask, so this is EXPECTED to fail there."""
+        from redactcam.frames import FrameSourceError
+
+        cfg, video, mask, calls, real_fn = real
+        _src(video, CN)
+        _cmask(mask, n=CN // 2)
+        with pytest.raises(FrameSourceError):
+            real_fn(video, mask, "v", cabin_frac=0.6, min_coverage=0.5)
+
+
+class TestEverySampledFrameMustRead:
+    def test_an_unreadable_sampled_frame_without_a_sighting_runs_the_full_pass(
+        self, real, monkeypatch
+    ):
+        cfg, video, mask, calls, _ = real
+        _src(video, CN)
+        _cmask(mask)
+        assert blur_gate.check_day_master_cabin_coverage(cfg, video, mask)
+        assert (
+            json.loads(blur_gate.cabin_sightings_path(mask).read_text())["step"] == 2
+        )  # 10 fps / 4 sample fps
+        _cmask(mask, [(4, 0, 0, 30, 16)])
+        real_cap = cv2.VideoCapture
+        bad = {"on": True}
+
+        class Flaky:
+            def __init__(self, *a, **k):
+                self._c = real_cap(*a, **k)
+                self._n = 0
+
+            def grab(self):
+                ok = self._c.grab()
+                self._n += ok
+                return ok
+
+            def retrieve(self):
+                if bad["on"] and self._n - 1 == 6:  # sampled, no sighting there
+                    return False, None
+                return self._c.retrieve()
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+        monkeypatch.setattr(cv2, "VideoCapture", Flaky)
+        blur_gate.check_day_master_cabin_coverage(cfg, video, mask)
+        assert calls == [2.0, 2.0]
+
+
+class TestBuildIdentityStrength:
+    def test_the_source_hash_is_always_part_of_the_build(self, monkeypatch):
+        a = blur_gate._redactcam_build()
+        assert "commit:" in a and "sha256:" in a
+        monkeypatch.setattr(blur_gate, "_redactcam_source_hash", lambda: "other")
+        assert blur_gate._redactcam_build() != a
+
+    def test_an_unidentifiable_build_never_matches_itself(self, monkeypatch):
+        def boom():
+            raise OSError("no source")
+
+        monkeypatch.setattr(blur_gate, "_redactcam_source_hash", boom)
+        assert blur_gate._redactcam_build() != blur_gate._redactcam_build()
+
+    def test_a_changed_cpu_allowed_setting_forces_a_full_pass(self, tmp_path, fake, monkeypatch):
+        config, video, mask = _cfg(tmp_path)
+        monkeypatch.delenv("REDACTCAM_ALLOW_CPU", raising=False)
+        _mask(mask)
+        _gate(config, video, mask)
+        _repaired(mask)
+        monkeypatch.setenv("REDACTCAM_ALLOW_CPU", "1")
+        _gate(config, video, mask)
+        assert fake.calls == 2
+
+    @pytest.mark.parametrize("mode", ["changed", "raises"])
+    def test_the_providers_a_session_would_use_are_in_the_signature(
+        self, tmp_path, fake, monkeypatch, mode
+    ):
+        import redactcam.detect as rd
+
+        config, video, mask = _cfg(tmp_path)
+        monkeypatch.setattr(rd, "check_inference_providers", lambda: ["CUDAExecutionProvider"])
+        _mask(mask)
+        _gate(config, video, mask)
+        _repaired(mask)
+        if mode == "changed":
+            monkeypatch.setattr(rd, "check_inference_providers", lambda: ["CPUExecutionProvider"])
+        else:
+            monkeypatch.setattr(
+                rd, "check_inference_providers", lambda: (_ for _ in ()).throw(RuntimeError("x"))
+            )
+        _gate(config, video, mask)
+        assert fake.calls == 2

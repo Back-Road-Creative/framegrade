@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -546,7 +547,7 @@ def record_cabin_repair_failure(
 #: sightings a later re-measure needs. The real leaks are then re-derived with the real
 #: threshold, by the same ``coverage < min_coverage`` comparison the library makes.
 _ALL_SIGHTINGS_COVERAGE = 2.0
-_SIGHTINGS_SCHEMA = 2
+_SIGHTINGS_SCHEMA = 3
 
 
 def cabin_sightings_path(mask: Path) -> Path:
@@ -557,31 +558,44 @@ def cabin_sightings_path(mask: Path) -> Path:
     return mask.with_name(f"{mask.stem}_cabin_sightings.json")
 
 
-def _redactcam_build() -> str:
-    """The installed redactcam BUILD. Its version string is not bumped per commit, so the
-    pinned commit (from the dist's ``direct_url.json``) is used, else a hash of the two
-    modules that decide what a sighting is."""
+def _redactcam_source_hash() -> str:
+    """sha256 of the IMPORTED ``redactcam/coverage.py`` + ``detect.py``: what actually runs,
+    whatever the dist metadata says (it misreports a shadowed or editable install)."""
     import hashlib
+
+    import redactcam
+
+    root = Path(redactcam.__file__).parent
+    h = hashlib.sha256()
+    for name in ("coverage.py", "detect.py"):
+        h.update((root / name).read_bytes())
+    return h.hexdigest()
+
+
+def _never_matches(what: str) -> str:
+    """A value for something that could not be identified: unique per call, so two
+    unidentifiable builds never compare equal and a record keyed on one is never reused."""
+    return f"unidentifiable:{what}:{uuid.uuid4().hex}"
+
+
+def _redactcam_build() -> str:
+    """The installed redactcam BUILD: the pinned commit from the dist's ``direct_url.json``
+    (its version string is not bumped per commit) AND the hash of the imported source."""
     import json as _json
     from importlib import metadata
 
+    commit = "none"
     try:
         raw = metadata.distribution("redactcam").read_text("direct_url.json")
-        commit = (_json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
-        if commit:
-            return f"commit:{commit}"
-    except Exception:  # noqa: BLE001 - falls through to the content hash
+        commit = (
+            (_json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+        ) or "none"
+    except Exception:  # noqa: BLE001 - the source hash still identifies the build
         pass
     try:
-        import redactcam
-
-        root = Path(redactcam.__file__).parent
-        h = hashlib.sha256()
-        for name in ("coverage.py", "detect.py"):
-            h.update((root / name).read_bytes())
-        return f"sha256:{h.hexdigest()}"
-    except Exception:  # noqa: BLE001 - an unidentifiable build never matches a record
-        return "unknown"
+        return f"commit:{commit}|sha256:{_redactcam_source_hash()}"
+    except Exception:  # noqa: BLE001
+        return _never_matches("redactcam")
 
 
 def _build_identity() -> dict:
@@ -593,13 +607,20 @@ def _build_identity() -> dict:
         out["onnxruntime"] = onnxruntime.__version__
         out["providers"] = list(onnxruntime.get_available_providers())
     except Exception:  # noqa: BLE001
-        out["onnxruntime"], out["providers"] = "absent", []
+        out["onnxruntime"], out["providers"] = _never_matches("onnxruntime"), []
+    try:
+        from redactcam.detect import ALLOW_CPU_ENV, check_inference_providers
+
+        out["cpu_allowed"] = (os.environ.get(ALLOW_CPU_ENV) or "").strip().lower()
+        out["session_providers"] = list(check_inference_providers())
+    except Exception:  # noqa: BLE001 - a session that would refuse or is unknown never matches
+        out["session_providers"] = _never_matches("providers")
     try:
         import cv2
 
         out["cv2"] = cv2.__version__
     except Exception:  # noqa: BLE001
-        out["cv2"] = "absent"
+        out["cv2"] = _never_matches("cv2")
     return out
 
 
@@ -632,22 +653,49 @@ def _decode_stats(path: Path) -> Optional[tuple]:
     return None if shape is None else (n, shape[0], shape[1])
 
 
-def _write_cabin_sightings(path: Path, signature: dict, video: Path, mask: Path, rep, sightings):
-    """Persist every sighting of a full pass, atomically (tmp file + replace) so a crash
-    leaves either no record or a whole one. Any failure just means the next pass runs in
-    full; a record is an optimisation and never the gate."""
+def _source_probe(video: Path, sample_fps: float) -> Optional[tuple]:
+    """``(height, width, step)`` from ONE retrieved source frame and the header fps, with
+    ``step`` computed exactly as the verifier does. No source decode beyond that frame."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(video))
+    try:
+        if not cap.isOpened() or not cap.grab():
+            return None
+        ok, frame = cap.retrieve()
+        if not ok:
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
+        step = max(1, round(fps / sample_fps)) if sample_fps > 0 else 1
+        return frame.shape[0], frame.shape[1], int(step)
+    finally:
+        cap.release()
+
+
+def _write_cabin_sightings(
+    path: Path, signature: dict, video: Path, mask: Path, rep, sightings, sample_fps: float
+):
+    """Persist every sighting of a full pass that FOUND a leak (the only case a repair, and
+    so a re-measure, follows), atomically (tmp file + replace). N, the frame count, is the
+    mask's DECODED count: the verifier refuses a source and mask that decode to different
+    lengths, so a full pass that returned proves N is the source's too and the source is
+    never decoded again here. Any failure just means the next pass runs in full."""
     try:
         path.unlink(missing_ok=True)
-        src, msk = _decode_stats(video), _decode_stats(mask)
-        if src is None or msk is None or src[0] != msk[0]:
-            logger.info("cabin sightings not recorded: source/mask do not decode alike")
+        if not sightings:
+            return
+        msk = _decode_stats(mask)
+        probe = _source_probe(video, sample_fps)
+        if msk is None or probe is None:
+            logger.info("cabin sightings not recorded: mask/source unreadable")
             return
         payload = {
             "schema": _SIGHTINGS_SCHEMA,
             "signature": _signature_sans_mask(signature),
-            "frame_h": src[1],
-            "frame_w": src[2],
-            "source_frames": src[0],
+            "frame_h": probe[0],
+            "frame_w": probe[1],
+            "step": probe[2],
+            "sample_fps": sample_fps,
             "mask_frames": msk[0],
             "vehicle_frames": rep.vehicle_frames,
             "plate_corroborated": bool(rep.plate_corroborated),
@@ -676,7 +724,7 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
     ints = (
         rec.get("frame_w"),
         rec.get("frame_h"),
-        rec.get("source_frames"),
+        rec.get("step"),
         rec.get("mask_frames"),
         rec.get("vehicle_frames"),
     )
@@ -684,7 +732,7 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
         not isinstance(items, list)
         or rec.get("sighting_count") != len(items)
         or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints)
-        or rec["source_frames"] != rec["mask_frames"]
+        or rec["step"] < 1
     ):
         return "record partial"
     for it in items:
@@ -729,12 +777,13 @@ def _remeasure_cabin(mask: Path, sig_core: dict, cabin_frac: float, min_coverage
             return None, "mask unreadable"
         decoded = 0
         while cap.grab():
-            if decoded in by_frame:
+            if decoded % rec["step"] == 0:
+                # every sampled frame is read, as the verifier does (it stops on a failure)
                 ok, m = cap.retrieve()
                 if not ok:
                     return None, f"mask frame {decoded} unreadable"
                 mgray = m if m.ndim == 2 else m[:, :, 0]
-                for i in by_frame[decoded]:
+                for i in by_frame.get(decoded, ()):
                     x0, y0, x1, y1 = cabin_region(
                         tuple(items[i]["box"]), cabin_frac, rec["frame_w"], rec["frame_h"]
                     )
@@ -814,11 +863,19 @@ def _cabin_coverage_error(config, video: Path, mask: Optional[Path]) -> Optional
             )
         except Exception as exc:  # never let the gate itself crash the run silently
             return f"BLUR GATE (cabin): coverage check could not run: {exc}"
-        _write_cabin_sightings(cabin_sightings_path(mask), signature, video, mask, full, full.leaks)
         rep = type(full)(
             vehicle_frames=full.vehicle_frames,
             leaks=[leak for leak in full.leaks if leak.coverage < min_coverage],
             plate_corroborated=full.plate_corroborated,
+        )
+        _write_cabin_sightings(
+            cabin_sightings_path(mask),
+            signature,
+            video,
+            mask,
+            full,
+            full.leaks if rep.leaks else [],
+            getattr(drive, "blur_cabin_gate_sample_fps", 4.0),
         )
     else:
         logger.info("cabin gate: re-measured the recorded sightings; no decode, no detection")
