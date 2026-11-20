@@ -997,6 +997,7 @@ class SocialGenerator:
         experiment_today: Optional[date] = None,
         spooled_texts: "Optional[Mapping[str, Sequence[str]]]" = None,
         bracket_route: "Optional[dict]" = None,
+        pinned_arms: "Optional[Mapping[int, Mapping[str, str]]]" = None,
     ):
         """
         Args:
@@ -1045,6 +1046,9 @@ class SocialGenerator:
         self._spooled_keys: "Optional[dict[str, list[tuple[str, ...]]]]" = (
             None if spooled_texts is None else _opener_keys(spooled_texts)
         )
+        #: ``{global short index: {experiment: arm}}``: arms a queued-row rewrite keeps
+        #: (``publishing/queue_short_text.py``) instead of a fresh assignment.
+        self._pinned_arms = {int(k): dict(v) for k, v in (pinned_arms or {}).items()}
         #: Meta caption evidence, loaded on first use; ``False`` = none usable.
         self._caption_evidence = None
         self._title_snapshot = None
@@ -2236,7 +2240,11 @@ class SocialGenerator:
             logger.info("pool titles: %s absent/incomplete", self.titles_file)
             self._pool_fallback_logged = True
 
-        arms = assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
+        arms = (
+            dict(self._pinned_arms[hand_idx])
+            if hand_idx in self._pinned_arms
+            else assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
+        )
         title_place, desc_place, desc_kind, variety = None, None, "", {}
         if hand is None and title_facts is not None and title_facts.place_ok:
             title_place, desc_place, desc_kind, variety = self._choose_places(
@@ -2411,6 +2419,7 @@ class SocialGenerator:
             experiments=self.experiments,
             experiment_today=self.experiment_today,
             bracket_route=self._bracket_route,
+            pinned_arms=self._pinned_arms,
         )
         clone.recording_date = self.recording_date
         clone.resolved_location = self.resolved_location

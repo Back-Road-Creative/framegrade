@@ -1,0 +1,3 @@
+### Added
+
+- `gomoveshift queue sync-short-text [--apply]` re-writes the title, description and tags of every queued YouTube Short more than 24 hours from its slot with the current generator (no repeated place) and the latest arm decisions (a demoted or paused arm is not chosen). The stamp, recording date, schedule and arm tags are kept, the new text is re-reviewed (a refused Short is left unchanged and reported), the plan hash is recomputed with the old one kept in `response_log`, and the write is atomic and idempotent. The nightly `metrics` run calls it after the `ARM_DECISION` lines. See `docs/pipeline/183-queue-sync-short-text.md`.
