@@ -19,15 +19,26 @@ Graph answers no per-Reel reach for the live Page, so every Reel's ``reach`` is
 null (``docs/facebook-metrics.md``). Plays not yet measured are unknown, never 0,
 and a short counts toward an arm's ``n`` only once its day-7 window is settled
 (``tracking.day7.window_settled``).
+
+YouTube Shorts arms (title body, hashtag set) are the second half of this
+module: ``assign_stratified_arm`` balances arms within a (project, slot)
+stratum, ``youtube_outcome`` reads a Short's 72 h views and average view
+percentage from the stored observation series, and ``decide_shorts_arms``
+turns the settled outcomes into one decision record per arm -- ``hold``,
+``demote``, ``pause`` or ``INSUFFICIENT_EVIDENCE``. Every decision is a pure
+function of recorded numbers and :class:`ArmThresholds`; nothing here picks
+text to send (the caption/title generator does), and no LLM is involved.
 """
 
 from __future__ import annotations
 
 import hashlib
+import math
 import statistics
+from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 HASHTAG_MODES = frozenset({"none", "location", "june"})
 #: Facebook Reel plays are the only experiment outcome measured today.
@@ -247,4 +258,310 @@ def arm_report_lines(results: Sequence[ArmResult]) -> List[str]:
             f"EXPERIMENT {r.experiment} platform={r.platform} arm={r.arm} n={r.n} "
             f"median_plays={median}"
         )
+    return lines
+
+
+# --- YouTube Shorts arms: title body and hashtag set -------------------------
+
+#: The two factors a Short's sidecar ``experiment_arms`` may tag with an arm id.
+SHORTS_FACTORS = ("yt_title_body", "yt_hashtag_set")
+
+#: The outcome is read at 72 h after posting, within 12 h either way
+#: (the day-7 snapshot rule in ``tracking.evidence_export``, at a 72 h target).
+OUTCOME_AGE = timedelta(hours=72)
+OUTCOME_TOLERANCE = timedelta(hours=12)
+
+#: Named defaults for :class:`ArmThresholds` (JP-approved conservative values,
+#: decision D2: act only on a clear, repeated gap).
+DEFAULT_MIN_N = 36  #: settled Shorts an arm needs before it can be judged
+DEFAULT_MIN_GAP = 3.0  #: a reference arm's median ratio must be >= 3x this arm's
+DEFAULT_PAUSE_GAP = 6.0  #: ...and >= 6x (with no better retention) to pause
+PAUSE_RETEST_DAYS = 28  #: a paused arm is re-tested once every 28 days
+
+HOLD = "hold"
+DEMOTE = "demote"
+PAUSE = "pause"
+INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+
+#: An arm's gap must hold in each of this many chronological slices of its
+#: Shorts (halves): one good or bad stretch is not a "repeated" gap.
+REPEAT_SLICES = 2
+
+
+@dataclass(frozen=True)
+class ArmThresholds:
+    """Tracked config for the arm decision; ``policy.arm_thresholds`` overrides."""
+
+    min_n: int = DEFAULT_MIN_N
+    min_gap: float = DEFAULT_MIN_GAP
+    pause_gap: float = DEFAULT_PAUSE_GAP
+    retest_days: int = PAUSE_RETEST_DAYS
+
+
+_THRESHOLD_KEYS = frozenset({"min_n", "min_gap", "pause_gap", "retest_days"})
+
+
+def parse_arm_thresholds(block: Any) -> ArmThresholds:
+    """Validate ``policy.arm_thresholds`` (``None`` = the named defaults)."""
+    if block is None:
+        return ArmThresholds()
+    if not isinstance(block, dict):
+        raise ValueError(f"policy.arm_thresholds must be a mapping (or omitted), got {block!r}")
+    unknown = set(block) - _THRESHOLD_KEYS
+    if unknown:
+        raise ValueError(f"policy.arm_thresholds.{sorted(unknown)[0]} is not a recognized key")
+    values: Dict[str, Any] = {}
+    for key in ("min_n", "retest_days"):
+        if key in block:
+            v = block[key]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f"policy.arm_thresholds.{key} must be an int >= 1, got {v!r}")
+            values[key] = v
+    for key in ("min_gap", "pause_gap"):
+        if key in block:
+            v = block[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 1:
+                raise ValueError(f"policy.arm_thresholds.{key} must be a number > 1, got {v!r}")
+            values[key] = float(v)
+    out = ArmThresholds(**values)
+    if out.pause_gap < out.min_gap:
+        raise ValueError("policy.arm_thresholds.pause_gap must be >= min_gap")
+    return out
+
+
+def assign_stratified_arm(
+    factor: str,
+    arm_ids: Sequence[str],
+    stratum: Tuple[str, str],
+    short_key: Any,
+    assigned: Sequence[str],
+) -> str:
+    """The arm for a new Short in ``stratum`` (``(project, slot)``).
+
+    ``assigned`` holds the arms already given to that stratum's Shorts. The
+    new Short takes an arm with the fewest so far, so arm counts never differ
+    by more than one within the stratum (the ordinal confound: an arm no
+    longer lands on the early or on the strong slot by luck). Ties break on a
+    stable sha256 of ``factor:project:slot:short_key:arm`` -- never random.
+    """
+    counts = Counter(assigned)
+    fewest = min(counts.get(a, 0) for a in arm_ids)
+    tied = [a for a in arm_ids if counts.get(a, 0) == fewest]
+
+    def rank(arm: str) -> bytes:
+        key = f"{factor}:{stratum[0]}:{stratum[1]}:{short_key}:{arm}"
+        return hashlib.sha256(key.encode()).digest()
+
+    return min(tied, key=rank)
+
+
+def _utc(ts: Any) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(str(ts)) if ts else None
+    except ValueError:
+        return None
+    if dt is not None and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc) if dt else None
+
+
+def youtube_outcome(short: Any, today: date) -> Optional[Tuple[int, Optional[float]]]:
+    """``(views_72h, avg_view_percentage)`` for a settled YouTube Short, or ``None``.
+
+    Read from the measured observation nearest 72 h after posting (within
+    12 h) in ``short.observation_log["youtube"]``. Unsettled means
+    ``posted + 72 h > today - SETTLE_LAG_DAYS`` (the Analytics lag in
+    ``tracking.day7``). Unreported retention is ``None``, never 0; a snapshot
+    with no views is not an outcome.
+    """
+    from ..tracking.day7 import SETTLE_LAG_DAYS, posted_date
+
+    posted = posted_date(getattr(short, "posted_at", None))
+    if posted is None or posted + OUTCOME_AGE > today - timedelta(days=SETTLE_LAG_DAYS):
+        return None
+    best = None
+    for entry in (getattr(short, "observation_log", None) or {}).get("youtube") or []:
+        if entry.get("status") != "measured":
+            continue
+        cumulative = entry.get("cumulative") or {}
+        views = cumulative.get("views")
+        event, fetched = _utc(entry.get("event_at")), _utc(entry.get("fetched_at"))
+        if views is None or event is None or fetched is None:
+            continue
+        miss = abs(fetched - event - OUTCOME_AGE)
+        if miss <= OUTCOME_TOLERANCE and (best is None or miss < best[0]):
+            best = (miss, (int(views), cumulative.get("avg_view_percentage")))
+    return best[1] if best else None
+
+
+@dataclass(frozen=True)
+class ShortOutcome:
+    project: str
+    arm: str
+    posted: date
+    views_72h: int
+    avg_view_pct: Optional[float]
+
+
+def shorts_arm_outcomes(
+    factor: str, records: Iterable[Any], arms_for_project, today: date
+) -> List[ShortOutcome]:
+    """One :class:`ShortOutcome` per tracked Short tagged into ``factor`` with a
+    settled 72 h outcome. ``arms_for_project`` is as for :func:`arm_observations`."""
+    from ..tracking.day7 import posted_date
+
+    rows = []
+    for record in records:
+        tagged = arms_for_project(record.project) or {}
+        for short in record.shorts:
+            arm = (tagged.get(short.index) or {}).get(factor)
+            outcome = youtube_outcome(short, today) if arm else None
+            if outcome is not None:
+                rows.append(
+                    ShortOutcome(
+                        record.project, arm, posted_date(short.posted_at), outcome[0], outcome[1]
+                    )
+                )
+    return rows
+
+
+@dataclass(frozen=True)
+class ArmDecision:
+    factor: str
+    arm: str
+    decision: str
+    n: int
+    #: Median of the arm's views / its project's median (``None`` = unknown).
+    score: Optional[float]
+    #: Median score of the other arms that hold ``min_n`` (``None`` = unknown).
+    reference: Optional[float]
+    #: ``reference / score`` (``inf`` when the arm's median is 0).
+    gap: Optional[float]
+    reason: str
+
+
+def _median_or_none(values: Sequence[float]) -> Optional[float]:
+    return float(statistics.median(values)) if values else None
+
+
+def _gap(reference: float, score: float) -> float:
+    return math.inf if score <= 0 else reference / score
+
+
+def decide_shorts_arms(
+    factor: str, outcomes: Sequence[ShortOutcome], thresholds: ArmThresholds
+) -> List[ArmDecision]:
+    """One decision per arm, from settled outcomes and ``thresholds`` alone.
+
+    Each Short's views are divided by the median views of its project's
+    Shorts (a project counts only if it holds two or more arms and a non-zero
+    median), so an arm is never judged by the strength of the projects it
+    happened to land in. An arm's score is the median of those ratios; its
+    reference is the median score of the OTHER arms holding ``min_n``
+    (``caption_ranking``'s pool-median-reference policy, with a ratio gap
+    instead of a lift band). An arm below ``min_n`` or with no reference is
+    ``INSUFFICIENT_EVIDENCE``. Otherwise a gap of at least ``min_gap`` that
+    holds in each chronological half of the arm's Shorts is ``demote``
+    (``pause`` at ``pause_gap`` when its median retention is also known and no
+    better than the others'); everything else, winners included, is ``hold``.
+    """
+    by_project: Dict[str, List[ShortOutcome]] = {}
+    for o in outcomes:
+        by_project.setdefault(o.project, []).append(o)
+    ratios: Dict[str, List[Tuple[date, str, float]]] = {}
+    pcts: Dict[str, List[float]] = {}
+    for project, rows in sorted(by_project.items()):
+        if len({r.arm for r in rows}) < 2:
+            continue
+        base = statistics.median(r.views_72h for r in rows)
+        if base <= 0:
+            continue
+        for r in rows:
+            ratios.setdefault(r.arm, []).append((r.posted, project, r.views_72h / base))
+            if r.avg_view_pct is not None:
+                pcts.setdefault(r.arm, []).append(r.avg_view_pct)
+    if not ratios:
+        return []
+    scores = {a: _median_or_none([x[2] for x in v]) for a, v in ratios.items()}
+    judged = {a for a, v in ratios.items() if len(v) >= thresholds.min_n}
+    out = []
+    for arm in sorted(ratios):
+        n, score = len(ratios[arm]), scores[arm]
+        others = sorted(a for a in judged if a != arm)
+        reference = _median_or_none([scores[a] for a in others])
+        if n < thresholds.min_n:
+            out.append(
+                ArmDecision(factor, arm, INSUFFICIENT_EVIDENCE, n, score, None, None, "n_below_min")
+            )
+            continue
+        if reference is None:
+            out.append(
+                ArmDecision(
+                    factor, arm, INSUFFICIENT_EVIDENCE, n, score, None, None, "no_reference"
+                )
+            )
+            continue
+        gap = _gap(reference, score)
+        if gap < thresholds.min_gap:
+            out.append(ArmDecision(factor, arm, HOLD, n, score, reference, gap, "within_gap"))
+            continue
+        ordered = sorted(ratios[arm], key=lambda x: (x[0], x[1], x[2]))
+        size = len(ordered) // REPEAT_SLICES
+        slices = [
+            ordered[i * size : (i + 1) * size if i < REPEAT_SLICES - 1 else None]
+            for i in range(REPEAT_SLICES)
+        ]
+        repeated = all(
+            _gap(reference, statistics.median(x[2] for x in chunk)) >= thresholds.min_gap
+            for chunk in slices
+        )
+        if not repeated:
+            out.append(ArmDecision(factor, arm, HOLD, n, score, reference, gap, "gap_not_repeated"))
+            continue
+        mine = _median_or_none(pcts.get(arm, []))
+        theirs = _median_or_none([p for a in others for p in pcts.get(a, [])])
+        no_better = mine is not None and theirs is not None and mine <= theirs
+        if gap >= thresholds.pause_gap and no_better:
+            out.append(
+                ArmDecision(factor, arm, PAUSE, n, score, reference, gap, "clear_gap_repeated")
+            )
+        else:
+            out.append(
+                ArmDecision(factor, arm, DEMOTE, n, score, reference, gap, "clear_gap_repeated")
+            )
+    return out
+
+
+def pause_retest_due(
+    paused_on: date, today: date, thresholds: ArmThresholds = ArmThresholds()
+) -> bool:
+    """True once a paused arm's fixed re-test schedule has come round
+    (``retest_days`` after ``paused_on``)."""
+    return today >= paused_on + timedelta(days=thresholds.retest_days)
+
+
+def _num(value: Optional[float]) -> str:
+    if value is None:
+        return "unknown"
+    return "inf" if math.isinf(value) else f"{value:.2f}"
+
+
+def decision_lines(
+    factor: str, decisions: Sequence[ArmDecision], thresholds: ArmThresholds = ArmThresholds()
+) -> List[str]:
+    """One ``ARM_DECISION ...`` line per arm for the nightly output."""
+    if not decisions:
+        return [
+            f"ARM_DECISION factor={factor} arm=- decision={INSUFFICIENT_EVIDENCE} n=0 reason=no_outcomes"
+        ]
+    lines = []
+    for d in decisions:
+        line = (
+            f"ARM_DECISION factor={d.factor} arm={d.arm} decision={d.decision} n={d.n} "
+            f"min_n={thresholds.min_n} score={_num(d.score)} reference={_num(d.reference)} "
+            f"gap={_num(d.gap)} reason={d.reason}"
+        )
+        if d.decision == PAUSE:
+            line += f" retest_days={thresholds.retest_days}"
+        lines.append(line)
     return lines

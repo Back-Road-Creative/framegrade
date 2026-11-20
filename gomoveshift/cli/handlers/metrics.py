@@ -27,7 +27,15 @@ from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
 # Imported at module scope (not lazily) so tests can ``patch.object`` them.
 from ...publishing.brand_policy import load_brand_policy
 from ...publishing.dispatch import apply_suppression_response
-from ...publishing.experiments import arm_observations, arm_report_lines, arm_results
+from ...publishing.experiments import (
+    SHORTS_FACTORS,
+    arm_observations,
+    arm_report_lines,
+    arm_results,
+    decide_shorts_arms,
+    decision_lines,
+    shorts_arm_outcomes,
+)
 from ...publishing.plan_io import load_publish_plan
 from ...publishing.queue import (
     open_queue_db,
@@ -230,6 +238,7 @@ def _cmd_metrics_collect(args, config) -> int:
 
     _apply_bounded_response(config, brand, getattr(args, "response_mode", "shadow"))
     _report_caption_experiments(config, brand)
+    _report_shorts_arm_decisions(config, brand)
     _write_caption_evidence(config)
     _write_title_evidence(config)
     return 0
@@ -263,6 +272,38 @@ def _report_caption_experiments(config, brand: str) -> None:
             conn.close()
     except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
         logger.warning("caption experiment report skipped: %s", exc)
+
+
+def _report_shorts_arm_decisions(config, brand: str) -> None:
+    """Print one ``ARM_DECISION ...`` line per arm of each YouTube Shorts factor
+    (title body, hashtag set): ``hold`` / ``demote`` / ``pause`` /
+    ``INSUFFICIENT_EVIDENCE``, from 72 h outcomes and the brand's
+    ``policy.arm_thresholds`` (``publishing/experiments.py``). Reporting only:
+    a failure is logged and swallowed, never failing the collection."""
+    try:
+        thresholds = load_brand_policy(brand).arm_thresholds
+        storage_path = Path(config.seo.storage_path)
+        conn = open_queue_db(storage_path)
+        try:
+            lookup = _sidecar_lookup(conn, storage_path)
+
+            def arms_for_project(project):
+                path = lookup(project)
+                if path is None:
+                    return None
+                return {s.short_index: s.experiment_arms for s in load_publish_plan(path).shorts}
+
+            records = TrackingStore().load_all_records()
+            for factor in SHORTS_FACTORS:
+                rows = shorts_arm_outcomes(factor, records, arms_for_project, date.today())
+                for line in decision_lines(
+                    factor, decide_shorts_arms(factor, rows, thresholds), thresholds
+                ):
+                    print(line)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - a report must never fail the collection
+        logger.warning("shorts arm decision report skipped: %s", exc)
 
 
 def _write_caption_evidence(config) -> None:
