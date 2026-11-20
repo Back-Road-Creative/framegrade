@@ -383,6 +383,11 @@ def run_check(
                     prior.update(fill)
                     write_row(incidents_dir, prior)
                 continue
+            if prior is not None and prior.get("resolution_reason"):
+                # ``health heal`` closed it with a recorded reason (a recipe-less publish/heal
+                # job that is never resumable); re-filing it from the same failed job would
+                # undo that closure every tick.
+                continue
             write_row(incidents_dir, row)
             by_key[row["key"]] = row
             new.append(row["key"])

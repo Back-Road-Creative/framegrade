@@ -834,3 +834,36 @@ def test_check_stamps_the_failure_fingerprint_on_the_row_it_files(tmp_path):
     _run(tmp_path, lambda e, i, s: True, stamp_fn=lambda r: {"hash": "h2"})
     row = json.loads((tmp_path / "inc" / "demo-drive-a.json").read_text())
     assert row["failure_fingerprint"]["hash"] == "h1" and stamped == [row["key"]]  # filed once
+
+
+def _close_by_heal(tmp_path, drive, reason):
+    rows, _ = load_all(tmp_path / "inc")
+    (row,) = [r for r in rows if r["kind"] == "drive_failed" and r["drive"] == drive]
+    row["resolved_at"] = _hours_ago(1)
+    if reason:
+        row["resolution_reason"] = reason
+    write_row(tmp_path / "inc", row)
+
+
+def _drive_rows(tmp_path, drive):
+    rows, _ = load_all(tmp_path / "inc")
+    return [r for r in rows if r["kind"] == "drive_failed" and r["drive"] == drive]
+
+
+def test_a_row_heal_closed_with_a_reason_stays_closed_while_its_job_is_still_failed(tmp_path):
+    """``health heal`` closes a recipe-less publish/heal ``drive_failed`` row with a recorded
+    ``resolution_reason``; the next check must not re-file it from the same failed job."""
+    _two_drives(tmp_path, "demo-drive-a")
+    _close_by_heal(tmp_path, "demo-drive-a", "no resume recipe: publish job, never resumable")
+    _out, sent = _recheck(tmp_path)
+    (row,) = _drive_rows(tmp_path, "demo-drive-a")
+    assert row["resolved_at"] and row["resolution_reason"].startswith("no resume recipe")
+    assert not [e for e, _s in sent if e == "health_drive_failed"]
+
+
+def test_a_row_resolved_without_a_reason_is_still_refiled_while_its_job_is_failed(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _close_by_heal(tmp_path, "demo-drive-a", None)
+    _recheck(tmp_path)
+    (row,) = _drive_rows(tmp_path, "demo-drive-a")
+    assert not row.get("resolved_at")
