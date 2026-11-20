@@ -41,6 +41,7 @@ from ..publishing.experiments import (
     assign_arms,
     assign_shorts_arms,
     hashtag_mode_for,
+    record_shorts_arms,
 )
 from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
@@ -2387,16 +2388,27 @@ class SocialGenerator:
                 hashtag_arm=shorts_arms.get("yt_hashtag_set"),
             )
             hashtag_arm = shorts_arms.get("yt_hashtag_set")
-            if hashtag_arm and not set(SHORTS_HASHTAG_SET_ARMS[hashtag_arm]) <= set(
-                re.findall(r"#\w+", youtube_description)
-            ):
-                # The length limit cut an arm tag: never record an arm the final
-                # description does not carry. Render the legacy set instead.
-                del shorts_arms["yt_hashtag_set"], arms["yt_hashtag_set"]
-                self._used_pois = pois_before
-                youtube_description = self._build_youtube_description(
+            if hashtag_arm:
+                pois_arm = self._used_pois
+                self._used_pois = dict(pois_before)
+                legacy = self._build_youtube_description(
                     short_index, interactive=interactive, place=desc_place, place_kind=desc_kind
                 )
+
+                def _body(text: str) -> str:
+                    return text.split(" #Shorts", 1)[0]
+
+                carried = set(SHORTS_HASHTAG_SET_ARMS[hashtag_arm]) <= set(
+                    re.findall(r"#\w+", youtube_description)
+                )
+                if carried and _body(youtube_description) == _body(legacy):
+                    self._used_pois = pois_arm
+                else:
+                    # The limit cut an arm tag, or kept the tags only by cutting more of
+                    # the body than the legacy render: never store an arm whose text is
+                    # not whole. Render the legacy set (its POI state is already set).
+                    del shorts_arms["yt_hashtag_set"], arms["yt_hashtag_set"]
+                    youtube_description = legacy
 
             baseline = title[:100]  # YT max 100
             place_facts = None
@@ -2666,7 +2678,9 @@ class SocialGenerator:
                     f"expected num_shorts={num_shorts}"
                 )
         arm_history = {} if shorts_arm_history is None else shorts_arm_history
-        arm_project = re.sub(r"_lf\d+$", "", self.project_name)
+        # One stratum per base project: Phase D's title ordinals are unique across the
+        # whole day, so a per-position stratum would hold one Short and balance nothing.
+        arm_stratum = (re.sub(r"_lf\d+$", "", self.project_name), "")
         for i in range(1, num_shorts + 1):
             weather = None
             if weather_results and i - 1 < len(weather_results):
@@ -2706,7 +2720,7 @@ class SocialGenerator:
                 shorts_arms = dict(per_short_shorts_arms[i - 1] or {})
             elif shorts_arms_enabled:
                 shorts_arms = assign_shorts_arms(
-                    (arm_project, f"day-position-{facts.ordinal if facts else 0}"),
+                    arm_stratum,
                     global_idx,
                     arm_history,
                     gen._shorts_arm_factors(global_idx, facts),
@@ -2722,6 +2736,12 @@ class SocialGenerator:
                 route_record=route_rec,
                 shorts_arms=shorts_arms,
             )
+            if shorts_arms is not None and per_short_shorts_arms is None:
+                record_shorts_arms(
+                    arm_stratum,
+                    arm_history,
+                    {f: a for f, a in post.experiment_arms.items() if shorts_arms.get(f) == a},
+                )
             if post.place_variety:
                 previous = {k: v["body"] for k, v in post.place_variety.items()}
             # An interactive short whose burned OST label is non-empty

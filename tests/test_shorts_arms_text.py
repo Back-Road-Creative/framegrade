@@ -34,6 +34,7 @@ from gomoveshift.publishing.experiments import (  # noqa: E402
     SHORTS_HASHTAG_SET_ARMS,
     SHORTS_TITLE_BODY_ARMS,
     assign_shorts_arms,
+    record_shorts_arms,
 )
 from gomoveshift.publishing.plan_bracket_sync import sync_bracket_short_text  # noqa: E402
 from gomoveshift.publishing.plan_gates import (  # noqa: E402
@@ -115,7 +116,12 @@ def test_every_hashtag_is_an_existing_generic_hashtag():
 def test_assignment_is_deterministic_and_stratified():
     def run():
         history: dict = {}
-        return [assign_shorts_arms(("p", "slot1"), k, history, SHORTS_FACTORS) for k in range(1, 9)]
+        out = []
+        for k in range(1, 9):
+            arms = assign_shorts_arms(("p", "slot1"), k, history, SHORTS_FACTORS)
+            record_shorts_arms(("p", "slot1"), history, arms)
+            out.append(arms)
+        return out
 
     first = run()
     assert first == run()
@@ -128,7 +134,8 @@ def test_strata_are_balanced_independently():
     history: dict = {}
     for slot in ("a", "b"):
         for k in range(2):
-            assign_shorts_arms(("p", slot), k, history, ["yt_hashtag_set"])
+            arms = assign_shorts_arms(("p", slot), k, history, ["yt_hashtag_set"])
+            record_shorts_arms(("p", slot), history, arms)
     for slot in ("a", "b"):
         assert sorted(history[("yt_hashtag_set", "p", slot)]) == sorted(
             SHORTS_ARMS["yt_hashtag_set"]
@@ -377,34 +384,69 @@ def test_bracket_sync_refuses_a_stored_arm_it_can_no_longer_render(tmp_path, arm
 # --- one history, one stratum per base project --------------------------------
 
 
-def test_phase_d_pattern_balances_each_stratum_across_long_forms():
-    """The real per-long-form call pattern: one ``generate_all`` per LF (project
-    ``<base>_lfNN``) with one shared history, 5 Shorts at day positions 1-5."""
+def _drive_posts(n_lf=8, n=5, **gen_kw):
+    """The Phase D call pattern: one ``generate_all`` per LF (``<base>_lfNN``), one shared
+    history, day-wide title ordinals exactly as ``_per_short_title_facts`` gives them."""
     history: dict = {}
     posts = []
-    for lf in range(1, 9):
+    for lf in range(1, n_lf + 1):
         gen = SocialGenerator(
-            location=LABEL, project_name=f"drive_lf{lf:02d}", series_part=lf, spooled_texts={}
+            location=LABEL,
+            project_name=f"drive_lf{lf:02d}",
+            series_part=lf,
+            spooled_texts={},
+            **gen_kw,
         )
-        n = 5
+        facts = [
+            TitleFacts(date=DATE, ordinal=(lf - 1) * n + k + 1, secs=41, place_ok=True)
+            for k in range(n)
+        ]
         posts += gen.generate_all(
             num_shorts=n,
             per_short_locations=[LABEL] * n,
             per_short_regions=[REGIONS] * n,
-            per_short_title_facts=_facts(n),
+            per_short_title_facts=facts,
             global_indexes=[lf * 10 + k for k in range(n)],
             shorts_arms_enabled=True,
             shorts_arm_history=history,
         )
+    return posts, history
+
+
+def test_phase_d_pattern_balances_the_drive_with_day_wide_ordinals():
+    posts, history = _drive_posts()
     assert len(posts) == 40
     for factor, arms in SHORTS_ARMS.items():
-        by_slot: dict = {}
-        for k, post in enumerate(posts):
-            by_slot.setdefault(k % 5, []).append(post.experiment_arms[factor])
-        for slot, got in by_slot.items():
-            counts = [got.count(a) for a in arms]
-            assert max(counts) - min(counts) <= 1, (factor, slot, counts)
+        counts = [sum(1 for p in posts if p.experiment_arms[factor] == a) for a in arms]
+        assert sum(counts) == 40 and max(counts) - min(counts) <= 1, (factor, counts)
     assert {key[1] for key in history} == {"drive"}, "strata use the base project"
+
+
+def test_a_dropped_arm_is_not_counted_in_the_history():
+    place = "Llanfairpwllgwyngyllgogerychwyrndrobwllllantysiliogogogoch Community Council"
+    gen = SocialGenerator(location=place, project_name="p_lf01", series_part=1, spooled_texts={})
+    history: dict = {}
+    facts = [TitleFacts(DATE, k, 41, True) for k in range(1, 7)]
+    posts = gen.generate_all(
+        num_shorts=6,
+        per_short_locations=[place] * 6,
+        per_short_regions=[[place]] * 6,
+        per_short_title_facts=facts,
+        shorts_arms_enabled=True,
+        shorts_arm_history=history,
+    )
+    for factor, arms in SHORTS_ARMS.items():
+        kept = [p.experiment_arms[factor] for p in posts if factor in p.experiment_arms]
+        recorded = history.get((factor, "p", ""), [])
+        assert sorted(recorded) == sorted(kept), factor
+        counts = [kept.count(a) for a in arms]
+        if kept:
+            assert max(counts) - min(counts) <= 1
+    # clip_led never fits this place, so it was dropped each time it was picked
+    assert all(p.experiment_arms.get("yt_title_body") != "clip_led" for p in posts)
+    assert history[("yt_title_body", "p", "")] == ["place_led"] * len(
+        [p for p in posts if "yt_title_body" in p.experiment_arms]
+    )
 
 
 def test_phase_d_hands_one_shared_history_to_every_long_form(tmp_path):
@@ -552,3 +594,25 @@ def test_every_title_variant_passes_the_gates_with_a_long_place():
                 ).record(),
             )  # fmt: skip
             assert short_review_refusal(record) is None, (arm, record.payloads.youtube.title)
+
+
+@pytest.mark.parametrize("arm", sorted(SHORTS_HASHTAG_SET_ARMS))
+def test_a_kept_hashtag_arm_never_cuts_more_description_body_than_legacy(arm):
+    def render(hashtag_arm=None):
+        gen = SocialGenerator(
+            location=LONG_COUNTY, project_name="p", series_part=1, spooled_texts={}
+        )
+        gen.nearest_poi = LONG_POI
+        return gen.generate_post(
+            1,
+            title_facts=TitleFacts(DATE, 1, 41, True),
+            shorts_arms={"yt_hashtag_set": hashtag_arm} if hashtag_arm else None,
+        )
+
+    legacy, post = render(), render(arm)
+    body = lambda d: d.split(" #Shorts", 1)[0]  # noqa: E731
+    assert len(legacy.youtube_description) > 150  # the long case
+    if "yt_hashtag_set" in post.experiment_arms:
+        assert body(post.youtube_description) == body(legacy.youtube_description)
+    else:
+        assert post.youtube_description == legacy.youtube_description

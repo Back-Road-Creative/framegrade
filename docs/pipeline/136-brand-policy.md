@@ -131,20 +131,22 @@ carry the block itself to keep the experiment running.
   (`#POVDriving`, the legacy set) or `road` (`#RoadTrip #OpenRoad`), both from `GENERIC_HASHTAGS`.
   Phase D's social pass calls `generate_all(shorts_arms_enabled=True)` once per long-form with ONE
   shared `shorts_arm_history`: `assign_shorts_arms` gives each new Short an arm per factor,
-  stratified by (BASE project, position in its day) and ordered by global index. The stratum
-  project is the generator's `<base>_lfNN` with the `_lfNN` suffix stripped, the project
-  `decide_shorts_arms` also groups on (`record.project`). Across a whole drive, the counts of one
-  stratum differ by at most one among the Shorts that were assigned that factor; a Short whose
-  text cannot carry an arm (below) or whose arm is dropped (below) leaves the split as it was,
-  not rebalanced. The same inputs give the same arms; `SocialGenerator` renders them and the plan
+  stratified by the BASE project alone (the generator's `<base>_lfNN` with `_lfNN` stripped, the
+  project `decide_shorts_arms` also groups on, which ignores the slot). A Short's day position is
+  not part of the stratum: Phase D's title ordinals are unique across the whole day, so a
+  per-position stratum would hold one Short and balance nothing. The history counts only the arms
+  a Short actually kept (`record_shorts_arms`, after the post is rendered), so across a drive the
+  per-arm counts of one factor differ by at most one among the Shorts that kept it; an arm
+  dropped at render time (below) does not count and is not rebalanced. The same inputs give the same arms; `SocialGenerator` renders them and the plan
   stores them in `experiment_arms`.
   A factor the text cannot carry is not assigned (a hand title or an unverified place has no
   title-body arm; an interactive Short has no hashtag-set arm), and an unknown arm renders as
   today and is not stored. An arm is also dropped, never stored, when its text cannot be
   rendered whole: every body of the title arm is already a published title or would not fit in
   100 characters without a mid-word cut (the full template walk is used instead), or the
-  description limit would cut one of the hashtag arm's tags (the arm's tags are pinned in the
-  description, so only a description with no room for them loses the arm). A caller that does not
+  description limit would cut one of the hashtag arm's tags, or cut more of the description's
+  body than the legacy render does (the arm's tags are pinned, so only a description with no
+  room for them loses the arm). A caller that does not
   enable arms, and every already-queued Short, keeps its text byte for byte
   (`tests/fixtures/shorts_text_origin_main.json`, generated from origin/main).
   Regeneration never assigns: `sync_bracket_short_text` passes each Short's stored arms

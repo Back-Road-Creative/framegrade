@@ -393,6 +393,16 @@ def assign_stratified_arm(
     return min(tied, key=rank)
 
 
+def record_shorts_arms(
+    stratum: Tuple[str, str],
+    assigned: Dict[Tuple[str, str, str], List[str]],
+    arms: Mapping[str, str],
+) -> None:
+    """Count ``arms`` (``{factor: arm}`` a Short actually kept) in ``assigned``."""
+    for factor, arm in arms.items():
+        assigned.setdefault((factor, stratum[0], stratum[1]), []).append(arm)
+
+
 def assign_shorts_arms(
     stratum: Tuple[str, str],
     short_key: Any,
@@ -402,17 +412,18 @@ def assign_shorts_arms(
     """``{factor: arm}`` for one new Short, each through :func:`assign_stratified_arm`.
 
     ``assigned`` is the caller's running record, ``(factor, project, slot) ->
-    arms given so far``; it is updated in place, so calling this for a batch in
-    a fixed order gives the same arms every time. Only ``factors`` the Short's
+    arms kept so far``. This only reads it: the caller records what the Short
+    actually kept with :func:`record_shorts_arms` (an arm dropped at render time
+    never counts), so a fixed order gives the same arms every time. Only ``factors`` the Short's
     text can actually carry are assigned (an arm that changes nothing would only
     blur the outcome).
     """
     out: Dict[str, str] = {}
     for factor in factors:
-        history = assigned.setdefault((factor, stratum[0], stratum[1]), [])
-        arm = assign_stratified_arm(factor, SHORTS_ARMS[factor], stratum, short_key, history)
-        history.append(arm)
-        out[factor] = arm
+        history = assigned.get((factor, stratum[0], stratum[1]), [])
+        out[factor] = assign_stratified_arm(
+            factor, SHORTS_ARMS[factor], stratum, short_key, history
+        )
     return out
 
 
