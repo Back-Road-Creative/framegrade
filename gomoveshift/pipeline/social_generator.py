@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from string import Formatter
+from types import SimpleNamespace
 from typing import Iterable, List, Mapping, Optional, Sequence
 
 import yaml
@@ -450,6 +451,12 @@ class SocialPost:
     #: caption whose opener order was re-ranked from ``caption_evidence.json``;
     #: absent when there was no evidence file or Waypost refused it.
     caption_rankings: "dict[str, dict]" = field(default_factory=dict)
+    #: ``{"title"|"description": {"body", "reason", "kind"}}`` -- the place each
+    #: surface names and why (``place_variety.PlaceChoice``): ``distinct``, ``varied``
+    #: (another measured place replaced a repeat) or ``no_alternative`` (a repeat
+    #: with no other measured place, today's text kept). ``{}`` for a hand title, a
+    #: legacy title or an older sidecar round-trip.
+    place_variety: "dict[str, dict]" = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -468,6 +475,7 @@ class SocialPost:
             "experiment_arms": dict(self.experiment_arms),
             "caption_templates": dict(self.caption_templates),
             "caption_rankings": dict(self.caption_rankings),
+            "place_variety": {k: dict(v) for k, v in self.place_variety.items()},
         }
 
 
@@ -491,6 +499,107 @@ TITLE_FRAME_TEMPLATES = [
     "{county}'s {terrain_desc}, featuring {location}",
     "{moment}: the {terrain_desc} of {location}",
 ]
+
+# ─── Place variety (unit C2) ───────────────────────────────────────
+# Near-zero-view Shorts line up with the same place named Short after Short.
+# Within a project, and from one publish day to the next, a Short's place body
+# must differ from the previous Short's whenever its own clip measured another
+# place. Robust by construction: candidates are only places the Short's
+# final-text review already accepts (``youtube_adapter._clip_towns`` /
+# ``_clip_places``: a town held for every retained second, a county the clip's GPS
+# voted) plus the clip's measured road, offered to the DESCRIPTION line only (the
+# review refuses a road named in a title: it cites the title's one place, and a
+# road is evidence for a tag only). Nothing is ever guessed.
+# ``choose_place_body`` is the pure chooser; later units (queued-row repair) import it.
+#: ``PlaceChoice.reason`` values. Recorded on the Short as ``place_variety``.
+REASON_DISTINCT = "distinct"  # today's body is not a repeat; kept
+REASON_VARIED = "varied"  # today's body repeated; another measured place used
+REASON_NO_ALTERNATIVE = "no_alternative"  # repeated, no other measured place; kept
+
+KIND_TOWN = "town"
+KIND_ROAD = "road"
+KIND_COUNTY = "county"
+#: Most specific first.
+KIND_ORDER = (KIND_TOWN, KIND_ROAD, KIND_COUNTY)
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceChoice:
+    """The chosen place ``body``, why (``reason``), and its ``kind`` (``"today"``
+    when today's text was kept, else town/road/county)."""
+
+    body: str
+    reason: str
+    kind: str = "today"
+
+    def to_dict(self) -> dict:
+        return {"body": self.body, "reason": self.reason, "kind": self.kind}
+
+
+def _norm(text: str) -> str:
+    return " ".join((text or "").split()).lower()
+
+
+def choose_place_body(
+    candidates: Sequence[str],
+    previous: Sequence[str] = (),
+    *,
+    kinds: Optional[Sequence[str]] = None,
+) -> PlaceChoice:
+    """Pick the Short's place body: ``candidates[0]`` (today's text) unless it
+    repeats one of ``previous`` (the previous Short's body), then the first later
+    candidate that does not. Pure: no I/O, deterministic.
+
+    ``candidates`` is today's body first, then the clip's other measured places in
+    :data:`KIND_ORDER`; ``kinds`` (parallel, optional) labels them for the result.
+    No candidate left -> today's body with ``no_alternative``. Comparison ignores
+    case and spacing."""
+    if not candidates:
+        raise ValueError("choose_place_body needs today's body as the first candidate")
+    seen = {_norm(p) for p in previous if _norm(p)}
+    today = candidates[0]
+    if _norm(today) not in seen:
+        return PlaceChoice(today, REASON_DISTINCT)
+    for i, cand in enumerate(candidates[1:], start=1):
+        if _norm(cand) and _norm(cand) not in seen:
+            kind = kinds[i] if kinds and i < len(kinds) else "other"
+            return PlaceChoice(cand, REASON_VARIED, kind)
+    return PlaceChoice(today, REASON_NO_ALTERNATIVE)
+
+
+def measured_places(
+    regions: Sequence[str] = (),
+    roads: Sequence[str] = (),
+    route_record: Optional[Mapping] = None,
+) -> "list[tuple[str, str]]":
+    """The clip's measured ``(kind, body)`` places, town, road, county order, each
+    once. Towns and counties come from the same functions the Short's review
+    reads, so every town/county here is one the review accepts."""
+    from ..publishing.youtube_adapter import _clip_places, _clip_towns
+
+    rec = SimpleNamespace(sampled_regions=tuple(regions), route_record=dict(route_record or {}))
+    found = (
+        [(KIND_TOWN, t["value"]) for t in _clip_towns(rec)]
+        + [(KIND_ROAD, r.strip()) for r in roads if r and r.strip()]
+        + [(KIND_COUNTY, c["value"]) for c in _clip_places(rec, "")]
+    )
+    out: "list[tuple[str, str]]" = []
+    seen: set = set()
+    for kind, body in found:
+        if _norm(body) not in seen:
+            seen.add(_norm(body))
+            out.append((kind, body))
+    return out
+
+
+def town_evidence(route_record: Optional[Mapping]) -> "dict[str, str]":
+    """Town name -> evidence id for the towns the review accepts (``towns=`` of
+    ``title_decision.short_place_facts``)."""
+    from ..publishing.youtube_adapter import _clip_towns
+
+    rec = SimpleNamespace(route_record=dict(route_record or {}))
+    return {t["value"]: t["evidence_id"] for t in _clip_towns(rec)}
+
 
 # ─── Stamped titles (drive path) ─────────────────────────────────────
 # A drive short's title is ``"{stamp}: {body}"``. The stamp -- ``"Sep 14, 3rd
@@ -1133,14 +1242,17 @@ class SocialGenerator:
             moment=moment,
         )
 
-    def _compose_stamped_title(self, facts: TitleFacts, seed_suffix: str, max_len: int) -> str:
+    def _compose_stamped_title(
+        self, facts: TitleFacts, seed_suffix: str, max_len: int, place: Optional[str] = None
+    ) -> str:
         """``"{stamp}: {body}"``. The ledger walk rotates the BODY only; the
         stamp (<=22 chars, the whole first-3-word prefix) never changes or truncates."""
         stamp = title_stamp(facts.date, facts.ordinal)
-        named = facts.place_ok and bool(self.location_short)
+        place = place or self.location_short
+        named = facts.place_ok and bool(place)
         slots = defaultdict(
             str,
-            location=self.location_short if named else "",
+            location=place if named else "",
             secs=str(facts.secs),
             weekday=weekday_name(facts.date),
         )
@@ -1163,6 +1275,7 @@ class SocialGenerator:
         seed_suffix: str,
         max_len: int,
         facts: Optional[TitleFacts] = None,
+        place: Optional[str] = None,
     ) -> str:
         """Compose a title from grounded fact slots.
 
@@ -1197,7 +1310,7 @@ class SocialGenerator:
                 title for that index, or lower ``--shorts-target``.
         """
         if facts is not None:
-            return self._compose_stamped_title(facts, seed_suffix, max_len)
+            return self._compose_stamped_title(facts, seed_suffix, max_len, place)
         slots = self._title_slots(short_index)
         available = {name for name, value in slots.items() if value}
         applicable = [t for t in TITLE_FRAME_TEMPLATES if _frame_fields(t) <= available]
@@ -1244,6 +1357,7 @@ class SocialGenerator:
         weather: Optional[WeatherResult],
         short_index: int,
         facts: Optional[TitleFacts] = None,
+        place: Optional[str] = None,
     ) -> str:
         """Pick a unique composed title for this short.
 
@@ -1252,7 +1366,7 @@ class SocialGenerator:
         is retained in the signature for caller stability; it no longer
         selects a title.
         """
-        return self._compose_title(short_index, "titles", max_len=100, facts=facts)
+        return self._compose_title(short_index, "titles", max_len=100, facts=facts, place=place)
 
     def _spooled_opener_keys(self) -> "dict[str, list[tuple[str, ...]]]":
         """Platform -> 6-word opener keys of text other projects spooled."""
@@ -1612,7 +1726,13 @@ class SocialGenerator:
 
         return captions
 
-    def _build_youtube_description(self, short_index: int = 1, interactive: bool = False) -> str:
+    def _build_youtube_description(
+        self,
+        short_index: int = 1,
+        interactive: bool = False,
+        place: "Optional[PlaceChoice]" = None,
+        place_kind: str = "",
+    ) -> str:
         """Build a short YouTube description for Shorts (max 200 chars).
 
         Per-short differentiation uses most specific data available (priority):
@@ -1667,6 +1787,13 @@ class SocialGenerator:
             phrase = f"driving near {self.nearest_poi}, {self.social_location_full}"
             if self._used_pois[self.nearest_poi] > 1:
                 phrase += f" Pt.{short_index}"
+        elif place is not None and place.reason == REASON_VARIED:
+            # A repeated place body gave way to another the clip measured.
+            if place_kind == KIND_ROAD:
+                phrase = f"driving along {place.body}, {self.social_location_full}"
+            else:
+                phrase = f"driving through {place.body}"
+            phrase += f" Pt.{short_index}"
         elif self.road_name:
             phrase = f"driving along {self.road_name}, {self.social_location_full} Pt.{short_index}"
         else:
@@ -2018,12 +2145,40 @@ class SocialGenerator:
         """
         return self._compose_title(short_index, "tiktok", max_len=90, facts=facts)
 
+    def _choose_places(self, previous: "Mapping[str, str]", route_record: Optional[dict]):
+        """The place bodies this Short's title and description name, varied from the
+        previous Short's when the clip measured another place (``place_variety``).
+
+        Title candidates are today's label, then the clip's towns and counties, the
+        places its final-text review accepts; a road is a description-only candidate
+        (the review refuses one in a title). Returns ``(title_choice, description_choice,
+        description_kind, record)``; a choice that keeps today's text is returned as
+        ``None`` so the composer's existing text is byte-identical."""
+        measured = measured_places(self._own_regions or [], self._own_roads, route_record)
+        title = [("today", self.location_short)] + [m for m in measured if m[0] != KIND_ROAD]
+        desc = [("today", self.social_location_full)] + measured
+        t_choice = choose_place_body(
+            [b for _, b in title], [previous.get("title", "")], kinds=[k for k, _ in title]
+        )
+        d_choice = choose_place_body(
+            [b for _, b in desc], [previous.get("description", "")], kinds=[k for k, _ in desc]
+        )
+        record = {"title": t_choice.to_dict(), "description": d_choice.to_dict()}
+        return (
+            t_choice if t_choice.reason == REASON_VARIED else None,
+            d_choice if d_choice.reason == REASON_VARIED else None,
+            d_choice.kind,
+            record,
+        )
+
     def generate_post(
         self,
         short_index: int,
         weather: Optional[WeatherResult] = None,
         global_index: Optional[int] = None,
         title_facts: Optional[TitleFacts] = None,
+        previous_places: "Optional[Mapping[str, str]]" = None,
+        route_record: Optional[dict] = None,
     ) -> SocialPost:
         """
         Generate a unique social post for one short.
@@ -2038,6 +2193,12 @@ class SocialGenerator:
                 caller has no offset to apply.
             title_facts: Drive path only -- composes a stamped title (see
                 :class:`TitleFacts`). ``None`` keeps the legacy composition.
+            previous_places: ``{"title": body, "description": body}`` -- the place
+                bodies the previous Short named (``SocialPost.place_variety``).
+                A stamped title or description naming the same body takes another
+                place the clip measured (``place_variety``); ``None`` = no previous.
+            route_record: This clip's measured route record (towns held for every
+                retained second are title candidates).
 
         Returns:
             SocialPost with all platform-specific content
@@ -2076,6 +2237,11 @@ class SocialGenerator:
             self._pool_fallback_logged = True
 
         arms = assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
+        title_place, desc_place, desc_kind, variety = None, None, "", {}
+        if hand is None and title_facts is not None and title_facts.place_ok:
+            title_place, desc_place, desc_kind, variety = self._choose_places(
+                previous_places or {}, route_record
+            )
         for attempt in range(max_attempts):
             # Vary the seed on retries so we pick different hooks/titles
             rng = self._get_rng(short_index + attempt * 1000)
@@ -2085,7 +2251,13 @@ class SocialGenerator:
                 # Hand title/caption bypass the template pool entirely.
                 title = hand.title
             else:
-                title = self._pick_title(rng, weather, short_index, title_facts)
+                title = self._pick_title(
+                    rng,
+                    weather,
+                    short_index,
+                    title_facts,
+                    place=title_place.body if title_place else None,
+                )
             # One caption per platform — a hand caption becomes the
             # YouTube caption verbatim and seeds the other three.
             caption_templates: "dict[str, str]" = {}
@@ -2109,7 +2281,7 @@ class SocialGenerator:
                 else self._pick_tiktok_title(rng, short_index, title_facts)
             )
             youtube_description = self._build_youtube_description(
-                short_index, interactive=interactive
+                short_index, interactive=interactive, place=desc_place, place_kind=desc_kind
             )
 
             baseline = title[:100]  # YT max 100
@@ -2117,9 +2289,10 @@ class SocialGenerator:
             if hand is None and title_facts is not None and title_facts.place_ok:
                 place_facts = short_place_facts(
                     baseline,
-                    self.location_short,
+                    title_place.body if title_place else self.location_short,
                     self._own_regions,
                     segment_id=f"lf{self.series_part or 0:02d}-short{short_index:03d}",
+                    towns=town_evidence(route_record),
                 )
             if self._title_snapshot is None:
                 self._title_snapshot = shipped_title_snapshot() or False
@@ -2157,6 +2330,7 @@ class SocialGenerator:
                 # a bare "County, State".
                 sampled_regions=([_strip_series_suffix(self.location)] if self.location else []),
                 interactive=interactive,
+                place_variety=variety,
             )
 
             try:
@@ -2272,6 +2446,7 @@ class SocialGenerator:
         per_short_route_records: Optional[List[Optional[dict]]] = None,
         global_indexes: Optional[Sequence[int]] = None,
         per_short_title_facts: Optional[Sequence[Optional[TitleFacts]]] = None,
+        previous_places: "Optional[Mapping[str, str]]" = None,
     ) -> List[SocialPost]:
         """
         Generate unique social posts for all shorts.
@@ -2310,6 +2485,11 @@ class SocialGenerator:
                 stamped title for that short; ``None`` keeps the legacy
                 composition. Must have length ``num_shorts`` when supplied.
 
+            previous_places: ``{"title": body, "description": body}`` of the Short
+                published just before the first of these (the previous publish day's
+                last Short), from its ``SocialPost.place_variety``. Each Short after
+                the first is compared with the one before it in this batch.
+
         Returns:
             List of SocialPost objects
 
@@ -2341,6 +2521,7 @@ class SocialGenerator:
             )
 
         posts = []
+        previous = dict(previous_places or {})
         for i in range(1, num_shorts + 1):
             weather = None
             if weather_results and i - 1 < len(weather_results):
@@ -2371,7 +2552,21 @@ class SocialGenerator:
             # post.short_index below.
             global_idx = global_indexes[i - 1] if global_indexes is not None else i + index_offset
             facts = per_short_title_facts[i - 1] if per_short_title_facts is not None else None
-            post = gen.generate_post(i, weather, global_index=global_idx, title_facts=facts)
+            route_rec = (
+                per_short_route_records[i - 1]
+                if per_short_route_records and i - 1 < len(per_short_route_records)
+                else None
+            )
+            post = gen.generate_post(
+                i,
+                weather,
+                global_index=global_idx,
+                title_facts=facts,
+                previous_places=previous,
+                route_record=route_rec,
+            )
+            if post.place_variety:
+                previous = {k: v["body"] for k, v in post.place_variety.items()}
             # An interactive short whose burned OST label is non-empty
             # makes "where is this?" a lie — the answer is already on screen.
             # No per-short OST skip exists yet, so this fires for every

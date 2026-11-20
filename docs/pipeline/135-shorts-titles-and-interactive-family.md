@@ -256,6 +256,30 @@ Excluded: `median_speed_mps` (pace claim), `regions`, LF-level terrain/road/coun
 global index, day-of-trip. Any unparsable path/date/row gives `None` facts (legacy
 composition for that short).
 
+**Place variety (`social_generator.choose_place_body`).** Near-zero-view Shorts lined up with
+the same place named Short after Short. A short's place body (the title's `{location}`, the
+description's place) now differs from the previous short's whenever its own clip measured
+another place. The previous short is the one before it in `generate_all`, or
+`previous_places` (the previous publish day's last short, its `SocialPost.place_variety`
+bodies) for the first.
+
+- Candidates, today's text first then most specific first: town, road, county. Towns and
+  counties come from `youtube_adapter._clip_towns` / `_clip_places` (the places the short's
+  final-text review accepts: a town held for every retained second, a county the clip's GPS
+  voted), so a varied title cannot be refused by that review. A road is a **description-only**
+  candidate: the review cites one place in a title and treats a road as tag evidence, so a road in
+  a title is refused (checked against `build_short_final_text_review`).
+- `choose_place_body(candidates, previous, *, kinds=None) -> PlaceChoice(body, reason, kind)`
+  is pure and deterministic; `candidates[0]` is today's body. Reasons: `distinct` (not a
+  repeat; kept), `varied` (a repeat replaced by the first candidate that is not a repeat),
+  `no_alternative` (a repeat, no other measured place; today's text kept).
+- Recorded per short as `SocialPost.place_variety` (`{"title": {...}, "description": {...}}`,
+  in `social_posts.json`). Never invented: with no measured alternative the text is unchanged.
+- Hand titles, interactive shorts and legacy (no `TitleFacts`) titles are untouched. The TikTok
+  title and Meta captions still name today's place.
+- Wiring: a caller composing per LF passes the previous LF's last `place_variety` bodies as
+  `previous_places`; without it only the shorts inside one `generate_all` call are compared.
+
 **Why titles are unique.** The batch gate keys on the first 3 tokens of a title
 (`anti_spam_gate.title_prefix_key`: lowercased `[a-z0-9]+` words, trailing hashtags
 stripped). A stamped title begins `"{Mon} {D}, {k}{sfx} stretch: "`, so its key is
