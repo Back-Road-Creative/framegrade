@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.118] - 2026-11-20
+
+### Added
+
+- Each `dispatch-queue --apply` tick now confirms scheduled YouTube Shorts that went public: it runs `confirm_scheduled_live` after dispatch, recording `platform_live` and the real go-public time, and logs `CONFIRMED_LIVE count=<n>`. A failure there only logs a warning and is retried next tick.
+
+### Changed
+
+- `tests/test_changelog.py` refuses a `changelog.d` fragment whose name starts with `deploy`, `publish` or `upload`. The merge robot holds those paths for a human, so such a fragment stopped release 0.3.116's PR.
+
+### Fixed
+
+- `health check` rule 6 (`failure_unattended`) now alarms on failures, not only time: a drive whose last 3 launches in a row failed, or whose retry budget (the heal policy's own count) is spent, stays alarmed however recent its last launch. Before, every relaunch reset the 26 h clock, so a drive that kept failing never stayed alarmed.
+- `health check` no longer re-files a `drive_failed` row that `health heal` closed with a `resolution_reason`.
+
 ## [0.3.117] - 2026-11-20
 
 ### Added
@@ -1325,7 +1340,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...HEAD
+[0.3.118]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...v0.3.118
 [0.3.117]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.116...v0.3.117
 [0.3.116]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...v0.3.116
 [0.3.115]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.114...v0.3.115
