@@ -71,6 +71,16 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    resolves when the row is recovered (`dispatch-queue` requeues a review refusal that now
    passes) or ages out. Read-only (queue opened `mode=ro`).
 
+**Backlog launch refused for space.** Not a check rule: `health backlog` writes it. A launch
+refused with `storage:` (a device's free space is under the staging plus output need,
+`launch.storage_plan`) opens one `backlog_storage_refused` row per region (key
+`backlog_storage_refused:<region>`, row file `backlog_storage_refused_<region>.json`, fields
+`region`, `project`, `reason`), pushed once as `health_backlog_storage_refused`. A later
+`health backlog` tick for the region that launches, or that measures every device with room,
+sets `resolved_at`; a refusal for another reason, or a tick that never reached the space check
+(lease held, running drive), leaves it open. `health check` never resolves it. A dry run writes
+nothing.
+
 A relative `seo.storage_path` skips rules 2, 4, 7 and 8 with a note (it would resolve against the cwd).
 
 ## Push and idempotency
@@ -82,7 +92,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `backlog_storage_refused`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,

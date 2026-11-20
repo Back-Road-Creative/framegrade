@@ -110,3 +110,16 @@ an audit-only drive for any free slot inside the render horizon (the wider of 7 
 (`docs/pipeline/156-health-check.md`). Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
 claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
+
+### Stage roots with no backlog row
+
+A stage root kept on purpose with no `drive_backlog.yaml` row (today: `mizen-remeasure`, held as
+evidence for framegrade#398) needs an owner record in `gomoveshift/health/stage_owners.json`
+(`gms-stage-owners/1`): `name`, `owner`, `reason`, `issue`, `expires` (an ISO date). A record
+missing a field, with a bad date or a repeated name is refused, never guessed past. The day after
+`expires`, `health backlog` appends the name to `<data root>/host-cleanup/gms-stages-release.list`
+(`stage_owners.STAGES_RELEASE_LIST_NAME`, with a comment naming the issue and owner); removal is
+the host-cleanup rule 7c, which keeps every hold it has (running spool job, `.keep`, live lease,
+process inside). The file name is the one `_ops/host-cleanup.sh` reads (`GMS_STAGES_RELEASE`); a
+test pins the literal. Extending a hold means editing `expires` in the same PR that cites the
+issue. A root with no row and no record is printed as `unowned stage root` on every tick.
