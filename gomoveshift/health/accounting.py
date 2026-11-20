@@ -17,8 +17,11 @@ opened, probed or decoded.
 from __future__ import annotations
 
 import os
+import re
+import threading
+import time
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
@@ -29,6 +32,30 @@ from .store import new_incident, safe_name
 CAMERA_SUFFIXES = (".mp4", ".insv", ".mov")
 _KEYS = {"sources", "reason", "project"}
 
+#: Total seconds the folder listings of one tick may take: ``bin/gms-health-cron.sh`` holds a
+#: flock with no timeout, so a hung ``/mnt`` share must not stall the tick. A folder not listed
+#: in time is treated as unreadable (its open incidents stay live).
+LIST_DEADLINE_S = 20.0
+
+_DRIVE_RE = re.compile(r"^(/mnt/[A-Za-z])(?:/|$)")
+
+
+def _is_drvfs(path: str) -> bool:
+    """Under ``/mnt/<single letter>/``: a Windows drive, case-insensitive."""
+    return _DRIVE_RE.match(path) is not None
+
+
+def norm(path: str) -> str:
+    """The comparison form of a path: normalised, and case-folded on a Windows drive."""
+    out = os.path.normpath(str(path))
+    return out.casefold() if _is_drvfs(out) else out
+
+
+def _is_unmounted(folder: str) -> bool:
+    """A ``/mnt/<letter>`` folder with nothing mounted there is an offline drive, not an empty one."""
+    m = _DRIVE_RE.match(folder)
+    return bool(m) and not os.path.ismount(m.group(1))
+
 
 @dataclass(frozen=True)
 class Exclusion:
@@ -38,11 +65,22 @@ class Exclusion:
 
 
 def _is_absolute(text: str) -> bool:
-    return PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute()
+    """POSIX absolute only: a Windows path (``D:\\x``) names nothing the launcher can open."""
+    return text.startswith("/")
 
 
-def _problem(entry: Optional[int], detail: str) -> Dict[str, Any]:
-    return {"entry": entry, "detail": detail}
+def _problem(entry: Optional[int], detail: str, tag: Optional[str] = None) -> Dict[str, Any]:
+    return {"entry": entry, "detail": detail, "tag": tag}
+
+
+def _entry_tag(raw: Any) -> Optional[str]:
+    """The entry's first usable source path: its key, so inserting an entry above does not
+    shift every key below it."""
+    if isinstance(raw, dict) and isinstance(raw.get("sources"), list):
+        for src in raw["sources"]:
+            if isinstance(src, str) and src.strip():
+                return src.strip()
+    return None
 
 
 def _entry_problem(raw: Any, row_sources: Dict[str, str], seen: set) -> Optional[str]:
@@ -64,13 +102,14 @@ def _entry_problem(raw: Any, row_sources: Dict[str, str], seen: set) -> Optional
     project = raw.get("project")
     if project is not None and (not isinstance(project, str) or not project.strip()):
         return "project must be a non-empty string when given"
-    if twice := sorted({s for s in sources if sources.count(s) > 1}):
+    normed = [norm(s) for s in sources]
+    if twice := sorted({s for s, n in zip(sources, normed) if normed.count(n) > 1}):
         return f"source listed twice: {twice}"
-    if dup := sorted(s for s in sources if s in seen):
+    if dup := sorted(s for s, n in zip(sources, normed) if n in seen):
         return f"source already excluded by an earlier entry: {dup}"
-    if clash := sorted(s for s in sources if s in row_sources):
+    if clash := sorted(s for s, n in zip(sources, normed) if n in row_sources):
         return "source is also a drive_backlog.yaml row source: " + ", ".join(
-            f"{s} (row {row_sources[s]})" for s in clash
+            f"{s} (row {row_sources[norm(s)]})" for s in clash
         )
     return None
 
@@ -80,7 +119,7 @@ def load_exclusions(
 ) -> Tuple[List[Exclusion], List[Dict[str, Any]]]:
     """``(valid entries, problems)``. A missing file is ``([], [])``; nothing here raises."""
     row_sources = {
-        str(s): str(getattr(row, "project", "?"))
+        norm(str(s)): str(getattr(row, "project", "?"))
         for row in rows
         for s in (getattr(row, "sources", ()) or ())
     }
@@ -100,26 +139,32 @@ def load_exclusions(
     for n, item in enumerate(raw, start=1):
         why = _entry_problem(item, row_sources, seen)
         if why:
-            problems.append(_problem(n, why))
+            problems.append(_problem(n, why, _entry_tag(item)))
             continue
         entries.append(
             Exclusion(tuple(item["sources"]), item["reason"].strip(), item.get("project"))
         )
-        seen.update(item["sources"])
+        seen.update(norm(x) for x in item["sources"])
     return entries, problems
 
 
 def exclusion_problem_incidents(
     problems: Sequence[Dict[str, Any]], now_iso: str
 ) -> List[Dict[str, Any]]:
+    """One incident per problem, keyed by the entry's first source path (the entry number only
+    when it has no usable source; ``file`` for a file-level problem)."""
     out = []
+    used: Dict[str, int] = {}
     for p in problems:
-        tag = "file" if p["entry"] is None else str(p["entry"])
+        tag = "file" if p["entry"] is None else (p.get("tag") or str(p["entry"]))
+        used[tag] = used.get(tag, 0) + 1
+        if used[tag] > 1:
+            tag = f"{tag}#{used[tag]}"
         out.append(
             new_incident(
                 "backlog_exclusion_invalid",
                 f"backlog_exclusion_invalid:{tag}",
-                f"backlog_exclusion_invalid_{tag}.json",
+                f"backlog_exclusion_invalid_{safe_name(tag)}.json",
                 now_iso,
                 entry=p["entry"],
                 detail=p["detail"],
@@ -162,37 +207,97 @@ def store_orphan_incidents(
     ]
 
 
-def unlisted_footage_incidents(
-    rows: Iterable[Any], exclusions: Iterable[Exclusion], now_iso: str, notes: List[str]
-) -> List[Dict[str, Any]]:
-    """One incident per folder holding a row or exclusion source, listing its camera files
-    (top level, files only) that no row and no exclusion names. A folder that cannot be listed
-    is a note."""
-    accounted = {str(s) for r in rows for s in (getattr(r, "sources", ()) or ())}
-    accounted.update(s for e in exclusions for s in e.sources)
-    folders = sorted({os.path.dirname(s) for s in accounted})
-    out: List[Dict[str, Any]] = []
-    for folder in folders:
+def _scan(folder: str) -> List[str]:
+    """The camera files directly in ``folder`` (names only; nothing is opened)."""
+    with os.scandir(folder) as it:
+        return sorted(
+            e.name for e in it if e.name.lower().endswith(CAMERA_SUFFIXES) and e.is_file()
+        )
+
+
+def _list_folders(
+    folders: Sequence[str], notes: List[str]
+) -> Tuple[Dict[str, List[str]], List[str]]:
+    """``({folder: camera file names}, unreadable folders)``. Each folder is listed in a daemon
+    thread against one shared deadline; a folder that raises, sits on an unmounted drive or is
+    not done in time is unreadable (noted), never empty."""
+    results: Dict[str, Any] = {}
+    threads: Dict[str, threading.Thread] = {}
+
+    def work(folder: str) -> None:
         try:
-            with os.scandir(folder) as it:
-                names = sorted(
-                    e.name for e in it if e.name.lower().endswith(CAMERA_SUFFIXES) and e.is_file()
-                )
+            results[folder] = _scan(folder)
         except OSError as exc:
-            notes.append(
-                f"backlog_unlisted_footage not evaluated for {folder}: {type(exc).__name__}: {exc}"
-            )
+            results[folder] = exc
+
+    unreadable: List[str] = []
+    for folder in folders:
+        if _is_unmounted(folder):
+            notes.append(f"backlog_unlisted_footage not evaluated for {folder}: drive not mounted")
+            unreadable.append(folder)
             continue
-        missing = [n for n in names if os.path.join(folder, n) not in accounted]
-        if missing:
+        threads[folder] = threading.Thread(target=work, args=(folder,), daemon=True)
+        threads[folder].start()
+    deadline = time.monotonic() + LIST_DEADLINE_S
+    listed: Dict[str, List[str]] = {}
+    for folder, thread in threads.items():
+        thread.join(max(0.0, deadline - time.monotonic()))
+        got = results.get(folder)
+        if thread.is_alive() or got is None:
+            notes.append(
+                f"backlog_unlisted_footage not evaluated for {folder}: "
+                f"listing exceeded {LIST_DEADLINE_S:g} s"
+            )
+            unreadable.append(folder)
+        elif isinstance(got, OSError):
+            notes.append(
+                f"backlog_unlisted_footage not evaluated for {folder}: {type(got).__name__}: {got}"
+            )
+            unreadable.append(folder)
+        else:
+            listed[folder] = got
+    return listed, unreadable
+
+
+def unlisted_footage_incidents(
+    rows: Iterable[Any],
+    exclusions: Iterable[Exclusion],
+    now_iso: str,
+    notes: List[str],
+    unreadable: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """One incident per camera file (top level of a folder holding a row or exclusion source)
+    that no row and no exclusion names, keyed by its path so each opens, resolves and notifies
+    on its own. A folder that cannot be listed is a note and is appended to ``unreadable``
+    (comparison form, see :func:`norm`) so the caller keeps its open incidents live."""
+    accounted = {norm(str(s)) for r in rows for s in (getattr(r, "sources", ()) or ())}
+    accounted.update(norm(s) for e in exclusions for s in e.sources)
+    originals: Dict[str, str] = {}
+    for src in sorted(
+        {str(s) for r in rows for s in (getattr(r, "sources", ()) or ())}
+        | {s for e in exclusions for s in e.sources}
+    ):
+        originals.setdefault(
+            norm(os.path.dirname(os.path.normpath(src))), os.path.dirname(os.path.normpath(src))
+        )
+    listed, bad = _list_folders([originals[k] for k in sorted(originals)], notes)
+    if unreadable is not None:
+        unreadable.extend(norm(f) for f in bad)
+    out: List[Dict[str, Any]] = []
+    for folder in sorted(listed):
+        for name in listed[folder]:
+            path = os.path.join(folder, name)
+            if norm(path) in accounted:
+                continue
             out.append(
                 new_incident(
                     "backlog_unlisted_footage",
-                    f"backlog_unlisted_footage:{folder}",
-                    f"backlog_unlisted_footage_{safe_name(folder)}.json",
+                    f"backlog_unlisted_footage:{path}",
+                    f"backlog_unlisted_footage_{safe_name(path)}.json",
                     now_iso,
                     directory=folder,
-                    files=missing,
+                    name=name,
+                    path=path,
                 )
             )
     return out
