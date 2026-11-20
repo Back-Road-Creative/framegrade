@@ -56,7 +56,7 @@ def test_pins_and_untouched_branch_are_unchanged(proc):
     assert "[base]split[b1][b2]" in fc
     assert f"[bl][m]alphamerge,format={BLUR_ALPHA_FORMAT}[bla]" in fc
     assert f"[b1][bla]overlay=format={BLUR_OVERLAY_FORMAT}[ov]" in fc
-    assert "[1:v]format=gray[m]" in fc
+    assert "[1:v]setpts=N/(FRAME_RATE*TB),format=gray[m]" in fc
     # the b1 branch reaches overlay with no filter of its own
     assert "[b1]scale" not in fc and "[b1]boxblur" not in fc
 

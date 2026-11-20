@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import Config
+from . import blur_gate
 from . import encoding_constants as ec
 from .cache import (
     TRANSIENT_COLOR_CACHE_SCHEMA_VERSION,
@@ -1299,8 +1300,17 @@ class SinglePassProcessor:
         tonemap_filter: str = "",
         upscale_filter: str = "",
         output_fps: str = OUTPUT_FPS,
+        index_fps: Optional[float] = None,
     ) -> str:
         """Privacy-blur ``filter_complex`` (input 0 = video, 1 = privacy mask).
+
+        Mask and picture are paired by FRAME INDEX, not by timestamp: both inputs
+        are retimed to ``N / index_fps`` first, so mask frame ``j`` meets picture
+        frame ``j`` even when the source has timestamp gaps (the mask is stamped
+        ``j / fps`` and ``alphamerge`` / ``overlay`` pair by timestamp, so a gap
+        otherwise shifts the blur off the picture). ``index_fps`` is the shared
+        index rate (container frames / duration, which keeps the total length);
+        ``None`` falls back to each input's own ``FRAME_RATE``.
 
         Blur lands AFTER color/scale/fade but BEFORE the text overlays so the
         OST/CTA pixels stay sharp. The gray mask drives an ``alphamerge`` +
@@ -1360,11 +1370,13 @@ class SinglePassProcessor:
         # Pin the base BEFORE the split so alphamerge's 8-bit-only requirement
         # cannot negotiate backwards into it — see the BLUR_*_FORMAT comment.
         base.append(f"format={BLUR_BASE_FORMAT}")
+        rate = f"{index_fps:.9f}" if index_fps else "FRAME_RATE"
+        index_time = f"setpts=N/({rate}*TB)"
         segs = [
-            f"[0:v]{','.join(base)}[base]",
+            f"[0:v]{index_time},{','.join(base)}[base]",
             "[base]split[b1][b2]",
             f"[b2]{blur_filter}[bl]",
-            f"[1:v]{upscale_filter + ',' if upscale_filter else ''}format=gray[m]",
+            f"[1:v]{index_time},{upscale_filter + ',' if upscale_filter else ''}format=gray[m]",
             f"[bl][m]alphamerge,format={BLUR_ALPHA_FORMAT}[bla]",
         ]
         # CFR conversion rides the tail, strictly AFTER the composite — the
@@ -1873,6 +1885,17 @@ class SinglePassProcessor:
 
             filter_complex = None
             if blur_mask_path is not None:
+                # Fail closed before the irreversible encode: mask frame j is picture
+                # frame j only when both count the same frames.
+                n_src = blur_gate.container_frame_count(video_path)
+                n_mask = blur_gate.container_frame_count(blur_mask_path)
+                if n_src <= 0 or n_src != n_mask:
+                    raise ValueError(
+                        f"BLUR GATE (frame pairing): the source has {n_src} frames but the "
+                        f"privacy mask has {n_mask}; refusing the encode, nothing was "
+                        "encoded. Re-run blur_detection (--fresh)."
+                    )
+                filter_kwargs["index_fps"] = n_src / duration
                 filter_complex = self._build_blur_filter_complex(
                     **filter_kwargs,
                     video_height=plan.target[1] if plan else height,

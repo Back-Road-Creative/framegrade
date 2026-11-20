@@ -8,6 +8,7 @@ the ``redactcam`` package's own suite.
 from unittest.mock import MagicMock
 
 from redactcam import timeline as br
+from gomoveshift.pipeline import blur_gate
 from gomoveshift.pipeline.context import PipelineContext, PipelinePaths
 from gomoveshift.pipeline.stages.blur_detection import BlurDetectionStage
 
@@ -55,6 +56,9 @@ def test_should_run_gated_by_enabled_and_skip(tmp_path):
 
 
 def test_run_detects_and_writes_sidecar(tmp_path, monkeypatch):
+    # Fake video: the three-way count gate is exercised in test_frame_index_pairing.
+    monkeypatch.setattr(blur_gate, "frame_pairing_error", lambda *a, **k: None)
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 96)
     monkeypatch.setattr("gomoveshift.pipeline.stop_processor.compute_file_hash", lambda p: "HASH1")
     monkeypatch.setattr(br, "probe_video", lambda p: (30.0, 0, 1920, 1080))
     # detect_and_track returns (frame_boxes, decoded_count, n_faces, n_plates);
@@ -99,6 +103,8 @@ def test_run_resumes_on_hash_match_without_redetecting(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr("gomoveshift.pipeline.stop_processor.compute_file_hash", lambda p: "MATCH")
+    # Fake files: source and mask both "count" the sidecar's 10 frames.
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 10)
 
     def _boom(*a, **k):
         raise AssertionError("detect_and_track must not run on a hash match")

@@ -119,6 +119,17 @@ class SinglePassEncodeStage(BaseStage):
             blur_err = blur_gate.check_mask_ready(ctx)
             if blur_err:
                 return StageResult(success=False, error=blur_err)
+            # Frame-index pairing: container == mask == sidecar, before the cabin gate
+            # and the irreversible encode (mask frame j must be picture frame j).
+            if ctx.blur_mask_path is not None:
+                sidecar = ctx.blur_regions_path or (
+                    ctx.paths.stages_dir / f"{ctx.project_name}_blur_regions.json"
+                )
+                pairing_err = blur_gate.frame_pairing_error(
+                    ctx.current_video, ctx.blur_mask_path, sidecar
+                )
+                if pairing_err:
+                    return StageResult(success=False, error=pairing_err)
             # Occupant-coverage gate: a corroborated car whose cabin the mask misses
             # would ship its driver exposed — fail BEFORE the irreversible encode.
             cabin_err = blur_gate.check_cabin_coverage(ctx)

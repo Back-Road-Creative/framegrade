@@ -31,6 +31,14 @@ from gomoveshift.pipeline import blur_gate
 from gomoveshift.pipeline import day_master_encoder as dme
 
 
+@pytest.fixture(autouse=True)
+def _frame_pairing_proven(monkeypatch):
+    """These tests use fake media files; the three-way frame-count gate has its own
+    real-media tests in ``test_frame_index_pairing.py``."""
+    monkeypatch.setattr(blur_gate, "frame_pairing_error", lambda *a, **k: None)
+    monkeypatch.setattr(dme, "_counts_allow_reuse", lambda *a, **k: True)
+
+
 def _batch(tmp_path, date="2026-02-24", n_ep=1, total_duration=600.0):
     from gomoveshift.pipeline.day_grouper import DayBatch
 

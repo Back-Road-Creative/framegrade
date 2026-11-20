@@ -735,7 +735,7 @@ def _concat_raw_episodes(
 # Schema for the mask-evidence sidecar (see `_build_day_blur_mask`). Bumping
 # this version invalidates every cached mask on the next run — deliberate,
 # the same way a source-fingerprint mismatch does.
-_BLUR_EVIDENCE_SCHEMA = "gms.blur_mask_evidence/v2"
+_BLUR_EVIDENCE_SCHEMA = "gms.blur_mask_evidence/v3"
 
 #: Schema of the publishable privacy attestation written beside the mask.
 PRIVACY_ATTESTATION_SCHEMA = "gms.privacy_attestation/v1"
@@ -1003,6 +1003,8 @@ def _current_blur_evidence(
         # reads. Inside the evidence dict so a change in what a run can
         # attest also invalidates the cached mask, exactly like a model
         # fingerprint change does.
+        # Another redactcam build or decode mode renders a different mask.
+        **blur_gate.renderer_identity(),
         "privacy_classes": _privacy_classes(
             drive,
             person_on=person_on,
@@ -1012,6 +1014,24 @@ def _current_blur_evidence(
             plate_model=plate_model,
         ),
     }
+
+
+def _counts_allow_reuse(video: Path, sidecar_count: int, mask_path: Path) -> bool:
+    """A cached detection/mask is reused only when it counts the container's frames.
+
+    One built on another frame count (a pre-fix decode that emitted extra frames)
+    lives in a different index space; reusing it would make the gate raise on every
+    retry. It is rebuilt instead."""
+    n = blur_gate.container_frame_count(video)
+    ok = blur_gate.sidecar_matches_container(sidecar_count, n)
+    ok = ok and blur_gate.container_frame_count(mask_path) == n
+    if not ok:
+        logger.warning(
+            "  Cached blur detection counts %d frames, the master has %d: re-detecting",
+            sidecar_count,
+            n,
+        )
+    return ok
 
 
 def _build_day_blur_mask(
@@ -1111,6 +1131,7 @@ def _build_day_blur_mask(
         and existing_evidence == current_evidence
         and mask_path.exists()
         and mask_path.stat().st_size > 0
+        and _counts_allow_reuse(raw_concat, existing.source_frame_count, mask_path)
     ):
         logger.info(
             "  Day %s: reusing blur mask %s (concat fingerprint + evidence match)",
@@ -1622,6 +1643,11 @@ def encode_day_master(
                 else _concat_provenance_fingerprint(concat_paths, raw_concat)
             ),
         )
+        # Frame-index pairing: container == mask == sidecar, or mask frame j is not
+        # picture frame j. Blocks BEFORE the cabin gate and the master encode.
+        pairing_err = blur_gate.frame_pairing_error(graded_src, blur_mask_path, regions_sidecar)
+        if pairing_err:
+            raise blur_gate.BlurGateError(pairing_err)
         # Occupant-coverage gate (drive path): a corroborated car whose cabin
         # the mask misses would ship its driver exposed — verify against the mask
         # BEFORE the irreversible master encode composites it, mirroring the
