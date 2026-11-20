@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.120] - 2026-11-20
+
+### Fixed
+
+- The hourly `health backlog` tick logs `RETIRED_CONFIG_KEY` once per process per key instead of on every config load, and reads the framegrade release list (`git ls-remote --tags`) at most once a day: the answer is cached in `<data root>/release-latest.json` for 24 h, reused if the network read fails (up to 7 days old), and with no cache a failure still refuses the launch as before.
+
 ## [0.3.119] - 2026-11-20
 
 ### Added
@@ -1357,7 +1363,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...HEAD
+[0.3.120]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...v0.3.120
 [0.3.119]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...v0.3.119
 [0.3.118]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...v0.3.118
 [0.3.117]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.116...v0.3.117
