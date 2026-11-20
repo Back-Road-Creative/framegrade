@@ -1,0 +1,3 @@
+### Added
+
+- `gomoveshift health check` rules 10 and 11 make the backlog manifest, the schedule store and the footage on disk account for each other. `backlog_store_orphan` flags a `ready_drives` project that is in no `drive_backlog.yaml` row and no exclusion's `project`; `backlog_unlisted_footage` flags, per folder, the camera files (`.mp4`, `.insv`, `.mov`, listed never opened) that no row or exclusion names. Footage left out on purpose is recorded with its measured reason in the new `drive_backlog_excluded.yaml` beside the manifest (`paths.drive_backlog_excluded_path()`), a separate file the backlog loader never reads, so an exclusion cannot launch; a file that breaks its contract opens a `backlog_exclusion_invalid` incident. See `docs/pipeline/156-health-check.md`.

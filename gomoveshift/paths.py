@@ -162,6 +162,13 @@ def drive_backlog_path() -> Path:
     )
 
 
+def drive_backlog_excluded_path() -> Path:
+    """``drive_backlog_excluded.yaml``: footage and store projects deliberately not in the
+    manifest, each with its measured reason. A separate file beside ``drive_backlog.yaml`` so
+    the backlog loader and ``backlog-next`` never read it and an exclusion cannot launch."""
+    return drive_backlog_path().with_name("drive_backlog_excluded.yaml")
+
+
 def assert_required_paths_exist() -> None:
     """Validate that env-resolved required paths exist on disk.
 

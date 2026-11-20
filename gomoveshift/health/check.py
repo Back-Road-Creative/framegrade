@@ -23,6 +23,9 @@ _EVENTS = {
     "delivery_failed_permanent": "health_delivery_failed_permanent",
     "short_bad_run": "health_short_bad_run",
     "backlog_storage_refused": "health_backlog_storage_refused",
+    "backlog_store_orphan": "health_backlog_store_orphan",
+    "backlog_unlisted_footage": "health_backlog_unlisted_footage",
+    "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
 }
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -89,6 +92,19 @@ def _line(row: Dict[str, Any]) -> str:
             "Give it bracket_gpx (the fixes files of the drives before and after) instead; run "
             "--placeless-label by hand only when no bracket exists."
         )
+    if row["kind"] == "backlog_store_orphan":
+        return (
+            f"Store project {row['project']} is in no drive_backlog.yaml row and no "
+            "drive_backlog_excluded.yaml entry's project: add the row, or exclude it with a reason."
+        )
+    if row["kind"] == "backlog_unlisted_footage":
+        return (
+            f"{len(row['files'])} camera file(s) in {row['directory']} are in no drive_backlog.yaml "
+            f"row and no drive_backlog_excluded.yaml entry: {', '.join(row['files'])}."
+        )
+    if row["kind"] == "backlog_exclusion_invalid":
+        where = "file" if row["entry"] is None else f"entry {row['entry']}"
+        return f"drive_backlog_excluded.yaml {where} breaks the contract: {row['detail']}."
     if row["kind"] == "short_bad_run":
         runs = ", ".join(f"{s['project']}#{s['index']} ({s['views']})" for s in row["shorts"])
         return (
@@ -374,6 +390,46 @@ def placeless_label_incidents(rows: List[Any], now_iso: str) -> List[Dict[str, A
     return out
 
 
+def _accounting_rows(
+    config: Any, rows: List[Any], now_iso: str, notes: List[str]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Rules 10 and 11 (and the exclusions file's own contract), for a readable manifest."""
+    from ..paths import drive_backlog_excluded_path
+    from . import accounting
+
+    found: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        entries, problems = accounting.load_exclusions(drive_backlog_excluded_path(), rows)
+        found["backlog_exclusion_invalid"] = accounting.exclusion_problem_incidents(
+            problems, now_iso
+        )
+        found["backlog_unlisted_footage"] = accounting.unlisted_footage_incidents(
+            rows, entries, now_iso, notes
+        )
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"rule 11 not evaluated: {type(exc).__name__}: {exc}")
+        return found
+    storage = Path(config.seo.storage_path)
+    if not storage.is_absolute():
+        return found  # _cadence_rows already noted it
+    try:
+        from ..pipeline.seo_slots import STORE_FILENAME, waypost_cadence
+
+        store_path = storage / STORE_FILENAME
+        if not store_path.exists():
+            notes.append("schedule.sqlite3 absent: rule 10 (backlog_store_orphan) not evaluated")
+            return found
+        cad = waypost_cadence(config)
+        projects = accounting.store_projects(store_path, cad.tz, cad.regions, notes)
+        if projects is not None:
+            found["backlog_store_orphan"] = accounting.store_orphan_incidents(
+                projects, rows, entries, now_iso
+            )
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"rule 10 not evaluated: {type(exc).__name__}: {exc}")
+    return found
+
+
 def _cadence_rows(
     config: Any, ledger_path: Optional[Path], now: datetime, now_iso: str, notes: List[str]
 ):
@@ -501,6 +557,7 @@ def run_check(
     backlog_rows = _backlog_rows(notes)
     if backlog_rows is not None:
         found["placeless_label_unverifiable"] = placeless_label_incidents(backlog_rows, now_iso)
+        found.update(_accounting_rows(config, backlog_rows, now_iso, notes))
 
     bad_run = _bad_run_rows(config, tracking_root, now, now_iso, notes)
     if bad_run is not None:
