@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -540,6 +541,174 @@ def record_cabin_repair_failure(
     save_cache_json(path, cached)
 
 
+#: Greater than any coverage fraction (0..1): run with it, ``verify_cabin_coverage`` reports
+#: EVERY measured sighting as a "leak" carrying its coverage, which is how pass 1 learns the
+#: sightings a later re-measure needs. The real leaks are then re-derived with the real
+#: threshold, by the same ``coverage < min_coverage`` comparison the library makes.
+_ALL_SIGHTINGS_COVERAGE = 2.0
+_SIGHTINGS_SCHEMA = 1
+
+
+def cabin_sightings_path(mask: Path) -> Path:
+    """Where the gate's full pass persists EVERY sighting it measured (not only the leaks),
+    beside the mask. It is keyed on the source, models, config and renderer but not on the
+    mask, so a repaired mask can be re-measured against it without re-detecting the source."""
+    return mask.with_name(f"{mask.stem}_cabin_sightings.json")
+
+
+def _signature_sans_mask(signature: dict) -> dict:
+    return {k: v for k, v in signature.items() if k != "mask_fp"}
+
+
+def _video_geometry(path: Path) -> Optional[tuple]:
+    """``(width, height, frame_count)`` from the container header, or ``None`` when the
+    file cannot be opened or reports nothing usable."""
+    import cv2
+
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            return None
+        geo = (
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+        )
+    finally:
+        cap.release()
+    return geo if all(v > 0 for v in geo) else None
+
+
+def _write_cabin_sightings(path: Path, signature: dict, video: Path, mask: Path, rep, sightings):
+    """Persist every sighting of a full pass, atomically (tmp file + replace) so a crash
+    leaves either no record or a whole one. Any failure just means the next pass runs in
+    full; a record is an optimisation and never the gate."""
+    path.unlink(missing_ok=True)
+    try:
+        src, msk = _video_geometry(video), _video_geometry(mask)
+        if src is None or msk is None:
+            logger.info("cabin sightings not recorded: source/mask geometry unreadable")
+            return
+        payload = {
+            "schema": _SIGHTINGS_SCHEMA,
+            "complete": True,
+            "signature": _signature_sans_mask(signature),
+            "frame_w": src[0],
+            "frame_h": src[1],
+            "mask_frames": msk[2],
+            "vehicle_frames": rep.vehicle_frames,
+            "plate_corroborated": bool(rep.plate_corroborated),
+            "sighting_count": len(sightings),
+            "sightings": [
+                {"frame": s.frame, "box": list(s.box), "coverage": s.coverage, "kind": "cabin"}
+                for s in sightings
+            ],
+        }
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("could not write cabin sightings %s: %s", path, exc)
+
+
+def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
+    """Why ``rec`` cannot be used as a re-measure record, or ``None`` when it can."""
+    if not isinstance(rec, dict):
+        return "record unreadable"
+    if rec.get("schema") != _SIGHTINGS_SCHEMA or rec.get("complete") is not True:
+        return "record partial or of another schema"
+    if rec.get("signature") != sig_core:
+        return "signature differs (source, models, config or renderer changed)"
+    items = rec.get("sightings")
+    ints = (
+        rec.get("frame_w"),
+        rec.get("frame_h"),
+        rec.get("mask_frames"),
+        rec.get("vehicle_frames"),
+    )
+    if (
+        not isinstance(items, list)
+        or rec.get("sighting_count") != len(items)
+        or not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in ints)
+    ):
+        return "record partial"
+    for it in items:
+        box = it.get("box") if isinstance(it, dict) else None
+        frame = it.get("frame") if isinstance(it, dict) else None
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or not all(isinstance(v, int) for v in box)
+            or not isinstance(frame, int)
+            or not 0 <= frame < rec["mask_frames"]
+        ):
+            return "record partial"
+    return None
+
+
+def _remeasure_cabin(mask: Path, sig_core: dict, cabin_frac: float, min_coverage: float):
+    """Re-measure the recorded sightings against the CURRENT mask only: no source decode,
+    no detection. Returns ``(report, None)``, or ``(None, reason)`` when a full pass must
+    run instead. Sightings depend only on source, models and config (all in the record's
+    signature), so the current mask's coverage at those frames is exactly what a full pass
+    would measure; the repaired mask need not contain the old one."""
+    import cv2
+    from redactcam import CoverageReport, Leak
+    from redactcam.coverage import cabin_region
+
+    rec = load_cached_json(cabin_sightings_path(mask))
+    if rec is None:
+        return None, "no usable sightings record (missing or unreadable)"
+    bad = _valid_sightings(rec, sig_core)
+    if bad:
+        return None, bad
+    geo = _video_geometry(mask)
+    if geo is None:
+        return None, "mask unreadable"
+    if geo[2] != rec["mask_frames"]:
+        return None, f"mask frame count {geo[2]} differs from the record's {rec['mask_frames']}"
+    items = rec["sightings"]
+    cov: dict = {}
+    if items:
+        by_frame: dict = {}
+        for i, it in enumerate(items):
+            by_frame.setdefault(it["frame"], []).append(i)
+        last = max(by_frame)
+        cap = cv2.VideoCapture(str(mask))
+        try:
+            for idx in range(last + 1):
+                if not cap.grab():
+                    return None, f"mask ended at frame {idx} before the record's frame {last}"
+                if idx not in by_frame:
+                    continue
+                ok, m = cap.retrieve()
+                if not ok:
+                    return None, f"mask frame {idx} unreadable"
+                mgray = m if m.ndim == 2 else m[:, :, 0]
+                for i in by_frame[idx]:
+                    x0, y0, x1, y1 = cabin_region(
+                        tuple(items[i]["box"]), cabin_frac, rec["frame_w"], rec["frame_h"]
+                    )
+                    if x1 <= x0 or y1 <= y0:
+                        return None, "recorded sighting has an empty cabin region"
+                    cov[i] = float((mgray[y0:y1, x0:x1] > 0).mean())
+        finally:
+            cap.release()
+    leaks = [
+        Leak(it["frame"], cov[i], tuple(it["box"]))
+        for i, it in enumerate(items)
+        if cov[i] < min_coverage
+    ]
+    return (
+        CoverageReport(
+            vehicle_frames=rec["vehicle_frames"],
+            leaks=leaks,
+            plate_corroborated=bool(rec.get("plate_corroborated", True)),
+        ),
+        None,
+    )
+
+
 def _cabin_coverage_error(config, video: Path, mask: Optional[Path]) -> Optional[str]:
     """Shared core for ``check_cabin_coverage`` (legacy per-episode path) and
     ``check_day_master_cabin_coverage`` (drive day-master path): error string if
@@ -569,22 +738,38 @@ def _cabin_coverage_error(config, video: Path, mask: Optional[Path]) -> Optional
     if cached is not None and cached.get("signature") == signature:
         return cached.get("error")
 
+    min_coverage = getattr(drive, "blur_cabin_gate_min_coverage", 0.5)
+    sig_core = _signature_sans_mask(signature)
     try:
-        rep = verify_cabin_coverage(
-            video,
-            mask,
-            veh,
-            plate_model=plate,
-            cabin_frac=drive.blur_vehicle_cabin_frac,
-            conf=drive.blur_vehicle_conf,
-            sample_fps=getattr(drive, "blur_cabin_gate_sample_fps", 4.0),
-            min_coverage=getattr(drive, "blur_cabin_gate_min_coverage", 0.5),
-            min_height_frac=drive.blur_vehicle_min_height_frac,
-            ignore_bottom_frac=drive.blur_vehicle_ignore_bottom_frac,
-            plate_max_area_frac=drive.blur_plate_max_area_frac,
+        rep, why = _remeasure_cabin(mask, sig_core, drive.blur_vehicle_cabin_frac, min_coverage)
+    except Exception as exc:  # a re-measure that cannot prove itself never decides
+        rep, why = None, f"re-measure failed: {exc}"
+    if rep is None:
+        logger.info("cabin gate: full pass (%s)", why)
+        try:
+            full = verify_cabin_coverage(
+                video,
+                mask,
+                veh,
+                plate_model=plate,
+                cabin_frac=drive.blur_vehicle_cabin_frac,
+                conf=drive.blur_vehicle_conf,
+                sample_fps=getattr(drive, "blur_cabin_gate_sample_fps", 4.0),
+                min_coverage=_ALL_SIGHTINGS_COVERAGE,
+                min_height_frac=drive.blur_vehicle_min_height_frac,
+                ignore_bottom_frac=drive.blur_vehicle_ignore_bottom_frac,
+                plate_max_area_frac=drive.blur_plate_max_area_frac,
+            )
+        except Exception as exc:  # never let the gate itself crash the run silently
+            return f"BLUR GATE (cabin): coverage check could not run: {exc}"
+        _write_cabin_sightings(cabin_sightings_path(mask), signature, video, mask, full, full.leaks)
+        rep = type(full)(
+            vehicle_frames=full.vehicle_frames,
+            leaks=[leak for leak in full.leaks if leak.coverage < min_coverage],
+            plate_corroborated=full.plate_corroborated,
         )
-    except Exception as exc:  # never let the gate itself crash the run silently
-        return f"BLUR GATE (cabin): coverage check could not run: {exc}"
+    else:
+        logger.info("cabin gate: re-measured the recorded sightings; no decode, no detection")
     report = cabin_leak_report_path(mask)
     if rep.ok:
         report.unlink(missing_ok=True)  # never let a passing run inherit a stale leak list
