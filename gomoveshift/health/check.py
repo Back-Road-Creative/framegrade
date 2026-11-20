@@ -21,6 +21,7 @@ _EVENTS = {
     "failure_unattended": "health_failure_unattended",
     "queued_short_refused": "health_queued_short_refused",
     "delivery_failed_permanent": "health_delivery_failed_permanent",
+    "short_bad_run": "health_short_bad_run",
 }
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -74,6 +75,12 @@ def _line(row: Dict[str, Any]) -> str:
             f"({why}): a placeless label is a last resort, so the row never launches unattended. "
             "Give it bracket_gpx (the fixes files of the drives before and after) instead; run "
             "--placeless-label by hand only when no bracket exists."
+        )
+    if row["kind"] == "short_bad_run":
+        runs = ", ".join(f"{s['project']}#{s['index']} ({s['views']})" for s in row["shorts"])
+        return (
+            f"{row['n']} settled Shorts in a row are under {row['threshold_views']:g} day-7 views "
+            f"(channel median {row['median_views']:g}): {runs}; causes are in the incident row."
         )
     if row.get("detail"):
         return str(row["detail"])
@@ -358,6 +365,24 @@ def _cadence_rows(
     return found
 
 
+def _bad_run_rows(
+    config: Any, tracking_root: Optional[Path], now: datetime, now_iso: str, notes: List[str]
+) -> Optional[List[Dict[str, Any]]]:
+    """Rule 9, or ``None`` (noted) when it could not run: an unreadable record proves nothing
+    either way, so it must not close an open incident."""
+    storage = Path(config.seo.storage_path)
+    if not storage.is_absolute():
+        notes.append("seo.storage_path is relative; rule 9 (short_bad_run) not evaluated")
+        return None
+    try:
+        from .bad_run import bad_run_rows
+
+        return bad_run_rows(storage, tracking_root, now.date(), now_iso)
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"rule 9 (short_bad_run) not evaluated: {type(exc).__name__}: {exc}")
+        return None
+
+
 def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[Dict[str, str]]:
     """Close the Waypost claims of finished ``health publish`` jobs (idempotent)."""
     if not Path(config.seo.storage_path).is_absolute():
@@ -388,6 +413,7 @@ def run_check(
     code_root: Path,
     staging_sha: Optional[str] = None,
     ledger_path: Optional[Path] = None,
+    tracking_root: Optional[Path] = None,
     now: Optional[datetime] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
     stamp_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -414,6 +440,10 @@ def run_check(
     backlog_rows = _backlog_rows(notes)
     if backlog_rows is not None:
         found["placeless_label_unverifiable"] = placeless_label_incidents(backlog_rows, now_iso)
+
+    bad_run = _bad_run_rows(config, tracking_root, now, now_iso, notes)
+    if bad_run is not None:
+        found["short_bad_run"] = bad_run
 
     live_drives = {r["key"]: r for r in drive_rows}
     open_drives = [

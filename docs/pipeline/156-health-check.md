@@ -71,7 +71,26 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    resolves when the row is recovered (`dispatch-queue` requeues a review refusal that now
    passes) or ages out. Read-only (queue opened `mode=ro`).
 
-A relative `seo.storage_path` skips rules 2, 4, 7 and 8 with a note (it would resolve against the cwd).
+9. **Fast guard for a bad Shorts run** (`gomoveshift/health/bad_run.py`). The newest
+   `GUARD_N` = 3 settled YouTube Shorts (settled as in `tracking/day7.py`: posted + 7 d <= today - 2 d,
+   ordered by `posted_at` across every tracked project) each have day-7 views under `LOW_FRACTION`
+   = 0.25 of the trailing median of the `TRAILING_N` = 10 settled Shorts before them (at least
+   `MIN_BASELINE` = 5 measured, else not evaluated). The measured base rate, 4 of the last 10
+   under 5 views, trips it against any median above 20; one good Short in the window breaks the
+   run. A Short with no settled series counts as low (the API omits zero-view days). One
+   `short_bad_run` incident (key `short_bad_run`, row file `short_bad_run.json`) lists each Short
+   with `causes`, each `{code, detail, c5_fixable}`, from recorded data only: `delivery_status`
+   (newest queue delivery not `published`), `duplicate_place_text` (`c5_fixable: true`: unit C2's
+   composer fixes it for new plans, and the later queued-row re-write unit acts on that flag),
+   `late_publish` (`published_at` over 3 h after `scheduled_at`), `bunched_publish` (another Short
+   within 1 h), `place_county_mismatch` (place text names a county the sidecar's
+   `sampled_regions` did not measure; skipped without a sidecar county) and
+   `missing_core_metrics`. YouTube's own processing/privacy state is not recorded, so it is not
+   swept. Detection only: nothing is edited. It resolves on a later check once the run is broken.
+   Pushed once as `health_short_bad_run`. `run_check(tracking_root=...)` overrides the tracking
+   store root (default `gms_output_dir()`).
+
+A relative `seo.storage_path` skips rules 2, 4, 7, 8 and 9 with a note (it would resolve against the cwd).
 
 ## Push and idempotency
 
@@ -82,7 +101,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -90,7 +109,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`.
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`).
 
 ## Resume recipe and `health heal`
 
