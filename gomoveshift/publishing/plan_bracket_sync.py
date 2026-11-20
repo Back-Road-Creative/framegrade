@@ -28,6 +28,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -105,23 +106,38 @@ def _stored_arms(short: dict) -> dict:
     return {f: a for f, a in (short.get("experiment_arms") or {}).items() if f in SHORTS_FACTORS}
 
 
-def _generate_lf(lf_shorts: List[dict], record: dict, location: str, lf_index: int) -> list:
-    """Phase D's per-LF generation (``generate_all``) over ``lf_shorts`` (those it may
-    rewrite carry the label as location/regions; the rest are generated and discarded)."""
+def _generate_lf(
+    lf_shorts: List[dict],
+    record: Optional[dict],
+    location: str,
+    lf_index: int,
+    *,
+    spooled_texts: Optional[dict] = None,
+    experiment_today: Optional[date] = None,
+    previous_places_at: Optional[Dict[int, dict]] = None,
+) -> list:
+    """Phase D's per-LF generation (``generate_all``) over ``lf_shorts``.
+
+    With a bracket ``record``, those it may rewrite carry the label as location/regions
+    and the rest are generated and discarded. Without one (``queue_short_text``), an
+    eligible Short keeps its own sampled regions, roads and route record. The bracket
+    path reads no queue text (``spooled_texts`` ``{}``) and takes today's date."""
     from gomoveshift.pipeline.social_generator import SocialGenerator, TitleFacts
 
-    label = str(record["label"]).strip()
+    label = str(record["label"]).strip() if record else None
     gen = SocialGenerator(
         location=location,
         project_name=f"{lf_shorts[0]['project_name']}_lf{lf_index:02d}",
         series_part=lf_index,
-        bracket_route=record,
-        spooled_texts={},  # never read the queue database
+        spooled_texts={} if spooled_texts is None else spooled_texts,
+        experiment_today=experiment_today,
+        **({"bracket_route": record} if record else {}),
     )
-    facts, locs, regions, roads = [], [], [], []
+    facts, locs, regions, roads, routes = [], [], [], [], []
     for s in lf_shorts:
         n = None if s.get("_skip") else _ordinal(s)
         eligible = n is not None and not s.get("_skip")
+        own = [label] if record else [str(r) for r in s.get("sampled_regions") or []]
         facts.append(
             TitleFacts(
                 date=s["recording_date"],
@@ -132,9 +148,10 @@ def _generate_lf(lf_shorts: List[dict], record: dict, location: str, lf_index: i
             if eligible
             else None
         )
-        locs.append(label if eligible else location)
-        regions.append([label] if eligible else [])
+        locs.append(own[0] if eligible and len(own) == 1 else location)
+        regions.append(own if eligible else [])
         roads.append(list(s.get("sampled_roads") or []) if eligible else [])
+        routes.append(None if record or not eligible else (s.get("route_record") or None))
     return gen.generate_all(
         num_shorts=len(lf_shorts),
         per_short_title_facts=facts,
@@ -142,7 +159,8 @@ def _generate_lf(lf_shorts: List[dict], record: dict, location: str, lf_index: i
         per_short_locations=locs,
         per_short_regions=regions,
         per_short_roads=roads,
-        per_short_route_records=[None] * len(lf_shorts),
+        per_short_route_records=routes,
+        previous_places_at=previous_places_at,
         # Each Short's stored arms, rendered verbatim: text must keep matching them.
         per_short_shorts_arms=[{} if s.get("_skip") else _stored_arms(s) for s in lf_shorts],
     )

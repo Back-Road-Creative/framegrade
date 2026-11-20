@@ -5,3 +5,4 @@
 ### Fixed
 
 - `queue sync-bracket-short-text` regenerates a Short under its stored Shorts arms instead of rewriting it as legacy text, and refuses a Short whose stored arm can no longer be rendered.
+- `sync-short-text` renders each queued Short's stored Shorts arms and refuses a Short whose known stored arm the regenerated text no longer carries.

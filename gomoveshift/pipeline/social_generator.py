@@ -2576,6 +2576,7 @@ class SocialGenerator:
         shorts_arms_enabled: bool = False,
         shorts_arm_history: "Optional[dict[tuple[str, str, str], list[str]]]" = None,
         per_short_shorts_arms: "Optional[Sequence[Optional[Mapping[str, str]]]]" = None,
+        previous_places_at: "Optional[Mapping[int, Mapping[str, str]]]" = None,
     ) -> List[SocialPost]:
         """
         Generate unique social posts for all shorts.
@@ -2636,6 +2637,9 @@ class SocialGenerator:
                 published just before the first of these (the previous publish day's
                 last Short), from its ``SocialPost.place_variety``. Each Short after
                 the first is compared with the one before it in this batch.
+            previous_places_at: ``{1-based position: {"title": body, "description":
+                body}}`` that replaces the chained previous Short before that
+                position (a queued-row rewrite seeds it from a Short's STORED text).
 
         Returns:
             List of SocialPost objects
@@ -2682,6 +2686,8 @@ class SocialGenerator:
         # whole day, so a per-position stratum would hold one Short and balance nothing.
         arm_stratum = (re.sub(r"_lf\d+$", "", self.project_name), "")
         for i in range(1, num_shorts + 1):
+            if previous_places_at and i in previous_places_at:
+                previous = dict(previous_places_at[i])
             weather = None
             if weather_results and i - 1 < len(weather_results):
                 weather = weather_results[i - 1]
