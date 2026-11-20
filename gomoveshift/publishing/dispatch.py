@@ -14,17 +14,20 @@ never silently discard a publishable short.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Tuple
 
 from ..console.settings import current_brand
 from .brand_policy import load_brand_policy
 from .ig_media_scan import SCAN_LIMIT, ScanUnprovableError, scan_for_post
+from .plan_title_sync import write_plan_slot
 from .queue import (
     _TERMINAL_SQL,
     FACEBOOK_PHOTO_KIND,
@@ -38,6 +41,7 @@ from .queue import (
     is_platform_paused,
     log_response,
     pause_platform,
+    reschedule_delivery,
     set_platform_daily_cap,
     transition,
 )
@@ -50,6 +54,15 @@ from .response_policy import Status, consecutive_healthy_days, daily_cap_for, sh
 logger = logging.getLogger(__name__)
 
 _DEFAULT_LEASE_SECONDS = 300
+
+#: How far past its ``scheduled_at`` a HELD row may sit before the hold becomes
+#: an incident. Two hours: longer than a normal drain cadence plus one retry, so
+#: an ordinary pass-to-pass delay never alerts, but short enough that a Short
+#: missing its slot is seen the same day. A hold is silent by design (no
+#: transition, no attempt charged), so without this a stuck row looks like an
+#: idle queue.
+HELD_PAST_SLOT_MARGIN = timedelta(hours=2)
+HELD_PAST_SLOT_KIND = "delivery_held_past_slot"
 
 #: Backoff base/cap and the retry bound. Instagram's 100-posts/24h quota is
 #: account-wide — a stuck delivery must cost
@@ -257,6 +270,9 @@ class DrainResult:
     #: names a problem on their (platform, project). Same contract as the
     #: privacy hold: no lease, no transition, no attempt charged.
     held_validate: int = 0
+    #: YouTube Shorts moved to the next free slot because another Short already
+    #: held that clock hour (this pass or the queue).
+    moved_same_hour: int = 0
     #: Subset of `retried`, counted separately: a throttled pass is a
     #: standing instruction to a human, not queue noise.
     throttled: int = 0
@@ -737,6 +753,127 @@ def _unrecorded_failure(
     )
 
 
+def _floor_hour(moment: datetime) -> datetime:
+    return moment.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _raise_held_incident(
+    row: Dict[str, Any], now: str, reason: str, incidents_dir: Optional[Path]
+) -> None:
+    """One incident per delivery held past its slot by more than the margin.
+
+    Never rewritten while open (the row is skipped if its file exists unresolved),
+    never fatal: an unwritable incidents dir must not stop the drain. ``pushed``
+    stays False; ``health check``'s generic ``detail`` fallback pushes it."""
+    scheduled_at = row.get("scheduled_at")
+    if not scheduled_at:
+        return
+    try:
+        late = datetime.fromisoformat(now) - datetime.fromisoformat(scheduled_at)
+    except ValueError:
+        return
+    if late <= HELD_PAST_SLOT_MARGIN:
+        return
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    key = f"{HELD_PAST_SLOT_KIND}:{row['id']}"
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    filename = f"{safe_name(key)}.json"
+    try:
+        existing = directory / filename
+        if existing.is_file() and json.loads(existing.read_text()).get("resolved_at") is None:
+            return
+        hours = late.total_seconds() / 3600
+        write_row(
+            directory,
+            new_incident(
+                HELD_PAST_SLOT_KIND,
+                key,
+                filename,
+                now,
+                delivery_id=row["id"],
+                platform=row["platform"],
+                project=row["project_name"],
+                scheduled_at=scheduled_at,
+                detail=(
+                    f"{row['platform']}#{row['id']} {row['project_name']} short "
+                    f"{row['short_index']} is {hours:.1f} h past its {scheduled_at} slot: {reason}"
+                ),
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("dispatch: could not write held-past-slot incident for %s", row["id"])
+
+
+def _defer_same_hour(conn, row: Dict[str, Any], now: str, released_hours: set) -> bool:
+    """Keep one YouTube Short per clock hour. ``True`` when this row was moved.
+
+    Its hour is its ``scheduled_at`` hour (the ``publishAt`` the platform goes
+    public at). The first due row in an hour claims it; any later one, or one
+    sharing the hour with a Short already uploaded/published for it, moves to the
+    next free hour at the same minute, sidecar first (as ``queue-reslot`` does).
+    A row whose sidecar cannot be written is left as it was."""
+    now_dt = datetime.fromisoformat(now)
+    slot = datetime.fromisoformat(row["scheduled_at"]) if row.get("scheduled_at") else now_dt
+    if slot.tzinfo is None:
+        slot = slot.replace(tzinfo=timezone.utc)
+    others = [
+        datetime.fromisoformat(r[0])
+        for r in conn.execute(
+            "SELECT COALESCE(platform_published_at, scheduled_at) FROM deliveries "
+            "WHERE platform='youtube' AND id<>? AND shadow=0 "
+            "AND status NOT IN ('cancelled', 'failed_permanent', 'missing_remote') "
+            "AND COALESCE(platform_published_at, scheduled_at) IS NOT NULL",
+            (row["id"],),
+        )
+    ]
+    sibling_hours = {_floor_hour(t) for t in others}
+    here = _floor_hour(slot)
+    # Rows queued for the same hour only conflict once one is released; a
+    # published/uploaded sibling already holds the hour.
+    held_elsewhere = conn.execute(
+        "SELECT 1 FROM deliveries WHERE platform='youtube' AND id<>? AND shadow=0 "
+        "AND status IN ('uploaded', 'published') "
+        "AND strftime('%Y-%m-%dT%H', COALESCE(platform_published_at, scheduled_at)) = ?",
+        (row["id"], here.strftime("%Y-%m-%dT%H")),
+    ).fetchone()
+    if here not in released_hours and not held_elsewhere:
+        released_hours.add(here)
+        return False
+    taken = sibling_hours | released_hours
+    candidate = slot
+    for _ in range(24 * 14):
+        candidate += timedelta(hours=1)
+        if candidate > now_dt and _floor_hour(candidate) not in taken:
+            break
+    else:
+        return False
+    if row.get("sidecar_path"):
+        try:
+            write_plan_slot(
+                Path(row["sidecar_path"]), row["project_name"], row["short_index"], candidate
+            )
+        except (OSError, ValueError, KeyError):
+            logger.exception("dispatch: could not move %s to %s", row["id"], candidate)
+            return False
+    if not reschedule_delivery(conn, row["id"], candidate.isoformat(), now=now):
+        return False
+    released_hours.add(_floor_hour(candidate))
+    logger.info(
+        "dispatch: delivery %s moved %s -> %s (one YouTube Short per hour)",
+        row["id"],
+        row.get("scheduled_at"),
+        candidate.isoformat(),
+    )
+    return True
+
+
 def drain_queue(
     conn,
     handlers: Mapping[str, Callable[[Dict[str, Any]], None]],
@@ -750,6 +887,7 @@ def drain_queue(
     privacy_attestations: Optional[Callable[[Dict[str, Any]], Optional[Mapping[str, Any]]]] = None,
     held_scopes: Optional[Collection[Tuple[str, str]]] = None,
     facebook_photo_reconciler: Optional[Callable[[Dict[str, Any]], None]] = None,
+    incidents_dir: Optional[Path] = None,
 ) -> DrainResult:
     """One drain pass. Never raises on an empty queue, an unavailable lease,
     or a single handler's exception — all recorded on ``DrainResult`` so one
@@ -764,7 +902,13 @@ def drain_queue(
 
     ``held_scopes`` is the validate gate: ``(platform, project)`` pairs whose
     rows are HELD the same way, because the validator names a problem on that
-    pair. Every other pair drains normally.
+    pair. Every other pair drains normally. A row held more than
+    ``HELD_PAST_SLOT_MARGIN`` past its ``scheduled_at`` (by either hold) writes one
+    ``delivery_held_past_slot`` incident under ``incidents_dir`` (default: the
+    health incidents dir).
+
+    Two YouTube Shorts are never released in one clock hour: the second due row
+    moves to the next free slot (row and sidecar ``publishAt``).
 
     ``facebook_photo_reconciler`` is an explicitly trusted read-only port for
     persisted Page-photo kinds. It runs without current-draft validation or
@@ -787,6 +931,7 @@ def drain_queue(
         backoff_cap_seconds=backoff_cap_seconds,
         max_attempts=max_attempts,
     )
+    released_hours: set = set()
     for row in _select_due(conn, now):
         delivery_id, platform, status = row["id"], row["platform"], row["status"]
 
@@ -807,10 +952,12 @@ def drain_queue(
 
         if not photo_read and held_scopes and (platform, row["project_name"]) in held_scopes:
             result.held_validate += 1
-            result.errors.append(
-                f"{platform}#{delivery_id}: validate hold: {platform}/{row['project_name']} "
+            reason = (
+                f"validate hold: {platform}/{row['project_name']} "
                 "has a publishing-status --validate problem"
             )
+            result.errors.append(f"{platform}#{delivery_id}: {reason}")
+            _raise_held_incident(row, now, reason, incidents_dir)
             continue
 
         # Same reasoning, one rung earlier in the same "check before locking"
@@ -833,6 +980,12 @@ def drain_queue(
                 logger.warning(
                     "dispatch: delivery %s held, privacy not verified: %s", delivery_id, hold
                 )
+                _raise_held_incident(row, now, f"privacy hold: {hold}", incidents_dir)
+                continue
+
+        if platform == "youtube" and not photo_read:
+            if _defer_same_hour(conn, row, now, released_hours):
+                result.moved_same_hour += 1
                 continue
 
         if not acquire_lease(conn, delivery_id, owner, expires_at, now=now):

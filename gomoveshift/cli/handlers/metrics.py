@@ -869,7 +869,7 @@ def _cmd_metrics_backfill_ids(config) -> int:
     try:
         rows = conn.execute(
             "SELECT project_name, short_index, platform, platform_upload_id, "
-            "platform_post_id, published_at, published_at_source "
+            "platform_post_id, published_at, published_at_source, platform_published_at "
             "FROM deliveries WHERE status='published'"
         ).fetchall()
     finally:
@@ -891,7 +891,7 @@ def _cmd_metrics_backfill_ids(config) -> int:
             # catch-up click read as a publish second. Old rows here have no
             # source at all -- see ``recorded_publish_time``.
             posted_at, posted_at_source = recorded_publish_time(
-                row["published_at"], row["published_at_source"]
+                row["published_at"], row["published_at_source"], row["platform_published_at"]
             )
             store.update_platform_id(
                 row["project_name"],

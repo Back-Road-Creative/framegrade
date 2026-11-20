@@ -190,6 +190,7 @@ _PUBLISHED_AT_SOURCES = (
     "platform_reconciled",
     "platform_confirmed",
     "platform_scheduled",
+    "platform_live",
 )
 
 

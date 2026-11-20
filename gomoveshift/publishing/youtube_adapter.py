@@ -34,7 +34,13 @@ from .models import ShortPublishRecord, YouTubePayload
 from .queue import NEXT_ATTEMPT_PLATFORM_DEFERRAL as PLATFORM_DEFERRAL
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from .queue import PUBLISHED_AT_PLATFORM_SCHEDULED as PLATFORM_SCHEDULED
-from .queue import acquire_lease, find_delivery, mark_missing_remote, transition
+from .queue import (
+    acquire_lease,
+    find_delivery,
+    mark_missing_remote,
+    record_live_publish,
+    transition,
+)
 from .short_title_review import short_text_policy
 from .youtube_uploads_listing import list_uploads
 
@@ -316,6 +322,54 @@ class ShortsPublishResult:
     #: U-R1: the insert returned an id YouTube then did not list -- the row
     #: is ``missing_remote``, not ``published``.
     missing_remote: bool = False
+
+
+def live_publish_time(item: Dict[str, Any]) -> Optional[str]:
+    """The time a ``videos.list`` item (``part=status,snippet``) went public, else ``None``.
+
+    Only ``status.privacyStatus == "public"`` proves the video is live; while it
+    is still ``private`` with a ``publishAt``, ``snippet.publishedAt`` is the
+    upload moment and must not be mistaken for go-public. Pure: no network."""
+    if (item.get("status") or {}).get("privacyStatus") != "public":
+        return None
+    published = (item.get("snippet") or {}).get("publishedAt")
+    if not published:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
+    """Replace the scheduled slot with the confirmed go-public time on every
+    YouTube row still ``platform_scheduled`` whose slot has passed.
+
+    One ``videos.list`` per row through the caller's ``service``; a lookup that
+    raises or a video not yet public leaves the row on its scheduled source.
+    Returns how many rows were confirmed."""
+    now = now or datetime.now(timezone.utc).isoformat()
+    rows = conn.execute(
+        "SELECT id, platform_upload_id FROM deliveries WHERE platform='youtube' "
+        "AND status='published' AND published_at_source=? AND platform_upload_id IS NOT NULL "
+        "AND platform_published_at <= ? ORDER BY id",
+        (PLATFORM_SCHEDULED, now),
+    ).fetchall()
+    confirmed = 0
+    for row in rows:
+        try:
+            resp = (
+                service.videos().list(part="status,snippet", id=row["platform_upload_id"]).execute()
+            )
+        except Exception:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+            logger.exception("live check failed for video_id=%s", row["platform_upload_id"])
+            continue
+        items = resp.get("items") or []
+        live_at = live_publish_time(items[0]) if items else None
+        if live_at and record_live_publish(conn, row["id"], live_at, now=now):
+            confirmed += 1
+    return confirmed
 
 
 def _utc_midnight(*, plus_days: int = 0) -> datetime:

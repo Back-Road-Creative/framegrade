@@ -38,7 +38,7 @@ lifetime Analytics query, and the per-day query (28 days from the booking date).
 also asks the same Analytics client for `views,engagedViews,estimatedMinutesWatched,
 averageViewDuration,averageViewPercentage` with `filters=video==<id>`, from the publish date
 (`published_at`, i.e. `ShortRecord.posted_at`, which may be the scheduled time when
-`posted_at_source` says so) to today. They land on `PlatformMetrics` as `engaged_views`,
+`posted_at_source` says so) to today. `posted_at_source=platform_live` means `posted_at` is the time YouTube confirmed the video public (`queue.record_live_publish`); `platform_scheduled` is only the upload moment, which can be days before go-public. They land on `PlatformMetrics` as `engaged_views`,
 `watch_time_seconds`, `avg_view_duration_seconds` and `avg_view_percentage`.
 
 - `MetricObservation.age_bucket` is the latest fixed age reached when asked: `24h`, `72h` or
