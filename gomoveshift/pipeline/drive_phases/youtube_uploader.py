@@ -334,7 +334,9 @@ class YouTubeUploader:
         overrides take effect per-invocation. See the module docstring
         for rationale (legacy "episode NN FINAL" draft prevention).
 
-        Every upload also sends ``snippet.defaultLanguage``, ``status.license``,
+        Every upload also sends ``snippet.defaultLanguage`` and
+        ``snippet.defaultAudioLanguage`` (both from the one config value),
+        ``status.license``,
         and ``status.embeddable`` (config-backed via ``config.drive.youtube_default_language``,
         ``youtube_license``, ``youtube_embeddable`` — see the YouTube Data API v3
         ``videos.insert`` reference).
@@ -378,6 +380,9 @@ class YouTubeUploader:
             "tags": list(tags),
             "categoryId": category_id,
             "defaultLanguage": drive_config.youtube_default_language,
+            # Same config language value: the narration/ambient track is declared
+            # in the language the metadata is written in. Unverified for JP.
+            "defaultAudioLanguage": drive_config.youtube_default_language,
         }
         status: dict[str, Any] = {
             "privacyStatus": privacy,
