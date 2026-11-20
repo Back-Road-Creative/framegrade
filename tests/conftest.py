@@ -85,6 +85,7 @@ def _make_test_home() -> str:
 
 
 _TEST_HOME = _make_test_home()
+
 os.environ["HOME"] = _TEST_HOME
 # Windows reads the home directory from USERPROFILE, not HOME.
 os.environ["USERPROFILE"] = _TEST_HOME

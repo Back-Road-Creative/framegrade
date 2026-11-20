@@ -4,6 +4,8 @@ rolling-ceiling gates it sits beside."""
 
 from __future__ import annotations
 
+import pytest
+
 import hashlib
 import tempfile
 from datetime import datetime, timezone
@@ -252,3 +254,12 @@ def test_rerunning_the_same_plan_is_not_a_cross_batch_repeat(tmp_path):
     assert _run(tmp_path, out, brand="no-such-brand") == 0
 
     assert _run(tmp_path, out, brand="no-such-brand") == 0
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)

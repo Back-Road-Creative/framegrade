@@ -215,6 +215,19 @@ exactly the file that produced the row, never a directory guess.
   `enqueue()`'s `sqlite3.IntegrityError` — the reader re-raises as
   `DeliveryPlanConflictError`, naming the project, short index, platform,
   and both the active and incoming `plan_hash`. Never swallowed.
+- **Final-text review at enqueue**: for every Short routed to YouTube, the reader asks
+  `youtube_adapter.short_review_refusal` (the review dispatch runs) before spooling. A
+  refused Short is enqueued on no platform; it is listed in `EnqueueResult.refused` and
+  raises one `short_review_refused` health incident (`health.store.new_incident`, key
+  `short_review_refused:<project>:<short_index>`, one open row however often enqueue
+  re-runs, replaced only when the reason changes). The plan's other Shorts still enqueue.
+  The row carries a `detail` line (project, Short index, reason) that `health check` pushes.
+  The refused Shorts are also left out of `enqueue-plan`'s rolling-ceiling and anti-spam counts.
+  `enqueue_from_plan_sidecar(..., review=False)` skips the check. `enqueue-plan`
+  prints the refusals on a dry run (writing nothing) and on `--apply` (`refused=N`).
+  The plan builder (`plan_builder.build_publish_plan`) first drops a Short's unreviewable
+  tags with `reviewable_short_tags`, the filter `queue sync-plan-tags` applies, and logs
+  a warning for a Short that still fails.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises

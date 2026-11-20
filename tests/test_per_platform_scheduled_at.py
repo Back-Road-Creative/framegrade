@@ -10,6 +10,8 @@ own time when one is present.
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -148,3 +150,12 @@ def test_the_delivery_row_carries_its_own_platform_time(tmp_path):
     assert rows[("youtube", 1)].startswith("2026-04-01T16:00")
     assert rows[("instagram", 2)].startswith("2026-04-01T16:00")
     assert rows[("youtube", 2)].startswith("2026-04-01T20:00")
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)
