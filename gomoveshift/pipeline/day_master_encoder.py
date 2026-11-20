@@ -1131,6 +1131,7 @@ def _build_day_blur_mask(
         and existing_evidence == current_evidence
         and mask_path.exists()
         and mask_path.stat().st_size > 0
+        and blur_gate.repair_swap_error(regions_sidecar) is None
         and _counts_allow_reuse(raw_concat, existing.source_frame_count, mask_path)
     ):
         logger.info(
@@ -1221,6 +1222,8 @@ def _build_day_blur_mask(
         br.write_sidecar(regions_sidecar, timeline)
         save_cache_json(_blur_evidence_path(regions_sidecar), current_evidence)
         materialize_mask_video(timeline, mask_path)
+        # A fresh pair supersedes any interrupted repair swap.
+        blur_gate.repair_swap_pending_path(regions_sidecar).unlink(missing_ok=True)
         # The finished mask is reused through the sidecar from here on.
         checkpoint_path.unlink(missing_ok=True)
         binding_path.unlink(missing_ok=True)
@@ -1336,10 +1339,15 @@ def _cabin_gate_with_repair(
     spent = 0
     for _ in range(rounds):
         added = _repair_cabin_leaks(raw_concat, config, mask_path, regions_sidecar)
-        spent += 1
         err = blur_gate.check_day_master_cabin_coverage(config, raw_concat, mask_path)
         if not err:
             return None
+        if getattr(added, "detector_missing", False):
+            # No detector was built, so the windowed detection never ran (only the
+            # gate's own leaked boxes were covered). That is not a tried repair: it is
+            # not counted or recorded, so a retry once the model loads gets every round.
+            return f"{err} (cabin repair: detector unavailable, repair not attempted)"
+        spent += 1
         if not added:
             # The mask did not change (the repair raised, or had no leak report), so another
             # round would repeat this one. The inputs were never actually tried, so this is
@@ -1348,6 +1356,17 @@ def _cabin_gate_with_repair(
     if spent:
         blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent, repair_key=key)
     return err
+
+
+class _Added(int):
+    """Boxes added by one repair, plus whether no detector could be built."""
+
+    detector_missing: bool = False
+
+    def __new__(cls, added: int, detector_missing: bool = False):
+        obj = super().__new__(cls, added)
+        obj.detector_missing = detector_missing
+        return obj
 
 
 def _repair_cabin_leaks(
@@ -1368,7 +1387,12 @@ def _repair_cabin_leaks(
     gate's. The new mask is written beside the old one and swapped in only once
     complete: the mask cache reuses whatever file is present, so a half-written one
     must never take its place. Any failure leaves the old mask and returns 0 —
-    the caller then stops on the gate's original error."""
+    the caller then stops on the gate's original error.
+
+    The mask and the sidecar are two files, so their swap is journaled: a pending
+    marker (``blur_gate.repair_swap_pending_path``) is written before the first
+    replace and removed after the second. An interrupted swap leaves it behind, and
+    every encode gate and the mask cache refuse the pair until a fresh detection."""
     import cv2
     from redactcam import materialize_mask_video
     from redactcam import timeline as br
@@ -1382,6 +1406,8 @@ def _repair_cabin_leaks(
     leak_frames = [int(leak["frame"]) for leak in leaks]
     if not leak_frames:
         return 0
+    if blur_gate.repair_swap_error(regions_sidecar):
+        return 0  # an interrupted swap: never repair on top of a mismatched pair
     timeline = br.load_sidecar(regions_sidecar)
     drive = config.drive
     veh = resolve_vehicle_model(drive)
@@ -1391,12 +1417,14 @@ def _repair_cabin_leaks(
     windows = _leak_windows(leak_frames, math.ceil(timeline.source_fps * CABIN_REPAIR_WINDOW_S), n)
     tmp_mask = mask_path.with_name(f"{mask_path.stem}.repair.tmp{mask_path.suffix}")
     tmp_sidecar = regions_sidecar.with_name(f"{regions_sidecar.stem}.repair.tmp.json")
+    pending = blur_gate.repair_swap_pending_path(regions_sidecar)
     try:
         # The gate's own leaked box first: whatever detection finds, the mask now
         # covers every cabin the gate saw exposed, so a repair given a leak cannot add
         # nothing. Needs no model, so a missing detector no longer voids the repair.
         added = _cover_leaked_boxes(timeline, leaks, drive.blur_vehicle_cabin_frac, n)
         det = build_vehicle_detector(str(veh), 640, 0.45, 0) if veh is not None else None
+        detector_missing = det is None
         if det is not None:
             cap = cv2.VideoCapture(str(raw_concat))
             try:
@@ -1438,11 +1466,15 @@ def _repair_cabin_leaks(
             finally:
                 cap.release()
         if not added:
-            return 0
+            return _Added(0, detector_missing)
         materialize_mask_video(timeline, tmp_mask)
         br.write_sidecar(tmp_sidecar, timeline)
+        # Journal first: a crash between the two replaces leaves the marker, which
+        # fails closed downstream instead of pairing a new mask with an old sidecar.
+        pending.write_text(json.dumps({"mask": mask_path.name, "sidecar": regions_sidecar.name}))
         os.replace(tmp_mask, mask_path)
         os.replace(tmp_sidecar, regions_sidecar)
+        pending.unlink(missing_ok=True)
     except Exception as exc:
         logger.warning("cabin leak repair failed, keeping the original mask: %s", exc)
         return 0
@@ -1456,7 +1488,7 @@ def _repair_cabin_leaks(
         len(set(leak_frames)),
         mask_path.name,
     )
-    return added
+    return _Added(added, detector_missing)
 
 
 def encode_day_master(
