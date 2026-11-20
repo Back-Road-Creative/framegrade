@@ -173,19 +173,23 @@ class TestHalfSwappedPairNeverReachesTheEncode:
 
 
 class TestInterruptedSwapIsRebuiltInPlaceOnce:
-    def _wire(self, tmp_path, monkeypatch, rebuild_clears_marker):
+    def _wire(self, tmp_path, monkeypatch, rebuild_clears_marker, after_rebuild=None):
         raw, mask, sidecar, cfg, _, _ = _helper._setup(tmp_path, monkeypatch, [50])
         cap = _blur_tests._mock_encode(monkeypatch)
         marker = blur_gate.repair_swap_pending_path(sidecar)
         builds = []
+        real_replace = os.replace
 
         def _build(*a, **k):
             builds.append(1)
+            if len(builds) > 1:
+                monkeypatch.setattr(dme.os, "replace", real_replace)  # the disk is back
             if len(builds) > 1 and rebuild_clears_marker:
                 marker.unlink(missing_ok=True)  # what a re-detect does
             return mask
 
-        verdicts = iter(["BLUR GATE (cabin): 1 of 9 EXPOSED", None])
+        verdicts = iter(["BLUR GATE (cabin): 1 of 9 EXPOSED", after_rebuild, after_rebuild])
+        cfg.drive.blur_cabin_repair_rounds = 1
         monkeypatch.setattr(dme, "_build_day_blur_mask", _build)
         monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda *a: next(verdicts))
         monkeypatch.setattr(blur_gate, "cabin_repair_failure", lambda *a, **k: None)
@@ -203,6 +207,17 @@ class TestInterruptedSwapIsRebuiltInPlaceOnce:
         out = dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=cfg)
         assert out == tmp_path / "day_2026-02-24_master.mp4"
         assert len(builds) == 2 and cap != {}
+
+    def test_the_cabin_gate_runs_again_on_the_rebuilt_pair(self, tmp_path, monkeypatch):
+        cfg, cap, builds = self._wire(
+            tmp_path,
+            monkeypatch,
+            rebuild_clears_marker=True,
+            after_rebuild="BLUR GATE (cabin): 2 of 9 EXPOSED",
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="EXPOSED"):
+            dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=cfg)
+        assert len(builds) == 2 and cap == {}
 
     def test_a_rebuild_that_leaves_the_marker_is_refused_without_a_third_build(
         self, tmp_path, monkeypatch
