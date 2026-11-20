@@ -1,29 +1,40 @@
 """Re-write queued YouTube Shorts with the CURRENT text generator.
 
-A Short queued days ago keeps the text the generator made then, so a generator fix (the
-no-repeated-place title rule, unit C2) never reaches it. ``sync_short_text`` regenerates
-title, description and tags of every ``queued`` YouTube row more than
-:data:`SYNC_LEAD_TIME` from its slot, through the path Phase D uses
-(``plan_bracket_sync._generate_lf``, over the parent LF), and writes them to the sidecar.
-Kept as stored: the title stamp, recording date, schedule, media and ``experiment_arms``
-(arm exclusion waits for a generator that consumes the Shorts arms).
+A Short queued days ago keeps the title, description and tags the generator made then,
+so a generator fix (the no-repeated-place title rule, unit C2) never reaches it.
+``sync_short_text`` closes that gap for every ``queued`` YouTube row whose slot is more
+than :data:`SYNC_LEAD_TIME` away: it regenerates the Short's text through the generator
+path Phase D uses (``plan_bracket_sync._generate_lf``, over the parent LF) and writes
+title, description and tags back to the publish-plan sidecar.
+
+Kept as it was: the title stamp (``"<date>, Nth stretch"``), recording date, schedule,
+media, and ``experiment_arms`` exactly as stored (the sync never picks, swaps or excludes
+an arm: arm exclusion waits for a generator that consumes the Shorts arms).
 
 A Short is refused whole (nothing written) when any delivery row of it, on any platform,
-is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at`` or a slot
-inside the lead time, or when a recovery row exists. The place chain is seeded from the
-STORED text of the Short before each rewritten one and the generator's date is pinned to
-the LF's publish date. Each rewritten
-Short must pass ``short_review_refusal``; a refused one is left unchanged and reported.
+is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at``, or has a
+slot inside the lead time, or when a recovery row exists. A Short with a hand title
+(``<plan dir>/social/titles.yaml``, as Phase D reads it) is reported ``unchanged`` /
+``hand_title``. The no-repeated-place chain is seeded from the STORED text of the Short
+before each rewritten one, and the generator's date is pinned to the LF's publish date,
+so a rerun with the same generator changes nothing.
+
+Each rewritten Short must pass ``short_review_refusal``, ``models.validate_payloads`` and
+``anti_spam_gate.check_batch`` (the gates enqueue runs, with the queue's recent text);
+a refused Short is left unchanged and reported with the reason.
 
 Plan hash (decision D4): a changed Short gets ``reviewed_plan_hash`` recomputed, every
-non-terminal, unleased row on the old hash moves to the new one, and ``response_log``
-keeps the old hash. The sidecar is replaced inside the queue transaction. No network, no
-platform call; a dry run writes no file at all.
+non-terminal, unleased row whose ``plan_hash`` was the old one moves to the new one, and
+``response_log`` keeps the old hash. Order: the audit row and queue update commit first,
+then the sidecar is replaced, so a failure never leaves them silently apart; every run
+also moves a queued row still on a stale hash to the sidecar's when the sidecar already
+holds the synced text. No network, no platform call; a dry run writes no file at all.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -48,12 +59,16 @@ _YT_SQL = (
 )
 
 
+class SidecarChangedError(ValueError):
+    """The sidecar was edited between planning and writing."""
+
+
 @dataclass(frozen=True)
 class ShortTextChange:
     delivery_id: int
     project_name: str
     short_index: int
-    # "changed" | "unchanged" | "inside_lead_time" | "refused"
+    # "changed" | "reconciled" | "unchanged" | "inside_lead_time" | "refused"
     status: str
     old_title: str
     new_title: str
@@ -62,6 +77,8 @@ class ShortTextChange:
     old_hash: str = ""
     new_hash: str = ""
     written: bool = False
+    #: queue ``plan_hash`` values that move to ``new_hash`` (``changed``: the old one)
+    old_hashes: Tuple[str, ...] = ()
     #: the row's own ``sidecar_path`` text, which the queue update matches verbatim
     sidecar_path: str = ""
 
@@ -227,15 +244,35 @@ def _generate(
     return posts, refused
 
 
-def _gate_refusals(plan, positions: List[int]) -> Dict[int, str]:
-    """Why each rewritten position still fails the Short review (the enqueue gate)."""
+def _gate_refusals(
+    plan, positions: List[int], spooled: dict, per_location_cap: Optional[int]
+) -> Dict[int, str]:
+    """Why each rewritten position fails the gates enqueue runs: the Short review,
+    ``validate_payloads`` and ``check_batch`` (over the whole trial plan)."""
+    from .anti_spam_gate import check_batch
+    from .models import PayloadLimitError, validate_payloads
     from .youtube_adapter import short_review_refusal
 
     out: Dict[int, str] = {}
+    batch = check_batch(list(plan.shorts), per_location_cap=per_location_cap, recent_texts=spooled)
     for pos in positions:
-        refusal = short_review_refusal(plan.shorts[pos])
+        record = plan.shorts[pos]
+        refusal = short_review_refusal(record)
         if refusal:
             out[pos] = f"still refused by the Short review: {refusal}"
+            continue
+        try:
+            validate_payloads(record.payloads)
+        except PayloadLimitError as exc:
+            out[pos] = f"payload limit: {exc}"
+            continue
+        hit = [
+            v
+            for v in batch
+            if v.index == pos and (v.platform in ("youtube", None) or v.rule == "caption-collision")
+        ]
+        if hit:
+            out[pos] = "anti-spam gate: " + "; ".join(f"{v.rule}: {v.detail}" for v in hit)
     return out
 
 
@@ -244,13 +281,19 @@ def _sidecar_changes(
     sidecar: Path,
     rows: List[sqlite3.Row],
     now: datetime,
-) -> Tuple[Dict[int, ShortTextChange], Dict[int, dict]]:
+    per_location_cap: Optional[int],
+) -> Tuple[Dict[int, ShortTextChange], Dict[int, dict], str]:
     """Per YouTube row id: its verdict; the rewritten Short for each ``changed`` one
-    (keyed by position in the plan). Nothing is written here."""
-    raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    (keyed by position in the plan); the sidecar's sha256. Nothing is written here."""
+    from gomoveshift.pipeline.social_generator import load_hand_titles
+
+    body = sidecar.read_bytes()
+    raw = json.loads(body)
     load_publish_plan(sidecar)  # the input must already be a valid plan
+    sha = hashlib.sha256(body).hexdigest()
     shorts: List[dict] = raw["shorts"]
     by_key = {(s["project_name"], int(s["short_index"])): pos for pos, s in enumerate(shorts)}
+    hand = load_hand_titles(sidecar.parent / "social" / "titles.yaml")
     verdict: Dict[int, ShortTextChange] = {}
 
     def settle(row, pos, status, reason="", **kw):
@@ -285,13 +328,18 @@ def _sidecar_changes(
             settle(row, pos, "inside_lead_time", f"slot {at.isoformat()} is inside the lead time")
         elif why:
             settle(row, pos, "refused", why)
+        elif int(shorts[pos]["short_index"]) in hand:
+            settle(row, pos, "unchanged", "hand_title")
         else:
             targets[pos] = row
             siblings[pos] = sib
     if not targets:
-        return verdict, {}
+        return verdict, {}, sha
 
-    spooled: dict = {}
+    projects = {s["project_name"] for s in shorts}
+    from .anti_spam_gate import recent_platform_texts
+
+    spooled = recent_platform_texts(conn, exclude_projects=projects)
     active: Set[int] = set(targets)
     rewritten: Dict[int, dict] = {}
     fields_of: Dict[int, Tuple[str, ...]] = {}
@@ -314,7 +362,7 @@ def _sidecar_changes(
             for pos, new in rewritten.items():
                 trial["shorts"][pos] = new
             plan = plan_from_raw(trial, sidecar)
-            bad = _gate_refusals(plan, list(rewritten))
+            bad = _gate_refusals(plan, list(rewritten), spooled, per_location_cap)
             for pos, why in bad.items():
                 settle(targets[pos], pos, "refused", why)
                 active.discard(pos)
@@ -322,10 +370,40 @@ def _sidecar_changes(
         if not again:
             break
     for pos in unchanged:
-        settle(targets[pos], pos, "unchanged", "text already matches the generator")
-    for pos, new in rewritten.items():
+        sidecar_hash = shorts[pos]["reviewed_plan_hash"]
+        stale = sorted(
+            {
+                r["plan_hash"]
+                for r in siblings[pos]
+                if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] != sidecar_hash
+            }
+        )
+        if stale:
+            settle(
+                targets[pos],
+                pos,
+                "reconciled",
+                "queue hash was behind the sidecar's synced text",
+                old_hash=stale[0],
+                new_hash=sidecar_hash,
+                old_hashes=tuple(stale),
+            )
+        else:
+            settle(targets[pos], pos, "unchanged", "text already matches the generator")
+    for pos, new in list(rewritten.items()):
         old = shorts[pos]["reviewed_plan_hash"]
         new_hash = new["reviewed_plan_hash"]
+        odd = [
+            r["plan_hash"]
+            for r in siblings[pos]
+            if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] not in (old, new_hash)
+        ]
+        if odd:
+            del rewritten[pos]
+            settle(
+                targets[pos], pos, "refused", f"a queue row's plan hash {odd[0][:12]} is unknown"
+            )
+            continue
         settle(
             targets[pos],
             pos,
@@ -334,8 +412,9 @@ def _sidecar_changes(
             new_title=new["payloads"]["youtube"]["title"],
             old_hash=old,
             new_hash=new_hash,
+            old_hashes=(old,),
         )
-    return verdict, rewritten
+    return verdict, rewritten, sha
 
 
 def _apply_sidecar(
@@ -343,35 +422,42 @@ def _apply_sidecar(
     sidecar: Path,
     verdict: Dict[int, ShortTextChange],
     rewritten: Dict[int, dict],
+    sha: str,
     now: datetime,
 ) -> None:
-    """Write ``rewritten`` into ``sidecar`` atomically and move the queue rows' hashes."""
-    raw = json.loads(sidecar.read_text(encoding="utf-8"))
-    for pos, new in rewritten.items():
-        raw["shorts"][pos] = new
+    """Commit the audit rows and queue hash moves, THEN replace the sidecar, so a failure
+    of either never leaves them silently apart (a rerun converges: see the module doc)."""
+    if hashlib.sha256(sidecar.read_bytes()).hexdigest() != sha:
+        raise SidecarChangedError(f"{sidecar.name} changed while the sync ran")
     tmp = sidecar.with_name(sidecar.name + ".sync-short-tmp")
-    tmp.write_text(json.dumps(raw, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    if rewritten:
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        for pos, new in rewritten.items():
+            raw["shorts"][pos] = new
+        tmp.write_text(json.dumps(raw, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
     try:
-        with conn:  # commits only after the sidecar has been replaced
+        with conn:
             for change in verdict.values():
-                if change.status != "changed":
+                if change.status not in ("changed", "reconciled"):
                     continue
-                moved = conn.execute(
-                    "UPDATE deliveries SET plan_hash = ? "  # noqa: S608
-                    "WHERE project_name = ? AND short_index = ? AND sidecar_path = ? "
-                    f"AND plan_hash = ? AND status NOT IN ({terminal}) "
-                    "AND (lease_owner IS NULL OR lease_expires_at <= ?)",
-                    (
-                        change.new_hash,
-                        change.project_name,
-                        change.short_index,
-                        change.sidecar_path,
-                        change.old_hash,
-                        *TERMINAL_STATUSES,
-                        now.isoformat(),
-                    ),
-                ).rowcount
+                moved = 0
+                for old in change.old_hashes:
+                    moved += conn.execute(
+                        "UPDATE deliveries SET plan_hash = ? "  # noqa: S608
+                        "WHERE project_name = ? AND short_index = ? AND sidecar_path = ? "
+                        f"AND plan_hash = ? AND status NOT IN ({terminal}) "
+                        "AND (lease_owner IS NULL OR lease_expires_at <= ?)",
+                        (
+                            change.new_hash,
+                            change.project_name,
+                            change.short_index,
+                            change.sidecar_path,
+                            old,
+                            *TERMINAL_STATUSES,
+                            now.isoformat(),
+                        ),
+                    ).rowcount
                 conn.execute(
                     "INSERT INTO response_log (at, platform, state, cap, action, mode, reason) "
                     "VALUES (?, 'youtube', 'plan_sync', 0, 'sync_short_text', 'live', ?)",
@@ -389,15 +475,17 @@ def _apply_sidecar(
                                 "old_title": change.old_title,
                                 "new_title": change.new_title,
                                 "fields": list(change.fields),
+                                "reconcile": change.status == "reconciled",
                             },
                             sort_keys=True,
                         ),
                     ),
                 )
-            os.replace(tmp, sidecar)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+    if rewritten:
+        os.replace(tmp, sidecar)
 
 
 def sync_short_text(
@@ -405,9 +493,11 @@ def sync_short_text(
     *,
     apply: bool,
     now: Optional[datetime] = None,
+    per_location_cap: Optional[int] = None,
 ) -> List[ShortTextChange]:
     """Re-write every eligible queued YouTube Short's text (see the module docstring);
-    one :class:`ShortTextChange` per queued, unleased YouTube row, in row order."""
+    one :class:`ShortTextChange` per queued, unleased YouTube row, in row order.
+    ``per_location_cap`` is the brand policy's, as enqueue passes it to ``check_batch``."""
     now = now or datetime.now(timezone.utc)
     rows = conn.execute(_YT_SQL, (now.isoformat(),)).fetchall()
     by_sidecar: Dict[str, List[sqlite3.Row]] = {}
@@ -431,18 +521,18 @@ def sync_short_text(
     for path, group in by_sidecar.items():
         sidecar = Path(path)
         try:
-            verdict, rewritten = _sidecar_changes(conn, sidecar, group, now)
+            verdict, rewritten, sha = _sidecar_changes(conn, sidecar, group, now, per_location_cap)
         except (OSError, ValueError, LookupError) as exc:
             refuse_all(group, f"sidecar unusable: {exc}")
             continue
-        if apply and any(v.status == "changed" for v in verdict.values()):
+        if apply and any(v.status in ("changed", "reconciled") for v in verdict.values()):
             try:
-                _apply_sidecar(conn, sidecar, verdict, rewritten, now)
+                _apply_sidecar(conn, sidecar, verdict, rewritten, sha, now)
             except (OSError, ValueError, sqlite3.Error) as exc:
                 refuse_all(group, f"sidecar unusable: write failed: {exc}")
                 continue
             verdict = {
-                k: replace(v, written=True) if v.status == "changed" else v
+                k: replace(v, written=True) if v.status in ("changed", "reconciled") else v
                 for k, v in verdict.items()
             }
         verdicts.update(verdict)

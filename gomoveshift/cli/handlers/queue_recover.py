@@ -544,6 +544,39 @@ def _cmd_sync_bracket_short_text(args, config) -> int:
     return 1 if refused else 0
 
 
+def _cmd_sync_short_text(args, config) -> int:
+    """Re-write each queued YouTube Short's title, description and tags with the current
+    generator. Local file writes plus the queue's plan hash (no platform call); dry run
+    unless ``--apply``. Exits 1 when any Short is refused or any sidecar is unusable."""
+    from gomoveshift.publishing.brand_policy import load_brand_policy
+    from gomoveshift.publishing.queue_short_text import SYNC_LEAD_TIME, sync_short_text
+
+    from ...console.settings import current_brand
+
+    cap = load_brand_policy(current_brand()).per_location_cap
+    conn = open_queue_db(config.seo.storage_path)
+    try:
+        changes = sync_short_text(conn, apply=args.apply, per_location_cap=cap)
+    finally:
+        conn.close()
+    for c in changes:
+        label = f"delivery {c.delivery_id} {c.project_name}#{c.short_index}"
+        if c.status in ("changed", "reconciled"):
+            verb = c.status if c.written else f"dry run: would change ({c.status})"
+            print(
+                f"{verb} {label}: {c.old_title!r} -> {c.new_title!r} [{', '.join(c.fields)}] "
+                f"plan hash {c.old_hash[:12]} -> {c.new_hash[:12]}"
+            )
+        else:
+            print(f"{c.status} {label}: {c.old_title!r} ({c.reason})")
+    changed = sum(c.status in ("changed", "reconciled") for c in changes)
+    refused = sum(c.status == "refused" for c in changes)
+    print(f"{changed} changed, {refused} refused (lead time {SYNC_LEAD_TIME})")
+    if not args.apply:
+        print(f"dry run: {changed} Short(s); re-run with --apply to write")
+    return 1 if refused else 0
+
+
 def cmd_queue(args, config) -> int:
     if args.queue_action not in (
         "recover-terminal",
@@ -551,6 +584,7 @@ def cmd_queue(args, config) -> int:
         "sync-plan-titles",
         "sync-plan-tags",
         "sync-bracket-short-text",
+        "sync-short-text",
         "reslot-overdue-manual",
         "reslot-overdue-youtube",
         "remeasure-short-route",
@@ -573,6 +607,8 @@ def cmd_queue(args, config) -> int:
         return _cmd_sync_plan_tags(args, config)
     if args.queue_action == "sync-bracket-short-text":
         return _cmd_sync_bracket_short_text(args, config)
+    if args.queue_action == "sync-short-text":
+        return _cmd_sync_short_text(args, config)
     if args.queue_action == "reslot-overdue-manual":
         from .queue_reslot import cmd_reslot_overdue_manual
 

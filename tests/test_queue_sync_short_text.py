@@ -1,4 +1,4 @@
-"""``sync_short_text`` re-writes queued Shorts with the current generator (plan unit C5).
+"""``queue sync-short-text`` re-writes queued Shorts with the current generator (plan unit C5).
 Slot more than 24 h away, stamp, date, slot and arms kept, Short review re-run, plan hash moved
 with the old one in ``response_log``. All data is synthetic."""
 
@@ -6,14 +6,18 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from test_place_gate import Geo, _win
 
+from gomoveshift.cli.handlers.queue_recover import cmd_queue
 from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.pipeline.route_claims import measure_route
+from gomoveshift.publishing import anti_spam_gate, models
 from gomoveshift.publishing import queue_short_text as qst
 from gomoveshift.publishing.plan_io import load_publish_plan
 from gomoveshift.publishing.queue import enqueue, open_queue_db
@@ -370,11 +374,133 @@ def test_experiment_arms_are_kept_exactly_as_stored(tmp_path):
     assert _youtube(plan, 1).experiment_arms == arms
 
 
+class _CommitFails:
+    """A connection whose ``with conn:`` rolls back and then fails like a full disk."""
+
+    def __init__(self, conn):
+        self._c = conn
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._c.rollback()
+        raise sqlite3.OperationalError("disk I/O error")
+
+
 def _converged(plan, conn):
     side = {s.short_index: s.reviewed_plan_hash for s in load_publish_plan(plan).shorts}
     return all(
         side[r["short_index"]] == r["plan_hash"] for r in conn.execute("SELECT * FROM deliveries")
     )
+
+
+def test_a_commit_failure_leaves_both_sides_alone_and_the_rerun_converges(tmp_path):
+    plan, conn = _two(tmp_path)
+    before = plan.read_text()
+    changes = sync_short_text(_CommitFails(conn), apply=True, now=NOW)
+    assert {c.status for c in changes} == {"refused"} and not any(c.written for c in changes)
+    assert plan.read_text() == before and set(_hashes(conn).values()) == {OLD_HASH}
+    assert conn.execute("SELECT COUNT(*) FROM response_log").fetchone()[0] == 0
+    assert not list(tmp_path.glob("*.sync-short-tmp"))
+    again = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in again] == ["changed", "changed"] and _converged(plan, conn)
+
+
+class _Crash(BaseException):
+    pass
+
+
+def test_a_crash_after_commit_before_the_replace_converges_on_the_next_run(tmp_path, monkeypatch):
+    plan, conn = _two(tmp_path)
+    before = plan.read_text()
+
+    def die(*a):
+        raise _Crash
+
+    monkeypatch.setattr(qst.os, "replace", die)
+    with pytest.raises(_Crash):
+        sync_short_text(conn, apply=True, now=NOW)
+    monkeypatch.undo()
+    assert plan.read_text() == before and not _converged(plan, conn)
+    assert conn.execute("SELECT COUNT(*) FROM response_log").fetchone()[0] == 2  # audited
+    again = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in again] == ["changed", "changed"] and _converged(plan, conn)
+    assert [c.status for c in sync_short_text(conn, apply=True, now=NOW)] == ["unchanged"] * 2
+
+
+def test_a_queue_row_behind_a_synced_sidecar_is_moved_with_an_audit_row(tmp_path):
+    plan, conn = _two(tmp_path)
+    sync_short_text(conn, apply=True, now=NOW)
+    conn.execute("UPDATE deliveries SET plan_hash = ?", (OLD_HASH,))
+    conn.commit()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [c.status for c in changes] == ["reconciled", "reconciled"] and _converged(plan, conn)
+    audits = [json.loads(r["reason"]) for r in conn.execute("SELECT * FROM response_log")]
+    assert sum(a["reconcile"] for a in audits) == 2
+
+
+def test_a_row_with_an_unknown_plan_hash_refuses_the_short(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)])
+    conn.execute("UPDATE deliveries SET plan_hash = ?", ("e" * 64,))
+    conn.commit()
+    before = plan.read_text()
+    assert sync_short_text(conn, apply=True, now=NOW)[0].status == "refused"
+    assert plan.read_text() == before
+
+
+def test_a_legacy_pool_title_is_refused_by_the_anti_spam_gate(tmp_path, monkeypatch):
+    plan, conn = _two(tmp_path)
+    title = sync_short_text(conn, apply=False, now=NOW)[0].new_title
+    pool = anti_spam_gate.LEGACY_TITLE_POOL | {
+        anti_spam_gate._normalize_exact(anti_spam_gate._bare_title(title))
+    }
+    monkeypatch.setattr(anti_spam_gate, "LEGACY_TITLE_POOL", pool)
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert changes[0].status == "refused" and "legacy-title" in changes[0].reason
+    assert (
+        _youtube(plan, 1).payloads.youtube.title
+        == json.loads(before)["shorts"][0]["payloads"]["youtube"]["title"]
+    )
+
+
+def test_a_payload_over_a_platform_limit_is_refused(tmp_path, monkeypatch):
+    def over(payloads):
+        raise models.PayloadLimitError("youtube title: too long")
+
+    monkeypatch.setattr(models, "validate_payloads", over)
+    plan, conn = _two(tmp_path)
+    before = plan.read_text()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert {c.status for c in changes} == {"refused"} and "payload limit" in changes[0].reason
+    assert plan.read_text() == before
+
+
+def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
+    seen = {}
+    real = anti_spam_gate.check_batch
+    monkeypatch.setattr(
+        anti_spam_gate, "check_batch", lambda r, **kw: seen.update(kw) or real(r, **kw)
+    )
+    _, conn = _two(tmp_path)
+    sync_short_text(conn, apply=False, now=NOW, per_location_cap=1)
+    assert seen["per_location_cap"] == 1 and seen["recent_texts"] == {}
+
+
+def test_a_hand_titled_short_is_left_alone(tmp_path):
+    plan, conn = _two(tmp_path)
+    (tmp_path / "social").mkdir()
+    (tmp_path / "social" / "titles.yaml").write_text('1:\n  title: "Mar 5, 1st stretch: by hand"\n')
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [(c.status, c.reason) for c in changes] == [
+        ("unchanged", "hand_title"),
+        ("changed", ""),
+    ]
+    assert "old words" in _youtube(plan, 1).payloads.youtube.title
 
 
 def test_a_dry_run_writes_no_file_at_all(tmp_path):
@@ -391,3 +517,49 @@ def test_the_queue_update_matches_the_rows_raw_sidecar_path(tmp_path):
     conn.commit()
     sync_short_text(conn, apply=True, now=NOW)
     assert _converged(plan, conn)
+
+
+def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
+    plan, conn = _two(tmp_path)
+    real = qst._sidecar_changes
+
+    def edited(*a):
+        out = real(*a)
+        plan.write_text(plan.read_text() + "\n")
+        return out
+
+    monkeypatch.setattr(qst, "_sidecar_changes", edited)
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert {c.status for c in changes} == {"refused"} and "changed while" in changes[0].reason
+    assert set(_hashes(conn).values()) == {OLD_HASH}
+
+
+def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
+    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    schedule = {
+        "display_timezone": "America/New_York",
+        "scheduled_at_utc": soon.isoformat(),
+        "scheduled_at_utc_by_platform": {},
+    }
+    plan, conn = _world(tmp_path, [_short(1, schedule=schedule)])
+    conn.close()
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    args = SimpleNamespace(queue_action="sync-short-text", apply=False)
+    before = plan.read_text()
+    assert cmd_queue(args, config) == 0
+    assert "dry run: would change" in capsys.readouterr().out
+    assert plan.read_text() == before
+    args.apply = True
+    assert cmd_queue(args, config) == 0
+    assert plan.read_text() != before
+
+
+def test_the_cli_exits_non_zero_when_a_short_is_refused(tmp_path):
+    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    schedule = {**_short(1)["schedule"], "scheduled_at_utc": soon.isoformat()}
+    plan, conn = _world(tmp_path, [_short(1, schedule=schedule)])
+    conn.close()
+    (tmp_path / f"{PROJECT}_lf01_youtube.json").unlink()  # the LF sidecar is gone
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    args = SimpleNamespace(queue_action="sync-short-text", apply=True)
+    assert cmd_queue(args, config) == 1

@@ -1,0 +1,3 @@
+### Fixed
+
+- `gomoveshift queue sync-short-text` commits the audit row and queue hash move before it replaces the sidecar, so a failure or crash never leaves them silently apart and the next run converges; a queued row left on a stale hash is moved to the sidecar's (`reconciled`, with an audit row), and a row with an unknown hash refuses the Short. It re-runs the enqueue gates on the new text (`validate_payloads` and the anti-spam batch check with the queue's recent text and the brand's per-location cap), skips hand-titled Shorts, and refuses a sidecar edited during the run. See `docs/pipeline/183-queue-sync-short-text.md`.
