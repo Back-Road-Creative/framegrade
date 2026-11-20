@@ -124,11 +124,15 @@ carry the block itself to keep the experiment running.
   `experiment_arms` like any other experiment. `assign_stratified_arm` gives a new Short the arm
   its (project, slot) stratum holds fewest of (ties on a sha256 of factor, project, slot, short
   and arm), so arm counts differ by at most one within a stratum. The outcome is
-  `youtube_outcome`: the measured observation nearest 72 h after posting (within 12 h) supplies
-  `views` and `avg_view_percentage`; a Short counts once `posted + 72 h <= today - 2 d`, and
+  `youtube_outcome`: the measured observation of the Short's current YouTube id nearest 72 h after
+  YouTube's own publish time (the queue's `deliveries.published_at` with its source, never
+  `posted_at`, which the last platform to register overwrites; within 12 h) supplies `views` and
+  `avg_view_percentage`; with no YouTube time there is no outcome, and a Short counts once
+  `published + 72 h <= today - 2 d`, and
   unreported retention is unknown, never 0. `metrics collect` prints, after the `EXPERIMENT`
   lines, one `ARM_DECISION factor= arm= decision= n= min_n= score= reference= gap= reason=` line
-  per arm (plus `retest_days=` for a pause). Each Short's views are divided by its project's
+  per arm (plus `retest_days=` for a pause); an arm tagged on a Short but with no countable Short prints
+  `INSUFFICIENT_EVIDENCE n=0`. Each Short's views are divided by its project's
   median (projects holding two or more arms and a non-zero median only); an arm's score is the
   median ratio and its reference the median score of the other arms holding `min_n` (the
   `caption_ranking` pool-median policy). `INSUFFICIENT_EVIDENCE` below `min_n` or with no
@@ -136,9 +140,13 @@ carry the block itself to keep the experiment running.
   chronological half of the arm's Shorts is `demote`, or `pause` at `pause_gap` when the arm's
   median retention is known and no better than the others'; anything else is `hold`. The record
   only reports: it changes no text sent to YouTube. A paused arm is re-tested every
-  `retest_days` (`pause_retest_due`). Thresholds: `policy.arm_thresholds` (`min_n` 36,
+  `retest_days` (`pause_retest_due`). Thresholds: `policy.arm_thresholds`, parsed only by the report path (`load_arm_thresholds`), so a bad value
+  never stops dispatch or planning (`min_n` 36 (at least 4),
   `min_gap` 3.0, `pause_gap` 6.0, `retest_days` 28; named `DEFAULT_*` constants, JP-approved
-  conservative defaults), no other keys. Weekly volume stays Waypost's (`volume_decide`,
+  conservative defaults; gaps must be finite), no other keys. A caption experiment may not take a
+  Shorts factor name. Known limits: an arm's halves split by publish date only (same-day Shorts
+  keep queue order), the per-project median pools every arm's Shorts, and retention is a
+  72 h snapshot that YouTube may still revise, not settled data. Weekly volume stays Waypost's (`volume_decide`,
   `docs/social-metrics-volume.md`); the nightly wrapper reads this record from the same
   `metrics collect` output.
 - **Caption opener ids** (`social_generator.caption_template_id`): every composed caption also

@@ -91,8 +91,6 @@ class BrandPolicy:
     quiet_after_alert_hours: Optional[int] = None
     #: Caption experiments (``publishing/experiments.py``). Empty = none run.
     experiments: Tuple[Experiment, ...] = ()
-    #: Thresholds for the Shorts arm decision record (``experiments.ArmThresholds``).
-    arm_thresholds: ArmThresholds = ArmThresholds()
 
 
 def _load_raw_policy_block(slug: str) -> dict:
@@ -216,8 +214,17 @@ def load_brand_policy(slug: str) -> BrandPolicy:
         blackout=blackout,
         quiet_after_alert_hours=quiet_after_alert_hours,
         experiments=parse_experiments(block.get("experiments")),
-        arm_thresholds=parse_arm_thresholds(block.get("arm_thresholds")),
     )
+
+
+def load_arm_thresholds(slug: str) -> ArmThresholds:
+    """``policy.arm_thresholds`` for the report path only (``metrics collect``).
+
+    Parsed here, never in :func:`load_brand_policy`: a bad value in a
+    report-only knob must not stop dispatch, planning or the console. Raises
+    ``ValueError`` naming the key.
+    """
+    return parse_arm_thresholds(_load_raw_policy_block(slug).get("arm_thresholds"))
 
 
 # --- Per-tenant media profile (``media:`` block) ---------------------------

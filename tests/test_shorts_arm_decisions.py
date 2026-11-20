@@ -7,7 +7,7 @@ from types import SimpleNamespace as Ns
 
 import pytest
 
-from gomoveshift.publishing.brand_policy import load_brand_policy
+from gomoveshift.publishing.brand_policy import load_arm_thresholds, load_brand_policy
 from gomoveshift.publishing.experiments import (
     DEFAULT_MIN_GAP,
     DEFAULT_MIN_N,
@@ -20,6 +20,7 @@ from gomoveshift.publishing.experiments import (
     decide_shorts_arms,
     decision_lines,
     parse_arm_thresholds,
+    parse_experiments,
     pause_retest_due,
     shorts_arm_outcomes,
     youtube_outcome,
@@ -72,37 +73,51 @@ def test_factors_are_assigned_independently():
 # --- the 72 h outcome --------------------------------------------------------
 
 
-def _entry(hours, views, pct, status="measured", posted="2026-11-01T12:00:00+00:00"):
+YT = "2026-11-01T12:00:00+00:00"  # YouTube's own publish time
+
+
+def _entry(hours, views, pct, status="measured", yt=YT, post_id="yt1"):
     from datetime import datetime
 
-    event = datetime.fromisoformat(posted)
     return {
         "status": status,
-        "event_at": posted,
-        "fetched_at": (event + timedelta(hours=hours)).isoformat(),
+        "post_id": post_id,
+        "event_at": "2026-11-01T20:00:00+00:00",  # copied from posted_at (a later platform)
+        "fetched_at": (datetime.fromisoformat(yt) + timedelta(hours=hours)).isoformat(),
         "cumulative": {"views": views, "avg_view_percentage": pct},
     }
 
 
-def _short(index, log, posted="2026-11-01T12:00:00+00:00"):
-    return Ns(index=index, posted_at=posted, observation_log={"youtube": log}, metrics={})
+def _short(index, log, posted="2026-11-01T20:00:00+00:00", youtube_id="yt1"):
+    return Ns(
+        index=index,
+        posted_at=posted,
+        platform_ids={"youtube": youtube_id} if youtube_id else {},
+        observation_log={"youtube": log},
+        metrics={},
+    )
 
 
 def test_outcome_reads_the_snapshot_nearest_72h_with_views_and_retention():
     s = _short(1, [_entry(24, 10, 80.0), _entry(71, 120, 61.5), _entry(168, 400, 50.0)])
-    assert youtube_outcome(s, TODAY) == (120, 61.5)
+    assert youtube_outcome(s, YT, TODAY) == (120, 61.5)
 
 
 def test_outcome_is_unknown_without_a_snapshot_near_72h_or_while_unsettled():
-    assert youtube_outcome(_short(1, [_entry(24, 10, 80.0), _entry(168, 400, 50.0)]), TODAY) is None
-    assert youtube_outcome(_short(1, [_entry(72, 5, 1.0, status="rate_limited")]), TODAY) is None
+    assert (
+        youtube_outcome(_short(1, [_entry(24, 10, 80.0), _entry(168, 400, 50.0)]), YT, TODAY)
+        is None
+    )
+    assert (
+        youtube_outcome(_short(1, [_entry(72, 5, 1.0, status="rate_limited")]), YT, TODAY) is None
+    )
     fresh = _short(1, [_entry(72, 50, 60.0)])
-    assert youtube_outcome(fresh, date(2026, 11, 5)) is None  # posted+3d > today-2d
-    assert youtube_outcome(fresh, date(2026, 11, 6)) == (50, 60.0)
+    assert youtube_outcome(fresh, YT, date(2026, 11, 5)) is None  # posted+3d > today-2d
+    assert youtube_outcome(fresh, YT, date(2026, 11, 6)) == (50, 60.0)
 
 
 def test_unreported_retention_stays_unknown_never_zero():
-    assert youtube_outcome(_short(1, [_entry(72, 50, None)]), TODAY) == (50, None)
+    assert youtube_outcome(_short(1, [_entry(72, 50, None)]), YT, TODAY) == (50, None)
 
 
 def test_outcome_rows_join_sidecar_tags_for_a_factor():
@@ -117,12 +132,15 @@ def test_outcome_rows_join_sidecar_tags_for_a_factor():
         )
     ]
     tags = {1: {"yt_title_body": "A"}, 2: {"yt_title_body": "B"}, 3: {"yt_hashtag_set": "X"}}
-    rows = shorts_arm_outcomes("yt_title_body", records, lambda project: tags, TODAY)
+    times = {("p", i): YT for i in (1, 2, 3)}
+    rows = shorts_arm_outcomes("yt_title_body", records, lambda project: tags, times, TODAY)
     assert [(r.arm, r.views_72h, r.avg_view_pct) for r in rows] == [
         ("A", 10, 50.0),
         ("B", 20, 60.0),
     ]
-    assert shorts_arm_outcomes("yt_title_body", records, lambda project: None, TODAY) == []
+    assert shorts_arm_outcomes("yt_title_body", records, lambda p: None, times, TODAY) == []
+    # no YouTube time known: no outcome, never a fall back to posted_at
+    assert shorts_arm_outcomes("yt_title_body", records, lambda p: tags, {}, TODAY) == []
 
 
 # --- decisions on a recorded-shape fixture ------------------------------------
@@ -154,7 +172,8 @@ def test_below_min_sample_is_insufficient_evidence_even_with_a_huge_gap():
 
 def test_clear_repeated_gap_demotes_only_the_lagging_arm():
     got = _by_arm(_fixture(1000, 100))  # 36 per arm, A is ~10x B
-    assert got["B"].decision == "demote" or got["B"].decision == "pause"
+    # ~10x gap >= pause_gap and retention equal (no better): the exact decision is pause
+    assert (got["B"].decision, got["B"].reason) == ("pause", "clear_gap_repeated")
     assert got["A"].decision == "hold"
 
 
@@ -265,12 +284,141 @@ def test_parse_arm_thresholds_defaults_validates_and_rejects_unknown_keys():
             parse_arm_thresholds(bad)
 
 
-def test_brand_policy_carries_the_thresholds(tmp_path, monkeypatch):
+def _brand(tmp_path, monkeypatch, policy_yaml):
     import gomoveshift.publishing.brand_policy as mod
 
     d = tmp_path / "brands" / "exp"
     d.mkdir(parents=True)
-    (d / "brand.yaml").write_text("policy:\n  arm_thresholds:\n    min_n: 40\n")
+    (d / "brand.yaml").write_text(policy_yaml)
     monkeypatch.setattr(mod, "_SHIPPED_BRANDS_DIR", tmp_path / "brands")
-    assert load_brand_policy("exp").arm_thresholds == ArmThresholds(min_n=40)
-    assert load_brand_policy("missing-brand").arm_thresholds == ArmThresholds()
+
+
+def test_arm_thresholds_load_in_the_report_path_only(tmp_path, monkeypatch):
+    _brand(tmp_path, monkeypatch, "policy:\n  arm_thresholds:\n    min_n: 40\n")
+    assert load_arm_thresholds("exp") == ArmThresholds(min_n=40)
+    assert load_arm_thresholds("missing-brand") == ArmThresholds()
+    load_brand_policy("exp")  # a known key, not flagged unknown
+
+
+def test_a_bad_arm_thresholds_value_never_breaks_load_brand_policy(tmp_path, monkeypatch):
+    _brand(
+        tmp_path, monkeypatch, "policy:\n  weekly_ceiling: 5\n  arm_thresholds:\n    min_gap: 0.5\n"
+    )
+    assert load_brand_policy("exp").weekly_ceiling == 5
+    with pytest.raises(ValueError, match="min_gap"):
+        load_arm_thresholds("exp")
+
+
+def test_thresholds_reject_a_min_n_too_small_to_split_and_non_finite_gaps():
+    for bad in ({"min_n": 1}, {"min_n": 3}, {"min_gap": float("nan")}, {"pause_gap": float("inf")}):
+        with pytest.raises(ValueError):
+            parse_arm_thresholds(bad)
+    assert parse_arm_thresholds({"min_n": 4}).min_n == 4
+
+
+def test_an_experiment_cannot_take_a_shorts_factor_name():
+    for name in SHORTS_FACTORS:
+        with pytest.raises(ValueError, match="Shorts factor"):
+            parse_experiments([{"name": name, "platforms": ["facebook"], "start": "2026-11-01"}])
+
+
+# --- review fixes: YouTube's own clock, id match, zero reference, unseen arms -
+
+
+def test_window_is_timed_from_youtube_not_from_the_later_platform():
+    # YouTube 10:00, Facebook registered 18:00 (posted_at): real YouTube ages
+    # 65 h and 89 h. The 89 h snapshot is 17 h off 72 h: no outcome from it.
+    yt = "2026-11-01T10:00:00+00:00"
+    late = "2026-11-01T18:00:00+00:00"
+    assert youtube_outcome(_short(1, [_entry(89, 70, 50.0, yt=yt)], posted=late), yt, TODAY) is None
+    both = [_entry(65, 60, 55.0, yt=yt), _entry(89, 90, 45.0, yt=yt)]
+    assert youtube_outcome(_short(1, both, posted=late), yt, TODAY) == (60, 55.0)
+    # timed from posted_at (the old bug) the 89 h entry would read as 81 h: in window
+    assert (
+        youtube_outcome(_short(1, [_entry(89, 70, 50.0, yt=yt)], posted=late), None, TODAY) is None
+    )
+
+
+def test_an_old_video_ids_entry_is_not_picked_after_a_reupload():
+    old = _short(1, [_entry(72, 99, 50.0, post_id="old")], youtube_id="new")
+    assert youtube_outcome(old, YT, TODAY) is None
+    assert youtube_outcome(_short(1, [_entry(72, 99, 50.0)], youtube_id=None), YT, TODAY) is None
+
+
+def test_an_arm_equal_to_a_zero_reference_holds_and_is_never_paused():
+    from gomoveshift.publishing.experiments import _gap
+
+    assert _gap(0.0, 0.0) == 0.0
+    assert _gap(1.0, 0.0) == float("inf")
+    assert _gap(2.0, 1.0) == 2.0
+
+
+def test_every_arm_seen_gets_a_line_even_with_no_countable_short():
+    rows = [r for r in _fixture(1000, 100) if r.arm == "A"]
+    got = decide_shorts_arms("yt_title_body", rows, ArmThresholds(), seen_arms=["A", "B"])
+    b = {d.arm: d for d in got}["B"]
+    assert (b.decision, b.n) == ("INSUFFICIENT_EVIDENCE", 0)
+    lines = decision_lines("yt_title_body", got)
+    assert any("arm=B decision=INSUFFICIENT_EVIDENCE n=0" in line for line in lines)
+
+
+# --- the metrics handler report -----------------------------------------------
+
+
+def _handler_world(tmp_path, monkeypatch, youtube_at):
+    import json as _json
+
+    from gomoveshift.cli.handlers import metrics as handler
+    from gomoveshift.publishing.queue import open_queue_db
+
+    conn = open_queue_db(tmp_path)
+    conn.execute(
+        "INSERT INTO deliveries (project_name, short_index, platform, plan_hash, status, "
+        "platform_upload_id, published_at, published_at_source, created_at, updated_at) "
+        "VALUES ('proj', 1, 'youtube', 'h', 'published', 'yt1', ?, 'platform_confirmed', 'x', 'x')",
+        (youtube_at,),
+    )
+    conn.commit()
+    conn.close()
+    plan = tmp_path / "proj_publish_plan.json"
+    plan.write_text(_json.dumps({}))
+    short = Ns(
+        index=1,
+        posted_at="2026-11-01T20:00:00+00:00",
+        platform_ids={"youtube": "yt1"},
+        observation_log={"youtube": [_entry(72, 50, 60.0)]},
+        metrics={},
+    )
+    monkeypatch.setattr(
+        handler,
+        "load_publish_plan",
+        lambda path: Ns(shorts=[Ns(short_index=1, experiment_arms={"yt_title_body": "A"})]),
+    )
+    monkeypatch.setattr(
+        handler,
+        "TrackingStore",
+        lambda: Ns(load_all_records=lambda: [Ns(project="proj", shorts=[short])]),
+    )
+    monkeypatch.setattr(handler, "load_arm_thresholds", lambda brand: ArmThresholds())
+    return handler, Ns(seo=Ns(storage_path=str(tmp_path)))
+
+
+def test_report_prints_one_line_per_arm_seen(tmp_path, monkeypatch, capsys):
+    handler, config = _handler_world(tmp_path, monkeypatch, YT)
+    handler._report_shorts_arm_decisions(config, "brand")
+    out = capsys.readouterr().out
+    assert "ARM_DECISION factor=yt_title_body arm=A decision=INSUFFICIENT_EVIDENCE n=0" in out
+    assert "ARM_DECISION factor=yt_hashtag_set arm=- " in out  # no tagged arm: one placeholder
+
+
+def test_report_failure_is_logged_and_swallowed(tmp_path, monkeypatch, capsys, caplog):
+    handler, config = _handler_world(tmp_path, monkeypatch, YT)
+
+    def boom(brand):
+        raise ValueError("policy.arm_thresholds.min_gap bad")
+
+    monkeypatch.setattr(handler, "load_arm_thresholds", boom)
+    with caplog.at_level("WARNING"):
+        handler._report_shorts_arm_decisions(config, "brand")  # must not raise
+    assert "ARM_DECISION" not in capsys.readouterr().out
+    assert "shorts arm decision report skipped" in caplog.text

@@ -25,7 +25,7 @@ from ...console.settings import current_brand
 from ...pipeline.drive_phases.youtube_uploader import YouTubeUploader
 
 # Imported at module scope (not lazily) so tests can ``patch.object`` them.
-from ...publishing.brand_policy import load_brand_policy
+from ...publishing.brand_policy import load_arm_thresholds, load_brand_policy
 from ...publishing.dispatch import apply_suppression_response
 from ...publishing.experiments import (
     SHORTS_FACTORS,
@@ -35,6 +35,7 @@ from ...publishing.experiments import (
     decide_shorts_arms,
     decision_lines,
     shorts_arm_outcomes,
+    tagged_arms,
 )
 from ...publishing.plan_io import load_publish_plan
 from ...publishing.queue import (
@@ -274,6 +275,22 @@ def _report_caption_experiments(config, brand: str) -> None:
         logger.warning("caption experiment report skipped: %s", exc)
 
 
+def _youtube_publish_times(conn) -> dict:
+    """``{(project, short_index): YouTube's own publish time}`` from the delivery
+    queue (``deliveries.published_at``, kept only with its source, as
+    ``recorded_publish_time`` does); the latest published YouTube row wins."""
+    times = {}
+    rows = conn.execute(
+        "SELECT project_name, short_index, published_at, published_at_source "
+        "FROM deliveries WHERE platform='youtube' AND status='published' ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        at, _source = recorded_publish_time(row["published_at"], row["published_at_source"])
+        if at:
+            times[(row["project_name"], row["short_index"])] = at
+    return times
+
+
 def _report_shorts_arm_decisions(config, brand: str) -> None:
     """Print one ``ARM_DECISION ...`` line per arm of each YouTube Shorts factor
     (title body, hashtag set): ``hold`` / ``demote`` / ``pause`` /
@@ -281,7 +298,7 @@ def _report_shorts_arm_decisions(config, brand: str) -> None:
     ``policy.arm_thresholds`` (``publishing/experiments.py``). Reporting only:
     a failure is logged and swallowed, never failing the collection."""
     try:
-        thresholds = load_brand_policy(brand).arm_thresholds
+        thresholds = load_arm_thresholds(brand)
         storage_path = Path(config.seo.storage_path)
         conn = open_queue_db(storage_path)
         try:
@@ -294,10 +311,14 @@ def _report_shorts_arm_decisions(config, brand: str) -> None:
                 return {s.short_index: s.experiment_arms for s in load_publish_plan(path).shorts}
 
             records = TrackingStore().load_all_records()
+            youtube_times = _youtube_publish_times(conn)
             for factor in SHORTS_FACTORS:
-                rows = shorts_arm_outcomes(factor, records, arms_for_project, date.today())
+                rows = shorts_arm_outcomes(
+                    factor, records, arms_for_project, youtube_times, date.today()
+                )
+                seen = tagged_arms(factor, records, arms_for_project)
                 for line in decision_lines(
-                    factor, decide_shorts_arms(factor, rows, thresholds), thresholds
+                    factor, decide_shorts_arms(factor, rows, thresholds, seen), thresholds
                 ):
                     print(line)
         finally:
