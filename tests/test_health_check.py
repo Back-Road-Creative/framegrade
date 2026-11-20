@@ -737,6 +737,73 @@ def test_a_drive_and_its_heal_resumes_raise_one_alarm_named_for_the_drive(tmp_pa
     assert [e for e, _ in sent] == ["health_failure_unattended"]
 
 
+def _failed(h, fp=None):
+    att = {"at": _hours_ago(h), "action": "launched", "reason": None, "outcome": "failed"}
+    return {**att, "fp_hash": fp} if fp else att
+
+
+def _stamp(tmp_path, drive, klass, fp="fp-1"):
+    rows, _ = load_all(tmp_path / "inc")
+    (row,) = [r for r in rows if r["kind"] == "drive_failed" and r["drive"] == drive]
+    row["failure_fingerprint"] = {"hash": fp, "class": klass, "fingerprint": {}}
+    write_row(tmp_path / "inc", row)
+
+
+def test_three_failed_launches_in_two_hours_alarm_however_recent(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _failed(2), _failed(1), _failed(0.2))
+    _, sent = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert "3 launches in a row failed" in row["detail"]
+    assert [e for e, _ in sent] == ["health_failure_unattended"]
+
+
+def test_two_failed_launches_inside_the_window_do_not_alarm(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _set(tmp_path, "demo-drive-a", _failed(2), _failed(1))
+    _, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+
+
+def test_a_spent_retry_budget_alarms_with_the_policys_own_reason(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _stamp(tmp_path, "demo-drive-a", "unknown")  # budget 1
+    _set(tmp_path, "demo-drive-a", _failed(1, "fp-1"))
+    _, sent = _recheck(tmp_path)
+    (row,) = _unattended(tmp_path)
+    assert "retry budget is spent" in row["detail"] and "1 of 1 attempts used" in row["detail"]
+    assert [e for e, _ in sent] == ["health_failure_unattended"]
+
+
+def test_one_recent_failure_with_budget_left_does_not_alarm(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    _stamp(tmp_path, "demo-drive-a", "transient")  # budget 3
+    _set(tmp_path, "demo-drive-a", _failed(1, "fp-1"))
+    _, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+
+
+def test_a_later_success_clears_the_failure_count(tmp_path):
+    _two_drives(tmp_path, "demo-drive-a")
+    ok = {"at": _hours_ago(1), "action": "launched", "reason": None, "outcome": "succeeded"}
+    _set(tmp_path, "demo-drive-a", _failed(4), _failed(3), _failed(2), ok, _failed(0.5))
+    _, sent = _recheck(tmp_path)
+    assert _unattended(tmp_path) == [] and sent == []
+    _set(
+        tmp_path,
+        "demo-drive-a",
+        _failed(4),
+        _failed(3),
+        _failed(2),
+        ok,
+        _failed(0.5),
+        _failed(0.2),
+        _failed(0.1),
+    )
+    _recheck(tmp_path)
+    assert len(_unattended(tmp_path)) == 1
+
+
 def test_a_manual_launch_the_launcher_gate_refused_is_not_a_failed_drive(tmp_path):
     # live 2026-11-17: gms-publish-rec0063 exited 2 at the gate; the drive itself shipped
     log = _log(

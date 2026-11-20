@@ -25,6 +25,13 @@ _EVENTS = {
 #: a row with no launch for 26 h (that cap plus two cron ticks) is one nothing is retrying.
 UNATTENDED_AFTER_H = 26
 
+#: Consecutive failed launches (no success between) that alarm a drive however recent the last
+#: launch. Three matches the transient retry budget (``retry_policy.BUDGET``): a drive that has
+#: relaunched three times and failed each time is not being healed, and the 26 h clock never
+#: fires on it because every relaunch refreshes it (Courtmacsherry, 2026-11-17..19: ~10 failed
+#: resumes across 9 SHAs with the alarm marked resolved).
+UNATTENDED_AFTER_FAILURES = 3
+
 _BACKFILL = ("resume_recipe", "log_path")
 
 
@@ -62,6 +69,41 @@ def _when(text: Any) -> Optional[datetime]:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+def _failed_streak(attempts: List[Dict[str, Any]]) -> int:
+    """Consecutive launched attempts whose run failed, newest back to the last success. A launch
+    still running, a refusal and a pre-flight failure (no work started) neither add nor reset."""
+    timed = [(w, a) for a in attempts if (w := _when(a.get("at"))) is not None]
+    streak = 0
+    for _w, att in sorted(timed, key=lambda t: t[0], reverse=True):
+        if att.get("action") != "launched":
+            continue
+        if att.get("outcome") == "succeeded":
+            break
+        if att.get("outcome") == "failed":
+            streak += 1
+    return streak
+
+
+def _budget_spent(rows: List[Dict[str, Any]], attempts: List[Dict[str, Any]]) -> Optional[str]:
+    """The retry policy's own refusal text when the drive's failure class has used its launches
+    under the fingerprint it failed under, and the newest launch is over (so no relaunch is due);
+    else ``None``. Publish-only is heal's refusal by design (``health publish`` owns it), and a
+    row filed before fingerprints has no class: neither is a spent budget."""
+    from . import retry_policy
+
+    stamped = [r for r in rows if (r.get("failure_fingerprint") or {}).get("hash")]
+    if not stamped:
+        return None
+    stamp = max(stamped, key=lambda r: str(r.get("failed_at") or ""))["failure_fingerprint"]
+    klass, fph = stamp.get("class") or retry_policy.UNKNOWN, stamp["hash"]
+    launches = [a for a in attempts if a.get("action") == "launched"]
+    used = retry_policy.launched_count(launches, fph)
+    newest = max(launches, key=lambda a: str(a.get("at") or ""), default=None)
+    if klass == retry_policy.PUBLISH_ONLY or not used or (newest or {}).get("outcome") != "failed":
+        return None
+    return retry_policy.refusal(klass, fph, launched=used, failed_under=False)
+
+
 def unattended_incidents(
     drive_rows: List[Dict[str, Any]], now: datetime, now_iso: str, notes: List[str]
 ) -> List[Dict[str, Any]]:
@@ -76,6 +118,9 @@ def unattended_incidents(
 
     limit = timedelta(hours=UNATTENDED_AFTER_H)
     launched: Dict[Any, datetime] = {}
+    by_group: Dict[Any, List[Dict[str, Any]]] = {}
+    for row in drive_rows:
+        by_group.setdefault(row.get("resume_recipe") or row["key"], []).append(row)
     for row in drive_rows:
         for att in row.get("resume_attempts") or []:
             when = _when(att.get("at"))
@@ -94,9 +139,19 @@ def unattended_incidents(
         attempts = row.get("resume_attempts") or []
         last = _when(attempts[-1].get("at")) if attempts else None
         newest = launched.get(recipe or row["key"])
+        group_rows = by_group.get(recipe or row["key"], [row])
+        group_atts = [a for r in group_rows for a in r.get("resume_attempts") or []]
+        streak, spent = _failed_streak(group_atts), _budget_spent(group_rows, group_atts)
         if attempts and attempts[-1].get("action") == "refused":
             reason = attempts[-1].get("reason") or "no reason given"
             why = f"heal refused it ({reason}) and can never relaunch it"
+        elif streak >= UNATTENDED_AFTER_FAILURES:
+            why = (
+                f"its last {streak} launches in a row failed (alarm at "
+                f"{UNATTENDED_AFTER_FAILURES}) and heal is not fixing it"
+            )
+        elif spent:
+            why = f"its retry budget is spent ({spent})"
         else:
             ref = newest or _when(row.get("failed_at"))
             if ref is None or now - ref <= limit:
