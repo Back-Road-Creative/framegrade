@@ -100,6 +100,39 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    Pushed once as `health_short_bad_run`. `run_check(tracking_root=...)` overrides the tracking
    store root (default `gms_output_dir()`).
 
+10. **Store project in no backlog row** (`backlog_store_orphan`,
+   `gomoveshift/health/accounting.py`). A `ready_drives` project in `schedule.sqlite3` (read
+   through `ScheduleStore.all_drives`) that is in no `drive_backlog.yaml` row and in no
+   `drive_backlog_excluded.yaml` entry's `project`. Row file `backlog_store_orphan_<project>.json`
+   (`project`); pushed once as `health_backlog_store_orphan`. A missing or unreadable store, or an
+   unreadable manifest, is a note, never a finding.
+11. **Camera footage in no backlog row** (`backlog_unlisted_footage`). For every folder holding at
+   least one source of a manifest row or an exclusion entry, the camera files (case-insensitive
+   `.mp4`, `.insv`, `.mov`; files only, not recursive) that no row's `sources` and no exclusion's
+   `sources` names. One incident per file (key `backlog_unlisted_footage:<absolute path>`, fields
+   `directory`, `name`, `path`), so each opens, resolves and notifies on its own
+   (`health_backlog_unlisted_footage`). Directory listing only: a media file is never opened,
+   probed or decoded. Paths compare after `os.path.normpath`, and case-folded under
+   `/mnt/<single letter>/` (a Windows drive). A folder that cannot be listed (D: offline: a
+   listing error, a `/mnt/<letter>` with nothing mounted, or no answer within
+   `accounting.LIST_DEADLINE_S` = 20 s for the whole tick, since the cron tick holds a lock with
+   no timeout) is a note naming it, never a finding and never "empty": its open incidents stay
+   open, so a drive that goes offline and returns does not close and re-notify them.
+
+**`drive_backlog_excluded.yaml`** sits beside `drive_backlog.yaml`
+(`paths.drive_backlog_excluded_path()`). It is a separate file on purpose: the backlog loader and
+`seo-manager schedule backlog-next` never read it, so an exclusion can never launch. A top-level
+list (empty is valid; a missing file is the same); each entry is a mapping with `sources` (non-empty
+list of absolute path strings), `reason` (non-empty string: the measured reason and where it was
+measured) and optionally `project` (a store project deliberately not a manifest row); no other
+keys. A source is an absolute POSIX path (a Windows `D:\...` path is refused), appears once across
+the file and in no manifest row (compared as in rule 11). An entry that breaks this opens a
+`backlog_exclusion_invalid` incident (key `backlog_exclusion_invalid:<the entry's first source
+path>`, or the entry number when it has no usable source; fields `entry`, `detail`) and excludes
+nothing, so its footage still shows under rule 11. An unreadable file or a non-list top level opens
+`backlog_exclusion_invalid:file` and rules 10 and 11 are not evaluated that tick (a note; their open
+incidents stay open) instead of flooding every excluded file in as a finding.
+
 **Backlog launch refused for space.** Not a check rule: `health backlog` writes it. A launch
 refused with `storage:` (a device's free space is under the staging plus output need,
 `launch.storage_plan`) opens one `backlog_storage_refused` row per region (key
@@ -110,7 +143,7 @@ sets `resolved_at`; a refusal for another reason, or a tick that never reached t
 (lease held, running drive), leaves it open. `health check` never resolves it. A dry run writes
 nothing.
 
-A relative `seo.storage_path` skips rules 2, 4, 7, 8 and 9 with a note (it would resolve against the cwd).
+A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
 
 ## Push and idempotency
 
@@ -121,7 +154,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
