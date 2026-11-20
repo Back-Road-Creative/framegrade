@@ -5,6 +5,23 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.121] - 2026-11-20
+
+### Changed
+
+- redactcam pinned to `b0861b2`: the decode emits exactly the container's frames and raises when the count differs.
+
+### Fixed
+
+- A cabin-leak repair now always adds a mask box covering the gate's own leaked box for every leaked frame, so a repair given a leak can no longer add nothing and waste the retry.
+- The single repair attempt is now up to `drive.blur_cabin_repair_rounds` rounds (default 2), each followed by a full gate pass. The encode runs only on a pass; after the last failed round the gate error is raised as before.
+- A failed repair is recorded in the cabin verdict cache under the same signature. A heal retry on identical inputs raises the recorded failure at once instead of repeating the repair; a changed mask, model, config or renderer repairs again.
+- The failed-repair record is keyed on the repair version and settings too: raising `drive.blur_cabin_repair_rounds` or shipping a repair change retries instead of refusing.
+- The privacy mask was paired with the picture by timestamp, so a source with timestamp gaps took each frame's blur from the wrong frame. The blur encode now retimes mask and picture to frame-index time, so mask frame `j` is picture frame `j`.
+- A blur run now stops, naming all three numbers, unless the source frame count, the mask frame count and the detection sidecar's `source_frame_count` agree. This runs before the cabin gate and before the encode.
+- A detection sidecar or mask built on a different frame count is rebuilt instead of reused, so a day detected before this fix does not fail the gate on every retry.
+- The cabin verdict and the day-mask reuse evidence now include the redactcam version and decode mode (`REDACTCAM_DECODE`).
+
 ## [0.3.120] - 2026-11-20
 
 ### Fixed
@@ -1363,7 +1380,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...HEAD
+[0.3.121]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...v0.3.121
 [0.3.120]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...v0.3.120
 [0.3.119]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...v0.3.119
 [0.3.118]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.117...v0.3.118
