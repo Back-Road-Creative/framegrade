@@ -1831,3 +1831,80 @@ def test_render_horizon_is_the_wider_of_seven_days_and_the_lead_window(monkeypat
         seo_slots, "waypost_cadence", lambda config: SimpleNamespace(lead_hours=lead)
     )
     assert launch.render_horizon_h(object()) == want
+
+
+# --- B6: a launch refused for lack of staging space raises an incident --------------------------
+
+
+def _space_incidents(tmp_path):
+    from gomoveshift.health.store import load_all
+
+    return [r for r in load_all(tmp_path / "inc")[0] if r["kind"] == launch.STORAGE_KIND]
+
+
+def _storage_run(rig, tmp_path, **kw):
+    return launch.run_backlog(**{**rig.kwargs(**kw), "incidents_dir": tmp_path / "inc"})
+
+
+def test_a_storage_refusal_raises_one_open_incident_per_region(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    res = _storage_run(rig, tmp_path)
+    assert res["action"] == "refused" and res["reason"].startswith("storage:")
+    (row,) = _space_incidents(tmp_path)
+    assert row["key"] == "backlog_storage_refused:usa" and not row["resolved_at"]
+    assert row["project"] == "day-a" and "5.0 GB free" in row["reason"]
+    _storage_run(rig, tmp_path)  # a repeat refusal files nothing new
+    assert len(_space_incidents(tmp_path)) == 1
+
+
+def test_a_launch_resolves_the_storage_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    _storage_run(rig, tmp_path)
+    rig.devices[rig.stages] = (1, 500.0)
+    assert _storage_run(rig, tmp_path)["action"] == "launched"
+    (row,) = _space_incidents(tmp_path)
+    assert row["resolved_at"]
+
+
+def test_space_freed_resolves_it_even_when_the_launch_then_stops_elsewhere(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    _storage_run(rig, tmp_path)
+    rig.devices[rig.stages] = (1, 500.0)
+    rig.launch_ok = False
+    assert _storage_run(rig, tmp_path)["action"] == "refused"
+    assert _space_incidents(tmp_path)[0]["resolved_at"]
+
+
+def test_another_refusal_leaves_the_storage_incident_open(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    _storage_run(rig, tmp_path)
+    rig.lease_free = False  # a noop that measured nothing proves nothing
+    _storage_run(rig, tmp_path)
+    assert not _space_incidents(tmp_path)[0]["resolved_at"]
+
+
+def test_a_dry_run_and_a_run_with_no_incidents_dir_write_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    _storage_run(rig, tmp_path, dry_run=True)
+    assert not (tmp_path / "inc").exists()
+    assert rig.run()["action"] == "refused"
+    assert not (tmp_path / "inc").exists()
+
+
+def test_a_reopened_shortage_after_resolution_files_a_fresh_unpushed_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    _storage_run(rig, tmp_path)
+    rig.devices[rig.stages] = (1, 500.0)
+    _storage_run(rig, tmp_path)
+    rig.devices[rig.stages] = (1, 5.0)
+    rig.registered.clear()
+    rig.rows = [rig.row("day-c", 4)]
+    _storage_run(rig, tmp_path)
+    (row,) = _space_incidents(tmp_path)
+    assert not row["resolved_at"] and not row["pushed"]
