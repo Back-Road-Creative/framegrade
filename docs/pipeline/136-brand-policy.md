@@ -122,8 +122,7 @@ carry the block itself to keep the experiment running.
 - **Shorts arms and decision record** (`experiments.py`, YouTube Shorts): the factors are
   `yt_title_body` and `yt_hashtag_set` (`SHORTS_FACTORS`), tagged in the sidecar's
   `experiment_arms` like any other experiment. `assign_stratified_arm` gives a new Short the arm
-  its (project, slot) stratum holds fewest of (ties on a sha256 of factor, project, slot, short
-  and arm), so arm counts differ by at most one within a stratum.
+  its stratum holds fewest of (ties on a sha256 of factor, project, slot, short and arm).
   The arms are tracked config in `experiments.py` (`SHORTS_ARMS`; bodies in
   `SHORTS_TITLE_BODY_ARMS`, hashtags in `SHORTS_HASHTAG_SET_ARMS`). `yt_title_body` is `place_led`
   (`{location}` or `{location}, on a {weekday}`) or `clip_led` (`{secs} seconds, {location}`),
@@ -135,9 +134,11 @@ carry the block itself to keep the experiment running.
   project `decide_shorts_arms` also groups on, which ignores the slot). A Short's day position is
   not part of the stratum: Phase D's title ordinals are unique across the whole day, so a
   per-position stratum would hold one Short and balance nothing. The history counts only the arms
-  a Short actually kept (`record_shorts_arms`, after the post is rendered), so across a drive the
-  per-arm counts of one factor differ by at most one among the Shorts that kept it; an arm
-  dropped at render time (below) does not count and is not rebalanced. The same inputs give the same arms; `SocialGenerator` renders them and the plan
+  a Short actually kept (`record_shorts_arms`, after the post is rendered). With no drops, the
+  per-arm counts of one factor differ by at most one across a drive. An arm dropped at render
+  time (below) does not count, so the next Short gets that arm; the count is refilled, not the
+  mix, and the longer arm text is dropped more often on long places (road kept 84 of 90 vs pov
+  89 of 90 in a long-POI sweep), so it slightly under-represents long descriptions. The same inputs give the same arms; `SocialGenerator` renders them and the plan
   stores them in `experiment_arms`.
   A factor the text cannot carry is not assigned (a hand title or an unverified place has no
   title-body arm; an interactive Short has no hashtag-set arm), and an unknown arm renders as
