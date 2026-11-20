@@ -5,6 +5,22 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.125] - 2026-11-20
+
+### Added
+
+- `gomoveshift health check` rules 10 and 11 make the backlog manifest, the schedule store and the footage on disk account for each other. `backlog_store_orphan` flags a `ready_drives` project that is in no `drive_backlog.yaml` row and no exclusion's `project`; `backlog_unlisted_footage` flags each camera file (`.mp4`, `.insv`, `.mov`, listed never opened) in a manifest or exclusion folder that no row or exclusion names, one incident per file keyed by its path. Footage left out on purpose is recorded with its measured reason in the new `drive_backlog_excluded.yaml` beside the manifest (`paths.drive_backlog_excluded_path()`), a separate file the backlog loader never reads, so an exclusion cannot launch; an entry that breaks its contract opens a `backlog_exclusion_invalid` incident keyed by its first source (an unreadable file opens `backlog_exclusion_invalid:file` and suspends rules 10 and 11 that tick).
+- A folder that cannot be listed (D: offline, unmounted `/mnt/<letter>`, or past a 20 s listing deadline) is a note, and its open footage incidents stay open instead of closing and re-notifying when the drive returns. Paths compare normalised, case-folded on a Windows drive; Windows `D:\` paths are refused in the exclusions file. See `docs/pipeline/156-health-check.md`.
+- The Shorts experiment arms now change the text. Phase D gives each new Short a `yt_title_body` arm (`place_led` or `clip_led`) and a `yt_hashtag_set` arm (`pov` or `road`) through `assign_stratified_arm`, `SocialGenerator` renders them, and the plan stores them in `experiment_arms`, so the `ARM_DECISION` lines get real outcomes once analytics arrive. The same inputs give the same arms. A Short with no arm, an unknown arm, or one already queued keeps its text byte for byte. One arm history spans the whole drive and the stratum is the base project alone and only arms a Short kept are counted, so each factor splits within one across the drive. An arm is stored only when its text is whole: a title body that is published or would be cut mid-word drops the arm, and the arm's hashtags are pinned in the description.
+
+### Fixed
+
+- A cabin repair now swaps the privacy mask and its regions sidecar as a journaled pair. A pending marker beside the sidecar is fsynced before the first replace and removed after the second (and after a directory fsync); an interrupted swap leaves it. The repair, the repair loop (which refuses the pair after each repair), a pairing re-check just before the day-master encode, and the mask cache (which re-detects and clears the marker) all refuse the mismatched pair. Previously a crash between the two replaces left a new mask beside the old sidecar.
+- When the gates report an interrupted swap, `encode_day_master` rebuilds the mask in place once (the marker forces a re-detect) and re-runs the gates on the fresh pair; if that is still refused it raises, and `health heal` retries it automatically while the remaining error is still the swap error (`BLUR GATE (repair swap)` is classified transient; a plain `BLUR GATE` stays deterministic), or a transient cause per the last entry.
+- A repair round in which no vehicle detector could be built is no longer counted as a spent round or recorded as an exhausted repair. The gate still fails closed, with `detector unavailable` in the error. A missing model file is an install fault: the next run reports it directly from the mask build, and `BLUR GATE (cabin)` stays deterministic.
+- `queue sync-bracket-short-text` regenerates a Short under its stored Shorts arms instead of rewriting it as legacy text, and refuses a Short whose stored arm can no longer be rendered.
+- `queue sync-short-text` regenerates each queued Short under its stored Shorts arms too (it shares `plan_bracket_sync._generate_lf`).
+
 ## [0.3.124] - 2026-11-20
 
 ### Added
@@ -1405,7 +1421,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.124...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...HEAD
+[0.3.125]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.124...v0.3.125
 [0.3.124]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.123...v0.3.124
 [0.3.123]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...v0.3.123
 [0.3.122]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...v0.3.122
