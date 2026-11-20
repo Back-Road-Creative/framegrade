@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.114] - 2026-11-20
+
+### Added
+
+- Short observations now carry per-video Analytics `engagedViews`, watch time, average view duration and `averageViewPercentage`, an `age_bucket` (24h/72h/7d) and, when Analytics fails, an `analytics_unavailable` reason. A later pass never nulls stored values.
+
+### Fixed
+
+- A queued YouTube Short the final-text review would refuse (a pre-filter tag, a route record with no `bins`) used to fail at its slot and never be refilled. `dispatch-queue` now repairs it first with the existing tag filter and route re-measure, writing the sidecar only when the review then passes, and prints `QUEUE_REPAIR <id> <project> repaired|still_refused:<reason>|ok`.
+- The health check gains the `queued_short_refused` rule: a queued Short still refused within 48 h of its slot raises an incident.
+
 ## [0.3.113] - 2026-11-19
 
 ### Fixed
@@ -1271,7 +1282,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.113...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.114...HEAD
+[0.3.114]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.113...v0.3.114
 [0.3.113]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...v0.3.113
 [0.3.112]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.111...v0.3.112
 [0.3.111]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.110...v0.3.111

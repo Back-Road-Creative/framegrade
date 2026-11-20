@@ -249,6 +249,19 @@ registry and hands it to `drain_queue`.
   `Config.load` deep-merges the user override `config.yaml` in the config home,
   which is where a deployment routes a platform `first_party`. Read the merged config — `gomoveshift dispatch-queue`
   with no `--apply` prints the routed list — never the dataclass defaults.
+- **Repair before the slot.** When YouTube is routed `first_party`, `dispatch-queue` first
+  runs the Short final-text review (`short_review_refusal`) on every queued, non-shadow
+  YouTube row (`publishing/queue_repair.py`). A refused row gets the two mechanical repairs, in
+  order, on a scratch copy of its sidecar: the tag filter (as `queue sync-plan-tags`) and, when
+  the refusal says the route record has no `bins`, the route re-measure (as `queue
+  remeasure-short-route`, stages dir derived from the sidecar's output dir). The sidecar is
+  replaced atomically only when the review then passes; otherwise it is untouched. Only tags and
+  `route_record` change (never the stamp, schedule, recording date or experiment arms) and the
+  stored `reviewed_plan_hash` is kept, never recomputed. One line per row:
+  `QUEUE_REPAIR <delivery_id> <project> repaired|still_refused:<reason>|ok`; a repair is logged
+  as a `queue_repair` `response_log` row. Without `--apply` the same lines print and nothing is
+  written. A row still refused within 48 h of its slot raises the health rule
+  `queued_short_refused` (`docs/pipeline/156-health-check.md`).
 - A queued row whose platform has no handler is left alone and counted as
   `skipped_no_handler`, never failed. Flipping a route back to `off`
   must not destroy deliveries that were already spooled.

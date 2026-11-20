@@ -19,7 +19,13 @@ _EVENTS = {
     "queue_stalled": "health_queue_stalled",
     "placeless_label_unverifiable": "health_placeless_label_unverifiable",
     "failure_unattended": "health_failure_unattended",
+    "queued_short_refused": "health_queued_short_refused",
 }
+
+#: A queued Short the final-text review still refuses this close to its slot (or past it)
+#: will fail at dispatch and its slot is never refilled; ``dispatch-queue`` already tried
+#: to repair it, so a human must act.
+QUEUED_REFUSED_WITHIN_H = 48
 
 #: ``health heal`` retries every open drive_failed row at least every 24 h (its backoff cap);
 #: a row with no launch for 26 h (that cap plus two cron ticks) is one nothing is retrying.
@@ -33,6 +39,12 @@ def _line(row: Dict[str, Any]) -> str:
         return drives.summary(row)
     if row["kind"] == "failure_unattended":
         return row["detail"]
+    if row["kind"] == "queued_short_refused":
+        return (
+            f"Queued YouTube Short {row['delivery_id']} ({row['project']} #{row['short_index']}) "
+            f"is slotted {row['scheduled_at']} and the final-text review refuses it: "
+            f"{row['reason']}. dispatch-queue could not repair it; it will fail at its slot."
+        )
     if row["kind"] == "lf_slot_unbooked":
         return f"LF slot {row['slot']} ({row['region']}) is inside 48 h with nothing booked and a drive ready."
     if row["kind"] == "lf_slot_uncovered":
@@ -118,6 +130,53 @@ def unattended_incidents(
                 drive=root,
                 last_attempt_at=stamp.isoformat() if stamp else None,
                 detail=f"Drive {root} failed at {where} and is unattended: {why}.",
+            )
+        )
+    return out
+
+
+def queued_short_refused_incidents(
+    db_path: Path, now: datetime, now_iso: str, notes: List[str]
+) -> List[Dict[str, Any]]:
+    """Rule 7: one ``queued_short_refused`` incident per queued, non-shadow YouTube row whose
+    slot is within ``QUEUED_REFUSED_WITHIN_H`` of ``now`` (or past) and whose final-text review
+    still refuses it. Read-only: the queue opens ``mode=ro`` and the review writes nothing.
+    A row whose sidecar cannot be read proves nothing either way: noted, no incident."""
+    import sqlite3
+
+    from ..publishing.queue_repair import QUEUED_YOUTUBE_SQL, row_refusal
+    from .store import new_incident
+
+    limit = now + timedelta(hours=QUEUED_REFUSED_WITHIN_H)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(QUEUED_YOUTUBE_SQL).fetchall()
+    finally:
+        conn.close()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        slot = _when(row["scheduled_at"]) if row["scheduled_at"] else None
+        if slot is None or slot > limit or not row["sidecar_path"]:
+            continue
+        try:
+            reason = row_refusal(row)
+        except Exception as exc:  # noqa: BLE001 -- unreadable sidecar: reported, never fatal
+            notes.append(f"rule 7: delivery {row['id']} not reviewed: {type(exc).__name__}: {exc}")
+            continue
+        if reason is None:
+            continue
+        out.append(
+            new_incident(
+                "queued_short_refused",
+                f"queued_short_refused:{row['id']}",
+                f"queued_short_refused_{row['id']}.json",
+                now_iso,
+                delivery_id=row["id"],
+                project=row["project_name"],
+                short_index=row["short_index"],
+                scheduled_at=slot.isoformat(),
+                reason=" ".join(reason.split()),
             )
         )
     return out
@@ -228,6 +287,10 @@ def _cadence_rows(
             found["queue_stalled"] = [row] if row else []
         except Exception as exc:  # noqa: BLE001
             notes.append(f"rule 4 not evaluated: {type(exc).__name__}: {exc}")
+        try:
+            found["queued_short_refused"] = queued_short_refused_incidents(db, now, now_iso, notes)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"rule 7 not evaluated: {type(exc).__name__}: {exc}")
     else:
         notes.append("social_queue.sqlite3 absent: rule 4 not evaluated")
     return found
@@ -247,6 +310,14 @@ def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[
         return []
 
 
+def _default_stamp(config: Any, code_root: Path) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+    from . import retry_policy  # noqa: PLC0415
+
+    return lambda row: retry_policy.failure_stamp(
+        row, python=retry_policy.service_python(code_root), config=config
+    )
+
+
 def run_check(
     config: Any,
     *,
@@ -257,6 +328,7 @@ def run_check(
     ledger_path: Optional[Path] = None,
     now: Optional[datetime] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
+    stamp_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Returns ``{"incidents": open rows, "new": keys written, "pushed": keys pushed,
     "resolved": keys closed, "unreadable": int, "publish_reconciled": [claims closed], "notes": [str]}``. Never raises on bad input."""
@@ -270,6 +342,11 @@ def run_check(
     sha = staging_sha or code_sha(code_root)
 
     drive_rows, succeeded, bad_jobs = drives.detect(jobs_dir, sha, now_iso)
+    # The fingerprint a failure is FILED under: heal retries by it, so it is taken here, at
+    # detection, never by heal at a later tick on newer code. Rows already on file keep theirs
+    # (or none: a legacy row, which heal treats as never fingerprinted).
+    for new_row in (r for r in drive_rows if r["key"] not in by_key):
+        new_row["failure_fingerprint"] = (stamp_fn or _default_stamp(config, code_root))(new_row)
     reconciled = _reconcile_publishes(config, jobs_dir, notes)
     found = {"drive_failed": drive_rows, **_cadence_rows(config, ledger_path, now, now_iso, notes)}
     backlog_rows = _backlog_rows(notes)

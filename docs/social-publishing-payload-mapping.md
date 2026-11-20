@@ -65,7 +65,7 @@ the un-truncated form back.
 ## Additional payload fields with no CSV source
 
 - **YouTube**: `snippet.description` — built from `SocialPost.youtube_description` plus the parent-LF link (`https://youtu.be/<parent_video_id>`), not present verbatim as a CSV column (the CSV encodes the link separately in `First Comment Text`).
-- **YouTube**: `snippet.defaultLanguage`, `status.license`, `status.embeddable` — sent on every `videos.insert` from `config.drive.youtube_default_language` / `youtube_license` / `youtube_embeddable` (defaults `"en"` / `"youtube"` / `True`), not CSV-sourced. `status.containsSyntheticMedia` is sent only when `YouTubeUploader.upload_video`'s `contains_synthetic_media` kwarg (or its config fallback `youtube_contains_synthetic_media`) is explicitly `True`/`False`; `None` omits the field.
+- **YouTube**: `snippet.defaultLanguage` and `snippet.defaultAudioLanguage` (one config value), `status.license`, `status.embeddable` — sent on every `videos.insert` from `config.drive.youtube_default_language` / `youtube_license` / `youtube_embeddable` (defaults `"en"` / `"youtube"` / `True`), not CSV-sourced. `status.containsSyntheticMedia` is sent only when `YouTubeUploader.upload_video`'s `contains_synthetic_media` kwarg (or its config fallback `youtube_contains_synthetic_media`) is explicitly `True`/`False`; `None` omits the field.
 - **Instagram**: `media_type=REELS` is a payload constant, not read from a column value (the `Instagram Post Type` column just confirms the row was authored as a Reel).
 - **Facebook**: `upload_phase` (`start`/`finish`) is protocol state for the resumable upload, not sourced from the CSV.
 - **TikTok**: `source_info.source=FILE_UPLOAD` is a payload constant.

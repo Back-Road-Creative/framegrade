@@ -284,6 +284,32 @@ def _validate_held_scopes(conn, config, ignore: bool, reason: str) -> set:
     return {(p.platform, p.project) for p in problems}
 
 
+def _run_queue_repair(conn, config, *, apply: bool) -> None:
+    """Repair queued YouTube Shorts the final-text review would refuse, BEFORE the drain
+    reads them (a refusal at dispatch burns an attempt and the slot is never refilled).
+    One ``QUEUE_REPAIR`` line per row. Never fatal: a repair failure must not stop the
+    drain of rows that are fine."""
+    from ...paths import gms_intermediate_dir
+    from ...publishing.queue_repair import repair_queued_shorts
+
+    def stages_dir_for(sidecar: Path, project: str) -> Path:
+        folder = getattr(getattr(config, "paths", None), "intermediate_folder", "") or ""
+        return gms_intermediate_dir(sidecar.parent.parent, project, intermediate_folder=folder)
+
+    def geocoder():
+        from ...pipeline.gps_enrichment import _build_shared_geocoder
+
+        return _build_shared_geocoder()
+
+    try:
+        for r in repair_queued_shorts(
+            conn, apply=apply, stages_dir_for=stages_dir_for, geocoder_factory=geocoder
+        ):
+            print(r.line())
+    except Exception as exc:  # noqa: BLE001
+        print(f"QUEUE_REPAIR skipped ({exc.__class__.__name__}: {exc})")
+
+
 def cmd_dispatch_queue(args, config) -> int:
     # A relative storage_path resolves against the CALLER's cwd, and
     # open_queue_db creates what it does not find -- so a drain started from
@@ -342,6 +368,8 @@ def cmd_dispatch_queue(args, config) -> int:
             print(f"shadow (never published): {shadow_count}")
 
         if not args.apply:
+            if "youtube" in routed:
+                _run_queue_repair(conn, config, apply=False)
             print("\nDRY RUN - no platform API was called and nothing was published.")
             print("Re-run with --apply to drain.")
             return 0
@@ -378,6 +406,11 @@ def cmd_dispatch_queue(args, config) -> int:
             bf = backfill_first_comment_text(conn)
             if bf.filled or bf.skipped:
                 print(f"first_comment_backfill: filled={bf.filled} skipped={bf.skipped}")
+
+        # Before the loader below caches any sidecar: a repaired sidecar must be the one
+        # the drain reads.
+        if "youtube" in routed:
+            _run_queue_repair(conn, config, apply=True)
 
         loader = SidecarRecordLoader(sidecar_dir, conn=conn)
         # U-R5(b): Instagram rows parked on "Media ID is not available" are

@@ -30,7 +30,13 @@ from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION, load_meta_cr
 from gomoveshift.publishing.tiktok_auth import TikTokAuthError, get_valid_tiktok_credentials
 
 from .day7 import DAY7_DAYS, has_settled_series, posted_date, window_settled
-from .observation import _UPLOAD_HANDLE_PREFIX, MetricObservation, ObservationStatus, has_numbers
+from .observation import (
+    _UPLOAD_HANDLE_PREFIX,
+    MetricObservation,
+    ObservationStatus,
+    age_bucket,
+    has_numbers,
+)
 from .schema import (
     LONG_FORM_DURATION_SOURCE_YOUTUBE,
     DailyMetricPoint,
@@ -94,6 +100,15 @@ _TIKTOK_ERROR_STATUS = {
     "access_token_invalid": ObservationStatus.PERMISSION_DENIED,
     "access_token_expired": ObservationStatus.PERMISSION_DENIED,
 }
+
+
+#: ``PlatformMetrics`` fields only the Analytics API fills.
+_ANALYTICS_FIELDS = (
+    "engaged_views",
+    "watch_time_seconds",
+    "avg_view_duration_seconds",
+    "avg_view_percentage",
+)
 
 
 def _reported_metric(value: Optional[Any]) -> Optional[int]:
@@ -469,7 +484,77 @@ class YouTubeCollector:
                 detail="queried; the platform reported no values for this post",
                 **base,
             )
-        return MetricObservation(status=ObservationStatus.MEASURED, cumulative=metrics, **base)
+        analytics, unavailable = self._query_short_analytics(video_id, published_at)
+        if analytics:
+            metrics.engaged_views = analytics["engaged_views"]
+            metrics.watch_time_seconds = analytics["watch_time_seconds"]
+            metrics.avg_view_duration_seconds = analytics["avg_view_duration_seconds"]
+            metrics.avg_view_percentage = analytics["avg_view_percentage"]
+        obs = MetricObservation(
+            status=ObservationStatus.MEASURED,
+            cumulative=metrics,
+            analytics_unavailable=unavailable,
+            **base,
+        )
+        obs.age_bucket = age_bucket(obs.age_at_fetch_seconds)
+        return obs
+
+    _SHORT_ANALYTICS_METRICS = (
+        "views,engagedViews,estimatedMinutesWatched,averageViewDuration,averageViewPercentage"
+    )
+
+    def _query_short_analytics(
+        self, video_id: str, published_at: Optional[str]
+    ) -> tuple[Optional[Dict[str, Optional[float]]], Optional[str]]:
+        """Per-video Analytics numbers for one Short since publish, through the
+        client ``fetch_analytics_metrics`` already uses.
+
+        Returns ``(numbers, None)`` or ``(None, reason)``; never raises, so the
+        Data API numbers the caller already holds are never lost. One log line
+        per failure. Absent columns stay ``None`` (unreported, never 0).
+        """
+        reason: Optional[str] = None
+        try:
+            analytics = self._analytics_client()
+            if analytics is None:
+                reason = f"analytics {self.analytics_status().status}"
+            else:
+                start = published_at[:10] if published_at else "2020-01-01"
+                response = (
+                    analytics.reports()
+                    .query(
+                        ids="channel==MINE",
+                        startDate=start,
+                        endDate=datetime.now().strftime("%Y-%m-%d"),
+                        metrics=self._SHORT_ANALYTICS_METRICS,
+                        filters=f"video=={video_id}",
+                    )
+                    .execute()
+                )
+                rows = response.get("rows") or []
+                if not rows:
+                    reason = "analytics returned no rows for this video"
+                else:
+                    names = [h.get("name") for h in response.get("columnHeaders") or []]
+                    row = dict(zip(names, rows[0], strict=False)) if names else {}
+
+                    def pick(name: str) -> Optional[float]:
+                        value = row.get(name)
+                        return None if value is None else float(value)
+
+                    minutes = pick("estimatedMinutesWatched")
+                    engaged = pick("engagedViews")
+                    return {
+                        "engaged_views": None if engaged is None else int(engaged),
+                        "watch_time_seconds": None if minutes is None else minutes * 60,
+                        "avg_view_duration_seconds": pick("averageViewDuration"),
+                        "avg_view_percentage": pick("averageViewPercentage"),
+                    }, None
+        except Exception as exc:
+            self._note_analytics_exception(exc)
+            reason = str(exc)[:200]
+        logger.warning("analytics_unavailable video=%s reason=%s", video_id, reason)
+        return None, reason
 
     def _analytics_token_data(self):
         token_data = None
@@ -1642,6 +1727,12 @@ class MetricsCollector:
                     counts[1] += 1
                     prior = short.metrics.get(platform)
                     short.metrics[platform] = obs.cumulative
+                    # Analytics-sourced fields: a pass whose Analytics call
+                    # failed must not null what an earlier pass stored.
+                    if prior is not None:
+                        for name in _ANALYTICS_FIELDS:
+                            if getattr(obs.cumulative, name) is None:
+                                setattr(obs.cumulative, name, getattr(prior, name))
                     # A cumulative read carries no daily series; keep the one
                     # already collected rather than wipe it every run.
                     if prior is not None and not obs.cumulative.daily:

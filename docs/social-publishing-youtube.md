@@ -7,6 +7,7 @@ than re-implementing its upload/retry/token/quota handling.
 
 - **Guard:** shorts are canonical (`short_NN.mp4`), so
   `config.drive.youtube_upload_filename_pattern` widened to `^(?:lf|sl|short)_\d{2}\.mp4$`.
+- **Recording facts:** every `videos.insert` sends `snippet.defaultAudioLanguage` (the `drive.youtube_default_language` value, same as `defaultLanguage`), and a Short sends `recordingDetails.recordingDate` from its record's measured `recording_date` (the GPS-measured day, never file mtime); a blank date omits the field.
 - **Ordering:** private upload with `status.publishAt`; `video_id` persists
   to the queue (`status=uploaded`) BEFORE the playlist call — a lost id there
   would re-issue `videos.insert` for content already live. A playlist failure after upload leaves `uploaded`
