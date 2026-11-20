@@ -51,6 +51,21 @@ UNATTENDED_AFTER_FAILURES = 3
 _BACKFILL = ("resume_recipe", "log_path")
 
 
+#: Camera file names a grouped footage push lists before "and N more".
+FOOTAGE_PUSH_NAMES = 10
+
+
+def _footage_line(rows: List[Dict[str, Any]]) -> str:
+    names = [str(r.get("name") or r["key"]) for r in rows]
+    shown = ", ".join(names[:FOOTAGE_PUSH_NAMES])
+    more = f" and {len(names) - FOOTAGE_PUSH_NAMES} more" if len(names) > FOOTAGE_PUSH_NAMES else ""
+    return (
+        f"{len(rows)} camera files are in no drive_backlog.yaml row and no "
+        f"drive_backlog_excluded.yaml entry: {shown}{more}. Queue them as rows, or exclude "
+        "them with a reason."
+    )
+
+
 def _line(row: Dict[str, Any]) -> str:
     if row["kind"] == "drive_failed":
         return drives.summary(row)
@@ -419,7 +434,12 @@ def _accounting_rows(
         return found, held
     try:
         found["backlog_unlisted_footage"] = accounting.unlisted_footage_incidents(
-            rows, entries, now_iso, notes, held
+            rows,
+            entries,
+            now_iso,
+            notes,
+            held,
+            [src for p in problems for src in p.get("sources", ())],
         )
     except Exception as exc:  # noqa: BLE001
         notes.append(f"rule 11 not evaluated: {type(exc).__name__}: {exc}")
@@ -603,6 +623,8 @@ def run_check(
             continue
         kind = row.get("kind")
         gone = kind in found and row["key"] not in live_keys
+        if kind == "backlog_exclusion_invalid" and "backlog_exclusion_invalid:file" in live_keys:
+            gone = False  # unreadable file: the per-entry findings could not be re-judged
         if kind == "backlog_unlisted_footage" and held_dirs:
             from .accounting import norm  # noqa: PLC0415
 
@@ -635,8 +657,27 @@ def run_check(
 
     pushed: List[str] = []
     open_rows = [r for r in by_key.values() if not r.get("resolved_at")]
+    unpushed = [r for r in open_rows if not r.get("pushed")]
+    footage = sorted(
+        (r for r in unpushed if r["kind"] == "backlog_unlisted_footage"), key=lambda r: r["key"]
+    )
+    if len(footage) > 1:  # one push per tick, not one per file: each row keeps its own key
+        if (
+            notify_fn(
+                _EVENTS["backlog_unlisted_footage"], {"count": len(footage)}, _footage_line(footage)
+            )
+            is not False
+        ):
+            for row in footage:
+                row["pushed"] = True
+                row["pushed_at"] = now_iso
+                write_row(incidents_dir, row)
+                pushed.append(row["key"])
+        grouped = {r["key"] for r in footage}
+    else:
+        grouped = set()
     for row in open_rows:
-        if row.get("pushed"):
+        if row.get("pushed") or row["key"] in grouped:
             continue
         event = _EVENTS.get(row["kind"], "health_incident")
         if notify_fn(event, {"incident": row["key"]}, _line(row)) is False:
