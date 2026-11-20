@@ -16,6 +16,7 @@ from ..models import DrivePipelineResult
 from .day_grouper import group_episodes_by_day
 from .ingest import create_ingest_plan
 from .inserts import describe_drive_inserts
+from .phase_timing import discover_record_paths
 from .preflight import PreflightBlockedError, format_blockers, run_preflight
 from .preflight_plan import print_plan
 
@@ -399,6 +400,10 @@ def run_preflight_and_prompt(
     insert_lines = describe_drive_inserts(config.drive)
     if insert_lines:
         plan_kwargs["insert_lines"] = insert_lines
+    # Recorded per-phase rates from this drive and sibling drives (A5).
+    record_paths = discover_record_paths(stages_dir, siblings=True)
+    if record_paths:
+        plan_kwargs["record_paths"] = record_paths
     print_plan(state, stages_dir, **plan_kwargs)
     cores, total_ram_gb = _machine_spec()
     advisory = machine_spec_advisory(cpu_cores=cores, total_ram_gb=total_ram_gb)
