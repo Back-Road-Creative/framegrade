@@ -153,3 +153,30 @@ def test_upload_video_body_field_defaults_come_from_config(
     assert body["snippet"]["defaultLanguage"] == "es"
     assert body["status"]["license"] == "creativeCommon"
     assert body["status"]["embeddable"] is False
+
+
+def test_upload_video_sends_default_audio_language_from_config(
+    mock_service, fake_creds_dict, fake_video_file
+):
+    """``snippet.defaultAudioLanguage`` rides every insert, taken from the same
+    config language value as ``defaultLanguage`` -- never a second literal."""
+    from gomoveshift.config import Config
+
+    up, yu = _make_uploader(mock_service, fake_creds_dict)
+    with patch.object(yu, "MediaFileUpload", return_value=MagicMock()):
+        up.upload_video(fake_video_file, title="t", description="d", tags=[])
+    body = mock_service.videos.return_value.insert.call_args.kwargs["body"]
+    assert body["snippet"]["defaultAudioLanguage"] == "en"
+
+    mock_service.videos.return_value.insert.return_value.next_chunk.side_effect = [
+        (None, {"id": "SECOND"})
+    ]
+    overridden = Config()
+    overridden.drive.youtube_default_language = "es"
+    with (
+        patch.object(yu, "get_config", return_value=overridden),
+        patch.object(yu, "MediaFileUpload", return_value=MagicMock()),
+    ):
+        up.upload_video(fake_video_file, title="t", description="d", tags=[])
+    body = mock_service.videos.return_value.insert.call_args.kwargs["body"]
+    assert body["snippet"]["defaultAudioLanguage"] == "es"

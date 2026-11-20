@@ -504,6 +504,9 @@ class YouTubeShortsAdapter:
                     category_id=payload.category or "2",
                     publish_at=record.schedule.scheduled_at_utc,
                     privacy="private",
+                    # The measured filmed-on date (per_lf_recording_date via the
+                    # plan builder), never a file time; blank sends nothing.
+                    recording_date=(record.recording_date or "").strip() or None,
                     final_text_review=ft_review,
                     final_text_context=ft_context,
                 )

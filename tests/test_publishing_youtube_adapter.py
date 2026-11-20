@@ -156,6 +156,29 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
     assert row["platform_published_at"] == "2026-08-24T14:00:00+00:00"
 
 
+def test_short_upload_sends_the_records_measured_recording_date(mock_service, queue_conn, tmp_path):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    assert record.recording_date == "2026-08-20"
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    kwargs = mock_service.videos.return_value.insert.call_args.kwargs
+    assert kwargs["body"]["recordingDetails"] == {"recordingDate": "2026-08-20T00:00:00.000Z"}
+    assert "recordingDetails" in kwargs["part"]
+
+
+def test_short_upload_without_a_measured_date_omits_recording_details(
+    mock_service, queue_conn, tmp_path
+):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    # GPS-less: no clip region votes, so no review demands a measured date.
+    record = dataclasses.replace(record, recording_date="", sampled_regions=())
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    kwargs = mock_service.videos.return_value.insert.call_args.kwargs
+    assert "recordingDetails" not in kwargs["body"]
+    assert "recordingDetails" not in kwargs["part"]
+
+
 def test_playlist_failure_does_not_lose_video_id(mock_service, queue_conn, tmp_path):
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
     mock_service.playlists.return_value.list.return_value.execute.side_effect = RuntimeError("boom")
