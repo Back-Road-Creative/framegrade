@@ -188,6 +188,13 @@ def isolate_media_admission_from_operator(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def isolate_health_incidents_from_workspace(tmp_path_factory, monkeypatch):
+    """No test may write health incident rows into the checkout's ``gms/incidents``:
+    ``store.default_incidents_dir`` honours ``GMS_HEALTH_INCIDENTS_DIR`` (store.py:53-55)."""
+    monkeypatch.setenv("GMS_HEALTH_INCIDENTS_DIR", str(tmp_path_factory.mktemp("incidents")))
+
+
+@pytest.fixture(autouse=True)
 def isolate_output_root_from_operator(tmp_path, monkeypatch):
     """Root ``gms_output_dir()``, and with it every default-constructed
     ``TrackingStore``, inside the test's own temp dir.
