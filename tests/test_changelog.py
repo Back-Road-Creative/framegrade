@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import gomoveshift
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -15,6 +16,11 @@ from tools import release  # noqa: E402
 
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 REPO_URL = "https://github.com/Back-Road-Creative/framegrade"
+#: Name prefixes the workspaces merge robot holds for a human (its hard-deny
+#: globs ``**/deploy*``, ``**/publish*``, ``**/upload*``). A release PR deletes
+#: every fragment, so one so named stops the release itself: 0.3.116 (#445)
+#: stopped on ``changelog.d/upload-sends-recording-facts.md``.
+HELD_NAME_PREFIXES = ("deploy", "publish", "upload")
 
 
 def _text() -> str:
@@ -68,3 +74,28 @@ def test_every_changelog_fragment_is_releasable() -> None:
     so a fragment it would refuse fails here, in the PR that adds it."""
     for path in release.fragment_paths(REPO_ROOT):
         release.read_fragment(path)
+
+
+def _held_by_merge_robot(name: str) -> bool:
+    return name.lower().startswith(HELD_NAME_PREFIXES)
+
+
+@pytest.mark.parametrize(
+    ("name", "held"),
+    [
+        ("upload-sends-recording-facts.md", True),
+        ("publish-x.md", True),
+        ("deploy-x.md", True),
+        ("Upload-x.md", True),
+        ("sends-upload-facts.md", False),
+        ("heal-retry-by-fingerprint.md", False),
+    ],
+)
+def test_held_name_matches_the_robots_globs_from_the_start(name: str, held: bool) -> None:
+    assert _held_by_merge_robot(name) is held
+
+
+def test_no_changelog_fragment_name_is_held_by_the_merge_robot() -> None:
+    """Fails the PR that adds such a name, before it can stop a release PR."""
+    held = [p.name for p in release.fragment_paths(REPO_ROOT) if _held_by_merge_robot(p.name)]
+    assert held == [], f"rename these changelog.d fragments: {held}"

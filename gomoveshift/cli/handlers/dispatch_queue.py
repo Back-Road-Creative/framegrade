@@ -48,6 +48,7 @@ from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
 from ...publishing.queue import TERMINAL_STATUSES, open_queue_db
 from ...publishing.tiktok_pack import reconcile_packed, resolve_pack_dir, sweep_queued
 from ...publishing.tiktok_rendition import ensure_h264_rendition, ensure_instagram_rendition
+from ...publishing.youtube_adapter import confirm_scheduled_live
 from ...publishing.youtube_comments import drain_first_comments
 from .pub_status import VALIDATE_COMMAND, gating_problems, record_ignore_validate
 
@@ -405,6 +406,7 @@ def cmd_dispatch_queue(args, config) -> int:
             # Not an error: every route still on metricool means the CSV
             # path is live and there is legitimately nothing to drain.
             print("\nNo platform is routed first_party; nothing to drain.")
+            logger.info("CONFIRMED_LIVE skipped: no platform is routed first_party")
             return 0
 
         # BEFORE the drain: a draft a human published in the app parks at
@@ -582,6 +584,11 @@ def cmd_dispatch_queue(args, config) -> int:
                     print(f"  error: {err}")
             comment_results.append(("youtube", fc_result))
 
+        # Dispatch has run. Confirm which scheduled Shorts went public (records
+        # ``platform_live``); a failure here warns and never changes the exit code,
+        # and the next tick asks again.
+        _confirm_live(conn, config, routed)
+
         # Instagram / Facebook first comments: same lazy-factory rule, each
         # platform only when routed first_party.
         meta_factories = _meta_comment_factories(config, routed)
@@ -700,6 +707,33 @@ def cmd_dispatch_queue(args, config) -> int:
         return 1
     finally:
         conn.close()
+
+
+class _LazyYouTubeService:
+    """Builds the YouTube client on first use, so a tick with no scheduled row
+    to confirm never pays the credential-decrypt cost."""
+
+    def __init__(self, config):
+        self._config = config
+        self._service = None
+
+    def videos(self):
+        if self._service is None:
+            self._service = _build_youtube_comments_service(self._config)
+        return self._service.videos()
+
+
+def _confirm_live(conn, config, routed) -> None:
+    """One ``confirm_scheduled_live`` pass per non-dry-run tick (see its docstring)."""
+    if "youtube" not in routed:
+        logger.info("CONFIRMED_LIVE skipped: youtube is not routed first_party in this run")
+        return
+    try:
+        count = confirm_scheduled_live(conn, _LazyYouTubeService(config))
+    except Exception as exc:  # noqa: BLE001 -- dispatch already ran; the next tick retries
+        logger.warning("CONFIRMED_LIVE failed: %s: %s", type(exc).__name__, exc)
+        return
+    logger.info("CONFIRMED_LIVE count=%d", count)
 
 
 def build_pack_reconciler(config):
