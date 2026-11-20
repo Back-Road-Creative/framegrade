@@ -1269,11 +1269,75 @@ def _leak_windows(frames: list[int], half: int, frame_count: int) -> list[tuple[
     return windows
 
 
+def _cover_leaked_boxes(timeline, leaks: list, cabin_frac: float, frame_count: int) -> int:
+    """Put the gate's own leaked cabin into the mask for every leak it reported.
+
+    ``leak["box"]`` is the vehicle box (x, y, w, h) the gate judged exposed; its cabin
+    is the same top ``cabin_frac`` of it that the gate measured, grown by the
+    timeline's dilation like every other mask box and held ``CABIN_REPAIR_HOLD_FRAMES``
+    either side. Boxes are only ever added, never removed or shrunk. Returns how many
+    were added (a box already present is not re-added)."""
+    from redactcam import timeline as br
+    from redactcam.coverage import cabin_region
+
+    w, h = timeline.frame_width, timeline.frame_height
+    added = 0
+    for leak in leaks:
+        x0, y0, x1, y1 = cabin_region(tuple(int(v) for v in leak["box"]), cabin_frac, w, h)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        box = br.dilate_box((x0, y0, x1 - x0, y1 - y0), timeline.box_dilation_px, w, h)
+        f = int(leak["frame"])
+        last = frame_count - 1 if frame_count > 0 else f + CABIN_REPAIR_HOLD_FRAMES
+        for g in range(
+            max(0, f - CABIN_REPAIR_HOLD_FRAMES), min(last, f + CABIN_REPAIR_HOLD_FRAMES) + 1
+        ):
+            boxes = timeline.frame_boxes.setdefault(g, [])
+            if box not in boxes:
+                boxes.append(box)
+                added += 1
+    return added
+
+
+def _cabin_gate_with_repair(
+    raw_concat: Path, config: Config, mask_path: Path, regions_sidecar: Path
+) -> Optional[str]:
+    """Run the cabin gate; on a leak, up to ``blur_cabin_repair_rounds`` rounds of
+    repair then a FULL gate pass. Returns ``None`` only when a gate pass is clean,
+    otherwise the gate's last error (the caller raises it). Every repair is followed
+    by a real gate pass; nothing here ever turns an error into a pass.
+
+    A heal retry whose signature (source, models, config, mask, renderer) matches a
+    recorded failed repair returns the recorded error at once instead of repeating a
+    repair that already failed on identical inputs."""
+    err = blur_gate.check_day_master_cabin_coverage(config, raw_concat, mask_path)
+    if not err:
+        return None
+    if blur_gate.cabin_repair_failure(config, raw_concat, mask_path) is not None:
+        logger.warning("  cabin repair already failed on these exact inputs; not repeating it")
+        return err
+    rounds = max(0, int(getattr(config.drive, "blur_cabin_repair_rounds", 2)))
+    spent = 0
+    for _ in range(rounds):
+        added = _repair_cabin_leaks(raw_concat, config, mask_path, regions_sidecar)
+        spent += 1
+        err = blur_gate.check_day_master_cabin_coverage(config, raw_concat, mask_path)
+        if not err:
+            return None
+        if not added:
+            break  # the mask did not change, so another round would repeat this one
+    if spent:
+        blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent)
+    return err
+
+
 def _repair_cabin_leaks(
     raw_concat: Path, config: Config, mask_path: Path, regions_sidecar: Path
 ) -> int:
     """Add the cabin of every vehicle seen near each frame the cabin gate flagged,
     rebuild the mask, and return how many boxes were added (0 = nothing changed).
+    The gate's own leaked box is always added too, so a repair given a leak adds
+    at least that one.
 
     The detection tracker blurs a car's cabin only once a plate track corroborates
     it, while the gate corroborates frame by frame, so the gate can see a driver the
@@ -1295,60 +1359,65 @@ def _repair_cabin_leaks(
     from ..analysis import resolve_vehicle_model
 
     report = load_cached_json(blur_gate.cabin_leak_report_path(mask_path)) or {}
-    leak_frames = [int(leak["frame"]) for leak in report.get("leaks", [])]
+    leaks = report.get("leaks", [])
+    leak_frames = [int(leak["frame"]) for leak in leaks]
     if not leak_frames:
         return 0
     timeline = br.load_sidecar(regions_sidecar)
     drive = config.drive
     veh = resolve_vehicle_model(drive)
-    if timeline is None or veh is None:
+    if timeline is None:
         return 0
     n = timeline.source_frame_count
     windows = _leak_windows(leak_frames, math.ceil(timeline.source_fps * CABIN_REPAIR_WINDOW_S), n)
     tmp_mask = mask_path.with_name(f"{mask_path.stem}.repair.tmp{mask_path.suffix}")
     tmp_sidecar = regions_sidecar.with_name(f"{regions_sidecar.stem}.repair.tmp.json")
-    added = 0
     try:
-        det = build_vehicle_detector(str(veh), 640, 0.45, 0)
-        if det is None:
-            return 0
-        cap = cv2.VideoCapture(str(raw_concat))
-        try:
-            wi, idx = 0, -1
-            while idx < windows[-1][1] and cap.grab():
-                idx += 1
-                while idx > windows[wi][1]:
-                    wi += 1
-                if idx < windows[wi][0]:
-                    continue
-                ok, frame = cap.retrieve()
-                if not ok:
-                    continue
-                h, w = frame.shape[:2]
-                for bx in filter_vehicles(
-                    det.detect(frame, drive.blur_vehicle_conf),
-                    h,
-                    drive.blur_vehicle_min_height_frac,
-                    drive.blur_vehicle_ignore_bottom_frac,
-                ):
-                    x0, y0, x1, y1 = cabin_region(bx, drive.blur_vehicle_cabin_frac, w, h)
-                    if x1 <= x0 or y1 <= y0:
+        # The gate's own leaked box first: whatever detection finds, the mask now
+        # covers every cabin the gate saw exposed, so a repair given a leak cannot add
+        # nothing. Needs no model, so a missing detector no longer voids the repair.
+        added = _cover_leaked_boxes(timeline, leaks, drive.blur_vehicle_cabin_frac, n)
+        det = build_vehicle_detector(str(veh), 640, 0.45, 0) if veh is not None else None
+        if det is not None:
+            cap = cv2.VideoCapture(str(raw_concat))
+            try:
+                wi, idx = 0, -1
+                while idx < windows[-1][1] and cap.grab():
+                    idx += 1
+                    while idx > windows[wi][1]:
+                        wi += 1
+                    if idx < windows[wi][0]:
                         continue
-                    box = br.dilate_box((x0, y0, x1 - x0, y1 - y0), timeline.box_dilation_px, w, h)
-                    px0, py0, px1, py1 = blur_gate.plate_band_region(bx, w, h)
-                    band = br.dilate_box(
-                        (px0, py0, px1 - px0, py1 - py0), timeline.box_dilation_px, w, h
-                    )
-                    lo = max(0, idx - CABIN_REPAIR_HOLD_FRAMES)
-                    hi = idx + CABIN_REPAIR_HOLD_FRAMES
-                    for f in range(lo, (min(hi, n - 1) if n > 0 else hi) + 1):
-                        boxes = timeline.frame_boxes.setdefault(f, [])
-                        for new_box in (box, band):
-                            if new_box not in boxes:
-                                boxes.append(new_box)
-                                added += 1
-        finally:
-            cap.release()
+                    ok, frame = cap.retrieve()
+                    if not ok:
+                        continue
+                    h, w = frame.shape[:2]
+                    for bx in filter_vehicles(
+                        det.detect(frame, drive.blur_vehicle_conf),
+                        h,
+                        drive.blur_vehicle_min_height_frac,
+                        drive.blur_vehicle_ignore_bottom_frac,
+                    ):
+                        x0, y0, x1, y1 = cabin_region(bx, drive.blur_vehicle_cabin_frac, w, h)
+                        if x1 <= x0 or y1 <= y0:
+                            continue
+                        box = br.dilate_box(
+                            (x0, y0, x1 - x0, y1 - y0), timeline.box_dilation_px, w, h
+                        )
+                        px0, py0, px1, py1 = blur_gate.plate_band_region(bx, w, h)
+                        band = br.dilate_box(
+                            (px0, py0, px1 - px0, py1 - py0), timeline.box_dilation_px, w, h
+                        )
+                        lo = max(0, idx - CABIN_REPAIR_HOLD_FRAMES)
+                        hi = idx + CABIN_REPAIR_HOLD_FRAMES
+                        for f in range(lo, (min(hi, n - 1) if n > 0 else hi) + 1):
+                            boxes = timeline.frame_boxes.setdefault(f, [])
+                            for new_box in (box, band):
+                                if new_box not in boxes:
+                                    boxes.append(new_box)
+                                    added += 1
+            finally:
+                cap.release()
         if not added:
             return 0
         materialize_mask_video(timeline, tmp_mask)
@@ -1652,11 +1721,9 @@ def encode_day_master(
         # the mask misses would ship its driver exposed — verify against the mask
         # BEFORE the irreversible master encode composites it, mirroring the
         # legacy per-episode gate (blur_gate.check_cabin_coverage). A failure gets
-        # one targeted repair and a fresh check of the whole day; only a leak that
-        # survives the repair stops the run.
-        cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, graded_src, blur_mask_path)
-        if cabin_err and _repair_cabin_leaks(graded_src, cfg, blur_mask_path, regions_sidecar):
-            cabin_err = blur_gate.check_day_master_cabin_coverage(cfg, graded_src, blur_mask_path)
+        # up to ``blur_cabin_repair_rounds`` targeted repairs, each followed by a
+        # fresh check of the whole day; only a leak that survives them stops the run.
+        cabin_err = _cabin_gate_with_repair(graded_src, cfg, blur_mask_path, regions_sidecar)
         if cabin_err:
             raise blur_gate.BlurGateError(cabin_err)
     # Use ``<stem>.tmp<suffix>`` (e.g. ``day_2025-01-15_master.tmp.mp4``) rather

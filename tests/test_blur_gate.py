@@ -533,3 +533,69 @@ class TestFrameSamplerHasOneHome:
 
         cmds.clear()
         assert blur_gate._gray_frames(Path("v.mp4"), [1.0, 2.0], 640) == []
+
+
+class TestFailedRepairIsRecordedInTheVerdict:
+    """A failed repair rides on the gate's own verdict, keyed by the same signature, so
+    a heal retry on identical inputs refuses at once and any changed input misses."""
+
+    def _fail_gate(self, tmp_path, monkeypatch):
+        import redactcam
+
+        from gomoveshift import analysis
+
+        monkeypatch.setattr(analysis, "resolve_vehicle_model", lambda d: Path("v.onnx"))
+        monkeypatch.setattr(analysis, "resolve_plate_model", lambda d: Path("p.onnx"))
+        rep = redactcam.CoverageReport(
+            vehicle_frames=5, leaks=[redactcam.Leak(100, 0.0, (1, 2, 3, 4))]
+        )
+        monkeypatch.setattr(analysis, "verify_cabin_coverage", lambda *a, **k: rep)
+        config, video, mask = _cabin_cfg(tmp_path)
+        video.write_bytes(b"\x00" * 128)
+        assert blur_gate.check_day_master_cabin_coverage(config, video, mask)
+        return config, video, mask
+
+    def test_no_failure_is_reported_until_one_is_recorded(self, tmp_path, monkeypatch):
+        config, video, mask = self._fail_gate(tmp_path, monkeypatch)
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2)
+        rec = blur_gate.cabin_repair_failure(config, video, mask)
+        assert rec["rounds"] == 2 and rec["leaks"][0]["frame"] == 100
+        # The gate still reports its error (never a pass) from the same cache entry.
+        assert blur_gate.check_day_master_cabin_coverage(config, video, mask)
+
+    def test_a_changed_mask_config_or_video_misses(self, tmp_path, monkeypatch):
+        config, video, mask = self._fail_gate(tmp_path, monkeypatch)
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2)
+        config.drive.blur_vehicle_conf = 0.7
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+        config.drive.blur_vehicle_conf = 0.6
+        assert blur_gate.cabin_repair_failure(config, video, mask) is not None
+        mask.write_bytes(b"\x00" * 64)
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+
+    def test_a_new_renderer_misses(self, tmp_path, monkeypatch):
+        config, video, mask = self._fail_gate(tmp_path, monkeypatch)
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2)
+        monkeypatch.setattr(
+            blur_gate, "renderer_identity", lambda: {"redactcam_version": "9", "decode_mode": "x"}
+        )
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+
+    def test_a_passing_verdict_never_carries_a_failure(self, tmp_path, monkeypatch):
+        import redactcam
+
+        from gomoveshift import analysis
+
+        config, video, mask = self._fail_gate(tmp_path, monkeypatch)
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2)
+        mask.write_bytes(b"\x01" * 40)  # repaired mask: new signature, gate now passes
+        monkeypatch.setattr(
+            analysis,
+            "verify_cabin_coverage",
+            lambda *a, **k: redactcam.CoverageReport(vehicle_frames=5, leaks=[]),
+        )
+        assert blur_gate.check_day_master_cabin_coverage(config, video, mask) is None
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
+        blur_gate.record_cabin_repair_failure(config, video, mask, 2)  # no-op on a pass
+        assert blur_gate.cabin_repair_failure(config, video, mask) is None
