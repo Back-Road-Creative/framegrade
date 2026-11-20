@@ -18,7 +18,7 @@ Changelog sections (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`,
 section of `CHANGELOG.md`. Fragments are taken in file-name order, and entries
 already under `[Unreleased]` come first. The tool then deletes the fragments.
 `tests/test_changelog.py` refuses a fragment the release would refuse: a missing
-heading, an unknown section, a section with no entries, or a name starting with
-`deploy`, `publish` or `upload` (the merge robot holds those paths for a human,
-which would stop the release PR that deletes the fragment). This README is never
+heading, an unknown section, or a section with no entries. It also refuses a name
+starting with `deploy`, `publish` or `upload`: the merge robot holds those paths
+for a human, which would stop the release PR that deletes the fragment. This README is never
 folded in.
