@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.122] - 2026-11-20
+
+### Added
+
+- `queue_short_text.sync_short_text` (library only; the `queue sync-short-text` command arrives with the next change) re-writes the title, description and tags of every queued YouTube Short more than 24 hours from its slot with the current generator (no repeated place, seeded from the stored text of its neighbours). `experiment_arms` are kept as stored. A Short is refused whole when any of its delivery rows is in flight, leased, unslotted or inside the lead time, or when the Short review refuses the new text. See `docs/pipeline/183-queue-sync-short-text.md`.
+
 ## [0.3.121] - 2026-11-20
 
 ### Changed
@@ -1380,7 +1386,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...HEAD
+[0.3.122]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...v0.3.122
 [0.3.121]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...v0.3.121
 [0.3.120]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...v0.3.120
 [0.3.119]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...v0.3.119
