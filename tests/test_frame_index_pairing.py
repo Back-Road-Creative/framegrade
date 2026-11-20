@@ -279,3 +279,86 @@ def test_day_mask_evidence_changes_with_the_renderer(monkeypatch):
     a = dme._current_blur_evidence(Config().drive, **kw)
     monkeypatch.setenv("REDACTCAM_DECODE", "cv2")
     assert dme._current_blur_evidence(Config().drive, **kw) != a
+
+
+# ── probe cost: nb_frames first, count_packets only as the fallback ───────────
+
+
+class _Probe:
+    """Stub ``subprocess.run`` in blur_gate; ``answers`` maps entry name -> stdout/None."""
+
+    def __init__(self, answers):
+        self.answers, self.calls = answers, []
+
+    def __call__(self, cmd, **kw):
+        entry = next(c for c in cmd if c.startswith("stream="))
+        if entry == "stream=nb_frames":
+            assert "-count_packets" not in cmd, "nb_frames probe must not read the file"
+        self.calls.append(entry)
+        out = self.answers.get(entry)
+        if out is None:
+            raise subprocess.TimeoutExpired(cmd, 1)
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+
+def _stub(monkeypatch, answers):
+    probe = _Probe(answers)
+    monkeypatch.setattr(blur_gate.subprocess, "run", probe)
+    return probe
+
+
+def test_nb_frames_is_read_without_counting_packets(monkeypatch):
+    probe = _stub(monkeypatch, {"stream=nb_frames": "306377\n"})
+    assert blur_gate.container_frame_count(Path("/x/day_raw.mp4")) == 306377
+    assert probe.calls == ["stream=nb_frames"]  # a 91 GB file is never read through
+
+
+@pytest.mark.parametrize("missing", ["N/A\n", "0\n", "\n", "-3\n"])
+def test_missing_nb_frames_falls_back_to_count_packets(monkeypatch, missing):
+    probe = _stub(monkeypatch, {"stream=nb_frames": missing, "stream=nb_read_packets": "24\n"})
+    assert blur_gate.container_frame_count(Path("/x/mask.mkv")) == 24
+    assert probe.calls == ["stream=nb_frames", "stream=nb_read_packets"]
+
+
+def test_both_probes_failing_is_minus_one(monkeypatch):
+    _stub(monkeypatch, {})
+    assert blur_gate.container_frame_count(Path("/x/v.mp4")) == -1
+    _stub(monkeypatch, {"stream=nb_frames": "N/A\n", "stream=nb_read_packets": "N/A\n"})
+    assert blur_gate.container_frame_count(Path("/x/v.mp4")) == -1
+
+
+# ── day-master reuse: a cached mask on another frame count is rebuilt ─────────
+
+
+def test_day_master_rebuilds_a_cached_mask_whose_count_differs_from_the_source(
+    tmp_path, monkeypatch
+):
+    from gomoveshift.pipeline import day_master_encoder as dme
+    from tests import test_day_master_blur as tdmb
+
+    tdmb.TestBuildDayBlurMask()._no_network_models(monkeypatch)
+    monkeypatch.setattr("redactcam.timeline.probe_video", lambda p: (30.0, 90, 64, 96))
+    detects = []
+
+    def _detect(*a, **k):
+        detects.append(1)
+        return ({0: [(10, 10, 20, 20)]}, 90, 1, 0)
+
+    monkeypatch.setattr("redactcam.detect_and_track", _detect)
+    monkeypatch.setattr(
+        "redactcam.materialize_mask_video", lambda tl, p, **k: (p.write_bytes(b"mask"), p)[1]
+    )
+    raw = tmp_path / "raw.mp4"
+    raw.write_bytes(b"raw")
+    cfg = Config()
+    cfg.drive.blur_vehicle_cabin_frac = 0.0
+    mask, sidecar = tmp_path / "m.mkv", tmp_path / "r.json"
+    count = {"n": 90}  # only the probe is stubbed; _counts_allow_reuse is the real one
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: count["n"])
+
+    dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+    dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+    assert detects == [1], "control: matching counts must still reuse"
+    count["n"] = 80  # the source (or mask) now counts another number of frames
+    dme._build_day_blur_mask(raw, cfg, mask, sidecar, "d")
+    assert detects == [1, 1], "a count-mismatched cached mask was reused"

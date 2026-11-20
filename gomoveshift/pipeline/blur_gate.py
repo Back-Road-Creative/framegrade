@@ -289,20 +289,36 @@ def fill_detection_gaps(frame_boxes: dict, *, max_gap_frames: int) -> dict:
 _PROBE_TIMEOUT_S = 600
 
 
-def container_frame_count(path: Path) -> int:
-    """Video packets in ``path`` (one per frame), read without decoding; ``-1`` when
-    ffprobe cannot say (callers treat that as a disagreement, never as a match)."""
+def _probe_entry(path: Path, entry: str) -> int:
+    """One ``stream=<entry>`` integer from ffprobe, ``-1`` when absent/``N/A``/failed."""
     try:
         out = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-count_packets", "-select_streams", "v:0",
-                "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path),
+                "ffprobe", "-v", "error",
+                # Counting reads the whole file; only the packet entry may ask for it.
+                *(["-count_packets"] if entry == "nb_read_packets" else []),
+                "-select_streams", "v:0",
+                "-show_entries", f"stream={entry}", "-of", "csv=p=0", str(path),
             ],
             capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
         )  # fmt: skip
         return int(out.stdout.strip())
     except (OSError, ValueError, subprocess.SubprocessError):
         return -1
+
+
+def container_frame_count(path: Path) -> int:
+    """Video frames in ``path``; ``-1`` when ffprobe cannot say (callers treat that
+    as a disagreement, never as a match).
+
+    ``nb_frames`` first: MP4/MOV carry it in the sample table, so a ~91 GB day master
+    costs no file read. Only when it is missing/``N/A``/<= 0 (FFV1/MKV masks, which
+    are small) does it count packets, which reads the file without decoding."""
+    n = _probe_entry(Path(path), "nb_frames")
+    if n > 0:
+        return n
+    n = _probe_entry(Path(path), "nb_read_packets")
+    return n if n > 0 else -1
 
 
 def sidecar_frame_count(sidecar: Optional[Path]) -> int:
