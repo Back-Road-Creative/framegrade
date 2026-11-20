@@ -270,6 +270,17 @@ def _validate_gate_refuses(conn, args, config, sidecars, max_shorts) -> bool:
     return True
 
 
+def _refused_keys(sidecars: List[Path], max_shorts: int | None) -> set:
+    """``(project, short_index)`` of every Short the final-text review refuses: enqueue
+    leaves them out, so the ceiling and anti-spam gates must not count them."""
+    keys: set = set()
+    for path in sidecars:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        capped = [r for r in select_capped_shorts(raw["shorts"], max_shorts) if isinstance(r, dict)]
+        keys.update(sidecar_review_refusals(path, capped))
+    return keys
+
+
 def _planned_deliveries(
     sidecars: List[Path], max_shorts: int | None
 ) -> List[Tuple[str, str, int, datetime]]:
@@ -278,9 +289,12 @@ def _planned_deliveries(
     ``select_capped_shorts`` selection ``_media_verification_errors`` already
     uses, so the ceiling never counts a short the cap would defer anyway."""
     planned: List[Tuple[str, str, int, datetime]] = []
+    refused = _refused_keys(sidecars, max_shorts)
     for path in sidecars:
         plan = load_publish_plan(path)
         for record in select_capped_shorts(list(plan.shorts), max_shorts):
+            if (record.project_name, record.short_index) in refused:
+                continue
             for platform in record.routes.selected:
                 planned.append(
                     (
@@ -299,9 +313,14 @@ def _planned_records(sidecars: List[Path], max_shorts: int | None) -> List:
     pre-spool gates use, so the anti-spam gate never counts a short the cap
     would defer anyway."""
     records: List = []
+    refused = _refused_keys(sidecars, max_shorts)
     for path in sidecars:
         plan = load_publish_plan(path)
-        records.extend(select_capped_shorts(list(plan.shorts), max_shorts))
+        records.extend(
+            r
+            for r in select_capped_shorts(list(plan.shorts), max_shorts)
+            if (r.project_name, r.short_index) not in refused
+        )
     return records
 
 

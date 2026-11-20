@@ -221,8 +221,9 @@ exactly the file that produced the row, never a directory guess.
   raises one `short_review_refused` health incident (`health.store.new_incident`, key
   `short_review_refused:<project>:<short_index>`, one open row however often enqueue
   re-runs, replaced only when the reason changes). The plan's other Shorts still enqueue.
-  The row is written `pushed` because `health check`'s push line has no wording for the
-  kind. `enqueue_from_plan_sidecar(..., review=False)` skips the check. `enqueue-plan`
+  The row carries a `detail` line (project, Short index, reason) that `health check` pushes.
+  The refused Shorts are also left out of `enqueue-plan`'s rolling-ceiling and anti-spam counts.
+  `enqueue_from_plan_sidecar(..., review=False)` skips the check. `enqueue-plan`
   prints the refusals on a dry run (writing nothing) and on `--apply` (`refused=N`).
   The plan builder (`plan_builder.build_publish_plan`) first drops a Short's unreviewable
   tags with `reviewable_short_tags`, the filter `queue sync-plan-tags` applies, and logs

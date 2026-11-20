@@ -176,9 +176,8 @@ def sidecar_review_refusals(
 def _raise_refusal_incident(project_name: str, short_index: int, reason: str, path: Path) -> None:
     """One open ``short_review_refused`` health incident per Short, written through the
     health store (``new_incident``). Deduped on its key: a repeated enqueue run finds the
-    open row and leaves it as it was; a refusal with a new reason replaces it. The row is
-    born ``pushed`` because ``health check``'s push line has no wording for this kind yet;
-    a failed write never blocks the rest of the plan."""
+    open row and leaves it as it was; a refusal with a new reason replaces it. The row's
+    ``detail`` is the line ``health check`` pushes; a failed write never blocks the rest of the plan."""
     from ..health.store import (
         default_data_root,
         default_incidents_dir,
@@ -206,8 +205,11 @@ def _raise_refusal_incident(project_name: str, short_index: int, reason: str, pa
             short_index=short_index,
             reason=reason,
             sidecar=str(path),
+            detail=(
+                f"Short {short_index} of {project_name} was not enqueued: the final-text "
+                f"review refuses it ({reason})."
+            ),
         )
-        row["pushed"], row["pushed_at"] = True, now
         write_row(incidents_dir, row)
     except OSError as exc:
         logger.warning("could not record the refusal incident %s: %s", key, exc)
