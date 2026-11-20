@@ -404,11 +404,16 @@ _PUBLISH_CONFIRMATION_LABELS = {
     # through to "unknown (legacy)" -- the strongest evidence this queue holds
     # wearing the label meant for rows that carry none.
     PUBLISHED_AT_PLATFORM_SCHEDULED: "platform scheduled (publishes later)",
+    "platform_live": "platform confirmed live",
 }
 
 
 #: ``published_at_source`` values that prove the platform itself published.
-_PLATFORM_PROVEN = (PUBLISHED_AT_PLATFORM_CONFIRMED, PUBLISHED_AT_PLATFORM_RECONCILED)
+_PLATFORM_PROVEN = (
+    PUBLISHED_AT_PLATFORM_CONFIRMED,
+    PUBLISHED_AT_PLATFORM_RECONCILED,
+    "platform_live",
+)
 
 
 def published_kind(row: Dict[str, Any]) -> str:

@@ -189,11 +189,19 @@ PUBLISHED_AT_PLATFORM_CONFIRMED = "platform_confirmed"  # publish call returned 
 #: is that a specific later time is KNOWN, and without one it says less than
 #: ``platform_confirmed`` while sounding like more.
 PUBLISHED_AT_PLATFORM_SCHEDULED = "platform_scheduled"
+#: The platform CONFIRMED the video is public and ``platform_published_at`` holds
+#: the time it went public (YouTube ``snippet.publishedAt`` once
+#: ``status.privacyStatus`` reads ``public``). Reached only from
+#: ``platform_scheduled`` through ``record_live_publish``, never by ``transition``:
+#: a scheduled slot is a promise, this is the receipt, and a reader tells them
+#: apart by this source.
+PUBLISHED_AT_PLATFORM_LIVE = "platform_live"
 _PUBLISHED_AT_SOURCES = (
     PUBLISHED_AT_OPERATOR_CONFIRMED,
     PUBLISHED_AT_PLATFORM_RECONCILED,
     PUBLISHED_AT_PLATFORM_CONFIRMED,
     PUBLISHED_AT_PLATFORM_SCHEDULED,
+    PUBLISHED_AT_PLATFORM_LIVE,
 )
 
 
@@ -665,6 +673,7 @@ def registered_platform_id(
 def recorded_publish_time(
     published_at: Optional[str],
     published_at_source: Optional[str],
+    platform_published_at: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """The posting time tracking may record, and which moment it is.
 
@@ -677,7 +686,15 @@ def recorded_publish_time(
     written by a path that never set it). Handing the bare time over would
     make an unknown look like a measurement, so both come back ``None`` and
     the platform id still registers -- an honest unknown, not a guess.
+
+    ``platform_live`` carries the time the platform confirmed the video public in
+    ``platform_published_at`` (``published_at`` is still the upload moment), so
+    that is the time tracking takes; without it the row says nothing.
     """
+    if published_at_source == PUBLISHED_AT_PLATFORM_LIVE:
+        if platform_published_at:
+            return platform_published_at, published_at_source
+        return None, None
     if published_at and published_at_source:
         return published_at, published_at_source
     return None, None
@@ -809,7 +826,7 @@ def _register_platform_id_best_effort(conn: sqlite3.Connection, delivery_id: int
     """
     row = conn.execute(
         "SELECT project_name, short_index, platform, platform_upload_id, "
-        "platform_post_id, published_at, published_at_source "
+        "platform_post_id, published_at, published_at_source, platform_published_at "
         "FROM deliveries WHERE id=?",
         (delivery_id,),
     ).fetchone()
@@ -824,7 +841,7 @@ def _register_platform_id_best_effort(conn: sqlite3.Connection, delivery_id: int
         from ..tracking import TrackingStore
 
         posted_at, posted_at_source = recorded_publish_time(
-            row["published_at"], row["published_at_source"]
+            row["published_at"], row["published_at_source"], row["platform_published_at"]
         )
         TrackingStore().update_platform_id(
             row["project_name"],
@@ -1066,6 +1083,41 @@ def cancel_delivery(conn: sqlite3.Connection, delivery_id: int, now: Optional[st
             (_now_iso(), delivery_id),
         )
         return cur.rowcount == 1
+
+
+def record_live_publish(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    live_at: str,
+    now: Optional[str] = None,
+) -> bool:
+    """Replace a scheduled row's slot with the time the platform confirmed it public.
+
+    Only a ``published`` row whose source is ``platform_scheduled`` moves; it
+    becomes ``platform_live`` with ``platform_published_at=live_at`` and tracking
+    ``posted_at`` follows. ``published_at`` (the upload moment) is untouched.
+    ``False`` when the row is not in that state, so a repeat is a no-op."""
+    now = now or _now_iso()
+    try:
+        datetime.fromisoformat(str(live_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"live_at must be an ISO-8601 timestamp; got {live_at!r}") from exc
+    with conn:
+        cur = conn.execute(
+            "UPDATE deliveries SET platform_published_at=?, published_at_source=?, "
+            "updated_at=? WHERE id=? AND status='published' AND published_at_source=?",
+            (
+                live_at,
+                PUBLISHED_AT_PLATFORM_LIVE,
+                now,
+                delivery_id,
+                PUBLISHED_AT_PLATFORM_SCHEDULED,
+            ),
+        )
+    if cur.rowcount != 1:
+        return False
+    _register_platform_id_best_effort(conn, delivery_id)
+    return True
 
 
 def reschedule_delivery(

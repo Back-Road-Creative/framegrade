@@ -1530,3 +1530,9 @@ def _drive_started_by_backlog(monkeypatch):
     """Existing drive tests exercise the pipeline, not the launch-origin gate
     (``tests/test_drive_launch_gate.py`` owns that and removes this marker)."""
     monkeypatch.setenv("GMS_LAUNCHED_BY", "health-backlog")
+
+
+@pytest.fixture(autouse=True)
+def isolate_health_incidents_dir(tmp_path, monkeypatch):
+    """``drain_queue`` writes a held-past-slot incident; never into the real incidents dir."""
+    monkeypatch.setenv("GMS_HEALTH_INCIDENTS_DIR", str(tmp_path / "health-incidents"))
