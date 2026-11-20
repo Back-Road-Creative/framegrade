@@ -455,17 +455,28 @@ class TestCabinGateRepairsItsOwnLeaks:
     mask, and the gate then re-checks the WHOLE day. Only a leak that survives the
     repair stops the run, and blur is never switched off to get past it."""
 
-    def _wire(self, tmp_path, monkeypatch, verdicts, added):
+    def _wire(self, tmp_path, monkeypatch, verdicts, added, failure=None):
         cap = _mock_encode(monkeypatch)
         mask_path = tmp_path / "day_2026-02-24_blur_mask.mkv"
         monkeypatch.setattr(
             dme, "_build_day_blur_mask", lambda raw, cfg, mask, sidecar, date, **_k: mask_path
         )
-        calls = {"check": 0, "repair": []}
+        calls = {"check": 0, "repair": [], "recorded": []}
 
         def _check(config, video, mask):
             calls["check"] += 1
             return verdicts[calls["check"] - 1]
+
+        def _lookup(config, video, mask, repair_key=None):
+            calls["lookup_key"] = repair_key
+            return failure
+
+        def _record(config, video, mask, rounds, repair_key=None):
+            calls["recorded"].append(rounds)
+            calls["record_key"] = repair_key
+
+        monkeypatch.setattr(blur_gate, "cabin_repair_failure", _lookup)
+        monkeypatch.setattr(blur_gate, "record_cabin_repair_failure", _record)
 
         def _repair(raw, cfg, mask, sidecar):
             calls["repair"].append((raw, mask, sidecar))
@@ -493,20 +504,128 @@ class TestCabinGateRepairsItsOwnLeaks:
 
     def test_leak_that_survives_the_repair_still_stops_the_run(self, tmp_path, monkeypatch):
         cap, _, calls = self._wire(
-            tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): STILL"], 4
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): MID", "BLUR GATE (cabin): STILL"],
+            4,
         )
         with pytest.raises(blur_gate.BlurGateError, match="STILL"):
             dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
-        assert calls["check"] == 2
+        assert calls["check"] == 3
         assert cap == {}
         assert not (tmp_path / "day_2026-02-24_master.mp4").exists()
 
-    def test_a_repair_that_adds_nothing_stops_without_a_second_check(self, tmp_path, monkeypatch):
-        cap, _, calls = self._wire(tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED"], 0)
+    def test_a_repair_that_adds_nothing_is_still_gated_then_stops(self, tmp_path, monkeypatch):
+        """No repair ever skips a gate pass; a repair that changed nothing ends the
+        rounds (another would repeat it) and the error is raised."""
+        cap, _, calls = self._wire(
+            tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): SAME"], 0
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="SAME"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert calls["check"] == 2 and len(calls["repair"]) == 1
+        assert cap == {}
+
+    def test_a_repair_that_could_not_run_is_not_cached_as_failed(self, tmp_path, monkeypatch):
+        """A repair that added nothing (an exception, a missing leak report) did not try the
+        inputs, so a heal retry must run it again: it is never recorded as a failed repair.
+        Only a repair that changed the mask every round and still leaked is recorded."""
+        _cap, _, calls = self._wire(
+            tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): SAME"], 0
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="SAME"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert calls["recorded"] == []
+
+    def test_a_repair_that_ran_every_round_and_still_leaks_is_cached(self, tmp_path, monkeypatch):
+        _cap, _, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): MID", "BLUR GATE (cabin): STILL"],
+            4,
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="STILL"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert calls["recorded"] == [2]
+
+    def test_the_record_is_keyed_on_the_repair_settings_and_version(self, tmp_path, monkeypatch):
+        _cap, _, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): A", "BLUR GATE (cabin): B", "BLUR GATE (cabin): C"],
+            4,
+        )
+        cfg = Config()
+        cfg.drive.blur_cabin_repair_rounds = 2
+        with pytest.raises(blur_gate.BlurGateError):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=cfg)
+        key = {
+            "version": dme.CABIN_REPAIR_VERSION,
+            "rounds": 2,
+            "window_s": dme.CABIN_REPAIR_WINDOW_S,
+            "hold_frames": dme.CABIN_REPAIR_HOLD_FRAMES,
+        }
+        assert calls["lookup_key"] == key and calls["record_key"] == key
+
+    def test_round_two_runs_when_round_one_still_leaks(self, tmp_path, monkeypatch):
+        cap, mask_path, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): A", "BLUR GATE (cabin): B", None],
+            added=3,
+        )
+        out = dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert out == tmp_path / "day_2026-02-24_master.mp4"
+        assert len(calls["repair"]) == 2 and calls["check"] == 3
+        assert calls["recorded"] == []
+        assert cap["blur_mask_path"] == mask_path
+
+    def test_after_the_configured_rounds_the_gate_error_raises(self, tmp_path, monkeypatch):
+        assert Config().drive.blur_cabin_repair_rounds == 2
+        cap, _, calls = self._wire(
+            tmp_path, monkeypatch, [f"BLUR GATE (cabin): L{i}" for i in range(6)], added=3
+        )
+        cfg = Config()
+        cfg.drive.blur_cabin_repair_rounds = 3
+        with pytest.raises(blur_gate.BlurGateError, match="L3"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=cfg)
+        assert len(calls["repair"]) == 3 and calls["check"] == 4  # a gate pass after each
+        assert calls["recorded"] == [3]
+        assert cap == {}
+
+    def test_default_two_rounds_then_raise_records_the_failure(self, tmp_path, monkeypatch):
+        cap, _, calls = self._wire(
+            tmp_path, monkeypatch, [f"BLUR GATE (cabin): L{i}" for i in range(6)], added=3
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="L2"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert len(calls["repair"]) == 2 and calls["check"] == 3
+        assert calls["recorded"] == [2] and cap == {}
+
+    def test_a_pass_at_round_one_encodes(self, tmp_path, monkeypatch):
+        cap, _, calls = self._wire(tmp_path, monkeypatch, ["BLUR GATE (cabin): A", None], 3)
+        dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert len(calls["repair"]) == 1 and "blur_mask_path" in cap
+
+    def test_a_recorded_failure_raises_without_repeating_the_repair(self, tmp_path, monkeypatch):
+        cap, _, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): EXPOSED"],
+            added=3,
+            failure={"rounds": 2, "leaks": []},
+        )
         with pytest.raises(blur_gate.BlurGateError, match="EXPOSED"):
             dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
-        assert calls["check"] == 1
-        assert cap == {}
+        assert calls["repair"] == [] and calls["check"] == 1 and cap == {}
+
+    def test_zero_rounds_means_no_repair_and_no_pass(self, tmp_path, monkeypatch):
+        cap, _, calls = self._wire(tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED"], 3)
+        cfg = Config()
+        cfg.drive.blur_cabin_repair_rounds = 0
+        with pytest.raises(blur_gate.BlurGateError, match="EXPOSED"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=cfg)
+        assert calls["repair"] == [] and cap == {}
 
 
 class TestRepairCabinLeaks:
@@ -625,6 +744,33 @@ class TestRepairCabinLeaks:
         assert written["path"] != mask and written["path"].suffix == ".mkv"
         assert mask.read_bytes() == b"new-mask"
         assert not written["path"].exists()
+
+    def test_the_gates_own_leaked_box_is_covered_even_when_detection_finds_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from redactcam import timeline as br
+
+        raw, mask, sidecar, cfg, written, seen = self._setup(tmp_path, monkeypatch, [50])
+
+        class _Blind:
+            def detect(self, frame, conf):
+                return []
+
+        monkeypatch.setattr("redactcam.detect.build_vehicle_detector", lambda *a, **k: _Blind())
+        added = dme._repair_cabin_leaks(raw, cfg, mask, sidecar)
+        assert added >= 1  # a repair given a leak can never add nothing
+        tl = br.load_sidecar(sidecar)
+        assert self.CABIN in tl.frame_boxes[50]
+        assert mask.read_bytes() == b"new-mask"
+
+    def test_the_leaked_box_is_covered_without_a_vehicle_model(self, tmp_path, monkeypatch):
+        from redactcam import timeline as br
+
+        raw, mask, sidecar, cfg, written, seen = self._setup(tmp_path, monkeypatch, [50])
+        monkeypatch.setattr("gomoveshift.analysis.resolve_vehicle_model", lambda drive: None)
+        assert dme._repair_cabin_leaks(raw, cfg, mask, sidecar) >= 1
+        assert self.CABIN in br.load_sidecar(sidecar).frame_boxes[50]
+        assert seen == []
 
     def test_no_leak_report_changes_nothing(self, tmp_path, monkeypatch):
         raw, mask, sidecar, cfg, written, seen = self._setup(tmp_path, monkeypatch, None)

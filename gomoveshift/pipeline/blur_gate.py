@@ -482,6 +482,64 @@ def _cabin_coverage_signature(drive, video: Path, mask: Path, veh: Path, plate) 
     }
 
 
+def cabin_signature(config, video: Path, mask: Optional[Path]) -> Optional[dict]:
+    """The reuse signature ``_cabin_coverage_error`` keys its verdict on, or ``None``
+    when it cannot be formed (no mask / no vehicle model / unreadable inputs)."""
+    if mask is None:
+        return None
+    from ..analysis import resolve_plate_model, resolve_vehicle_model
+
+    veh = resolve_vehicle_model(config.drive)
+    if veh is None:
+        return None
+    return _cabin_coverage_signature(
+        config.drive, video, mask, veh, resolve_plate_model(config.drive)
+    )
+
+
+def cabin_repair_failure(
+    config, video: Path, mask: Optional[Path], repair_key: Optional[dict] = None
+) -> Optional[dict]:
+    """The recorded failed repair for exactly this source, models, config, mask and
+    renderer, else ``None``. It lives in the cabin verdict beside the gate's own error
+    and is read only when the verdict's signature matches, so any changed input misses.
+
+    ``repair_key`` names the repair itself (its version and settings); a record made
+    under a different key misses, so raising the rounds or shipping a new repair retries.
+
+    It can only make a caller refuse sooner: it never reports a pass."""
+    if mask is None:
+        return None
+    sig = cabin_signature(config, video, mask)
+    cached = load_cached_json(cabin_verdict_path(mask))
+    if sig is None or not cached or cached.get("signature") != sig or not cached.get("error"):
+        return None
+    failed = cached.get("repair_failed")
+    if not isinstance(failed, dict) or failed.get("repair_key") != repair_key:
+        return None
+    return failed
+
+
+def record_cabin_repair_failure(
+    config, video: Path, mask: Path, rounds: int, repair_key: Optional[dict] = None
+) -> None:
+    """Record ``rounds`` spent and the last leaks on the verdict that the gate just
+    wrote for the mask as it now stands. A verdict that is not a matching failure is
+    left alone."""
+    sig = cabin_signature(config, video, mask)
+    path = cabin_verdict_path(mask)
+    cached = load_cached_json(path)
+    if sig is None or not cached or cached.get("signature") != sig or not cached.get("error"):
+        return
+    report = load_cached_json(cabin_leak_report_path(mask)) or {}
+    cached["repair_failed"] = {
+        "rounds": int(rounds),
+        "leaks": report.get("leaks", []),
+        "repair_key": repair_key,
+    }
+    save_cache_json(path, cached)
+
+
 def _cabin_coverage_error(config, video: Path, mask: Optional[Path]) -> Optional[str]:
     """Shared core for ``check_cabin_coverage`` (legacy per-episode path) and
     ``check_day_master_cabin_coverage`` (drive day-master path): error string if

@@ -1719,6 +1719,10 @@ class DriveConfig(BaseModel):
     # blur_coverage). Bypassed by --skip-blur / blur_vehicle_cabin_frac=0.
     blur_cabin_gate_sample_fps: float = 4.0
     blur_cabin_gate_min_coverage: float = 0.5
+    # Day-master cabin-leak repair rounds: each is one targeted repair followed by a full
+    # gate pass; the encode runs only on a pass, and the gate error is raised after this
+    # many failed rounds. 0 = no repair (the first leak stops the run).
+    blur_cabin_repair_rounds: int = 2
     # WHOLE-PERSON blur (a person standing OUTSIDE the vehicle must not get only a
     # face blur — their body/pose is still identifying). The COCO detector
     # (person class 0 — same yolo11n model the vehicle detector uses) boxes the FULL
