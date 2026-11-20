@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.116] - 2026-11-20
+
+### Fixed
+
+- A queued YouTube Short the review still refuses inside 48 h of its slot no longer burns the slot: `dispatch-queue` hands the slot to the next ready Short (printing `QUEUE_SLOT <id> <old> -> <new> <reason>`) and moves the refused row after the last queued slot on the daily grid. It also requeues a `failed_permanent` review refusal that now passes, never JP's kept rows (98, 102, 106, 110, 114).
+- The health check gains the `delivery_failed_permanent` rule: a new `failed_permanent` YouTube delivery raises an incident.
+- A Short's `videos.insert` now carries `recordingDetails.recordingDate`, the measured filmed-on date on its publish record (a blank date sends nothing), as long-form and superlong uploads already did.
+- Every upload sends `snippet.defaultAudioLanguage`, from the same config value as `defaultLanguage` (`drive.youtube_default_language`).
+
 ## [0.3.115] - 2026-11-20
 
 ### Fixed
@@ -1288,7 +1297,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.116...HEAD
+[0.3.116]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.115...v0.3.116
 [0.3.115]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.114...v0.3.115
 [0.3.114]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.113...v0.3.114
 [0.3.113]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.112...v0.3.113
