@@ -2,7 +2,7 @@
 state, so Phase D stops recomputing ``global_index_offset`` from
 ``len(posts)``.
 
-See docs/pipeline/135-shorts-titles-and-interactive-family.md.
+See docs/pipeline/181-shorts-interactive-family-and-ost-skip.md ("Per-short OST skip").
 """
 
 from types import SimpleNamespace
