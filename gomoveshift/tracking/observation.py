@@ -97,6 +97,8 @@ def has_numbers(metrics: PlatformMetrics) -> bool:
             metrics.shares,
             metrics.watch_time_seconds,
             metrics.avg_view_duration_seconds,
+            metrics.avg_view_percentage,
+            metrics.engaged_views,
             metrics.impressions,
             metrics.click_through_rate,
             metrics.reel_initial_plays,
@@ -105,6 +107,21 @@ def has_numbers(metrics: PlatformMetrics) -> bool:
             metrics.reach,
         )
     )
+
+
+#: Fixed observation ages (hours after ``event_at``), ascending.
+AGE_BUCKETS = ((24, "24h"), (72, "72h"), (168, "7d"))
+
+
+def age_bucket(age_seconds: Optional[float]) -> Optional[str]:
+    """The latest fixed age (24 h / 72 h / 7 d) already reached, else None."""
+    if age_seconds is None:
+        return None
+    reached = None
+    for hours, label in AGE_BUCKETS:
+        if age_seconds >= hours * 3600:
+            reached = label
+    return reached
 
 
 def _parse(ts: Optional[str]) -> Optional[datetime]:
@@ -149,6 +166,12 @@ class MetricObservation:
     data_through: Optional[str] = None
     #: Free text for the operator: the API error code, the missing scope.
     detail: str = ""
+    #: Latest fixed age reached when we asked: ``"24h"``, ``"72h"`` or ``"7d"``
+    #: after ``event_at``; ``None`` = younger than 24 h or age unknown.
+    age_bucket: Optional[str] = None
+    #: Why the per-video Analytics numbers are absent (the Data API numbers are
+    #: unaffected). ``None`` = Analytics answered, or was never asked.
+    analytics_unavailable: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.status not in ObservationStatus.ALL:
@@ -202,6 +225,8 @@ class MetricObservation:
             "fetched_at": self.fetched_at,
             "data_through": self.data_through,
             "detail": self.detail,
+            "age_bucket": self.age_bucket,
+            "analytics_unavailable": self.analytics_unavailable,
         }
 
     @classmethod

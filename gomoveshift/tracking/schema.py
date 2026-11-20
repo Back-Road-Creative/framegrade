@@ -112,6 +112,9 @@ class PlatformMetrics:
     click_through_rate: Optional[float] = None
     #: Lifetime Analytics ``averageViewPercentage`` (0-100). None = not reported.
     avg_view_percentage: Optional[float] = None
+    #: Lifetime Analytics ``engagedViews`` (a Short's views past the feed-swipe
+    #: threshold). None = not reported.
+    engaged_views: Optional[int] = None
     daily: List[DailyMetricPoint] = field(default_factory=list)
     #: Facebook Reel starts/replays count 1 ms playback, not three-second
     #: video views. Keep them distinct so existing view trends cannot blend.

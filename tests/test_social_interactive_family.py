@@ -1,6 +1,6 @@
 """TDD for the interactive ("where is this?") shorts family.
 
-See docs/pipeline/135-shorts-titles-and-interactive-family.md "Interactive family, resolved".
+See docs/pipeline/181-shorts-interactive-family-and-ost-skip.md "Interactive family, resolved".
 Covers what test_social_quality.py / test_shorts_yt_description_category.py /
 test_phase_d.py / test_social_generator_safety.py don't get inline twins for
 (diff-cap): the place-absence/presence contract, the validator carve-out, the

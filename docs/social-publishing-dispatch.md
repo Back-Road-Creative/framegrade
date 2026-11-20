@@ -249,6 +249,38 @@ registry and hands it to `drain_queue`.
   `Config.load` deep-merges the user override `config.yaml` in the config home,
   which is where a deployment routes a platform `first_party`. Read the merged config — `gomoveshift dispatch-queue`
   with no `--apply` prints the routed list — never the dataclass defaults.
+- **Repair before the slot.** When YouTube is routed `first_party`, `dispatch-queue` first
+  runs the Short final-text review (`short_review_refusal`) on every queued, non-shadow
+  YouTube row (`publishing/queue_repair.py`). A refused row gets the two mechanical repairs, in
+  order, on a scratch copy of its sidecar: the tag filter (as `queue sync-plan-tags`) and, when
+  the refusal says the route record has no `bins`, the route re-measure (as `queue
+  remeasure-short-route`, stages dir derived from the sidecar's output dir). The sidecar is
+  replaced atomically only when the review then passes; otherwise it is untouched. Only tags and
+  `route_record` change (never the stamp, schedule, recording date or experiment arms) and the
+  stored `reviewed_plan_hash` is kept, never recomputed. One line per row:
+  `QUEUE_REPAIR <delivery_id> <project> repaired|still_refused:<reason>|ok`; a repair is logged
+  as a `queue_repair` `response_log` row. Without `--apply` the same lines print and nothing is
+  written. A row still refused within 48 h of its slot raises the health rule
+  `queued_short_refused` (`docs/pipeline/156-health-check.md`).
+- **Slot hand-off and recovery.** Right after the repair (still before the loader caches a
+  sidecar), `publishing/queue_slot_refill.py` acts on rows the review still refuses. A queued,
+  non-shadow YouTube row still refused with its slot within `QUEUED_REFUSED_WITHIN_H` (48 h,
+  the health rule 7 constant) never reaches publish: it swaps slots with the earliest LATER
+  queued row that passes, so a run of refused rows drifts later while ready rows move up. With
+  no passing row left (or a slot under 1 h away, too near for a new `publishAt`) it moves to the
+  first free time of its region's daily Waypost shorts grid after the last queued slot (the
+  `reslot-overdue-youtube` grid; the region comes from the sidecar, else from the grid that
+  holds the row's own slot time). No hour that already holds a YouTube row is given out. Only
+  `scheduled_at` (and the sidecar `publishAt`, when the sidecar is readable) changes, through
+  `write_plan_slot` and `reschedule_delivery`; one `queue_slot` `response_log` row per move and
+  one `QUEUE_SLOT <id> <old> -> <new> <reason>` line. The same step re-reviews `failed_permanent`
+  rows the final-text review refused (no upload id, not already recovered): one that now passes
+  is requeued into the next free slot through `recover_terminal_delivery`
+  (`QUEUE_RECOVER <old id> -> <slot> queued_as:<new id>`); one that still cannot pass is
+  `QUEUE_FAILED <id> still_refused:<reason>` and left. `JP_KEPT_FAILED_PERMANENT_IDS` (98, 102,
+  106, 110, 114: JP keeps these failed) is never touched, and neither is a published row. Without
+  `--apply` the same lines print and nothing is written. A new `failed_permanent` YouTube row
+  raises the health rule `delivery_failed_permanent`.
 - A queued row whose platform has no handler is left alone and counted as
   `skipped_no_handler`, never failed. Flipping a route back to `off`
   must not destroy deliveries that were already spooled.

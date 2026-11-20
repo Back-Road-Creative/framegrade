@@ -55,8 +55,23 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    reported as a `held` note, never an incident. A job the drive's tracked-launcher gate refused
    (its log carries `run_origin.LAUNCHER_GATE_REFUSAL`) never started its drive, so it files no
    `drive_failed` row and raises no alarm: the drive is still the backlog's to launch.
+7. **Queued Short the review refuses.** One `queued_short_refused` incident per queued,
+   non-shadow YouTube delivery whose slot is within `QUEUED_REFUSED_WITHIN_H` = 48 h of now (or
+   past) and whose final-text review (`short_review_refusal`, run on the row's sidecar) still
+   refuses it after `dispatch-queue`'s repair: it would fail at its slot and the slot is never
+   refilled. Key `queued_short_refused:<delivery id>`; pushed once (`health_queued_short_refused`);
+   resolves once the review agrees or the row leaves `queued`. Read-only (queue opened `mode=ro`).
+   A sidecar that cannot be read (drive offline) is a note, never an incident.
 
-A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve against the cwd).
+8. **YouTube delivery failed permanently.** One `delivery_failed_permanent` incident per
+   non-shadow YouTube delivery that ended `failed_permanent` within
+   `FAILED_PERMANENT_NEW_WITHIN_H` = 72 h (`updated_at`) and has no recovering row. JP's kept rows
+   (`JP_KEPT_FAILED_PERMANENT_IDS`: 98, 102, 106, 110, 114) never raise. Key
+   `delivery_failed_permanent:<delivery id>`; pushed once (`health_delivery_failed_permanent`);
+   resolves when the row is recovered (`dispatch-queue` requeues a review refusal that now
+   passes) or ages out. Read-only (queue opened `mode=ro`).
+
+A relative `seo.storage_path` skips rules 2, 4, 7 and 8 with a note (it would resolve against the cwd).
 
 ## Push and idempotency
 
@@ -67,7 +82,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -75,7 +90,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`.
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`.
 
 ## Resume recipe and `health heal`
 
