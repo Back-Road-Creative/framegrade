@@ -41,6 +41,10 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    scenery, weather, time-of-day or road-kind words in the label. An
    absent or unreadable backlog closes nothing. Row file: `placeless_label_<project>.json`.
 
+   A `drive_failed` row that `health heal` closed with a `resolution_reason` (a recipe-less
+   publish or heal job, never resumable) stays closed: the check does not re-file it from the same
+   failed job. A row resolved without a reason is re-filed while its job is still failed.
+
 6. **Failed drive left unattended.** `health heal` retries every open `drive_failed` row on a
    backoff capped at 24 h; this rule is the independent alarm should anything still let one sit. An
    open `drive_failed` row is unattended when its newest `launched` attempt (the newest across every
