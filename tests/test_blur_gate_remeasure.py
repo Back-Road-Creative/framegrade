@@ -544,3 +544,57 @@ class TestBuildIdentityStrength:
             )
         _gate(config, video, mask)
         assert fake.calls == 2
+
+
+class TestSmallRecordChecks:
+    def test_a_recorded_box_outside_the_recorded_frame_runs_the_full_pass(self, tmp_path, fake):
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask)
+        _gate(config, video, mask)
+        rec = blur_gate.cabin_sightings_path(mask)
+        data = json.loads(rec.read_text())
+        data["sightings"][0]["box"] = [W - 5, 4, 20, 20]  # x + w > frame_w
+        rec.write_text(json.dumps(data))
+        _repaired(mask)
+        _gate(config, video, mask)
+        assert fake.calls == 2
+
+    def test_the_sampling_step_uses_the_fps_read_before_the_first_grab(
+        self, tmp_path, fake, monkeypatch
+    ):
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask)
+        real_cap = cv2.VideoCapture
+
+        class Fps:
+            def __init__(self, *a, **k):
+                self._c = real_cap(*a, **k)
+                self._grabbed = False
+
+            def grab(self):
+                self._grabbed = True
+                return self._c.grab()
+
+            def get(self, prop):
+                if prop == cv2.CAP_PROP_FPS:
+                    return 60.0 if self._grabbed else 10.0
+                return self._c.get(prop)
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+        monkeypatch.setattr(cv2, "VideoCapture", Fps)
+        _gate(config, video, mask)
+        # 10 fps / 4 sample fps -> 2 (read before grab); 60 / 4 would give 15
+        assert json.loads(blur_gate.cabin_sightings_path(mask).read_text())["step"] == 2
+
+    def test_a_changed_numpy_version_forces_a_full_pass(self, tmp_path, fake, monkeypatch):
+        import numpy
+
+        config, video, mask = _cfg(tmp_path)
+        _mask(mask)
+        _gate(config, video, mask)
+        _repaired(mask)
+        monkeypatch.setattr(numpy, "__version__", "0.0.1")
+        _gate(config, video, mask)
+        assert fake.calls == 2

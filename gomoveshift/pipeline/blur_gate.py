@@ -616,6 +616,12 @@ def _build_identity() -> dict:
     except Exception:  # noqa: BLE001 - a session that would refuse or is unknown never matches
         out["session_providers"] = _never_matches("providers")
     try:
+        import numpy
+
+        out["numpy"] = numpy.__version__
+    except Exception:  # noqa: BLE001
+        out["numpy"] = _never_matches("numpy")
+    try:
         import cv2
 
         out["cv2"] = cv2.__version__
@@ -660,12 +666,14 @@ def _source_probe(video: Path, sample_fps: float) -> Optional[tuple]:
 
     cap = cv2.VideoCapture(str(video))
     try:
-        if not cap.isOpened() or not cap.grab():
+        if not cap.isOpened():
+            return None
+        fps = cap.get(cv2.CAP_PROP_FPS) or 60.0  # before any grab, as the verifier reads it
+        if not cap.grab():
             return None
         ok, frame = cap.retrieve()
         if not ok:
             return None
-        fps = cap.get(cv2.CAP_PROP_FPS) or 60.0
         step = max(1, round(fps / sample_fps)) if sample_fps > 0 else 1
         return frame.shape[0], frame.shape[1], int(step)
     finally:
@@ -746,6 +754,8 @@ def _valid_sightings(rec, sig_core: dict) -> Optional[str]:
             or not 0 <= frame < rec["mask_frames"]
         ):
             return "record partial"
+        if box[0] + box[2] > rec["frame_w"] or box[1] + box[3] > rec["frame_h"]:
+            return "recorded box lies outside the recorded frame"
     return None
 
 
