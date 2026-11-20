@@ -268,6 +268,32 @@ def arm_report_lines(results: Sequence[ArmResult]) -> List[str]:
 #: The two factors a Short's sidecar ``experiment_arms`` may tag with an arm id.
 SHORTS_FACTORS = ("yt_title_body", "yt_hashtag_set")
 
+#: ``yt_title_body`` arms: arm id -> the stamped-title body templates the arm may
+#: render (``"{stamp}: {body}"``). Every entry is one of the generator's own
+#: ``STAMPED_BODY_TEMPLATES`` (a test holds that), so each already passes the
+#: title review and anti-spam gates; the arm only narrows which bodies a Short
+#: may take. ``place_led`` names the place (optionally with its weekday);
+#: ``clip_led`` leads with the clip's length.
+SHORTS_TITLE_BODY_ARMS: Dict[str, Tuple[str, ...]] = {
+    "place_led": ("{location}", "{location}, on a {weekday}"),
+    "clip_led": ("{secs} seconds, {location}",),
+}
+
+#: ``yt_hashtag_set`` arms: arm id -> the optional hashtags a non-interactive
+#: Short's YouTube description carries after ``#Shorts`` (the terrain hashtag,
+#: place and region tags follow as before). ``pov`` is the legacy set. Every
+#: entry is in the generator's ``GENERIC_HASHTAGS``, which the title review backs.
+SHORTS_HASHTAG_SET_ARMS: Dict[str, Tuple[str, ...]] = {
+    "pov": ("#POVDriving",),
+    "road": ("#RoadTrip", "#OpenRoad"),
+}
+
+#: One source of truth: factor -> its arm ids, in a fixed order.
+SHORTS_ARMS: Dict[str, Tuple[str, ...]] = {
+    "yt_title_body": tuple(SHORTS_TITLE_BODY_ARMS),
+    "yt_hashtag_set": tuple(SHORTS_HASHTAG_SET_ARMS),
+}
+
 #: The outcome is read at 72 h after posting, within 12 h either way
 #: (the day-7 snapshot rule in ``tracking.evidence_export``, at a 72 h target).
 OUTCOME_AGE = timedelta(hours=72)
@@ -365,6 +391,29 @@ def assign_stratified_arm(
         return hashlib.sha256(key.encode()).digest()
 
     return min(tied, key=rank)
+
+
+def assign_shorts_arms(
+    stratum: Tuple[str, str],
+    short_key: Any,
+    assigned: Dict[Tuple[str, str, str], List[str]],
+    factors: Iterable[str],
+) -> Dict[str, str]:
+    """``{factor: arm}`` for one new Short, each through :func:`assign_stratified_arm`.
+
+    ``assigned`` is the caller's running record, ``(factor, project, slot) ->
+    arms given so far``; it is updated in place, so calling this for a batch in
+    a fixed order gives the same arms every time. Only ``factors`` the Short's
+    text can actually carry are assigned (an arm that changes nothing would only
+    blur the outcome).
+    """
+    out: Dict[str, str] = {}
+    for factor in factors:
+        history = assigned.setdefault((factor, stratum[0], stratum[1]), [])
+        arm = assign_stratified_arm(factor, SHORTS_ARMS[factor], stratum, short_key, history)
+        history.append(arm)
+        out[factor] = arm
+    return out
 
 
 def _utc(ts: Any) -> Optional[datetime]:

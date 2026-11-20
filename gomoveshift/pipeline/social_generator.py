@@ -33,7 +33,15 @@ from typing import Iterable, List, Mapping, Optional, Sequence
 import yaml
 
 from ..models import ResolvedLocation
-from ..publishing.experiments import Experiment, assign_arms, hashtag_mode_for
+from ..publishing.experiments import (
+    SHORTS_ARMS,
+    SHORTS_HASHTAG_SET_ARMS,
+    SHORTS_TITLE_BODY_ARMS,
+    Experiment,
+    assign_arms,
+    assign_shorts_arms,
+    hashtag_mode_for,
+)
 from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
 from .final_text_record import reviewable_short_tags
@@ -1243,10 +1251,18 @@ class SocialGenerator:
         )
 
     def _compose_stamped_title(
-        self, facts: TitleFacts, seed_suffix: str, max_len: int, place: Optional[str] = None
+        self,
+        facts: TitleFacts,
+        seed_suffix: str,
+        max_len: int,
+        place: Optional[str] = None,
+        title_body_arm: Optional[str] = None,
     ) -> str:
         """``"{stamp}: {body}"``. The ledger walk rotates the BODY only; the
-        stamp (<=22 chars, the whole first-3-word prefix) never changes or truncates."""
+        stamp (<=22 chars, the whole first-3-word prefix) never changes or truncates.
+
+        ``title_body_arm`` (a ``yt_title_body`` arm id) narrows a place-named
+        title's bodies to that arm's; ``None`` or an unknown id keeps them all."""
         stamp = title_stamp(facts.date, facts.ordinal)
         place = place or self.location_short
         named = facts.place_ok and bool(place)
@@ -1257,6 +1273,8 @@ class SocialGenerator:
             weekday=weekday_name(facts.date),
         )
         bodies = STAMPED_BODY_TEMPLATES if named else STAMPED_PLACE_FREE_TEMPLATES
+        if named and title_body_arm in SHORTS_TITLE_BODY_ARMS:
+            bodies = list(SHORTS_TITLE_BODY_ARMS[title_body_arm])
         start = (facts.ordinal + self._project_seed(seed_suffix)) % len(bodies)
 
         from .longform_metadata import load_published_titles
@@ -1276,6 +1294,7 @@ class SocialGenerator:
         max_len: int,
         facts: Optional[TitleFacts] = None,
         place: Optional[str] = None,
+        title_body_arm: Optional[str] = None,
     ) -> str:
         """Compose a title from grounded fact slots.
 
@@ -1310,7 +1329,7 @@ class SocialGenerator:
                 title for that index, or lower ``--shorts-target``.
         """
         if facts is not None:
-            return self._compose_stamped_title(facts, seed_suffix, max_len, place)
+            return self._compose_stamped_title(facts, seed_suffix, max_len, place, title_body_arm)
         slots = self._title_slots(short_index)
         available = {name for name, value in slots.items() if value}
         applicable = [t for t in TITLE_FRAME_TEMPLATES if _frame_fields(t) <= available]
@@ -1358,6 +1377,7 @@ class SocialGenerator:
         short_index: int,
         facts: Optional[TitleFacts] = None,
         place: Optional[str] = None,
+        title_body_arm: Optional[str] = None,
     ) -> str:
         """Pick a unique composed title for this short.
 
@@ -1366,7 +1386,14 @@ class SocialGenerator:
         is retained in the signature for caller stability; it no longer
         selects a title.
         """
-        return self._compose_title(short_index, "titles", max_len=100, facts=facts, place=place)
+        return self._compose_title(
+            short_index,
+            "titles",
+            max_len=100,
+            facts=facts,
+            place=place,
+            title_body_arm=title_body_arm,
+        )
 
     def _spooled_opener_keys(self) -> "dict[str, list[tuple[str, ...]]]":
         """Platform -> 6-word opener keys of text other projects spooled."""
@@ -1732,8 +1759,12 @@ class SocialGenerator:
         interactive: bool = False,
         place: "Optional[PlaceChoice]" = None,
         place_kind: str = "",
+        hashtag_arm: Optional[str] = None,
     ) -> str:
         """Build a short YouTube description for Shorts (max 200 chars).
+
+        ``hashtag_arm`` (a ``yt_hashtag_set`` arm id) swaps the optional hashtags
+        of a non-interactive description; ``None`` or an unknown id keeps today's.
 
         Per-short differentiation uses most specific data available (priority):
           1. POI name  — "POV driving near {poi}, {location}"
@@ -1804,7 +1835,7 @@ class SocialGenerator:
         # shorts are 1080x1920 (never 4K), so the claim would be false.
         # #ScenicDrive removed: unverifiable genre claim (scenic-purge).
         fixed_hashtags = ["#Shorts"]
-        optional_hashtags = ["#POVDriving"]
+        optional_hashtags = list(SHORTS_HASHTAG_SET_ARMS.get(hashtag_arm or "", ("#POVDriving",)))
         terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
         if terrain_ht:
             optional_hashtags.append(terrain_ht[0])
@@ -2171,6 +2202,18 @@ class SocialGenerator:
             record,
         )
 
+    def _shorts_arm_factors(self, hand_idx: int, title_facts: Optional[TitleFacts]) -> "list[str]":
+        """The Shorts factors this Short's text can carry: the title body only on a
+        generated, place-verified stamped title, the hashtag set only off an
+        interactive Short (whose description withholds the place)."""
+        hand = self._hand_titles.get(hand_idx)
+        factors = []
+        if hand is None and title_facts is not None and title_facts.place_ok:
+            factors.append("yt_title_body")
+        if not (hand.interactive if hand is not None else False):
+            factors.append("yt_hashtag_set")
+        return factors
+
     def generate_post(
         self,
         short_index: int,
@@ -2179,9 +2222,16 @@ class SocialGenerator:
         title_facts: Optional[TitleFacts] = None,
         previous_places: "Optional[Mapping[str, str]]" = None,
         route_record: Optional[dict] = None,
+        shorts_arms: "Optional[Mapping[str, str]]" = None,
     ) -> SocialPost:
         """
         Generate a unique social post for one short.
+
+        ``shorts_arms`` (``{factor: arm}``, ``publishing.experiments.SHORTS_ARMS``)
+        renders the assigned ``yt_title_body`` / ``yt_hashtag_set`` variant and is
+        stored in ``experiment_arms``. A factor the Short's text cannot carry
+        (hand title, no verified place, interactive) or an unknown arm is dropped,
+        so a Short with none renders exactly as before.
 
         Args:
             short_index: 1-based index of the short (local to this generator's
@@ -2237,6 +2287,13 @@ class SocialGenerator:
             self._pool_fallback_logged = True
 
         arms = assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
+        eligible = self._shorts_arm_factors(hand_idx, title_facts)
+        shorts_arms = {
+            f: a
+            for f, a in (shorts_arms or {}).items()
+            if f in eligible and a in SHORTS_ARMS.get(f, ())
+        }
+        arms.update(shorts_arms)
         title_place, desc_place, desc_kind, variety = None, None, "", {}
         if hand is None and title_facts is not None and title_facts.place_ok:
             title_place, desc_place, desc_kind, variety = self._choose_places(
@@ -2257,6 +2314,7 @@ class SocialGenerator:
                     short_index,
                     title_facts,
                     place=title_place.body if title_place else None,
+                    title_body_arm=shorts_arms.get("yt_title_body"),
                 )
             # One caption per platform — a hand caption becomes the
             # YouTube caption verbatim and seeds the other three.
@@ -2281,7 +2339,11 @@ class SocialGenerator:
                 else self._pick_tiktok_title(rng, short_index, title_facts)
             )
             youtube_description = self._build_youtube_description(
-                short_index, interactive=interactive, place=desc_place, place_kind=desc_kind
+                short_index,
+                interactive=interactive,
+                place=desc_place,
+                place_kind=desc_kind,
+                hashtag_arm=shorts_arms.get("yt_hashtag_set"),
             )
 
             baseline = title[:100]  # YT max 100
@@ -2447,6 +2509,7 @@ class SocialGenerator:
         global_indexes: Optional[Sequence[int]] = None,
         per_short_title_facts: Optional[Sequence[Optional[TitleFacts]]] = None,
         previous_places: "Optional[Mapping[str, str]]" = None,
+        shorts_arms_enabled: bool = False,
     ) -> List[SocialPost]:
         """
         Generate unique social posts for all shorts.
@@ -2485,6 +2548,11 @@ class SocialGenerator:
                 stamped title for that short; ``None`` keeps the legacy
                 composition. Must have length ``num_shorts`` when supplied.
 
+            shorts_arms_enabled: Give each Short its ``yt_title_body`` and
+                ``yt_hashtag_set`` arms (``assign_shorts_arms``, stratified within
+                this project and the Short's position in its day) and render them.
+                Deterministic for the same inputs; ``False`` keeps today's text.
+
             previous_places: ``{"title": body, "description": body}`` of the Short
                 published just before the first of these (the previous publish day's
                 last Short), from its ``SocialPost.place_variety``. Each Short after
@@ -2522,6 +2590,7 @@ class SocialGenerator:
 
         posts = []
         previous = dict(previous_places or {})
+        arm_history: "dict[tuple[str, str, str], list[str]]" = {}
         for i in range(1, num_shorts + 1):
             weather = None
             if weather_results and i - 1 < len(weather_results):
@@ -2557,6 +2626,16 @@ class SocialGenerator:
                 if per_short_route_records and i - 1 < len(per_short_route_records)
                 else None
             )
+            shorts_arms = (
+                assign_shorts_arms(
+                    (self.project_name, f"day-position-{facts.ordinal if facts else 0}"),
+                    global_idx,
+                    arm_history,
+                    gen._shorts_arm_factors(global_idx, facts),
+                )
+                if shorts_arms_enabled
+                else None
+            )
             post = gen.generate_post(
                 i,
                 weather,
@@ -2564,6 +2643,7 @@ class SocialGenerator:
                 title_facts=facts,
                 previous_places=previous,
                 route_record=route_rec,
+                shorts_arms=shorts_arms,
             )
             if post.place_variety:
                 previous = {k: v["body"] for k, v in post.place_variety.items()}

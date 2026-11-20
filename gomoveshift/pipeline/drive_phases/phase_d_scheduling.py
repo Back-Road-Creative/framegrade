@@ -1083,6 +1083,7 @@ def _build_social_posts_per_lf(
             per_short_regions=[regs for _, regs, _ in sidecar],
             per_short_roads=_per_short_sidecar_roads(lf_shorts),
             per_short_route_records=_per_short_sidecar_route_records(lf_shorts),
+            shorts_arms_enabled=True,
         )
         social_posts_per_lf[lf.index] = posts
         global_index_offset += len(posts)

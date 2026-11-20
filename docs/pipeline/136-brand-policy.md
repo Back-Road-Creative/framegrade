@@ -123,7 +123,19 @@ carry the block itself to keep the experiment running.
   `yt_title_body` and `yt_hashtag_set` (`SHORTS_FACTORS`), tagged in the sidecar's
   `experiment_arms` like any other experiment. `assign_stratified_arm` gives a new Short the arm
   its (project, slot) stratum holds fewest of (ties on a sha256 of factor, project, slot, short
-  and arm), so arm counts differ by at most one within a stratum. The outcome is
+  and arm), so arm counts differ by at most one within a stratum.
+  The arms are tracked config in `experiments.py` (`SHORTS_ARMS`; bodies in
+  `SHORTS_TITLE_BODY_ARMS`, hashtags in `SHORTS_HASHTAG_SET_ARMS`). `yt_title_body` is `place_led`
+  (`{location}` or `{location}, on a {weekday}`) or `clip_led` (`{secs} seconds, {location}`),
+  each one of the generator's own `STAMPED_BODY_TEMPLATES`; `yt_hashtag_set` is `pov`
+  (`#POVDriving`, the legacy set) or `road` (`#RoadTrip #OpenRoad`), both from `GENERIC_HASHTAGS`.
+  Phase D's social pass calls `generate_all(shorts_arms_enabled=True)`: `assign_shorts_arms` gives
+  each new Short an arm per factor, stratified by (project, position in its day) and ordered by
+  global index, so the same inputs give the same arms; `SocialGenerator` renders them and the plan
+  stores them in `experiment_arms`. A factor the text cannot carry is not assigned (a hand title or
+  an unverified place has no title-body arm; an interactive Short has no hashtag-set arm), and an
+  unknown arm renders as today and is not stored. A caller that does not enable arms, and every
+  already-queued Short, keeps its text byte for byte. The outcome is
   `youtube_outcome`: the measured observation of the Short's current YouTube id nearest 72 h after
   YouTube's own publish time (the queue's `deliveries.published_at` with its source, never
   `posted_at`, which the last platform to register overwrites; within 12 h) supplies `views` and
