@@ -16,6 +16,8 @@ platform, and dispatch-queue kept draining them. These tests pin the gate:
 
 from __future__ import annotations
 
+import pytest
+
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -292,3 +294,12 @@ def test_dispatch_ignore_validate_needs_a_reason_and_audits_it(tmp_path, capsys,
     ).fetchone()["n"]
     conn.close()
     assert n == 1
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)

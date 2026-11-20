@@ -244,3 +244,12 @@ def test_max_shorts_caps_by_lowest_short_index(tmp_path, conn):
     rows = sorted({r["short_index"] for r in conn.execute("SELECT short_index FROM deliveries")})
     assert rows == [1, 2]
     assert result.enqueued_count == 4  # two platforms per kept short
+
+
+@pytest.fixture(autouse=True)
+def _final_text_review_not_under_test(monkeypatch):
+    """These tests drive another gate with a placeholder region ("a"); the enqueue-time
+    final-text review (test_enqueue_review_refusal.py) is not what they assert."""
+    from gomoveshift.publishing import youtube_adapter
+
+    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)

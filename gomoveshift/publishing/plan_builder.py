@@ -3,6 +3,8 @@ Called from ``drive_phases.phase_d``; touches no other pipeline module."""
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -36,6 +38,8 @@ from gomoveshift.publishing.plan_gates import (
     assert_shorts_metadata_in_region,
     assert_shorts_not_scheduled_before_publish,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Hashtags a YouTube Short title carries at most -- the player shows the
 #: title, and past three a title reads as a tag wall.
@@ -76,6 +80,21 @@ def _title_with_hashtags(title: str, description: str) -> str:
         title = f"{title} {tag}"
         have.add(tag.lower())
     return title
+
+
+def _repair_short_tags(payloads: PlatformPayloads, regions, roads) -> PlatformPayloads:
+    """``payloads`` with the YouTube tags limited to what the final-text review can
+    check (``reviewable_short_tags``, the filter ``sync-plan-tags`` applies to a queued
+    Short): a Short whose only fault is an unreviewable tag drops it and passes."""
+    from gomoveshift.pipeline.final_text_record import reviewable_short_tags
+
+    yt = payloads.youtube
+    if yt is None or not regions:  # a GPS-less Short has no review to satisfy
+        return payloads
+    tags = tuple(reviewable_short_tags(yt.tags, regions, roads))
+    if tags == tuple(yt.tags):
+        return payloads
+    return dataclasses.replace(payloads, youtube=dataclasses.replace(yt, tags=tags))
 
 
 def _est_to_utc(date_s: str, time_s: str) -> datetime:
@@ -244,6 +263,11 @@ def build_publish_plan(
                 parent_id=parent_id,
                 tiktok_privacy_level=tiktok_privacy_level,
             )
+            payloads = _repair_short_tags(
+                payloads,
+                tuple(getattr(post, "sampled_regions", None) or ()),
+                tuple(getattr(post, "sampled_roads", None) or ()),
+            )
             parent_publish_at = datetime.fromisoformat(parent_publish_iso).astimezone(timezone.utc)
             records.append(
                 ShortPublishRecord(
@@ -284,4 +308,24 @@ def build_publish_plan(
                     format=FORMAT_SHORT,
                 )
             )
+    _warn_refused(records)
     return PublishPlan(shorts=tuple(records))
+
+
+def _warn_refused(records: "List[ShortPublishRecord]") -> None:
+    """Log every Short the final-text review still refuses after the tag repair. The
+    record stays in the plan: ``enqueue_from_plan`` leaves it out of the queue and
+    raises the incident, so the plan's other Shorts keep their slots."""
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    for record in records:
+        if record.payloads.youtube is None:
+            continue
+        reason = short_review_refusal(record)
+        if reason:
+            logger.warning(
+                "publish plan: short %s #%s will be refused at enqueue: %s",
+                record.project_name,
+                record.short_index,
+                reason,
+            )
