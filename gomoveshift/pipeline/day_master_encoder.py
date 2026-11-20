@@ -1325,7 +1325,10 @@ def _cabin_gate_with_repair(
         if not err:
             return None
         if not added:
-            break  # the mask did not change, so another round would repeat this one
+            # The mask did not change (the repair raised, or had no leak report), so another
+            # round would repeat this one. The inputs were never actually tried, so this is
+            # NOT recorded: a heal retry runs the repair again rather than refusing at once.
+            return err
     if spent:
         blur_gate.record_cabin_repair_failure(config, raw_concat, mask_path, spent)
     return err

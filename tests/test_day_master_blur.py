@@ -522,6 +522,28 @@ class TestCabinGateRepairsItsOwnLeaks:
         assert calls["check"] == 2 and len(calls["repair"]) == 1
         assert cap == {}
 
+    def test_a_repair_that_could_not_run_is_not_cached_as_failed(self, tmp_path, monkeypatch):
+        """A repair that added nothing (an exception, a missing leak report) did not try the
+        inputs, so a heal retry must run it again: it is never recorded as a failed repair.
+        Only a repair that changed the mask every round and still leaked is recorded."""
+        _cap, _, calls = self._wire(
+            tmp_path, monkeypatch, ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): SAME"], 0
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="SAME"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert calls["recorded"] == []
+
+    def test_a_repair_that_ran_every_round_and_still_leaks_is_cached(self, tmp_path, monkeypatch):
+        _cap, _, calls = self._wire(
+            tmp_path,
+            monkeypatch,
+            ["BLUR GATE (cabin): EXPOSED", "BLUR GATE (cabin): MID", "BLUR GATE (cabin): STILL"],
+            4,
+        )
+        with pytest.raises(blur_gate.BlurGateError, match="STILL"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert calls["recorded"] == [2]
+
     def test_round_two_runs_when_round_one_still_leaks(self, tmp_path, monkeypatch):
         cap, mask_path, calls = self._wire(
             tmp_path,
