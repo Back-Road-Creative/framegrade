@@ -32,7 +32,24 @@ lifetime Analytics query, and the per-day query (28 days from the booking date).
   duration never overwrites a known one.
 - No new endpoints: the same YouTube Data / Analytics calls the collector already makes.
 
-Shorts tracking is unchanged. Records written without long-form data load with `long_forms == []`.
+## Shorts: per-video Analytics on the observation
+
+`YouTubeCollector.collect_observation` (a Short) keeps the Data API views/likes/comments and now
+also asks the same Analytics client for `views,engagedViews,estimatedMinutesWatched,
+averageViewDuration,averageViewPercentage` with `filters=video==<id>`, from the publish date
+(`published_at`, i.e. `ShortRecord.posted_at`, which may be the scheduled time when
+`posted_at_source` says so) to today. They land on `PlatformMetrics` as `engaged_views`,
+`watch_time_seconds`, `avg_view_duration_seconds` and `avg_view_percentage`.
+
+- `MetricObservation.age_bucket` is the latest fixed age reached when asked: `24h`, `72h` or
+  `7d` after `event_at`; `None` under 24 h or with no known publish time. Later reads stay `7d`.
+- If the Analytics call fails or rejects the metric combination, the observation keeps its Data
+  API numbers, sets `analytics_unavailable` to the reason and logs one `analytics_unavailable`
+  line. It never raises.
+- `collect_all` carries those four fields forward from the prior reading when a later pass
+  could not fetch them; it never overwrites them with null.
+
+Other shorts tracking is unchanged. Records written without long-form data load with `long_forms == []`.
 
 ## Length evidence (no report, no decision yet)
 
