@@ -131,6 +131,10 @@ class TestProcessThreadsMask:
             patch.object(processor, "_run_encode_step", side_effect=fake_encode),
             patch.object(processor, "_has_nvenc", return_value=True),
             patch.object(processor, "_find_font", return_value=None),
+            # Fake files: the frame-count probe is exercised in test_frame_index_pairing.
+            patch(
+                "gomoveshift.pipeline.single_pass.blur_gate.container_frame_count", return_value=600
+            ),
         ):
             processor.process(
                 video_path=Path("/fake/in.mp4"),

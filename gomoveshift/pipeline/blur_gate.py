@@ -279,6 +279,107 @@ def fill_detection_gaps(frame_boxes: dict, *, max_gap_frames: int) -> dict:
     return filled
 
 
+# ── frame-index pairing ──────────────────────────────────────────────────────
+# The mask is stamped ``j / fps`` and the final encode pairs it with picture frame
+# ``j`` by FRAME INDEX (``single_pass`` retimes both inputs to index time). That is
+# only sound when the container, the mask and the detection sidecar all count the
+# same number of frames; any disagreement means mask frame ``j`` is not picture
+# frame ``j`` and the blur would sit on the wrong pixels.
+
+_PROBE_TIMEOUT_S = 600
+
+
+def _probe_entry(path: Path, entry: str) -> int:
+    """One ``stream=<entry>`` integer from ffprobe, ``-1`` when absent/``N/A``/failed."""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                # Counting reads the whole file; only the packet entry may ask for it.
+                *(["-count_packets"] if entry == "nb_read_packets" else []),
+                "-select_streams", "v:0",
+                "-show_entries", f"stream={entry}", "-of", "csv=p=0", str(path),
+            ],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+        )  # fmt: skip
+        return int(out.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return -1
+
+
+def container_frame_count(path: Path) -> int:
+    """Video frames in ``path``; ``-1`` when ffprobe cannot say (callers treat that
+    as a disagreement, never as a match).
+
+    ``nb_frames`` first: MP4/MOV carry it in the sample table, so a ~91 GB day master
+    costs no file read. Only when it is missing/``N/A``/<= 0 (FFV1/MKV masks, which
+    are small) does it count packets, which reads the file without decoding."""
+    n = _probe_entry(Path(path), "nb_frames")
+    if n > 0:
+        return n
+    n = _probe_entry(Path(path), "nb_read_packets")
+    return n if n > 0 else -1
+
+
+def sidecar_frame_count(sidecar: Optional[Path]) -> int:
+    """``source_frame_count`` recorded in a detection sidecar, ``-1`` if unreadable."""
+    if sidecar is None:
+        return -1
+    try:
+        from redactcam import timeline as br
+
+        tl = br.load_sidecar(Path(sidecar))
+    except Exception:  # an unreadable sidecar is a disagreement, not a crash
+        return -1
+    return -1 if tl is None else int(tl.source_frame_count)
+
+
+def frame_pairing_error(
+    video: Path, mask: Optional[Path], sidecar: Optional[Path]
+) -> Optional[str]:
+    """Error naming the three counts unless container == mask == sidecar.
+
+    Runs BEFORE the cabin gate and the irreversible encode. A missing or
+    uncountable input reads as ``-1`` and so also blocks."""
+    if mask is None:
+        return None  # mask readiness is its own gate
+    counts = (
+        container_frame_count(Path(video)),
+        container_frame_count(Path(mask)),
+        sidecar_frame_count(sidecar),
+    )
+    if counts[0] > 0 and counts[0] == counts[1] == counts[2]:
+        return None
+    return (
+        f"BLUR GATE (frame pairing): the source has {counts[0]} frames, the privacy mask "
+        f"{counts[1]} and the detection sidecar {counts[2]} (-1 = unreadable); mask frame j "
+        "would not sit on picture frame j and the blur would land on the wrong pixels. "
+        "Re-run blur_detection (--fresh) to rebuild the detection and the mask from this "
+        "source."
+    )
+
+
+def sidecar_matches_container(sidecar_count: int, container_count: int) -> bool:
+    """A detection built on a different frame count is rebuilt, never reused."""
+    return container_count > 0 and sidecar_count == container_count
+
+
+def renderer_identity() -> dict:
+    """Who renders the mask: the redactcam build and its decode mode. Folded into
+    every reuse signature so a verdict or mask from another renderer is not reused."""
+    import os
+    from importlib import metadata
+
+    try:
+        version = metadata.version("redactcam")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    return {
+        "redactcam_version": version,
+        "decode_mode": (os.environ.get("REDACTCAM_DECODE") or "auto").strip().lower(),
+    }
+
+
 def blur_required(config) -> bool:
     """True when this run must produce a blurred master."""
     drive = config.drive
@@ -377,6 +478,7 @@ def _cabin_coverage_signature(drive, video: Path, mask: Path, veh: Path, plate) 
         "min_height_frac": drive.blur_vehicle_min_height_frac,
         "ignore_bottom_frac": drive.blur_vehicle_ignore_bottom_frac,
         "plate_max_area_frac": drive.blur_plate_max_area_frac,
+        **renderer_identity(),
     }
 
 

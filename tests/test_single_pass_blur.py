@@ -47,7 +47,8 @@ class TestBlurFilterComplex:
         fc = proc._build_blur_filter_complex(blur_filter="boxblur=24:2", **KW)
         assert "alphamerge" in fc and "overlay" in fc
         assert "maskedmerge" not in fc  # the chroma-corrupting design we rejected
-        assert "[1:v]format=gray[m]" in fc and "[0:v]" in fc  # mask is input 1
+        assert "[1:v]setpts=N/(FRAME_RATE*TB),format=gray[m]" in fc  # mask is input 1
+        assert "[0:v]setpts=N/(FRAME_RATE*TB)," in fc  # both retimed to frame-index time
         # blur sits after color/scale/fade, before the text overlays
         assert fc.index("scale=in_range=full") < fc.index("split") < fc.index("boxblur")
         assert fc.index("boxblur") < fc.index("drawtext")

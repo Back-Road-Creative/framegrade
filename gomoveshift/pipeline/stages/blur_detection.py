@@ -52,6 +52,20 @@ class BlurDetectionStage(BaseStage):
             input_hash = compute_file_hash(video)
 
             existing = br.load_sidecar(sidecar)
+            container_count = blur_gate.container_frame_count(video)
+            if existing is not None and existing.source_hash == input_hash:
+                if not blur_gate.sidecar_matches_container(
+                    existing.source_frame_count, container_count
+                ):
+                    # A detection built on another frame count lives in a different
+                    # index space; rebuild it (a reused one would block every retry).
+                    logger.warning(
+                        "  BLUR: sidecar %s counts %d frames, the source has %d: re-detecting",
+                        sidecar.name,
+                        existing.source_frame_count,
+                        container_count,
+                    )
+                    existing = None
             if existing is not None and existing.source_hash == input_hash:
                 logger.info("  BLUR: reusing detections from %s (input hash match)", sidecar.name)
                 ctx.blur_regions_path = sidecar
@@ -153,6 +167,10 @@ class BlurDetectionStage(BaseStage):
             br.write_sidecar(sidecar, timeline)
             ctx.blur_regions_path = sidecar
             self._ensure_mask(ctx, timeline, allow_reuse=False)
+            # container == mask == sidecar, before anything downstream trusts the mask.
+            pairing_err = blur_gate.frame_pairing_error(video, ctx.blur_mask_path, sidecar)
+            if pairing_err:
+                return StageResult(success=False, error=pairing_err)
         except Exception as e:
             return StageResult(success=False, error=f"Blur detection failed: {e}")
         return StageResult(success=True)
@@ -166,7 +184,11 @@ class BlurDetectionStage(BaseStage):
         from redactcam import materialize_mask_video
 
         mask_path = ctx.paths.stages_dir / f"{ctx.project_name}_blur_mask.mkv"
-        if allow_reuse and mask_path.exists():
+        if (
+            allow_reuse
+            and mask_path.exists()
+            and blur_gate.container_frame_count(mask_path) == timeline.source_frame_count
+        ):
             logger.info("  BLUR: reusing mask %s", mask_path.name)
         else:
             materialize_mask_video(timeline, mask_path)

@@ -172,6 +172,8 @@ def test_libplacebo_probe_follows_ffmpeg_exit(monkeypatch):
 
 def _wire_process(monkeypatch, tmp_path, *, blur=False):
     monkeypatch.setattr(sp, "_ffmpeg_filter_names", lambda: ZS)
+    # Fake input files: the frame-count probe is exercised in test_frame_index_pairing.
+    monkeypatch.setattr(sp.blur_gate, "container_frame_count", lambda p: 600)
     seen = {}
     proc = _proc()
 
