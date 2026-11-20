@@ -125,6 +125,8 @@ def parse_experiments(block: Any) -> Tuple[Experiment, ...]:
         name = raw.get("name")
         if not isinstance(name, str) or not name.strip():
             raise _bad(index, "name", f"must be a non-empty string, got {name!r}")
+        if name in SHORTS_FACTORS:
+            raise _bad(index, "name", f"{name!r} is a Shorts factor name, not a caption experiment")
         if any(e.name == name for e in experiments):
             raise _bad(index, "name", f"duplicate experiment name {name!r}")
         platforms = raw.get("platforms")
@@ -314,14 +316,24 @@ def parse_arm_thresholds(block: Any) -> ArmThresholds:
     for key in ("min_n", "retest_days"):
         if key in block:
             v = block[key]
-            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-                raise ValueError(f"policy.arm_thresholds.{key} must be an int >= 1, got {v!r}")
+            floor = 2 * REPEAT_SLICES if key == "min_n" else 1
+            if isinstance(v, bool) or not isinstance(v, int) or v < floor:
+                raise ValueError(
+                    f"policy.arm_thresholds.{key} must be an int >= {floor}, got {v!r}"
+                )
             values[key] = v
     for key in ("min_gap", "pause_gap"):
         if key in block:
             v = block[key]
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 1:
-                raise ValueError(f"policy.arm_thresholds.{key} must be a number > 1, got {v!r}")
+            if (
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(v)
+                or v <= 1
+            ):
+                raise ValueError(
+                    f"policy.arm_thresholds.{key} must be a finite number > 1, got {v!r}"
+                )
             values[key] = float(v)
     out = ArmThresholds(**values)
     if out.pause_gap < out.min_gap:
@@ -365,30 +377,41 @@ def _utc(ts: Any) -> Optional[datetime]:
     return dt.astimezone(timezone.utc) if dt else None
 
 
-def youtube_outcome(short: Any, today: date) -> Optional[Tuple[int, Optional[float]]]:
+def youtube_outcome(
+    short: Any, youtube_at: Optional[str], today: date
+) -> Optional[Tuple[int, Optional[float]]]:
     """``(views_72h, avg_view_percentage)`` for a settled YouTube Short, or ``None``.
 
-    Read from the measured observation nearest 72 h after posting (within
-    12 h) in ``short.observation_log["youtube"]``. Unsettled means
-    ``posted + 72 h > today - SETTLE_LAG_DAYS`` (the Analytics lag in
-    ``tracking.day7``). Unreported retention is ``None``, never 0; a snapshot
-    with no views is not an outcome.
+    ``youtube_at`` is YouTube's OWN publish time (the delivery queue's
+    ``published_at``), never ``short.posted_at``: that field holds whichever
+    platform registered last, hours after YouTube for Facebook/Instagram.
+    No YouTube time means no outcome. Read from the measured observation of
+    the Short's current YouTube id (``short.platform_ids["youtube"]``) nearest
+    72 h after that time (within 12 h) in ``short.observation_log["youtube"]``.
+    Unsettled means ``published + 72 h > today - SETTLE_LAG_DAYS`` (the
+    Analytics lag in ``tracking.day7``). Unreported retention is ``None``,
+    never 0; a snapshot with no views is not an outcome.
     """
     from ..tracking.day7 import SETTLE_LAG_DAYS, posted_date
 
-    posted = posted_date(getattr(short, "posted_at", None))
-    if posted is None or posted + OUTCOME_AGE > today - timedelta(days=SETTLE_LAG_DAYS):
+    published, video_id = (
+        _utc(youtube_at),
+        (getattr(short, "platform_ids", None) or {}).get("youtube"),
+    )
+    day = posted_date(youtube_at)
+    if published is None or day is None or not video_id:
+        return None
+    if day + OUTCOME_AGE > today - timedelta(days=SETTLE_LAG_DAYS):
         return None
     best = None
     for entry in (getattr(short, "observation_log", None) or {}).get("youtube") or []:
-        if entry.get("status") != "measured":
+        if entry.get("status") != "measured" or entry.get("post_id") != video_id:
             continue
         cumulative = entry.get("cumulative") or {}
-        views = cumulative.get("views")
-        event, fetched = _utc(entry.get("event_at")), _utc(entry.get("fetched_at"))
-        if views is None or event is None or fetched is None:
+        views, fetched = cumulative.get("views"), _utc(entry.get("fetched_at"))
+        if views is None or fetched is None:
             continue
-        miss = abs(fetched - event - OUTCOME_AGE)
+        miss = abs(fetched - published - OUTCOME_AGE)
         if miss <= OUTCOME_TOLERANCE and (best is None or miss < best[0]):
             best = (miss, (int(views), cumulative.get("avg_view_percentage")))
     return best[1] if best else None
@@ -403,11 +426,28 @@ class ShortOutcome:
     avg_view_pct: Optional[float]
 
 
+def tagged_arms(factor: str, records: Iterable[Any], arms_for_project) -> List[str]:
+    """Every arm id of ``factor`` that any tracked Short is tagged with."""
+    seen = set()
+    for record in records:
+        tagged = arms_for_project(record.project) or {}
+        for short in record.shorts:
+            arm = (tagged.get(short.index) or {}).get(factor)
+            if arm:
+                seen.add(arm)
+    return sorted(seen)
+
+
 def shorts_arm_outcomes(
-    factor: str, records: Iterable[Any], arms_for_project, today: date
+    factor: str,
+    records: Iterable[Any],
+    arms_for_project,
+    youtube_times: Mapping[Tuple[str, int], str],
+    today: date,
 ) -> List[ShortOutcome]:
     """One :class:`ShortOutcome` per tracked Short tagged into ``factor`` with a
-    settled 72 h outcome. ``arms_for_project`` is as for :func:`arm_observations`."""
+    settled 72 h outcome. ``arms_for_project`` is as for :func:`arm_observations`;
+    ``youtube_times`` maps ``(project, short_index)`` to YouTube's publish time."""
     from ..tracking.day7 import posted_date
 
     rows = []
@@ -415,11 +455,12 @@ def shorts_arm_outcomes(
         tagged = arms_for_project(record.project) or {}
         for short in record.shorts:
             arm = (tagged.get(short.index) or {}).get(factor)
-            outcome = youtube_outcome(short, today) if arm else None
+            youtube_at = youtube_times.get((record.project, short.index))
+            outcome = youtube_outcome(short, youtube_at, today) if arm else None
             if outcome is not None:
                 rows.append(
                     ShortOutcome(
-                        record.project, arm, posted_date(short.posted_at), outcome[0], outcome[1]
+                        record.project, arm, posted_date(youtube_at), outcome[0], outcome[1]
                     )
                 )
     return rows
@@ -445,11 +486,18 @@ def _median_or_none(values: Sequence[float]) -> Optional[float]:
 
 
 def _gap(reference: float, score: float) -> float:
+    """``reference / score``: ``inf`` only for a dead arm beside a live
+    reference; a reference of 0 or less is no gap at all."""
+    if reference <= 0:
+        return 0.0
     return math.inf if score <= 0 else reference / score
 
 
 def decide_shorts_arms(
-    factor: str, outcomes: Sequence[ShortOutcome], thresholds: ArmThresholds
+    factor: str,
+    outcomes: Sequence[ShortOutcome],
+    thresholds: ArmThresholds,
+    seen_arms: Sequence[str] = (),
 ) -> List[ArmDecision]:
     """One decision per arm, from settled outcomes and ``thresholds`` alone.
 
@@ -464,6 +512,8 @@ def decide_shorts_arms(
     holds in each chronological half of the arm's Shorts is ``demote``
     (``pause`` at ``pause_gap`` when its median retention is also known and no
     better than the others'); everything else, winners included, is ``hold``.
+    An arm in ``seen_arms`` (tagged on a Short) with no countable Short is
+    ``INSUFFICIENT_EVIDENCE`` at ``n=0``.
     """
     by_project: Dict[str, List[ShortOutcome]] = {}
     for o in outcomes:
@@ -480,12 +530,17 @@ def decide_shorts_arms(
             ratios.setdefault(r.arm, []).append((r.posted, project, r.views_72h / base))
             if r.avg_view_pct is not None:
                 pcts.setdefault(r.arm, []).append(r.avg_view_pct)
-    if not ratios:
+    if not ratios and not seen_arms:
         return []
     scores = {a: _median_or_none([x[2] for x in v]) for a, v in ratios.items()}
     judged = {a for a, v in ratios.items() if len(v) >= thresholds.min_n}
     out = []
-    for arm in sorted(ratios):
+    for arm in sorted(set(ratios) | set(seen_arms)):
+        if arm not in ratios:
+            out.append(
+                ArmDecision(factor, arm, INSUFFICIENT_EVIDENCE, 0, None, None, None, "no_countable")
+            )
+            continue
         n, score = len(ratios[arm]), scores[arm]
         others = sorted(a for a in judged if a != arm)
         reference = _median_or_none([scores[a] for a in others])
