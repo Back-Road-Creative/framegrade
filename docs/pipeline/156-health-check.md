@@ -55,8 +55,15 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    reported as a `held` note, never an incident. A job the drive's tracked-launcher gate refused
    (its log carries `run_origin.LAUNCHER_GATE_REFUSAL`) never started its drive, so it files no
    `drive_failed` row and raises no alarm: the drive is still the backlog's to launch.
+7. **Queued Short the review refuses.** One `queued_short_refused` incident per queued,
+   non-shadow YouTube delivery whose slot is within `QUEUED_REFUSED_WITHIN_H` = 48 h of now (or
+   past) and whose final-text review (`short_review_refusal`, run on the row's sidecar) still
+   refuses it after `dispatch-queue`'s repair: it would fail at its slot and the slot is never
+   refilled. Key `queued_short_refused:<delivery id>`; pushed once (`health_queued_short_refused`);
+   resolves once the review agrees or the row leaves `queued`. Read-only (queue opened `mode=ro`).
+   A sidecar that cannot be read (drive offline) is a note, never an incident.
 
-A relative `seo.storage_path` skips rules 2 and 4 with a note (it would resolve against the cwd).
+A relative `seo.storage_path` skips rules 2, 4 and 7 with a note (it would resolve against the cwd).
 
 ## Push and idempotency
 
@@ -67,7 +74,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -75,7 +82,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`.
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`.
 
 ## Resume recipe and `health heal`
 
