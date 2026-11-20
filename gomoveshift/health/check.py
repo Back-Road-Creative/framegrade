@@ -310,6 +310,14 @@ def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[
         return []
 
 
+def _default_stamp(config: Any, code_root: Path) -> Callable[[Dict[str, Any]], Dict[str, Any]]:
+    from . import retry_policy  # noqa: PLC0415
+
+    return lambda row: retry_policy.failure_stamp(
+        row, python=retry_policy.service_python(code_root), config=config
+    )
+
+
 def run_check(
     config: Any,
     *,
@@ -320,6 +328,7 @@ def run_check(
     ledger_path: Optional[Path] = None,
     now: Optional[datetime] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
+    stamp_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Returns ``{"incidents": open rows, "new": keys written, "pushed": keys pushed,
     "resolved": keys closed, "unreadable": int, "publish_reconciled": [claims closed], "notes": [str]}``. Never raises on bad input."""
@@ -333,6 +342,11 @@ def run_check(
     sha = staging_sha or code_sha(code_root)
 
     drive_rows, succeeded, bad_jobs = drives.detect(jobs_dir, sha, now_iso)
+    # The fingerprint a failure is FILED under: heal retries by it, so it is taken here, at
+    # detection, never by heal at a later tick on newer code. Rows already on file keep theirs
+    # (or none: a legacy row, which heal treats as never fingerprinted).
+    for new_row in (r for r in drive_rows if r["key"] not in by_key):
+        new_row["failure_fingerprint"] = (stamp_fn or _default_stamp(config, code_root))(new_row)
     reconciled = _reconcile_publishes(config, jobs_dir, notes)
     found = {"drive_failed": drive_rows, **_cadence_rows(config, ledger_path, now, now_iso, notes)}
     backlog_rows = _backlog_rows(notes)

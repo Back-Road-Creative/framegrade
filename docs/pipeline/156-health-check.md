@@ -102,10 +102,22 @@ saves never move `phase_reached`: an existing recipe stays byte-identical. Writi
 drive (warning only).
 
 **Heal.** `gomoveshift health heal [--dry-run] [--json]` takes open `drive_failed` rows and
-launches at most one resume per recipe per mirror SHA and installed `gomoveshift-video` version (guard (a): a deferred venv
-install leaves the SHA ahead of the code that runs, so a new installed version under the same SHA
-earns a new resume; each attempt records `installed_version`; while the checkout's `pyproject.toml`
-pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`):
+launches resumes by failure class and fingerprint, never by mirror SHA (`health/retry_policy.py`; guard (a)). An unrelated
+commit to the mirror no longer relaunches a drive whose failure it cannot change. The **fingerprint** is the installed
+versions of `gomoveshift-video`, `seo_manager` and `redactcam`, the sha256 of the drive's `drive_backlog.yaml` row, the sha256
+of the resolved drive config and the failed phase; each attempt records `fingerprint`, `fp_hash` and `failure_class`, and the
+row's `failure_fingerprint` is stamped by `health check` when it FILES the row, so it names the code the drive failed under, never
+the code heal runs later. A row with no `failure_fingerprint` is legacy (filed before fingerprints): heal never stamps it, and it gets
+exactly one launch under the current fingerprint, which the attempt then records and the launched-count rule bounds (a legacy
+deterministic row is thus not refused forever by the very release meant to recover it). A version that cannot be read counts as
+`null`, which is itself a distinct value). The **class** comes from a first-match regex table over the
+failure text (`CLASS_TABLE`; unmatched = `unknown`): `deterministic` (blur gate, final-text review refusal, duration floors,
+batch duration integrity, GPS fix density), `transient` (disk full, ENOMEM/killed, drive not mounted/offline, I/O error, place
+lookup unavailable, network timeouts), `publish_only` (YouTube quota, Drive upload). Budget per recipe and fingerprint:
+`deterministic` 0 until the fingerprint changes, then one; `transient` 3, spaced by the backoff; `unknown` 1; `publish_only`
+never (heal has no publish path: it records `refused`, naming class, a 12-char fingerprint hash and `use health publish`).
+A refusal is one `refused` attempt (deduped per fingerprint and reason) and one log line. While the checkout's `pyproject.toml`
+pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`:
 the recipe argv + `--skip-upload --no-youtube-upload`
 (each added only when the recipe lacks it), via
 the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). A failed heal job becomes an
@@ -119,7 +131,7 @@ checkpoint beside the recipe (`pipeline_state.json`) holds a phase whose stamped
 no longer current (see `PHASE_CODE_VERSIONS`), that plain resume re-runs the stale phases and the
 phases built from them, reusing renders by fingerprint. That attempt records `stale_phases`. No
 readable recipe is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
-`{at, mirror_sha, slot, action: launched|skipped|refused, reason, job_name}` (+ `outcome`,
+`{at, mirror_sha, installed_version, fingerprint, fp_hash, failure_class, slot, action: launched|skipped|refused, reason, job_name}` (+ `outcome`,
 `outcome_at` once the heal job ends); an unchanged repeat skip is not re-recorded.
 
 **Operator hold.** A file named `no-auto-resume` beside the recipe (`<stages dir>/no-auto-resume`,
