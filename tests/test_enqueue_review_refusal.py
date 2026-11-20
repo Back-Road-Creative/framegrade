@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -131,3 +132,42 @@ def test_cli_apply_enqueues_the_rest_and_reports_the_refusal(tmp_path, incidents
     text = capsys.readouterr().out
     assert "enqueued=1" in text and "refused=1" in text
     assert len(load_all(incidents)[0]) == 1
+
+
+def test_health_check_pushes_the_refusal_detail_and_returns(tmp_path, conn, incidents):
+    from gomoveshift.health import run_check
+
+    sidecar = _sidecar(tmp_path, _short(2, tags=(BAD_TAG,)))
+    enqueue_from_plan_sidecar(conn, sidecar)
+    pushed = []
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    result = run_check(
+        SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo"))),
+        incidents_dir=incidents,
+        jobs_dir=jobs,
+        code_root=tmp_path,
+        notify_fn=lambda event, payload, text: pushed.append(text) or True,
+    )
+    key = "short_review_refused:example-2026-08:2"
+    assert key in result["pushed"]
+    assert any(
+        "Short 2 of example-2026-08" in t and f"tag_unreviewable:{BAD_TAG}" in t for t in pushed
+    )
+
+
+def test_refused_short_is_not_counted_by_the_ceiling_or_anti_spam(tmp_path, incidents, capsys):
+    out = tmp_path / "out"
+    out.mkdir()
+    # Same title prefix would trip the anti-spam gate; two Shorts would trip a ceiling of 1.
+    _sidecar(out, _short(1), _short(2, tags=(BAD_TAG,)))
+    state_path = out / "pipeline_state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    with mock.patch(
+        "gomoveshift.cli.handlers.enqueue_plan._load_state", return_value=_approved_state(out)
+    ):
+        rc = cmd_enqueue_plan(_args(state_path, apply=True), _config(tmp_path, ceiling=1))
+    text = capsys.readouterr().out
+    assert rc == 0, text
+    assert "enqueued=1" in text and "refused=1" in text
+    assert "shared-prefix" not in text and "ceiling exceeded" not in text
