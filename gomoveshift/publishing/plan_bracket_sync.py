@@ -135,8 +135,10 @@ def _generate_lf(
     )
     facts, locs, regions, roads, routes = [], [], [], [], []
     for s in lf_shorts:
-        n = None if s.get("_skip") else _ordinal(s)
-        eligible = n is not None and not s.get("_skip")
+        # ``_discard`` (queue_short_text): a stored Short rides along with stamped
+        # stand-in text, discarded, so its legacy composition cannot raise for the others
+        n = (_ordinal(s) or 1) if s.get("_discard") else (None if s.get("_skip") else _ordinal(s))
+        eligible = n is not None
         own = [label] if record else [str(r) for r in s.get("sampled_regions") or []]
         facts.append(
             TitleFacts(

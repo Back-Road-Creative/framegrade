@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.123] - 2026-11-20
+
+### Changed
+
+- The cabin gate's second pass after a repair now re-measures the first pass's recorded sightings against the repaired mask (decoding only the mask, never the source or a detector) instead of re-decoding and re-detecting the whole source. A full pass records every sighting beside the mask (`*_cabin_sightings.json`) under the cabin signature minus the mask fingerprint; any missing, partial, unreadable or mismatching record (signature or build, decoded mask length) falls back to a full pass and logs why. The verdict and leak report are the same a full pass would give.
+- The re-measure decodes the whole repaired mask and requires its decoded length to match the record (a truncated mask with an intact header runs the full pass), and the record is bound to the redactcam commit, onnxruntime and cv2 versions and ORT providers too.
+- The sightings record is written only by a full pass that found a leak, and takes its frame count from the mask, so a passing drive pays no extra decode. The re-measure reads every sampled frame like the verifier, and the build identity now always includes the imported redactcam source hash, the providers a session would use and the CPU-allowed setting; an unidentifiable build never matches.
+- The re-measure also runs in full when a recorded box lies outside the recorded frame, the sampling step reads the source fps before the first grab, and numpy joins the build identity.
+
+## [0.3.122] - 2026-11-20
+
+### Added
+
+- `queue_short_text.sync_short_text` (library only; the `queue sync-short-text` command arrives with the next change) re-writes the title, description and tags of every queued YouTube Short more than 24 hours from its slot with the current generator (no repeated place, seeded from the stored text of its neighbours). `experiment_arms` are kept as stored. A Short is refused whole when any of its delivery rows is in flight, leased, unslotted or inside the lead time, or when the Short review refuses the new text. See `docs/pipeline/183-queue-sync-short-text.md`.
+
 ## [0.3.121] - 2026-11-20
 
 ### Changed
@@ -1380,7 +1395,9 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.123...HEAD
+[0.3.123]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...v0.3.123
+[0.3.122]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.121...v0.3.122
 [0.3.121]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.120...v0.3.121
 [0.3.120]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.119...v0.3.120
 [0.3.119]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.118...v0.3.119
