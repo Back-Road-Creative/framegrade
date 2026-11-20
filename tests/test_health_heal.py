@@ -1099,3 +1099,39 @@ def test_a_deterministic_refusal_raises_one_failure_unattended_that_does_not_gro
         notes: list = []
         counts.append(len(check.unattended_incidents(drive_rows, now, now.isoformat(), notes)))
     assert counts == [1, 1, 1, 1]
+
+
+# -- V19: a recipe-less publish or heal incident closes instead of re-refusing every tick ---------
+
+
+@pytest.mark.parametrize("job_name", ["gms-publish-demo-drive-a", "gms-heal-gms-backlog-demo-a-1111111"])  # fmt: skip
+def test_a_recipe_less_publish_or_heal_job_incident_is_closed_with_a_reason(tmp_path, job_name):
+    rig = Rig(tmp_path, resume_recipe=None, job_name=job_name)
+    out = rig.run()
+    assert rig.launches == [] and out["launched"] == []
+    row = rig.row()
+    assert row["resolved_at"] and "no resume recipe" in row["resolution_reason"]
+    assert row["resume_attempts"][0]["action"] == "closed"
+    rig.run(now=NOW + timedelta(hours=1))  # resolved: never touched again
+    assert len(rig.row()["resume_attempts"]) == 1
+
+
+def test_a_recipe_less_publish_incident_dry_run_writes_nothing(tmp_path):
+    rig = Rig(tmp_path, resume_recipe=None, job_name="gms-publish-demo-drive-a")
+    out = rig.run(dry_run=True)
+    assert rig.row()["resolved_at"] is None and out["attempts"][0]["action"] == "closed"
+
+
+def test_a_recipe_less_backlog_job_incident_stays_open_and_refused(tmp_path):
+    rig = Rig(tmp_path, resume_recipe=None, job_name="gms-backlog-demo-drive-a")
+    rig.run()
+    row = rig.row()
+    assert row["resolved_at"] is None and row["resume_attempts"][0]["action"] == "refused"
+
+
+def test_a_heal_of_a_heal_reuses_the_base_drive_name(tmp_path):
+    nested = "gms-heal-gms-heal-demo-drive-a-1111111-2222222"
+    rig = Rig(tmp_path, drive=nested, job_name=nested)
+    rig.run()
+    argv = rig.launches[0][0]
+    assert argv[argv.index("--name") + 1] == "gms-heal-demo-drive-a-abcdef1"

@@ -362,6 +362,37 @@ def test_a_failed_publish_waits_for_a_running_drive(tmp_path):
     assert rig.publishes == [] and "running" in res["reason"]
 
 
+# 2026-11-20 root cause (Kerry-to-Cork): the retry keyed on the publish job's ``state`` being
+# ``failed`` or its exit code being non-zero. A publish job the runner ended any other way
+# (cancelled, stalled, killed with no exit code) is as dead as a failed one, but matched neither,
+# so the failed row with a passed audit and no upload receipt was never published again.
+
+
+@pytest.mark.parametrize("state, code", [("cancelled", None), ("stalled", None), ("killed", None), ("failed", None)])  # fmt: skip
+def test_a_publish_job_that_ended_without_an_exit_code_is_published_again(tmp_path, state, code):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "failed"))
+    job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "pub", "day-a", state, 200.0, exit_code=code, name="gms-publish-day-a")
+    rig.publish_result = {"action": "launched", "reason": "day-a for slot"}
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)], res
+    assert not rig.launches and not rig.registered  # the PUBLISH retries; never a render
+
+
+def test_a_failed_publish_row_with_an_upload_receipt_is_never_published_again(tmp_path):
+    rig = Rig(tmp_path)
+    out = tmp_path / "out" / "day-a"
+    out.mkdir(parents=True)
+    (out / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "V1"}}))
+    rig.drives.append(drive("day-a", "failed", output_dir=str(out)))
+    job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "pub", "day-a", "cancelled", 200.0, exit_code=None, name="gms-publish-day-a")
+    rig.publish_result = {"action": "launched", "reason": "x"}
+    rig.run()
+    assert rig.publishes == []
+
+
 def test_publish_job_prefix_matches_the_publisher():
     from gomoveshift.health import publish
 
