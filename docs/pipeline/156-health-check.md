@@ -99,8 +99,11 @@ launches resumes by failure class and fingerprint, never by mirror SHA (`health/
 commit to the mirror no longer relaunches a drive whose failure it cannot change. The **fingerprint** is the installed
 versions of `gomoveshift-video`, `seo_manager` and `redactcam`, the sha256 of the drive's `drive_backlog.yaml` row, the sha256
 of the resolved drive config and the failed phase; each attempt records `fingerprint`, `fp_hash` and `failure_class`, and the
-row keeps its first-seen `failure_fingerprint` (rows and attempts from before it read as unknown and keep working; a version
-that cannot be read counts as `null`, which is itself a distinct value). The **class** comes from a first-match regex table over the
+row's `failure_fingerprint` is stamped by `health check` when it FILES the row, so it names the code the drive failed under, never
+the code heal runs later. A row with no `failure_fingerprint` is legacy (filed before fingerprints): heal never stamps it, and it gets
+exactly one launch under the current fingerprint, which the attempt then records and the launched-count rule bounds (a legacy
+deterministic row is thus not refused forever by the very release meant to recover it). A version that cannot be read counts as
+`null`, which is itself a distinct value). The **class** comes from a first-match regex table over the
 failure text (`CLASS_TABLE`; unmatched = `unknown`): `deterministic` (blur gate, final-text review refusal, duration floors,
 batch duration integrity, GPS fix density), `transient` (disk full, ENOMEM/killed, drive not mounted/offline, I/O error, place
 lookup unavailable, network timeouts), `publish_only` (YouTube quota, Drive upload). Budget per recipe and fingerprint:

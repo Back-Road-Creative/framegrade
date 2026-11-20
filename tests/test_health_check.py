@@ -747,3 +747,23 @@ def test_a_manual_launch_the_launcher_gate_refused_is_not_a_failed_drive(tmp_pat
     _job(tmp_path / "jobs", "g1", "gms-publish-demo", log, rc=2, created=T0)
     out = _run(tmp_path, lambda *a: True)
     assert out["incidents"] == [] and out["new"] == []
+
+
+def test_check_stamps_the_failure_fingerprint_on_the_row_it_files(tmp_path):
+    _failed_drive(tmp_path)
+    stamped = []
+
+    def stamp(row):
+        stamped.append(row["key"])
+        return {"hash": "h1", "fingerprint": {"phase": row["phase"]}, "class": "transient"}
+
+    _run(tmp_path, lambda e, i, s: True, stamp_fn=stamp)
+    row = json.loads((tmp_path / "inc" / "demo-drive-a.json").read_text())
+    assert row["failure_fingerprint"] == {
+        "hash": "h1",
+        "fingerprint": {"phase": "phase_d"},
+        "class": "transient",
+    }
+    _run(tmp_path, lambda e, i, s: True, stamp_fn=lambda r: {"hash": "h2"})
+    row = json.loads((tmp_path / "inc" / "demo-drive-a.json").read_text())
+    assert row["failure_fingerprint"]["hash"] == "h1" and stamped == [row["key"]]  # filed once

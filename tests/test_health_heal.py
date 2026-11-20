@@ -25,7 +25,9 @@ NEW_SHA = "1234567fedcba"  # pragma: allowlist secret
 
 
 class Rig:
-    def __init__(self, tmp_path: Path, *, drive_args=None, venv=True, **row_over):
+    def __init__(self, tmp_path: Path, *, drive_args=None, venv=True, legacy=False, **row_over):
+        self.legacy = legacy  # filed before fingerprints: the row carries no failure_fingerprint
+        self.filed = False
         self.tmp = tmp_path
         self.svc = tmp_path
         self.python = self.svc / ".venv" / "bin" / "python"
@@ -62,7 +64,20 @@ class Rig:
         row.update(row_over)
         write_row(self.inc, row)
 
+    def file_now(self):
+        """What ``health check`` does when it files the row: stamp the fingerprint it failed under."""
+        row = self.row()
+        row["failure_fingerprint"] = retry_policy.failure_stamp(
+            row, python=str(self.python), config=None,
+            installed_version_fn=lambda p: self.installed, sibling_versions_fn=lambda p: self.siblings,
+            manifest_sha_fn=lambda r: self.manifest, config_sha_fn=lambda c: "cfg",
+        )  # fmt: skip
+        write_row(self.inc, row)
+        self.filed = True
+
     def run(self, *, sha=SHA, dry_run=False, now=NOW, only_key=None):
+        if not (self.legacy or self.filed):
+            self.file_now()
         return heal.run_heal(
             incidents_dir=self.inc, jobs_dir=self.jobs, code_root=self.tmp, mirror_sha=sha,
             now=now, dry_run=dry_run, only_key=only_key,
@@ -364,6 +379,7 @@ def test_outcome_is_pushed_once_when_the_heal_job_finishes(tmp_path):
 
 def test_dry_run_launches_nothing_and_writes_nothing(tmp_path):
     rig = Rig(tmp_path)
+    rig.file_now()
     before = rig.row()
     out = rig.run(dry_run=True)
     assert rig.launches == [] and rig.pushes == [] and rig.row() == before
@@ -539,6 +555,7 @@ def test_dry_run_reports_the_exact_launch_it_would_make(tmp_path):
     recipe["argv"][0] = "/old/worktree/service/.venv/bin/python"
     recipe["cwd"] = "/old/worktree/service"
     (tmp_path / "stages" / "resume.json").write_text(json.dumps(recipe))
+    rig.file_now()
     before = rig.row()
     out = rig.run(dry_run=True)
     assert rig.launches == [] and rig.row() == before
@@ -1041,3 +1058,44 @@ def test_the_classifier_table(tmp_path):
     for text, want in cases.items():
         assert retry_policy.classify_failure(text) == want, text
     assert retry_policy.classify_failure(None, "phase_d", "Metadata quality") == "unknown"
+
+
+def test_a_legacy_deterministic_row_gets_one_launch_then_is_refused_under_the_same_fingerprint(
+    tmp_path,
+):
+    rig = Rig(tmp_path, legacy=True, error="LF 1: final-text review refused (place_outside_text)")
+    out = rig.run()
+    assert out["launched"] == [rig.row()["key"]] and len(rig.launches) == 1
+    assert "failure_fingerprint" not in rig.row()  # heal never stamps a row it did not file
+    _fail(rig, 1, error="LF 1: final-text review refused (place_outside_text)")
+    out = rig.run(now=_at(100))
+    assert out["launched"] == [] and len(rig.launches) == 1
+    assert rig.row()["resume_attempts"][-1]["action"] == "refused"
+
+
+def test_a_row_filed_under_a_fingerprint_is_refused_while_it_holds_and_launches_once_when_it_changes(
+    tmp_path,
+):
+    rig = Rig(tmp_path, error="BLUR GATE: no marker")
+    rig.installed = "0.3.1"
+    rig.file_now()
+    assert rig.run()["launched"] == [] and rig.launches == []
+    rig.installed = "0.3.2"  # a release since the failure
+    assert len(rig.run(now=_at(100))["launched"]) == 1
+    assert len(rig.launches) == 1
+
+
+def test_a_deterministic_refusal_raises_one_failure_unattended_that_does_not_grow(tmp_path):
+    from gomoveshift.health import check
+
+    rig = Rig(tmp_path, error="BLUR GATE: no marker")
+    for i in range(4):
+        rig.run(now=_at(i * 90000))
+    rows = load_all(rig.inc)[0]
+    drive_rows = [r for r in rows if r["kind"] == "drive_failed"]
+    counts = []
+    for i in range(4):
+        now = _at(i * 90000)
+        notes: list = []
+        counts.append(len(check.unattended_incidents(drive_rows, now, now.isoformat(), notes)))
+    assert counts == [1, 1, 1, 1]

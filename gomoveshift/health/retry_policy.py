@@ -9,7 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+import subprocess
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
+
+from .store import DIST_NAME
 
 DETERMINISTIC = "deterministic"
 TRANSIENT = "transient"
@@ -69,6 +73,74 @@ CLASS_TABLE: Tuple[Tuple["re.Pattern[str]", str], ...] = tuple(
 )
 
 
+_VERSIONS_CODE = (
+    "import importlib.metadata as m, json\n"
+    "out = {}\n"
+    "try:\n    out['redactcam'] = m.version('redactcam')\n"
+    "except Exception:\n    out['redactcam'] = None\n"
+    "try:\n    import seo_manager; out['seo_manager'] = seo_manager.__version__\n"
+    "except Exception:\n    out['seo_manager'] = None\n"
+    "print(json.dumps(out))"
+)  # seo_manager ships no dist-info here, so its ``__version__`` is read instead
+
+
+def default_installed_version(python: str) -> Optional[str]:
+    """The ``gomoveshift-video`` version installed in ``python``'s environment, else ``None``
+    (no interpreter, not installed, or the lookup failed)."""
+    code = f"import importlib.metadata as m; print(m.version({DIST_NAME!r}))"
+    try:
+        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
+            [python, "-c", code], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = done.stdout.strip()
+    return out if done.returncode == 0 and out else None
+
+
+def default_sibling_versions(python: str) -> Dict[str, Optional[str]]:
+    """``seo_manager`` and ``redactcam`` versions in ``python``'s environment (``None`` each when
+    unreadable): the dependencies a drive's output depends on besides ``gomoveshift``."""
+    try:
+        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
+            [python, "-c", _VERSIONS_CODE], capture_output=True, text=True, timeout=30, check=False
+        )
+        got = json.loads(done.stdout) if done.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        got = {}
+    return {k: got.get(k) if isinstance(got, dict) else None for k in ("seo_manager", "redactcam")}
+
+
+def default_manifest_sha(row: Dict[str, Any]) -> Optional[str]:
+    """sha256 of the ``drive_backlog.yaml`` row the backlog launcher resolves for this drive
+    (project = the innermost job name, minus ``gms-backlog-``), else ``None`` (not a backlog
+    drive, or the manifest is unreadable)."""
+    from . import drives  # noqa: PLC0415 -- drives imports store; keep the import graph acyclic
+
+    name = str(row.get("drive") or "")
+    name = min(drives.heal_origins(name) or {name}, key=len)
+    project = name.removeprefix("gms-backlog-")
+    try:
+        import dataclasses  # noqa: PLC0415
+
+        from seo_manager.scheduling import backlog  # noqa: PLC0415
+
+        from ..paths import drive_backlog_path  # noqa: PLC0415
+
+        found = next((r for r in backlog.load(drive_backlog_path()) if r.project == project), None)
+        return sha256_json(dataclasses.asdict(found)) if found else None
+    except Exception:  # noqa: BLE001 -- an unreadable manifest is "unknown", never a retry
+        return None
+
+
+def default_config_sha(config: Any) -> Optional[str]:
+    """sha256 of the resolved drive config, else ``None``."""
+    try:
+        return sha256_json(config.drive.model_dump(mode="json"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def classify_failure(error: Any = None, phase: Any = None, gate: Any = None) -> str:
     """``deterministic | transient | publish_only | unknown`` from the failure's text. Unknown is
     the default; ``phase`` is part of the fingerprint, not a signal (any phase can fail either way)."""
@@ -122,3 +194,29 @@ def refusal(klass: str, fp_hash: str, *, launched: int, failed_under: bool) -> O
             f"{short}: {launched} of {BUDGET[klass]} attempts used; waits for a changed fingerprint"
         )
     return None
+
+
+def failure_stamp(
+    row: Mapping[str, Any], *, python: str, config: Any,
+    installed_version_fn: Optional[Callable[[str], Optional[str]]] = None,
+    sibling_versions_fn: Optional[Callable[[str], Dict[str, Optional[str]]]] = None,
+    manifest_sha_fn: Optional[Callable[[Any], Optional[str]]] = None,
+    config_sha_fn: Optional[Callable[[Any], Optional[str]]] = None,
+) -> Dict[str, Any]:  # fmt: skip
+    """The ``failure_fingerprint`` a row carries: ``{hash, fingerprint, class}``. ``health check``
+    writes it when it files the row, so it names the code the drive failed under, never the code
+    heal later runs."""
+    versions = {
+        "gomoveshift": (installed_version_fn or default_installed_version)(python),
+        **(sibling_versions_fn or default_sibling_versions)(python),
+    }
+    fp = fingerprint(
+        versions=versions, manifest_sha=(manifest_sha_fn or default_manifest_sha)(row),
+        config_sha=(config_sha_fn or default_config_sha)(config), phase=row.get("phase"),
+    )  # fmt: skip
+    klass = classify_failure(row.get("error"), row.get("phase"), row.get("gate"))
+    return {"hash": fingerprint_hash(fp), "fingerprint": fp, "class": klass}
+
+
+def service_python(code_root: Path) -> str:
+    return str(Path(code_root) / ".venv" / "bin" / "python")

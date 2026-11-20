@@ -44,7 +44,13 @@ import tomllib
 
 from .. import run_origin
 from . import drives, resume, retry_policy
-from .store import DIST_NAME, code_sha, load_all, new_incident, safe_name, utc_iso, write_row
+from .retry_policy import (  # noqa: F401 -- the probes live there; re-exported for callers
+    default_config_sha,
+    default_installed_version,
+    default_manifest_sha,
+    default_sibling_versions,
+)
+from .store import code_sha, load_all, new_incident, safe_name, utc_iso, write_row
 
 #: Files whose change can alter a metadata-gate verdict (the title/description generators and
 #: their validator). Repo-root-relative; guard (d) diffs exactly these.
@@ -72,18 +78,6 @@ _LOG_MAX_BYTES = 1_000_000
 
 Launcher = Callable[[List[str], str], Tuple[bool, str]]
 logger = logging.getLogger(__name__)
-#: Dists whose installed version is part of a failure's fingerprint (``seo_manager`` ships no
-#: dist-info here, so its ``__version__`` is read instead).
-_FINGERPRINT_DISTS = ("redactcam",)
-_VERSIONS_CODE = (
-    "import importlib.metadata as m, json\n"
-    "out = {}\n"
-    "try:\n    out['redactcam'] = m.version('redactcam')\n"
-    "except Exception:\n    out['redactcam'] = None\n"
-    "try:\n    import seo_manager; out['seo_manager'] = seo_manager.__version__\n"
-    "except Exception:\n    out['seo_manager'] = None\n"
-    "print(json.dumps(out))"
-)
 
 
 def stale_phases(recipe_path: Path) -> List[str]:
@@ -219,61 +213,6 @@ def _default_launcher(argv: List[str], cwd: str) -> Tuple[bool, str]:
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
     return done.returncode == 0, (done.stderr or done.stdout).strip()[-200:]
-
-
-def default_installed_version(python: str) -> Optional[str]:
-    """The ``gomoveshift-video`` version installed in ``python``'s environment, else ``None``
-    (no interpreter, not installed, or the lookup failed)."""
-    code = f"import importlib.metadata as m; print(m.version({DIST_NAME!r}))"
-    try:
-        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
-            [python, "-c", code], capture_output=True, text=True, timeout=30, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    out = done.stdout.strip()
-    return out if done.returncode == 0 and out else None
-
-
-def default_sibling_versions(python: str) -> Dict[str, Optional[str]]:
-    """``seo_manager`` and ``redactcam`` versions in ``python``'s environment (``None`` each when
-    unreadable): the dependencies a drive's output depends on besides ``gomoveshift``."""
-    try:
-        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
-            [python, "-c", _VERSIONS_CODE], capture_output=True, text=True, timeout=30, check=False
-        )
-        got = json.loads(done.stdout) if done.returncode == 0 else {}
-    except (OSError, ValueError, subprocess.SubprocessError):
-        got = {}
-    return {k: got.get(k) if isinstance(got, dict) else None for k in ("seo_manager", "redactcam")}
-
-
-def default_manifest_sha(row: Dict[str, Any]) -> Optional[str]:
-    """sha256 of the ``drive_backlog.yaml`` row the backlog launcher resolves for this drive
-    (project = the innermost job name, minus ``gms-backlog-``), else ``None`` (not a backlog
-    drive, or the manifest is unreadable)."""
-    name = str(row.get("drive") or "")
-    name = min(drives.heal_origins(name) or {name}, key=len)
-    project = name.removeprefix("gms-backlog-")
-    try:
-        import dataclasses  # noqa: PLC0415
-
-        from seo_manager.scheduling import backlog  # noqa: PLC0415
-
-        from ..paths import drive_backlog_path  # noqa: PLC0415
-
-        found = next((r for r in backlog.load(drive_backlog_path()) if r.project == project), None)
-        return retry_policy.sha256_json(dataclasses.asdict(found)) if found else None
-    except Exception:  # noqa: BLE001 -- an unreadable manifest is "unknown", never a retry
-        return None
-
-
-def default_config_sha(config: Any) -> Optional[str]:
-    """sha256 of the resolved drive config, else ``None``."""
-    try:
-        return retry_policy.sha256_json(config.drive.model_dump(mode="json"))
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def default_pinned_version(code_root: Path) -> Optional[str]:
@@ -560,12 +499,9 @@ def run_heal(
         )  # fmt: skip
         fph = retry_policy.fingerprint_hash(fp)
         att.update(failure_class=klass, fp_hash=fph, fingerprint=fp)
-        if not (row.get("failure_fingerprint") or {}).get("hash"):
-            # First sight of this failure: the fingerprint it failed under, kept on the row.
-            row["failure_fingerprint"] = {"hash": fph, "fingerprint": fp, "class": klass}
-            seen_fp.setdefault(recipe_path, set()).add(fph)
-            if not dry_run:
-                write_row(incidents_dir, row)
+        # A row with no ``failure_fingerprint`` is legacy (filed before fingerprints): heal never
+        # stamps it from the current code, which would count the very release meant to recover it
+        # as the one the failure happened under. ``health check`` stamps new rows when it files them.
         group = [a for _w, a in launches.get(recipe_path, ())]
         launched_at = [
             w for w, a in launches.get(recipe_path, ())
