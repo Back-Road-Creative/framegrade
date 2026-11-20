@@ -5,11 +5,16 @@ Each resume is launched detached through the job runner (``job_runner``). Heal n
 argv (no readable recipe = ``refused``) and never publishes: it appends
 ``--skip-upload --no-youtube-upload``. A ``no-auto-resume`` file beside the recipe refuses the drive
 on every SHA (an operator's stop); that and an unreadable recipe are the only stops.
+Retry is keyed on the failure, never the mirror SHA (``retry_policy``): each attempt records the
+failure's fingerprint (installed ``gomoveshift-video`` / ``seo_manager`` / ``redactcam`` versions,
+the drive's manifest row, the drive config, the failed phase) and class (``deterministic``,
+``transient``, ``publish_only``, ``unknown``). Deterministic: no relaunch until the fingerprint
+changes; transient: up to 3 attempts per fingerprint; unknown: 1; publish_only: refused (heal never
+publishes). A refusal is a recorded ``refused`` attempt naming class, fingerprint and reason.
 Guards, each a recorded skip that ends by itself: (a) retry backoff. With n launched attempts of
-this recipe (counted across every row sharing it) on the current mirror SHA and installed
-``gomoveshift-video`` version (the code that will actually run), the next waits
+this recipe (counted across every row sharing it) under the current fingerprint, the next waits
 ``min(HEAL_RETRY_BASE_S * 2**(n-1), HEAL_RETRY_MAX_S)`` (1 h, 2 h, 4 h ... 24 h) after the newest.
-A new SHA or version retries at once. (b) a drive job is running. (c) none: the publish slot is
+A changed fingerprint retries at once. (b) a drive job is running. (c) none: the publish slot is
 recorded, never gating, because an audit-only drive keeps only the weekday check
 (``_launch_anchor_refusal``); ``health backlog`` and ``health publish`` claim a fresh slot after
 a passed audit. (d) a metadata-gate failure with no generator change since the failure retries once
@@ -26,6 +31,7 @@ Every attempt is appended to the row's ``resume_attempts``."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -37,7 +43,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import tomllib
 
 from .. import run_origin
-from . import drives, resume
+from . import drives, resume, retry_policy
 from .store import DIST_NAME, code_sha, load_all, new_incident, safe_name, utc_iso, write_row
 
 #: Files whose change can alter a metadata-gate verdict (the title/description generators and
@@ -65,6 +71,19 @@ _DETAIL_MAX = 300
 _LOG_MAX_BYTES = 1_000_000
 
 Launcher = Callable[[List[str], str], Tuple[bool, str]]
+logger = logging.getLogger(__name__)
+#: Dists whose installed version is part of a failure's fingerprint (``seo_manager`` ships no
+#: dist-info here, so its ``__version__`` is read instead).
+_FINGERPRINT_DISTS = ("redactcam",)
+_VERSIONS_CODE = (
+    "import importlib.metadata as m, json\n"
+    "out = {}\n"
+    "try:\n    out['redactcam'] = m.version('redactcam')\n"
+    "except Exception:\n    out['redactcam'] = None\n"
+    "try:\n    import seo_manager; out['seo_manager'] = seo_manager.__version__\n"
+    "except Exception:\n    out['seo_manager'] = None\n"
+    "print(json.dumps(out))"
+)
 
 
 def stale_phases(recipe_path: Path) -> List[str]:
@@ -214,6 +233,47 @@ def default_installed_version(python: str) -> Optional[str]:
         return None
     out = done.stdout.strip()
     return out if done.returncode == 0 and out else None
+
+
+def default_sibling_versions(python: str) -> Dict[str, Optional[str]]:
+    """``seo_manager`` and ``redactcam`` versions in ``python``'s environment (``None`` each when
+    unreadable): the dependencies a drive's output depends on besides ``gomoveshift``."""
+    try:
+        done = subprocess.run(  # noqa: S603 -- the service interpreter, fixed code
+            [python, "-c", _VERSIONS_CODE], capture_output=True, text=True, timeout=30, check=False
+        )
+        got = json.loads(done.stdout) if done.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        got = {}
+    return {k: got.get(k) if isinstance(got, dict) else None for k in ("seo_manager", "redactcam")}
+
+
+def default_manifest_sha(row: Dict[str, Any]) -> Optional[str]:
+    """sha256 of the ``drive_backlog.yaml`` row the backlog launcher resolves for this drive
+    (project = the innermost job name, minus ``gms-backlog-``), else ``None`` (not a backlog
+    drive, or the manifest is unreadable)."""
+    name = str(row.get("drive") or "")
+    name = min(drives.heal_origins(name) or {name}, key=len)
+    project = name.removeprefix("gms-backlog-")
+    try:
+        import dataclasses  # noqa: PLC0415
+
+        from seo_manager.scheduling import backlog  # noqa: PLC0415
+
+        from ..paths import drive_backlog_path  # noqa: PLC0415
+
+        found = next((r for r in backlog.load(drive_backlog_path()) if r.project == project), None)
+        return retry_policy.sha256_json(dataclasses.asdict(found)) if found else None
+    except Exception:  # noqa: BLE001 -- an unreadable manifest is "unknown", never a retry
+        return None
+
+
+def default_config_sha(config: Any) -> Optional[str]:
+    """sha256 of the resolved drive config, else ``None``."""
+    try:
+        return retry_policy.sha256_json(config.drive.model_dump(mode="json"))
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def default_pinned_version(code_root: Path) -> Optional[str]:
@@ -416,6 +476,9 @@ def run_heal(
     only_key: Optional[str] = None,
     installed_version_fn: Optional[Callable[[str], Optional[str]]] = None,
     pinned_version_fn: Optional[Callable[[Path], Optional[str]]] = None,
+    sibling_versions_fn: Optional[Callable[[str], Dict[str, Optional[str]]]] = None,
+    manifest_sha_fn: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+    config_sha_fn: Optional[Callable[[Any], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """``{"launched", "would_launch", "outcomes", "attempts", "notes"}``. Never raises on input."""
     if notify_fn is None:
@@ -429,6 +492,9 @@ def run_heal(
     slot_fn = slot_fn or default_slot(config, now)
     installed_version_fn = installed_version_fn or default_installed_version
     pinned_version_fn = pinned_version_fn or default_pinned_version
+    sibling_versions_fn = sibling_versions_fn or default_sibling_versions
+    manifest_sha_fn = manifest_sha_fn or default_manifest_sha
+    config_sha_fn = config_sha_fn or default_config_sha
     rows, _bad = load_all(incidents_dir)
     rows = [
         r for r in rows
@@ -448,32 +514,36 @@ def run_heal(
     python = Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python"
     installed = installed_version_fn(str(python))
     pinned = pinned_version_fn(Path(code_root))
+    versions = {"gomoveshift": installed, **sibling_versions_fn(str(python))}
+    config_sha = config_sha_fn(config)
 
     def _same_code(a: Dict[str, Any]) -> bool:
-        # An attempt with no recorded version (older row) or an unknown one matches: only two
-        # known, different versions are different code.
+        # A pre-fingerprint attempt (older row): the SHA plus the installed version. An unknown
+        # version matches: only two known, different versions are different code.
         had = a.get("installed_version")
         return a.get("mirror_sha") == sha and (had is None or installed is None or had == installed)
+
+    def _same(a: Dict[str, Any], fph: str) -> bool:
+        # The retry key is the failure's fingerprint, never the mirror SHA: an unrelated commit
+        # to the mirror is not a reason to relaunch.
+        return a.get("fp_hash") == fph if a.get("fp_hash") else _same_code(a)
 
     # The backoff is per recipe, not per row: ``health check`` files a failed heal job as a row of
     # its own, and a per-row count healed that row again every tick. A launch that died in
     # pre-flight never started the work: it is retried, up to the cap, then on the max backoff.
-    launched_at: Dict[Any, List[datetime]] = {}
-    preflight_at: Dict[Any, List[datetime]] = {}
+    launches: Dict[Any, List[Tuple[datetime, Dict[str, Any]]]] = {}
+    seen_fp: Dict[Any, set] = {}  # recipe -> fingerprints a failure was recorded under
     last_launch_any: Dict[Any, datetime] = {}  # any code: guard (d)'s "same generators" clock
     for r in rows:
         rp = r.get("resume_recipe")
+        if (r.get("failure_fingerprint") or {}).get("hash"):
+            seen_fp.setdefault(rp, set()).add(r["failure_fingerprint"]["hash"])
         for a in r.get("resume_attempts") or []:
             when = _parse_when(a.get("at"))
             if when is None or a.get("action") != "launched":
                 continue
             last_launch_any[rp] = max(when, last_launch_any.get(rp, when))
-            if not _same_code(a):
-                continue
-            if a.get("outcome") == "preflight_failed":
-                preflight_at.setdefault(rp, []).append(when)
-            else:
-                launched_at.setdefault(rp, []).append(when)
+            launches.setdefault(rp, []).append((when, a))
     for row in rows:
         if row.get("resolved_at"):
             continue
@@ -483,6 +553,32 @@ def run_heal(
             "reason": "", "job_name": None,
         }  # fmt: skip
         recipe_path = row.get("resume_recipe")
+        klass = retry_policy.classify_failure(row.get("error"), row.get("phase"), row.get("gate"))
+        fp = retry_policy.fingerprint(
+            versions=versions, manifest_sha=manifest_sha_fn(row), config_sha=config_sha,
+            phase=row.get("phase"),
+        )  # fmt: skip
+        fph = retry_policy.fingerprint_hash(fp)
+        att.update(failure_class=klass, fp_hash=fph, fingerprint=fp)
+        if not (row.get("failure_fingerprint") or {}).get("hash"):
+            # First sight of this failure: the fingerprint it failed under, kept on the row.
+            row["failure_fingerprint"] = {"hash": fph, "fingerprint": fp, "class": klass}
+            seen_fp.setdefault(recipe_path, set()).add(fph)
+            if not dry_run:
+                write_row(incidents_dir, row)
+        group = [a for _w, a in launches.get(recipe_path, ())]
+        launched_at = [
+            w for w, a in launches.get(recipe_path, ())
+            if _same(a, fph) and a.get("outcome") != "preflight_failed"
+        ]  # fmt: skip
+        preflight_at = [
+            w for w, a in launches.get(recipe_path, ())
+            if _same(a, fph) and a.get("outcome") == "preflight_failed"
+        ]  # fmt: skip
+        refused = retry_policy.refusal(
+            klass, fph, launched=retry_policy.launched_count(group, fph),
+            failed_under=fph in seen_fp.get(recipe_path, ()),
+        )  # fmt: skip
         recipe = resume.read_recipe(Path(recipe_path)) if recipe_path else None
         stale = stale_phases(Path(recipe_path)) if recipe else []
         if stale:
@@ -494,13 +590,14 @@ def run_heal(
             att.update(
                 action="refused", reason=f"operator hold: {resume.HOLD_NAME} beside the recipe"
             )
-        elif launched_at.get(recipe_path) and now < (
-            retry_at := max(launched_at[recipe_path])
-            + timedelta(seconds=_retry_wait_s(len(launched_at[recipe_path])))
+        elif refused:
+            att.update(action="refused", reason=refused)
+        elif launched_at and now < (
+            retry_at := max(launched_at) + timedelta(seconds=_retry_wait_s(len(launched_at)))
         ):
             att["reason"] = f"retry backoff: next attempt at {utc_iso(retry_at.timestamp())}"  # (a)
-        elif len(preflight_at.get(recipe_path, ())) >= HEAL_PREFLIGHT_RETRIES and now < (
-            retry_at := max(preflight_at[recipe_path]) + timedelta(seconds=HEAL_RETRY_MAX_S)
+        elif len(preflight_at) >= HEAL_PREFLIGHT_RETRIES and now < (
+            retry_at := max(preflight_at) + timedelta(seconds=HEAL_RETRY_MAX_S)
         ):
             att["reason"] = (
                 f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this code; "
@@ -549,7 +646,7 @@ def run_heal(
             env = {**resume.recipe_env(recipe), run_origin.LAUNCHED_BY_ENV: "health-heal"}
             argv = launch_argv(code_root, jobs_dir, name, bound, env=env)
             att["interpreter"] = bound[0]
-            prior = len(launched_at.get(recipe_path, ()))
+            prior = len(launched_at)
             if dry_run:  # the exact launch, so the evidence is gradeable before it runs
                 att.update(argv=argv, cwd=cwd, job_name=name, reason="dry run: would launch")
                 out["would_launch"].append(row["key"])
@@ -558,7 +655,7 @@ def run_heal(
                 att["job_name"] = name
                 if ok:
                     att.update(action="launched", reason=_launch_reason(stale, prior))
-                    launched_at.setdefault(recipe_path, []).append(now)
+                    launches.setdefault(recipe_path, []).append((now, att))
                     last_launch_any[recipe_path] = now
                 else:
                     att["reason"] = f"launch failed: {detail}"
@@ -568,10 +665,12 @@ def run_heal(
         if (
             att["action"] != "launched"
             and attempts
-            and all(attempts[-1].get(k) == att[k] for k in ("mirror_sha", "action", "reason"))
+            and all(attempts[-1].get(k) == att[k] for k in ("fp_hash", "action", "reason"))
         ):
             continue  # same skip as last pass: do not grow the list every cycle
         attempts.append(att)
+        if att["action"] == "refused" and refused:
+            logger.info("heal %s: refused: %s", row["key"], att["reason"])
         write_row(incidents_dir, row)
         out["attempts"].append({"key": row["key"], **att})
         if att["action"] == "launched":

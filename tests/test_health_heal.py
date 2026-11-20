@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from gomoveshift.health import heal, resume
+from gomoveshift.health import heal, resume, retry_policy
 from gomoveshift.health.store import load_all, new_incident, write_row
 
 NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
@@ -42,6 +42,8 @@ class Rig:
         self.launch_ok = True
         self.installed = None  # the venv's gomoveshift-video version; None = unknown
         self.pinned = None  # the checkout's pinned version; None = unknown
+        self.siblings: dict = {}  # seo_manager / redactcam versions; {} = unknown
+        self.manifest = None  # sha of the drive's manifest row; None = unknown
         stages = tmp_path / "stages"
         resume.write_recipe(
             stages,
@@ -52,7 +54,8 @@ class Rig:
         )
         row = new_incident(
             "drive_failed", "drive_failed:demo-drive-a:r1", "demo-drive-a.json", "t",
-            drive="demo-drive-a", phase="phase_d", gate=None, error="boom", log_path=None,
+            drive="demo-drive-a", phase="phase_d", gate=None, error="OSError: No space left on device",
+            log_path=None,
             job_name="gms-fri-demo", job_run_id="r1", failed_at=None, staging_sha="old",
             resume_recipe=str(stages / "resume.json"), resume_attempts=[],
         )  # fmt: skip
@@ -70,6 +73,9 @@ class Rig:
             slot_fn=lambda row, recipe: self.slot,
             installed_version_fn=lambda python: self.installed,
             pinned_version_fn=lambda code_root: self.pinned,
+            sibling_versions_fn=lambda python: self.siblings,
+            manifest_sha_fn=lambda row: self.manifest,
+            config_sha_fn=lambda config: "cfg",
         )  # fmt: skip
 
     def row(self):
@@ -135,7 +141,7 @@ def test_no_auto_resume_marker_refuses_on_every_mirror_sha(tmp_path):
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
     assert rig.launches == [] and out["launched"] == []
     att = rig.row()["resume_attempts"]
-    assert [a["action"] for a in att] == ["refused", "refused"]
+    assert [a["action"] for a in att] == ["refused"]  # an unchanged refusal is not re-recorded
     assert resume.HOLD_NAME in att[0]["reason"]
 
 
@@ -155,6 +161,9 @@ def test_guard_a_waits_out_its_backoff_on_one_mirror_sha(tmp_path):
     # the backoff skip is recorded once (the owner's rule: waits are visible, never silent)
     assert len(rig.row()["resume_attempts"]) == 2
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
+    assert len(rig.launches) == 1  # an unrelated mirror commit is not a reason to relaunch
+    rig.installed = "0.3.999"
+    rig.run(sha="1234567fedcba", now=_at(heal.HEAL_RETRY_BASE_S + 60))  # pragma: allowlist secret
     assert len(rig.launches) == 2
 
 
@@ -173,12 +182,16 @@ def test_guard_a_is_keyed_on_the_installed_version_not_the_sha_alone(tmp_path):
     assert len(rig.launches) == 2
 
 
-def test_an_attempt_recorded_before_versions_existed_still_blocks_its_sha(tmp_path):
-    rig = Rig(tmp_path)
-    rig.run()  # installed unknown: no version recorded as a value
-    rig.installed = "0.3.102"
+def test_an_unknown_version_turning_known_is_one_changed_fingerprint(tmp_path):
+    rig = Rig(tmp_path, error="boom")  # unknown class: one launch per fingerprint
+    rig.run()  # installed unknown
     rig.run()
     assert len(rig.launches) == 1
+    rig.installed = "0.3.102"
+    rig.run()
+    assert len(rig.launches) == 2
+    rig.run()
+    assert len(rig.launches) == 2
 
 
 def test_install_pending_refuses_while_the_pin_differs_from_the_venv(tmp_path):
@@ -241,6 +254,9 @@ def test_guard_a_is_once_per_recipe_not_once_per_row(tmp_path):
     rig.run()
     assert len(rig.launches) == 1
     rig.run(sha="1234567fedcba")  # pragma: allowlist secret
+    assert len(rig.launches) == 1  # an unrelated mirror commit: nothing
+    rig.installed = "0.3.999"
+    rig.run()
     assert len(rig.launches) == 2  # new code: exactly one more resume of that recipe
 
 
@@ -504,7 +520,7 @@ def test_recipe_target_still_obeys_the_backoff_and_holds(tmp_path):
     rig.run(only_key=key)
     assert len(rig.launches) == 1
     row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
-    assert row["resume_attempts"][-1]["reason"].startswith("retry backoff")
+    assert row["resume_attempts"][-1]["reason"].startswith("unknown failure, fingerprint")
     (second.parent / resume.HOLD_NAME).write_text("stop\n")
     rig.run(only_key=key, now=NOW + timedelta(days=3))
     row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
@@ -656,6 +672,7 @@ def test_re_registering_a_resolved_recipe_reopens_it_with_its_history(tmp_path):
     row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
     assert not row.get("resolved_at") and row["reopened_at"] == "t2"
     assert [a["action"] for a in row["resume_attempts"]] == ["launched"]
+    rig.installed = "0.3.999"
     assert rig.run(sha="newer", only_key=key)["launched"] == [key]
 
 
@@ -773,7 +790,8 @@ def test_preflight_retries_are_capped_then_wait_the_max_backoff_never_forever(tm
     assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES
     rig.run(now=retry_at + timedelta(minutes=5))
     assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES + 1
-    rig.run(sha="1234567fedcba", now=retry_at + timedelta(minutes=6))  # pragma: allowlist secret
+    rig.installed = "0.3.999"
+    rig.run(now=retry_at + timedelta(minutes=6))
     assert len(rig.launches) == heal.HEAL_PREFLIGHT_RETRIES + 2  # new code is immediate
 
 
@@ -832,7 +850,8 @@ def test_same_code_past_the_backoff_launches_again_on_the_same_job_name(tmp_path
     assert names[0] == names[1] == heal.job_name("demo-drive-a", SHA)
 
 
-def test_the_backoff_doubles_from_one_hour_and_caps_at_a_day(tmp_path):
+def test_the_backoff_doubles_from_one_hour_and_caps_at_a_day(tmp_path, monkeypatch):
+    monkeypatch.setitem(retry_policy.BUDGET, "transient", 99)  # the curve, not the budget
     assert (heal.HEAL_RETRY_BASE_S, heal.HEAL_RETRY_MAX_S) == (3600, 86400)
     rig = Rig(tmp_path)
     clock = 0.0
@@ -865,11 +884,14 @@ def test_the_backoff_is_counted_across_every_row_sharing_the_recipe(tmp_path):
     assert len(rig.launches) == 3
 
 
-def test_a_new_sha_still_retries_immediately_inside_the_backoff(tmp_path):
+def test_a_changed_fingerprint_retries_immediately_inside_the_backoff(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     rig.run(sha="1234567fedcba", now=_at(60))  # pragma: allowlist secret
-    assert len(rig.launches) == 2
+    assert len(rig.launches) == 1  # a new mirror SHA alone no longer resets the backoff
+    rig.manifest = "row-v2"
+    rig.run(sha="1234567fedcba", now=_at(120))  # pragma: allowlist secret
+    assert len(rig.launches) == 2  # a changed manifest row does
 
 
 def test_a_reused_job_name_maps_each_outcome_to_its_own_run_by_time(tmp_path):
@@ -893,3 +915,129 @@ def test_a_reused_job_name_maps_each_outcome_to_its_own_run_by_time(tmp_path):
     rig.run(now=_at(heal.HEAL_RETRY_BASE_S + 120))
     atts = rig.row()["resume_attempts"]
     assert [a["outcome"] for a in atts if a["action"] == "launched"] == ["failed", "succeeded"]
+
+
+# ── Retry by failure class and fingerprint, never by mirror SHA ──
+
+
+def _fail(rig: Rig, n: int, **over) -> None:
+    """A heal job failed: `health check` files it as a row of its own under the same recipe."""
+    _failed_heal_row(rig, n)
+    rows = {r["key"]: r for r in load_all(rig.inc)[0]}
+    row = rows[f"drive_failed:gms-heal-demo-drive-a-abcdef1:h{n}"]
+    row.update(over)
+    write_row(rig.inc, row)
+
+
+def test_a_deterministic_failure_is_not_relaunched_by_an_unrelated_mirror_commit(tmp_path):
+    rig = Rig(tmp_path, error="LF 1: final-text review refused (place_outside_text)")
+    for i, sha in enumerate([SHA, NEW_SHA, "99999991", "99999992"]):
+        out = rig.run(sha=sha, now=_at(i * 90000))
+        assert out["launched"] == []
+    assert rig.launches == []
+    att = rig.row()["resume_attempts"][0]
+    assert att["action"] == "refused" and att["failure_class"] == "deterministic"
+    assert att["reason"].startswith(f"deterministic failure, fingerprint {att['fp_hash'][:12]}")
+    assert len(rig.row()["resume_attempts"]) == 1  # one refusal line, not one per mirror commit
+
+
+def test_a_changed_version_or_manifest_row_relaunches_a_deterministic_failure_once(tmp_path):
+    rig = Rig(tmp_path, error="BLUR GATE: blur_enabled but the cached day master has no marker")
+    rig.run()
+    assert rig.launches == []
+    rig.manifest = "row-v2"  # the manifest row was fixed
+    rig.run(now=_at(100))
+    rig.run(now=_at(100 + 90000))
+    assert len(rig.launches) == 1
+    _fail(rig, 1, error="BLUR GATE: again", phase="phase_d")
+    rig.run(now=_at(200 + 90000))
+    assert len(rig.launches) == 1  # failed the same way under the same fingerprint
+    rig.installed = "0.3.200"  # a release
+    rig.run(now=_at(300 + 90000))
+    assert len(rig.launches) == 2
+
+
+def test_a_transient_failure_retries_at_most_three_times_with_the_backoff(tmp_path):
+    rig = Rig(tmp_path)  # "No space left on device"
+    clock = 0.0
+    for n in (1, 2, 3):
+        rig.run(now=_at(clock))
+        assert len(rig.launches) == n
+        clock += 3600 * 2 ** (n - 1) + 60
+    rig.run(now=_at(clock))
+    rig.run(now=_at(clock + 7 * 86400))
+    assert len(rig.launches) == 3
+    last = rig.row()["resume_attempts"][-1]
+    assert last["action"] == "refused" and "3 of 3 attempts used" in last["reason"]
+    rig.siblings = {"redactcam": "9.9.9"}
+    rig.run(now=_at(clock + 7 * 86400 + 60))
+    assert len(rig.launches) == 4  # a changed dependency version
+
+
+def test_an_unknown_failure_is_retried_once_per_fingerprint(tmp_path):
+    rig = Rig(tmp_path, error="something nobody classified")
+    rig.run()
+    rig.run(now=_at(90000))
+    rig.run(sha=NEW_SHA, now=_at(180000))
+    assert len(rig.launches) == 1
+    assert rig.row()["resume_attempts"][0]["failure_class"] == "unknown"
+    rig.siblings = {"seo_manager": "0.9.9"}
+    rig.run(now=_at(270000))
+    assert len(rig.launches) == 2
+
+
+def test_a_publish_only_failure_is_refused_with_its_class_and_reason(tmp_path):
+    rig = Rig(tmp_path, error="YouTubeQuotaError: quotaExceeded")
+    out = rig.run()
+    att = rig.row()["resume_attempts"][0]
+    assert rig.launches == [] and out["launched"] == []
+    assert att["action"] == "refused" and att["failure_class"] == "publish_only"
+    assert "heal never publishes" in att["reason"] and att["fp_hash"][:12] in att["reason"]
+
+
+def test_each_attempt_records_the_fingerprint_and_the_row_keeps_its_first_failure(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed, rig.siblings, rig.manifest = "0.3.113", {"redactcam": "0.2.0"}, "m1"
+    rig.run()
+    att, row = rig.row()["resume_attempts"][0], rig.row()
+    assert att["fingerprint"] == {
+        "versions": {"gomoveshift": "0.3.113", "redactcam": "0.2.0"},
+        "manifest_sha": "m1", "config_sha": "cfg", "phase": "phase_d",
+    }  # fmt: skip
+    assert att["fp_hash"] == row["failure_fingerprint"]["hash"]
+    assert row["failure_fingerprint"]["class"] == "transient"
+
+
+def test_an_incident_from_before_fingerprints_keeps_working(tmp_path):
+    rig = Rig(tmp_path, error="boom")  # no failure_fingerprint, an old attempt without fp_hash
+    row = rig.row()
+    row["resume_attempts"] = [
+        {"at": "t", "mirror_sha": SHA, "installed_version": None, "action": "launched",
+         "reason": "old", "job_name": "x", "slot": None},
+    ]  # fmt: skip
+    write_row(rig.inc, row)
+    out = rig.run(now=_at(100))
+    assert out["launched"] == [row["key"]]  # unknown: its first fingerprinted attempt
+    rig.run(now=_at(200))
+    assert len(rig.launches) == 1
+
+
+def test_the_classifier_table(tmp_path):
+    cases = {
+        "BLUR GATE: insert clip x carries no .blurred marker": "deterministic",
+        "FinalTextReviewError: LF 2: final-text review refused (x)": "deterministic",
+        "Day 2026-01-01: kept footage 10s is under full_drive_part_min_sec=600s": "deterministic",
+        "BatchDurationIntegrityError: sum disagrees": "deterministic",
+        "OSError: [Errno 28] No space left on device": "transient",
+        "ffmpeg: Cannot allocate memory": "transient",
+        "Windows drive /mnt/d is not accessible after 3 probe attempt(s)": "transient",
+        "OSError: [Errno 5] Input/output error": "transient",
+        "PlaceLookupUnavailableError: every endpoint down": "transient",
+        "YouTubeQuotaError: quotaExceeded": "publish_only",
+        "DriveUploadError: EOF": "publish_only",
+        "ValueError: nobody knows": "unknown",
+        "": "unknown",
+    }
+    for text, want in cases.items():
+        assert retry_policy.classify_failure(text) == want, text
+    assert retry_policy.classify_failure(None, "phase_d", "Metadata quality") == "unknown"
