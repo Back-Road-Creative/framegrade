@@ -100,8 +100,25 @@ def stale_phases(recipe_path: Path) -> List[str]:
     return [p for p in done if p not in kept]
 
 
+def base_drive(drive: str) -> str:
+    """The drive a heal job name stands for: ``gms-heal-<x>-<sha7>`` unwraps to ``<x>``, however
+    deeply nested, so a heal of a heal reuses the base drive name instead of growing it."""
+    return min(drives.heal_origins(str(drive)) or {str(drive)}, key=len)
+
+
+def wrap_name(name: str, sha: str) -> str:
+    """``gms-heal-<name>-<sha7>`` exactly as given: how a job record written before names stopped
+    nesting still parses."""
+    return f"gms-heal-{safe_name(name)}-{sha[:7]}"
+
+
 def job_name(drive: str, sha: str) -> str:
-    return f"gms-heal-{safe_name(drive)}-{sha[:7]}"
+    return wrap_name(base_drive(drive), sha)
+
+
+#: Job-name prefixes whose incidents never have a resume recipe: a publish job (Phase D) and a
+#: heal resume are not audits ``resume.json`` can restart.
+_RECIPELESS_PREFIXES = ("gms-publish-", "gms-heal-")
 
 
 #: Overrides that described the writer's host, not the drive: a resume re-earns them.
@@ -520,7 +537,15 @@ def run_heal(
         if stale:
             att["stale_phases"] = stale
         slot = None
-        if recipe is None:
+        if recipe is None and str(row.get("job_name") or "").startswith(_RECIPELESS_PREFIXES):
+            # such a job never has a recipe: re-refusing it every tick can never end, so it closes
+            why = (
+                f"no resume recipe: {row.get('job_name')} is a publish or heal job, never resumable"
+            )
+            att.update(action="closed", reason=why)
+            if not dry_run:
+                row["resolved_at"], row["resolution_reason"] = now_iso, why
+        elif recipe is None:
             att.update(action="refused", reason="no readable resume.json for this incident")
         elif resume.is_held(Path(recipe_path)):
             att.update(

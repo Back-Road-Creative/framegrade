@@ -138,7 +138,11 @@ failure in any phase heals, and a failed phase that cannot be mapped no longer r
 checkpoint beside the recipe (`pipeline_state.json`) holds a phase whose stamped code version is
 no longer current (see `PHASE_CODE_VERSIONS`), that plain resume re-runs the stale phases and the
 phases built from them, reusing renders by fingerprint. That attempt records `stale_phases`. No
-readable recipe is `refused` (argv is never guessed). Each attempt is appended to `resume_attempts` as
+readable recipe is `refused` (argv is never guessed), except for an incident whose job is a publish
+(`gms-publish-<project>`) or heal (`gms-heal-...`) job: those never have a recipe, so heal closes
+the row (`resolved_at`, `resolution_reason: no resume recipe: ...`, one `closed` attempt) instead
+of refusing it on every tick. A heal of a heal reuses the base drive name
+(`gms-heal-<drive>-<sha7>`, never `gms-heal-gms-heal-...`). Each attempt is appended to `resume_attempts` as
 `{at, mirror_sha, installed_version, fingerprint, fp_hash, failure_class, slot, action: launched|skipped|refused, reason, job_name}` (+ `outcome`,
 `outcome_at` once the heal job ends); an unchanged repeat skip is not re-recorded.
 
@@ -283,11 +287,15 @@ running audit, one with no job record, a failed one and one at the OST gate are 
 `--supersede` of the drive itself is unchanged. `--dry-run` asks `health publish --dry-run`.
 
 **Failed publish.** A drive still in the backlog whose store row is `failed` because its newest
-`gms-publish-<project>` job failed (its audit succeeded) is handed to `health publish` again, before
+`gms-publish-<project>` job ended in anything but success (`failed`, or `cancelled`, `stalled`,
+`killed` with no exit code; its audit succeeded) is handed to `health publish` again, before
 the `auditing` drives; `health publish` reopens it (`failed -> auditing -> ready`) and claims a slot.
 A `failed` row with no failed publish job (set by hand, or a publish still running) is left alone.
 Before, the tick skipped it `in the schedule store (failed)` and the audited drive never aired
-(Kerry-to-Cork, 2026-11-19). Tests: `tests/test_health_backlog_launch.py`.
+(Kerry-to-Cork, 2026-11-19). The retry first keyed on `failed` or a non-zero exit code, so a publish
+job the runner ended with no exit code was never retried (unproven as Kerry's exact end state). It
+retries the PUBLISH only (`publish_only` class): never a render, and never a drive that already
+holds an upload receipt. Tests: `tests/test_health_backlog_launch.py`.
 
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one
 free-space figure. Staging needs `max(30 GB, sources × 3.0)` and output 50 GB; free equal to need
@@ -389,9 +397,10 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    `finish_claim` with `ok` = the output dir holds an upload receipt (`youtube_uploads.json` with a
    `video_id`; a receipt wins over the exit code, so a live video keeps its slot). Otherwise the
    drive is `failed` and its unconfirmed booking is released. A running job, or a claim with no
-   publish job, is left alone; a repeat pass is a no-op. It then retires every `ready` drive
-   that already holds an upload receipt (`publish.retire_uploaded`, the same `retire_published`
-   call). The closed claims and retirements are `publish_reconciled` in `run_check`'s result.
+   publish job, is left alone; a repeat pass is a no-op. It then retires every `ready` or
+   `auditing` drive that already holds an upload receipt (`publish.retire_uploaded`, the same
+   `retire_published` call; an `auditing` drive that was uploaded is published, never left in the
+   claim line, and a drive with no receipt is never retired). The closed claims and retirements are `publish_reconciled` in `run_check`'s result.
 
 `--dry-run` runs every check, then reports the four steps and Waypost's own dry-run answer
 (`next_claim`); it writes nothing and launches nothing.
