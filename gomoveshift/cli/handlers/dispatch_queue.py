@@ -302,12 +302,39 @@ def _run_queue_repair(conn, config, *, apply: bool) -> None:
         return _build_shared_geocoder()
 
     try:
-        for r in repair_queued_shorts(
+        results = repair_queued_shorts(
             conn, apply=apply, stages_dir_for=stages_dir_for, geocoder_factory=geocoder
-        ):
+        )
+        for r in results:
             print(r.line())
     except Exception as exc:  # noqa: BLE001
         print(f"QUEUE_REPAIR skipped ({exc.__class__.__name__}: {exc})")
+        return
+    _run_slot_refill(conn, config, results, apply=apply)
+
+
+def _run_slot_refill(conn, config, repairs, *, apply: bool) -> None:
+    """After the repair: a queued Short still refused inside the lead hands its slot to the
+    next ready Short, and a failed review refusal that now passes is requeued
+    (``publishing/queue_slot_refill.py``). One ``QUEUE_SLOT`` / ``QUEUE_RECOVER`` /
+    ``QUEUE_FAILED`` line per action. Never fatal; without ``apply`` nothing is written."""
+    from ...publishing.queue_slot_refill import config_grid, refill_slots
+
+    refusals = {
+        r.delivery_id: (r.reason or "refused") if r.outcome == "still_refused" else None
+        for r in repairs
+    }
+    try:
+        for action in refill_slots(
+            conn,
+            apply=apply,
+            now=datetime.now(timezone.utc),
+            refusals=refusals,
+            grid_for=config_grid(config),
+        ):
+            print(action.line())
+    except Exception as exc:  # noqa: BLE001
+        print(f"QUEUE_SLOT skipped ({exc.__class__.__name__}: {exc})")
 
 
 def cmd_dispatch_queue(args, config) -> int:
