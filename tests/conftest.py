@@ -85,6 +85,13 @@ def _make_test_home() -> str:
 
 
 _TEST_HOME = _make_test_home()
+
+# An enqueue that refuses a Short raises a health incident under the data root's
+# ``gms/incidents``; the data root defaults to the git checkout, so a test that
+# refuses one must not write into the tree. Tests that read incidents set their own.
+_TEST_INCIDENTS_DIR = tempfile.mkdtemp(prefix="gms-test-incidents-")
+atexit.register(shutil.rmtree, _TEST_INCIDENTS_DIR, True)
+os.environ.setdefault("GMS_HEALTH_INCIDENTS_DIR", _TEST_INCIDENTS_DIR)
 os.environ["HOME"] = _TEST_HOME
 # Windows reads the home directory from USERPROFILE, not HOME.
 os.environ["USERPROFILE"] = _TEST_HOME

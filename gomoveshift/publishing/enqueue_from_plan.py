@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -57,6 +57,13 @@ class EnqueueResult:
 
     enqueued: tuple[tuple[str, int, str, int], ...]  # (project, short_index, platform, id)
     already_present: tuple[tuple[str, int, str, int], ...]
+    #: ``(project, short_index, reason)`` of every Short the final-text review refused;
+    #: none of its platforms was enqueued.
+    refused: tuple[tuple[str, int, str], ...] = field(default=())
+
+    @property
+    def refused_count(self) -> int:
+        return len(self.refused)
 
     @property
     def enqueued_count(self) -> int:
@@ -122,6 +129,90 @@ def select_capped_shorts(shorts: list, max_shorts: Optional[int]) -> list:
     return sorted(shorts, key=rank)[:max_shorts]
 
 
+def sidecar_review_refusals(
+    path: Path, records: list, *, only_selected: bool = True
+) -> "dict[tuple[str, int], str]":
+    """``(project, short_index) -> reason`` for every raw sidecar record in ``records``
+    that ``youtube_adapter.short_review_refusal`` refuses: the review dispatch runs,
+    asked at enqueue so a refused Short never takes a slot. A record that carries no
+    YouTube payload or no sampled regions (a GPS-less Short, an asset sidecar) has no
+    review to refuse and is not loaded."""
+
+    def reviewable(raw: object) -> bool:
+        payloads = raw.get("payloads") if isinstance(raw, dict) else None
+        routes = raw.get("routes") if isinstance(raw, dict) else None
+        selected = routes.get("selected") if isinstance(routes, dict) else None
+        return bool(
+            isinstance(payloads, dict)
+            and payloads.get("youtube")
+            and raw.get("sampled_regions")
+            and (not only_selected or (isinstance(selected, list) and "youtube" in selected))
+        )
+
+    wanted = {
+        (raw["project_name"], raw["short_index"])
+        for raw in records
+        if reviewable(raw) and "project_name" in raw and "short_index" in raw
+    }
+    if not wanted:
+        return {}
+    from .plan_io import PublishPlanFormatError, load_publish_plan
+    from .youtube_adapter import short_review_refusal
+
+    try:
+        plan = load_publish_plan(path)
+    except PublishPlanFormatError as exc:
+        raise PublishPlanSidecarError(str(exc)) from exc
+    refusals: dict = {}
+    for record in plan.shorts:
+        key = (record.project_name, record.short_index)
+        if key in wanted and record.payloads.youtube is not None:
+            reason = short_review_refusal(record)
+            if reason:
+                refusals[key] = reason
+    return refusals
+
+
+def _raise_refusal_incident(project_name: str, short_index: int, reason: str, path: Path) -> None:
+    """One open ``short_review_refused`` health incident per Short, written through the
+    health store (``new_incident``). Deduped on its key: a repeated enqueue run finds the
+    open row and leaves it as it was; a refusal with a new reason replaces it. The row is
+    born ``pushed`` because ``health check``'s push line has no wording for this kind yet;
+    a failed write never blocks the rest of the plan."""
+    from ..health.store import (
+        default_data_root,
+        default_incidents_dir,
+        load_all,
+        new_incident,
+        safe_name,
+        utc_iso,
+        write_row,
+    )
+
+    key = f"short_review_refused:{project_name}:{short_index}"
+    try:
+        incidents_dir = default_incidents_dir(default_data_root())
+        rows, _bad = load_all(incidents_dir)
+        prior = next((r for r in rows if r.get("key") == key and not r.get("resolved_at")), None)
+        if prior is not None and prior.get("reason") == reason:
+            return
+        now = utc_iso()
+        row = new_incident(
+            "short_review_refused",
+            key,
+            f"short_review_refused_{safe_name(project_name)}_{short_index}.json",
+            prior["detected_at"] if prior else now,
+            project=project_name,
+            short_index=short_index,
+            reason=reason,
+            sidecar=str(path),
+        )
+        row["pushed"], row["pushed_at"] = True, now
+        write_row(incidents_dir, row)
+    except OSError as exc:
+        logger.warning("could not record the refusal incident %s: %s", key, exc)
+
+
 def _platform_scheduled_at(
     by_platform: dict, platform: str, fallback: str, path: Path, context: str
 ) -> str:
@@ -144,6 +235,7 @@ def enqueue_from_plan_sidecar(
     max_shorts: Optional[int] = None,
     order: Optional[Callable[[list], list]] = None,
     stagger_hours: Optional[int] = None,
+    review: bool = True,
 ) -> EnqueueResult:
     """Enqueue every ``routes.selected`` platform of every short in the
     sidecar at ``sidecar_path``. Returns a summary of new vs. already-present
@@ -175,6 +267,11 @@ def enqueue_from_plan_sidecar(
     ``dynamic_schedule.staggered_by_platform`` when the sidecar didn't
     already carry an explicit one for that platform -- the sidecar's own
     per-platform value always wins, this only fills a gap.
+
+    ``review=True`` asks ``short_review_refusal`` of every Short with a YouTube route
+    before it is spooled: a Short the review would refuse at dispatch is not enqueued on
+    any platform, raises one health incident naming the reason and is listed in
+    ``EnqueueResult.refused``; the other records still enqueue.
     """
     path = Path(sidecar_path)
     payload = _load_sidecar(path)
@@ -186,6 +283,11 @@ def enqueue_from_plan_sidecar(
     if order is not None:
         capped = order(capped)
 
+    refused: list[tuple[str, int, str]] = []
+    refusals = (
+        sidecar_review_refusals(path, [r for r in capped if isinstance(r, dict)]) if review else {}
+    )
+
     for record in capped:
         if not isinstance(record, dict):
             raise PublishPlanSidecarError(
@@ -193,6 +295,11 @@ def enqueue_from_plan_sidecar(
             )
         project_name = _field(record, "project_name", str, path, "record identity")
         short_index = _field(record, "short_index", int, path, "record identity")
+        reason = refusals.get((project_name, short_index))
+        if reason:
+            _raise_refusal_incident(project_name, short_index, reason, path)
+            refused.append((project_name, short_index, reason))
+            continue
         context = f"project={project_name!r} short_index={short_index}"
         plan_hash = _field(record, "reviewed_plan_hash", str, path, context)
         # The plan's publish time goes ONTO the row: `dispatch._select_due`
@@ -283,7 +390,11 @@ def enqueue_from_plan_sidecar(
             else:
                 enqueued.append(key)
 
-    return EnqueueResult(enqueued=tuple(enqueued), already_present=tuple(already_present))
+    return EnqueueResult(
+        enqueued=tuple(enqueued),
+        already_present=tuple(already_present),
+        refused=tuple(refused),
+    )
 
 
 def _first_comment_for(record: dict, platform: str, context: str) -> Optional[str]:
