@@ -199,3 +199,25 @@ def test_release_refuses_a_bad_fragment_and_writes_nothing(tmp_path, text, match
     assert (root / "CHANGELOG.md").read_text() == CHANGELOG
     assert b'version = "0.3.4"' in (root / "pyproject.toml").read_bytes()
     assert bad.exists()
+
+
+@pytest.mark.parametrize(
+    "name", ["upload-sends-recording-facts.md", "publish-x.md", "deploy-x.md", "Upload-x.md"]
+)
+def test_release_refuses_a_fragment_name_the_merge_robot_holds(tmp_path, name):
+    """The workspaces merge robot holds every path matching ``**/deploy*``,
+    ``**/publish*`` or ``**/upload*`` for a human. A fragment so named stops the
+    release PR that deletes it (#445 stopped on ``upload-sends-recording-facts.md``),
+    so the name is refused here, in the PR that adds it."""
+    root = _tree(tmp_path)
+    _fragment(root, name, "### Fixed\n\n- a fix\n")
+    with pytest.raises(release.ReleaseError, match="merge robot"):
+        release.release(root, "0.3.5", "2026-10-24")
+    assert (root / "CHANGELOG.md").read_text() == CHANGELOG
+
+
+def test_release_accepts_a_name_that_only_contains_a_held_word(tmp_path):
+    root = _tree(tmp_path)
+    _fragment(root, "sends-upload-facts.md", "### Fixed\n\n- a fix\n")
+    release.release(root, "0.3.5", "2026-10-24")
+    assert "- a fix" in (root / "CHANGELOG.md").read_text()

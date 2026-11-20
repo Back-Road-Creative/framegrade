@@ -25,6 +25,10 @@ _VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
 FRAGMENTS_DIR = "changelog.d"
 _SECTION = re.compile(r"^### (.+?)\s*$", flags=re.MULTILINE)
+#: Name prefixes the workspaces merge robot holds for a human (its hard-deny
+#: globs ``**/deploy*``, ``**/publish*``, ``**/upload*``). The release PR deletes
+#: every fragment, so one so named would stop the release itself.
+HELD_NAME_PREFIXES = ("deploy", "publish", "upload")
 
 
 class ReleaseError(Exception):
@@ -74,8 +78,14 @@ def fragment_paths(root: Path) -> list[Path]:
 
 
 def read_fragment(path: Path) -> dict[str, list[str]]:
-    """One fragment's entries by section; refuses a section outside ``SECTIONS``."""
+    """One fragment's entries by section; refuses a section outside ``SECTIONS``
+    and a name the merge robot holds (``HELD_NAME_PREFIXES``)."""
     name = f"{FRAGMENTS_DIR}/{path.name}"
+    if path.name.lower().startswith(HELD_NAME_PREFIXES):
+        raise ReleaseError(
+            f"{name}: a name starting with one of {HELD_NAME_PREFIXES} is held by the merge"
+            " robot and would stop the release PR; rename it"
+        )
     sections = _sections(name, _read(path).replace("\r\n", "\n"))
     if not sections:
         raise ReleaseError(f"{name}: must start with a '### <Section>' heading")
