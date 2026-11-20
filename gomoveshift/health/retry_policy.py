@@ -36,6 +36,8 @@ CLASS_TABLE: Tuple[Tuple["re.Pattern[str]", str], ...] = tuple(
         ),  # pipeline/exceptions.py:141
         (r"DriveUploadError|DriveCredentialError", PUBLISH_ONLY),  # pipeline/uploader.py:52,56
         # deterministic: the same inputs fail the same way
+        # an interrupted cabin-repair swap: the marker makes the next run re-detect
+        (r"BLUR GATE \(repair swap\)", TRANSIENT),  # pipeline/blur_gate.py repair_swap_error
         (r"BLUR GATE|BlurGateError", DETERMINISTIC),  # pipeline/blur_gate.py:486, inserts.py:271
         (
             r"final-text review refused|FinalTextReviewError|PublicationGateError",

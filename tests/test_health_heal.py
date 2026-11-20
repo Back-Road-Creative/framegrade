@@ -1060,6 +1060,25 @@ def test_the_classifier_table(tmp_path):
     assert retry_policy.classify_failure(None, "phase_d", "Metadata quality") == "unknown"
 
 
+def test_an_interrupted_repair_swap_is_transient_and_relaunched_but_a_plain_blur_gate_is_not(
+    tmp_path,
+):
+    from gomoveshift.pipeline import blur_gate
+
+    sidecar = tmp_path / "day_x_blur_regions.json"
+    blur_gate.repair_swap_pending_path(sidecar).write_text("{}")
+    swap = blur_gate.repair_swap_error(sidecar)
+    assert retry_policy.classify_failure(swap) == "transient"
+    assert retry_policy.classify_failure("BLUR GATE (cabin): 1 of 9 EXPOSED") == "deterministic"
+    rig = Rig(tmp_path / "swap", error=swap)
+    out = rig.run(now=_at(100))
+    assert out["launched"] == [rig.row()["key"]] and len(rig.launches) == 1
+    plain = Rig(tmp_path / "plain", error="BLUR GATE (cabin): 1 of 9 EXPOSED")
+    plain.run(now=_at(100))
+    plain.run(now=_at(100 + 90000))
+    assert len(plain.launches) <= 1  # a deterministic failure waits for a changed fingerprint
+
+
 def test_a_legacy_deterministic_row_gets_one_launch_then_is_refused_under_the_same_fingerprint(
     tmp_path,
 ):

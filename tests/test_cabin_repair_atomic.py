@@ -64,12 +64,15 @@ class TestPairSwapIsFailClosed:
         assert mask.read_bytes() == b"old-mask" and sidecar.read_text() == before
         assert blur_gate.repair_swap_error(sidecar) is None
 
-    def test_a_pending_marker_stops_the_mask_cache_reusing_the_pair(self, tmp_path, monkeypatch):
+    def test_a_pending_marker_is_reported_as_a_swap_error_naming_the_sidecar(self, tmp_path):
+        # The cache refusal and the marker's clearing are TestStaleMarkerRecovery's.
         sidecar = tmp_path / "day_2026-02-24_blur_regions.json"
         marker = blur_gate.repair_swap_pending_path(sidecar)
         assert marker.parent == sidecar.parent and marker != sidecar
+        assert blur_gate.repair_swap_error(sidecar) is None
         marker.write_text("{}")
-        assert blur_gate.repair_swap_error(sidecar)
+        err = blur_gate.repair_swap_error(sidecar)
+        assert err and sidecar.name in err and "rebuilds the pair in place" in err
 
 
 class TestDetectorlessRoundIsNotSpent:
@@ -153,17 +156,61 @@ class TestHalfSwappedPairNeverReachesTheEncode:
         mask = tmp_path / "day_2026-02-24_blur_mask.mkv"
         cap = _blur_tests._mock_encode(monkeypatch)
         monkeypatch.setattr(dme, "_build_day_blur_mask", lambda *a, **k: mask)
-        monkeypatch.setattr(dme, "_cabin_gate_with_repair", lambda *a: None)
-        calls = []
+        order = []
+
+        def _cabin(*a):
+            order.append("cabin")
 
         def _pairing(*a, **k):
-            calls.append(1)
-            return None if len(calls) == 1 else "BLUR GATE (frame pairing): half-swapped"
+            order.append("pairing")
+            return "BLUR GATE (frame pairing): half-swapped" if order.count("pairing") > 1 else None
 
+        monkeypatch.setattr(dme, "_cabin_gate_with_repair", _cabin)
         monkeypatch.setattr(blur_gate, "frame_pairing_error", _pairing)
         with pytest.raises(blur_gate.BlurGateError, match="half-swapped"):
             dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=Config())
-        assert len(calls) == 2 and cap == {}
+        assert order == ["pairing", "cabin", "pairing"] and cap == {}
+
+
+class TestInterruptedSwapIsRebuiltInPlaceOnce:
+    def _wire(self, tmp_path, monkeypatch, rebuild_clears_marker):
+        raw, mask, sidecar, cfg, _, _ = _helper._setup(tmp_path, monkeypatch, [50])
+        cap = _blur_tests._mock_encode(monkeypatch)
+        marker = blur_gate.repair_swap_pending_path(sidecar)
+        builds = []
+
+        def _build(*a, **k):
+            builds.append(1)
+            if len(builds) > 1 and rebuild_clears_marker:
+                marker.unlink(missing_ok=True)  # what a re-detect does
+            return mask
+
+        verdicts = iter(["BLUR GATE (cabin): 1 of 9 EXPOSED", None])
+        monkeypatch.setattr(dme, "_build_day_blur_mask", _build)
+        monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda *a: next(verdicts))
+        monkeypatch.setattr(blur_gate, "cabin_repair_failure", lambda *a, **k: None)
+        monkeypatch.setattr(blur_gate, "record_cabin_repair_failure", lambda *a, **k: None)
+        monkeypatch.setattr(
+            blur_gate, "frame_pairing_error", lambda v, m, s: blur_gate.repair_swap_error(s)
+        )
+        _fail_second_replace(monkeypatch, sidecar)
+        return cfg, cap, builds
+
+    def test_the_rebuild_runs_once_and_the_encode_proceeds_on_the_fresh_pair(
+        self, tmp_path, monkeypatch
+    ):
+        cfg, cap, builds = self._wire(tmp_path, monkeypatch, rebuild_clears_marker=True)
+        out = dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=cfg)
+        assert out == tmp_path / "day_2026-02-24_master.mp4"
+        assert len(builds) == 2 and cap != {}
+
+    def test_a_rebuild_that_leaves_the_marker_is_refused_without_a_third_build(
+        self, tmp_path, monkeypatch
+    ):
+        cfg, cap, builds = self._wire(tmp_path, monkeypatch, rebuild_clears_marker=False)
+        with pytest.raises(blur_gate.BlurGateError, match="repair swap"):
+            dme.encode_day_master(_blur_tests._batch(tmp_path), tmp_path, config=cfg)
+        assert len(builds) == 2 and cap == {}
 
 
 class TestStaleMarkerRecovery:

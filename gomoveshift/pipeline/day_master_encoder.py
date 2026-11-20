@@ -1366,22 +1366,26 @@ def _cabin_gate_with_repair(
     return err
 
 
-def _write_durable(path: Path, text: str) -> None:
-    """Write ``text`` and fsync it and its directory, so the journal marker is on disk
-    before the first replace. The directory fsync is best effort (some filesystems
-    refuse it)."""
-    with open(path, "w") as fh:
-        fh.write(text)
-        fh.flush()
-        os.fsync(fh.fileno())
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort directory fsync (some filesystems refuse it)."""
     try:
-        dfd = os.open(path.parent, os.O_RDONLY)
+        dfd = os.open(directory, os.O_RDONLY)
         try:
             os.fsync(dfd)
         finally:
             os.close(dfd)
     except OSError:
         pass
+
+
+def _write_durable(path: Path, text: str) -> None:
+    """Write ``text`` and fsync it and its directory, so the journal marker is on disk
+    before the first replace."""
+    with open(path, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    _fsync_dir(path.parent)
 
 
 class _Added(int):
@@ -1502,6 +1506,7 @@ def _repair_cabin_leaks(
         )
         os.replace(tmp_mask, mask_path)
         os.replace(tmp_sidecar, regions_sidecar)
+        _fsync_dir(regions_sidecar.parent)  # both replaces durable before the marker goes
         pending.unlink(missing_ok=True)
     except Exception as exc:
         if pending.exists():
@@ -1784,39 +1789,53 @@ def encode_day_master(
     blur_mask_path: Optional[Path] = None
     if blur_gate.blur_required(cfg):
         regions_sidecar = output_dir / f"day_{date}_blur_regions.json"
-        blur_mask_path = _build_day_blur_mask(
-            graded_src,
-            cfg,
-            output_dir / f"day_{date}_blur_mask.mkv",
-            regions_sidecar,
-            date,
-            # Picture steps write a new file from the raw: only the raw itself is
-            # keyed by its episodes.
-            source_fingerprint=(
-                None
-                if picture_changed
-                else _concat_provenance_fingerprint(concat_paths, raw_concat)
-            ),
+        mask_target = output_dir / f"day_{date}_blur_mask.mkv"
+        # Picture steps write a new file from the raw: only the raw itself is keyed by
+        # its episodes.
+        source_fp = (
+            None if picture_changed else _concat_provenance_fingerprint(concat_paths, raw_concat)
         )
-        # Frame-index pairing: container == mask == sidecar, or mask frame j is not
-        # picture frame j. Blocks BEFORE the cabin gate and the master encode.
-        pairing_err = blur_gate.frame_pairing_error(graded_src, blur_mask_path, regions_sidecar)
-        if pairing_err:
-            raise blur_gate.BlurGateError(pairing_err)
-        # Occupant-coverage gate (drive path): a corroborated car whose cabin
-        # the mask misses would ship its driver exposed — verify against the mask
-        # BEFORE the irreversible master encode composites it, mirroring the
-        # legacy per-episode gate (blur_gate.check_cabin_coverage). A failure gets
-        # up to ``blur_cabin_repair_rounds`` targeted repairs, each followed by a
-        # fresh check of the whole day; only a leak that survives them stops the run.
-        cabin_err = _cabin_gate_with_repair(graded_src, cfg, blur_mask_path, regions_sidecar)
-        if cabin_err:
-            raise blur_gate.BlurGateError(cabin_err)
-        # A repair swaps the mask and the sidecar after the first pairing check; prove
-        # the pair again before the irreversible encode.
-        pairing_err = blur_gate.frame_pairing_error(graded_src, blur_mask_path, regions_sidecar)
-        if pairing_err:
-            raise blur_gate.BlurGateError(pairing_err)
+
+        def _build_mask() -> Path:
+            return _build_day_blur_mask(
+                graded_src,
+                cfg,
+                mask_target,
+                regions_sidecar,
+                date,
+                source_fingerprint=source_fp,
+            )
+
+        def _blur_gates(mask: Path) -> Optional[str]:
+            # Frame-index pairing: container == mask == sidecar, or mask frame j is not
+            # picture frame j. Blocks BEFORE the cabin gate and the master encode.
+            err = blur_gate.frame_pairing_error(graded_src, mask, regions_sidecar)
+            if err:
+                return err
+            # Occupant-coverage gate (drive path): a corroborated car whose cabin
+            # the mask misses would ship its driver exposed — verify against the mask
+            # BEFORE the irreversible master encode composites it, mirroring the
+            # legacy per-episode gate (blur_gate.check_cabin_coverage). A failure gets
+            # up to ``blur_cabin_repair_rounds`` targeted repairs, each followed by a
+            # fresh check of the whole day; only a leak that survives them stops the run.
+            err = _cabin_gate_with_repair(graded_src, cfg, mask, regions_sidecar)
+            if err:
+                return err
+            # A repair swaps the mask and the sidecar after the first pairing check;
+            # prove the pair again before the irreversible encode.
+            return blur_gate.frame_pairing_error(graded_src, mask, regions_sidecar)
+
+        blur_mask_path = _build_mask()
+        gate_err = _blur_gates(blur_mask_path)
+        if gate_err and blur_gate.repair_swap_error(regions_sidecar):
+            # An interrupted repair swap: the marker makes the builder re-detect (and
+            # clear it), so rebuild the pair in place ONCE rather than failing a run
+            # that the very next attempt would pass. Still refused -> raise below.
+            logger.warning("  Day %s: repair swap interrupted; rebuilding the blur mask once", date)
+            blur_mask_path = _build_mask()
+            gate_err = _blur_gates(blur_mask_path)
+        if gate_err:
+            raise blur_gate.BlurGateError(gate_err)
     # Use ``<stem>.tmp<suffix>`` (e.g. ``day_2025-01-15_master.tmp.mp4``) rather
     # than ``<name><suffix>.tmp`` so the real container extension stays at the
     # tail. ffmpeg infers the output muxer from the trailing extension; with
