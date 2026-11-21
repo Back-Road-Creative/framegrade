@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.128] - 2026-11-20
+
+### Fixed
+
+- `queue sync-short-text` is idempotent across sidecars: sidecars are planned in earliest-slot order (ties by path), each seeing one pre-run read of the queue's text (published Shorts of a project with a queued Short included) plus the final text of the sidecars before it, and an earlier sidecar's new text is checked against later sidecars' final text, so two queued projects that share a place no longer flip description leads on every apply. The title ledger and nightly title snapshot are read once per run, and a refusal re-checks the neighbour-place and batch rules on the final text. After a failed write the remaining sidecars are refused for that run.
+
 ## [0.3.127] - 2026-11-20
 
 ### Fixed
@@ -1436,7 +1442,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.127...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.128...HEAD
+[0.3.128]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.127...v0.3.128
 [0.3.127]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.126...v0.3.127
 [0.3.126]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...v0.3.126
 [0.3.125]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.124...v0.3.125
