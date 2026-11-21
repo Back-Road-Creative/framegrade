@@ -370,8 +370,15 @@ def load_published_titles() -> set[str]:
     directly so it can hard-gate on the UNREADABLE status before the
     irreversible OST burn.
     """
+    from .title_decision import title_input_cache
+
+    cache = title_input_cache.get()
+    if cache is not None and "ledger" in cache:
+        return set(cache["ledger"])
     titles, _status = read_published_titles()
-    return titles
+    if cache is not None:
+        cache["ledger"] = titles
+    return set(titles)
 
 
 def _live_catalog_videos() -> dict:

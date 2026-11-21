@@ -251,20 +251,23 @@ def _record_texts(record: PublishRecord) -> Dict[str, List[str]]:
     return texts
 
 
-def recent_platform_texts(
+def recent_text_entries(
     conn: sqlite3.Connection,
     *,
     since_days: int = CROSS_BATCH_WINDOW_DAYS,
     now: Optional[datetime] = None,
     exclude_projects: AbstractSet[str] = frozenset(),
-) -> Dict[str, List[str]]:
-    """Platform -> captions/titles already spooled in the last ``since_days``.
+    exclude_shorts: AbstractSet[Tuple[str, int]] = frozenset(),
+) -> List[Tuple[str, int, str, str]]:
+    """``(project, short_index, platform, text)`` for every text already spooled in the
+    last ``since_days``, in queue order.
 
     The queue stores no text itself; each delivery row names the sidecar it
     was enqueued from, so the text is read back from that plan file. Shadow
     and cancelled rows never publish and are skipped, as are rows of
     ``exclude_projects`` (the batch being checked: re-running the same plan
-    must not repeat against itself) and sidecars that are gone or unreadable.
+    must not repeat against itself), rows of the ``exclude_shorts``
+    ``(project, short_index)`` pairs and sidecars that are gone or unreadable.
     """
     from .plan_io import load_publish_plan
 
@@ -276,9 +279,11 @@ def recent_platform_texts(
         (cutoff,),
     ).fetchall()
     plans: Dict[str, Optional[Mapping[Tuple[str, int], PublishRecord]]] = {}
-    out: Dict[str, List[str]] = defaultdict(list)
+    out: List[Tuple[str, int, str, str]] = []
     for row in rows:
         if row["project_name"] in exclude_projects:
+            continue
+        if (row["project_name"], row["short_index"]) in exclude_shorts:
             continue
         path = row["sidecar_path"]
         if path not in plans:
@@ -293,8 +298,30 @@ def recent_platform_texts(
         if record is None:
             continue
         for text in _record_texts(record).get(row["platform"], []):
-            if text not in out[row["platform"]]:
-                out[row["platform"]].append(text)
+            out.append((row["project_name"], row["short_index"], row["platform"], text))
+    return out
+
+
+def recent_platform_texts(
+    conn: sqlite3.Connection,
+    *,
+    since_days: int = CROSS_BATCH_WINDOW_DAYS,
+    now: Optional[datetime] = None,
+    exclude_projects: AbstractSet[str] = frozenset(),
+    exclude_shorts: AbstractSet[Tuple[str, int]] = frozenset(),
+) -> Dict[str, List[str]]:
+    """Platform -> captions/titles already spooled in the last ``since_days``
+    (:func:`recent_text_entries`, which says what is skipped)."""
+    out: Dict[str, List[str]] = defaultdict(list)
+    for _project, _index, platform, text in recent_text_entries(
+        conn,
+        since_days=since_days,
+        now=now,
+        exclude_projects=exclude_projects,
+        exclude_shorts=exclude_shorts,
+    ):
+        if text not in out[platform]:
+            out[platform].append(text)
     return dict(out)
 
 

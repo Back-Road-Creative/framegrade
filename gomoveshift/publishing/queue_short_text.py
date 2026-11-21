@@ -31,6 +31,15 @@ non-terminal, unleased row whose ``plan_hash`` was the old one moves to the new 
 then the sidecar is replaced, so a failure never leaves them silently apart; every run
 also moves a queued row still on a stale hash to the sidecar's when the sidecar already
 holds the synced text. No network, no platform call; a dry run writes no file at all.
+
+Unattended nightly run (``health sync-short-text``): sidecars are planned in earliest-slot
+order (ties by path). A sidecar's "recent text" for the anti-spam gates is the pre-run
+snapshot of projects OUTSIDE the sync set plus the FINAL in-memory text of the sidecars
+planned before it, never a later one's, so a rerun sees the same inputs and is a no-op.
+A Short is also checked, across sidecars, against those earlier records inside the same
+refusal loop as the neighbour-place check, so a refusal always re-checks the final text.
+The title ledger and the nightly title snapshot are read once per run. The brand's per-location
+cap (``per_location_cap``) is passed to every ``check_batch`` call, as enqueue passes it.
 """
 
 from __future__ import annotations
@@ -40,10 +49,11 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .experiments import SHORTS_ARMS
 from .plan_bracket_sync import _generate_lf, _ordinal, _stored_arms
@@ -86,6 +96,25 @@ class ShortTextChange:
     sidecar_path: str = ""
     #: how many non-terminal rows the queue update must move (a short count = a lost race)
     expect_moved: int = 0
+
+
+#: A refusal that waits for a person: a gate, a payload or review refusal, an unusable
+#: sidecar (read or write failed), or a queue hash nothing explains. Anything else (a sibling
+#: row inside the lead time, a live lease, an old title with no stamp, a cascade after another
+#: sidecar's failed write) clears on its own, so the nightly run neither files an incident for
+#: it nor counts it.
+ACTIONABLE_REFUSALS = (
+    "still refused by the Short review",
+    "payload limit",
+    "plan gate",
+    "anti-spam gate",
+    "sidecar unusable",
+    "a queue row's plan hash",
+)
+
+
+def is_actionable_refusal(change: "ShortTextChange") -> bool:
+    return change.status == "refused" and change.reason.startswith(ACTIONABLE_REFUSALS)
 
 
 def _slot(raw) -> Optional[datetime]:
@@ -275,19 +304,25 @@ def _gate_refusals(
     posts: Dict[int, object],
     shorts: List[dict],
     spooled: dict,
-    per_location_cap: Optional[int],
+    earlier: Sequence = (),
+    per_location_cap: Optional[int] = None,
 ) -> Dict[int, str]:
     """Why each rewritten position fails the gates enqueue runs: the Short review,
     ``validate_payloads``, the plan-text gates (``plan_gates``, on the generator's post as
     ``build_publish_plan`` calls them) and ``check_batch`` over THIS sidecar's trial plan
-    (not enqueue's multi-sidecar batch)."""
+    behind the ``earlier`` sidecars' final records (the cross-sidecar rules; their own
+    violations are not this sidecar's). The brand location cap applies to the
+    forward pass as well."""
     from . import plan_gates
     from .anti_spam_gate import check_batch
     from .models import PayloadLimitError, validate_payloads
     from .youtube_adapter import short_review_refusal
 
     out: Dict[int, str] = {}
-    batch = check_batch(list(plan.shorts), per_location_cap=per_location_cap, recent_texts=spooled)
+    offset = len(earlier)
+    batch = check_batch(
+        [*earlier, *plan.shorts], per_location_cap=per_location_cap, recent_texts=spooled
+    )
     for pos in positions:
         record = plan.shorts[pos]
         refusal = short_review_refusal(record)
@@ -309,7 +344,8 @@ def _gate_refusals(
         hit = [
             v
             for v in batch
-            if v.index == pos and (v.platform in ("youtube", None) or v.rule == "caption-collision")
+            if v.index == pos + offset
+            and (v.platform in ("youtube", None) or v.rule == "caption-collision")
         ]
         if hit:
             out[pos] = "anti-spam gate: " + "; ".join(f"{v.rule}: {v.detail}" for v in hit)
@@ -383,6 +419,23 @@ def _successor_clashes(
     return out
 
 
+def _hash_refusal(conn: sqlite3.Connection, siblings, row, short: dict, new: dict) -> str:
+    """Why a rewritten Short's queue rows cannot move to its new plan hash ("" = they can)."""
+    old = short["reviewed_plan_hash"]
+    new_hash = new["reviewed_plan_hash"]
+    # a hash this sync wrote from the sidecar's own (crashed before the replace) is ours
+    known = {old, new_hash} | {n for o, n in _audit_pairs(conn, row) if o == old}
+    odd = [
+        r["plan_hash"]
+        for r in siblings
+        if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] not in known
+    ]
+    if odd:
+        return f"a queue row's plan hash {odd[0][:12]} is unknown"
+    taken = _hash_taken(siblings, conn, new_hash)
+    return f"{taken} already holds the new plan hash" if taken else ""
+
+
 def _live_rows(siblings, hashes) -> int:
     """How many non-terminal rows sit on one of ``hashes`` (what the queue update must move)."""
     return sum(
@@ -395,13 +448,18 @@ def _sidecar_changes(
     sidecar: Path,
     rows: List[sqlite3.Row],
     now: datetime,
-    per_location_cap: Optional[int],
     spooled: dict,
-) -> Tuple[Dict[int, ShortTextChange], Dict[int, dict], str, Dict[int, object]]:
+    earlier: Sequence = (),
+    forced: Optional[Mapping[Tuple[str, int], str]] = None,
+    per_location_cap: Optional[int] = None,
+) -> Tuple[Dict[int, ShortTextChange], Dict[int, dict], str, list]:
     """Per YouTube row id: its verdict; the rewritten Short for each ``changed`` one
-    (keyed by position in the plan); the sidecar's sha256; the trial plan's record of each
-    rewritten Short. ``spooled`` is this sidecar's snapshot of the queue's recent text,
-    taken before any apply. Nothing is written here."""
+    (keyed by position in the plan); the sidecar's sha256; the sidecar's FINAL records of the
+    Shorts it queues (rewritten text where a Short changes, stored text otherwise). ``spooled``
+    is this sidecar's recent text (the queue's text outside this run's Shorts plus the final
+    text of the sidecars before it), ``earlier`` those sidecars' final records and ``forced``
+    the ``(project, short_index)`` Shorts a later sidecar's text obliges us to refuse. A
+    plan that cannot be rebuilt raises (never an empty answer). Nothing is written here."""
     from gomoveshift.pipeline.social_generator import load_hand_titles
 
     body = sidecar.read_bytes()
@@ -412,6 +470,16 @@ def _sidecar_changes(
     by_key = {(s["project_name"], int(s["short_index"])): pos for pos, s in enumerate(shorts)}
     hand = load_hand_titles(sidecar.parent / "social" / "titles.yaml")
     verdict: Dict[int, ShortTextChange] = {}
+    forced = forced or {}
+    queued = {(r["project_name"], int(r["short_index"])) for r in rows}
+
+    def final_records(rewritten_now: Dict[int, dict], trial_plan=None) -> list:
+        if trial_plan is None:
+            trial_raw = copy.deepcopy(raw)
+            for pos, new in rewritten_now.items():
+                trial_raw["shorts"][pos] = new
+            trial_plan = plan_from_raw(trial_raw, sidecar)
+        return [r for r in trial_plan.shorts if (r.project_name, r.short_index) in queued]
 
     def settle(row, pos, status, reason="", **kw):
         title = shorts[pos]["payloads"]["youtube"]["title"] if pos is not None else ""
@@ -445,13 +513,15 @@ def _sidecar_changes(
             settle(row, pos, "inside_lead_time", f"slot {at.isoformat()} is inside the lead time")
         elif why:
             settle(row, pos, "refused", why)
+        elif (row["project_name"], int(row["short_index"])) in forced:
+            settle(row, pos, "refused", forced[(row["project_name"], int(row["short_index"]))])
         elif int(shorts[pos]["short_index"]) in hand:
             settle(row, pos, "unchanged", "hand_title")
         else:
             targets[pos] = row
             siblings[pos] = sib
     if not targets:
-        return verdict, {}, sha, {}
+        return verdict, {}, sha, final_records({})
 
     active: Set[int] = set(targets)
     rewritten: Dict[int, dict] = {}
@@ -482,11 +552,19 @@ def _sidecar_changes(
             for pos, new in rewritten.items():
                 trial["shorts"][pos] = new
             plan = plan_from_raw(trial, sidecar)
-            bad = _gate_refusals(plan, list(rewritten), posts, shorts, spooled, per_location_cap)
+            bad = _gate_refusals(
+                plan, list(rewritten), posts, shorts, spooled, earlier, per_location_cap
+            )
             for pos, why in bad.items():
                 settle(targets[pos], pos, "refused", why)
                 active.discard(pos)
             again |= set(bad)
+            for pos in set(rewritten) - set(bad):
+                why = _hash_refusal(conn, siblings[pos], targets[pos], shorts[pos], rewritten[pos])
+                if why:
+                    settle(targets[pos], pos, "refused", why)
+                    active.discard(pos)
+                    again.add(pos)
         if not again:
             break
     for pos in unchanged:
@@ -523,16 +601,9 @@ def _sidecar_changes(
             )
         else:
             settle(targets[pos], pos, "unchanged", "text already matches the generator")
-    for pos, new in list(rewritten.items()):
+    for pos, new in rewritten.items():
         old = shorts[pos]["reviewed_plan_hash"]
         new_hash = new["reviewed_plan_hash"]
-        # a hash this sync wrote from the sidecar's own (crashed before the replace) is ours
-        known = {old, new_hash} | {n for o, n in _audit_pairs(conn, targets[pos]) if o == old}
-        odd = [
-            r["plan_hash"]
-            for r in siblings[pos]
-            if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] not in known
-        ]
         moving = sorted(
             {
                 r["plan_hash"]
@@ -540,16 +611,6 @@ def _sidecar_changes(
                 if r["status"] not in TERMINAL_STATUSES and r["plan_hash"] != new_hash
             }
         )
-        taken = _hash_taken(siblings[pos], conn, new_hash)
-        if odd or taken:
-            del rewritten[pos]
-            why = (
-                f"a queue row's plan hash {odd[0][:12]} is unknown"
-                if odd
-                else f"{taken} already holds the new plan hash"
-            )
-            settle(targets[pos], pos, "refused", why)
-            continue
         settle(
             targets[pos],
             pos,
@@ -561,8 +622,7 @@ def _sidecar_changes(
             old_hashes=tuple(moving),
             expect_moved=_live_rows(siblings[pos], moving),
         )
-    records = {pos: plan.shorts[pos] for pos in rewritten} if plan is not None else {}
-    return verdict, rewritten, sha, records
+    return verdict, rewritten, sha, final_records(rewritten, plan if rewritten else None)
 
 
 def _apply_sidecar(
@@ -638,6 +698,72 @@ def _apply_sidecar(
         os.replace(tmp, sidecar)
 
 
+@contextmanager
+def _title_inputs_once() -> Iterator[None]:
+    """Read the published-titles ledger and the nightly title snapshot once for the whole run.
+
+    The generator reads both on every title it composes; a per-run cache (a context variable
+    the two readers consult, no function swapped) makes every sidecar, dry run or apply, judge
+    against the same inputs. Reset on exit, so nothing is cached across runs."""
+    from gomoveshift.pipeline.title_decision import title_input_cache
+
+    token = title_input_cache.set({})
+    try:
+        yield
+    finally:
+        title_input_cache.reset(token)
+
+
+def _with_texts(base: Dict[str, List[str]], records: Sequence) -> Dict[str, List[str]]:
+    """``base`` (platform -> texts) plus every text of ``records``, no repeats; a new dict."""
+    from .anti_spam_gate import _record_texts
+
+    out = {platform: list(texts) for platform, texts in base.items()}
+    for record in records:
+        for platform, texts in _record_texts(record).items():
+            bucket = out.setdefault(platform, [])
+            bucket.extend(t for t in texts if t not in bucket)
+    return out
+
+
+def _slot_order(by_sidecar: Dict[str, List[sqlite3.Row]]) -> List[str]:
+    """Sidecar paths by their earliest queued slot, ties (and unusable slots) by path."""
+    far = datetime.max.replace(tzinfo=timezone.utc)
+
+    def earliest(path: str) -> datetime:
+        slots = [_slot(r["scheduled_at"]) if r["scheduled_at"] else None for r in by_sidecar[path]]
+        return min((a for a in slots if a is not None), default=far)
+
+    return sorted(by_sidecar, key=lambda path: (earliest(path), path))
+
+
+def _new_text_clashes(
+    new_records: Sequence, later: Sequence, per_location_cap: Optional[int] = None
+) -> Dict[Tuple[str, int], str]:
+    """``(project, short_index)`` -> why, for each of ``new_records`` (one sidecar's rewritten
+    text) whose text collides with the FINAL text of a LATER sidecar, one the later sidecar's
+    own gates never saw change (a Short left as stored)."""
+    from .anti_spam_gate import check_batch
+
+    if not new_records or not later:
+        return {}
+    batch = check_batch(
+        [*new_records, *later],
+        per_location_cap=per_location_cap,
+        recent_texts=_with_texts({}, later),
+    )
+    out: Dict[Tuple[str, int], str] = {}
+    for v in batch:
+        if v.index < len(new_records) and (
+            v.platform in ("youtube", None) or v.rule == "caption-collision"
+        ):
+            record = new_records[v.index]
+            key = (record.project_name, record.short_index)
+            why = f"{v.rule}: {v.detail}"
+            out[key] = f"{out[key]}; {why}" if key in out else why
+    return {k: f"anti-spam gate: {why} (against a later sidecar's text)" for k, why in out.items()}
+
+
 def sync_short_text(
     conn: sqlite3.Connection,
     *,
@@ -654,15 +780,7 @@ def sync_short_text(
     for row in rows:
         by_sidecar.setdefault(row["sidecar_path"], []).append(row)
     verdicts: Dict[int, ShortTextChange] = {}
-    from .anti_spam_gate import recent_platform_texts
-
-    # one snapshot per sidecar, all taken before any apply and excluding only that sidecar's
-    # own projects: what the queue holds NOW (other projects' text included), so the
-    # verdicts depend neither on the visit order nor on what an earlier apply wrote
-    snapshots = {
-        path: recent_platform_texts(conn, exclude_projects={r["project_name"] for r in group})
-        for path, group in by_sidecar.items()
-    }
+    from .anti_spam_gate import recent_text_entries
 
     def refuse_all(group, why):
         for row in group:
@@ -677,22 +795,83 @@ def sync_short_text(
                 sidecar_path=row["sidecar_path"],
             )
 
-    planned: Dict[str, tuple] = {}
-    for path, group in by_sidecar.items():
-        try:
-            planned[path] = _sidecar_changes(
-                conn, Path(path), group, now, per_location_cap, snapshots[path]
-            )
-        except (OSError, ValueError, LookupError) as exc:
-            refuse_all(group, f"sidecar unusable: {exc}")
-    _cross_sidecar_refusals(planned, per_location_cap)
-    for path, (verdict, rewritten, sha, _records) in planned.items():
+    order = _slot_order(by_sidecar)
+    sync_keys = {(r["project_name"], int(r["short_index"])) for r in rows}
+    with _title_inputs_once():
+        # ONE read of the queue's text per run, taken before any apply. A sidecar's view of it
+        # leaves out its own projects and the Shorts this run rewrites for other sidecars (their
+        # text comes from `earlier`, final): everything else, a published Short beside a queued
+        # one included, reaches its gates. A rerun therefore sees the same inputs.
+        entries = recent_text_entries(conn)
+
+        def spooled_for(path: str, earlier: Sequence) -> Dict[str, List[str]]:
+            own = {r["project_name"] for r in by_sidecar[path]}
+            base: Dict[str, List[str]] = {}
+            for project, index, platform, text in entries:
+                if project in own or (project, index) in sync_keys:
+                    continue
+                bucket = base.setdefault(platform, [])
+                if text not in bucket:
+                    bucket.append(text)
+            return _with_texts(base, earlier)
+
+        forced: Dict[Tuple[str, int], str] = {}
+        while True:
+            planned: Dict[str, tuple] = {}
+            unusable: Dict[str, str] = {}
+            finals: Dict[str, list] = {}
+            earlier: list = []
+            for path in order:
+                try:
+                    planned[path] = _sidecar_changes(
+                        conn,
+                        Path(path),
+                        by_sidecar[path],
+                        now,
+                        spooled_for(path, earlier),
+                        tuple(earlier),
+                        forced,
+                        per_location_cap,
+                    )
+                except (OSError, ValueError, LookupError) as exc:
+                    unusable[path] = f"sidecar unusable: {exc}"
+                    continue
+                finals[path] = planned[path][3]
+                earlier.extend(finals[path])
+            # An earlier sidecar's NEW text must also clear the later sidecars' final text,
+            # including a Short they leave as stored (their own gates only check what changes).
+            found: Dict[Tuple[str, int], str] = {}
+            for i, path in enumerate(order):
+                if path not in planned:
+                    continue
+                new_keys = {
+                    (n["project_name"], int(n["short_index"])) for n in planned[path][1].values()
+                }
+                later = [r for p in order[i + 1 :] for r in finals.get(p, ())]
+                new = [r for r in finals[path] if (r.project_name, r.short_index) in new_keys]
+                found.update(_new_text_clashes(new, later, per_location_cap))
+            fresh = {k: v for k, v in found.items() if k not in forced}
+            if not fresh:
+                break
+            forced.update(fresh)  # grows every round, so the loop ends; re-plan with the refusals
+    for path, why in unusable.items():
+        refuse_all(by_sidecar[path], why)
+    write_failed = False
+    for path in order:
+        if path not in planned:
+            continue
+        verdict, rewritten, sha, _finals = planned[path]
         sidecar, group = Path(path), by_sidecar[path]
-        if apply and any(v.status in ("changed", "reconciled") for v in verdict.values()):
+        writes = any(v.status in ("changed", "reconciled") for v in verdict.values())
+        if apply and writes and write_failed:
+            refuse_all(group, "an earlier sidecar's write failed; retried next run")
+            continue
+        if apply and writes:
             try:
                 _apply_sidecar(conn, sidecar, verdict, rewritten, sha, now)
             except (OSError, ValueError, sqlite3.Error) as exc:
                 refuse_all(group, f"sidecar unusable: write failed: {exc}")
+                write_failed = True
                 continue
             verdict = {
                 k: replace(v, written=True) if v.status in ("changed", "reconciled") else v
@@ -700,48 +879,3 @@ def sync_short_text(
             }
         verdicts.update(verdict)
     return [verdicts[row["id"]] for row in rows]
-
-
-def _cross_sidecar_refusals(planned: Dict[str, tuple], per_location_cap: Optional[int]) -> None:
-    """One ``check_batch`` over every Short the run rewrites, across sidecars (each sidecar
-    was checked only against the queue's text and its own Shorts): a violation refuses the
-    offending Short in place, before anything is applied."""
-    from .anti_spam_gate import check_batch
-
-    items = [
-        (path, pos, rec)
-        for path, (_v, rewritten, _s, records) in planned.items()
-        for pos, rec in records.items()
-        if pos in rewritten
-    ]
-    if len({path for path, _, _ in items}) < 2:
-        return
-    while items:  # refuse the last offender, then look again: the earlier one may stand
-        found = check_batch(
-            [rec for *_, rec in items], per_location_cap=per_location_cap, recent_texts={}
-        )
-        found = [
-            v for v in found if v.platform in ("youtube", None) or v.rule == "caption-collision"
-        ]
-        if not found:
-            return
-        v = max(found, key=lambda v: v.index)
-        path, pos, rec = items.pop(v.index)
-        verdict, rewritten, _sha, _records = planned[path]
-        for rid, ch in verdict.items():
-            if (
-                ch.status == "changed"
-                and ch.project_name == rec.project_name
-                and ch.short_index == rec.short_index
-            ):
-                verdict[rid] = replace(
-                    ch,
-                    status="refused",
-                    reason=f"anti-spam gate (across sidecars): {v.rule}: {v.detail}",
-                    new_title=ch.old_title,
-                    fields=(),
-                    new_hash="",
-                    old_hashes=(),
-                    expect_moved=0,
-                )
-                rewritten.pop(pos, None)

@@ -23,17 +23,54 @@ The no-repeated-place chain is seeded from the stored title and description of t
 each rewritten one, not from regenerated text, and the generator's date is the LF's
 `parent_lf_publish_at`. Each rewritten Short
 must pass `short_review_refusal`, `models.validate_payloads` and `anti_spam_gate.check_batch`
-(with the queue's recent text and the brand's `per_location_cap`), the gates enqueue runs, plus
+(with the queue's recent text: the queue's published and queued text, read once per run, minus
+the Shorts this run rewrites and a sidecar's own projects; earlier sidecars' final text is added),
+the gates enqueue runs, plus
 `plan_gates.assert_plan_text_grammar` and `assert_shorts_metadata_in_region` on the new post;
-a refused one is left unchanged and reported. `check_batch` runs over the one sidecar's Shorts,
-not enqueue's multi-sidecar batch, so the location cap is counted within that sidecar. The
-queue's recent text is snapshotted once per sidecar, before anything is applied, excluding only
-that sidecar's own projects (other queued projects' text is seen), so dry run and apply give
-the same verdicts. One more `check_batch` then runs over every Short the run rewrites, across
-sidecars, and refuses the later offender in place before any apply. A single sidecar re-run is
-a no-op with the same generator, queue and title ledger (the ledger and title snapshot are read
-inside the generator, not snapshotted); two sidecars that share a place each see the other's
-text, so their description leads can still change on a later run.
+a refused one is left unchanged and reported. The brand's per-location cap is
+loaded by the CLI and the health entry point and applied to every anti-spam check, forward and
+backward, as enqueue applies it.
+
+### Order, recent text and idempotence
+
+Sidecars are planned in order of their earliest queued slot, ties broken by sidecar path.
+Sidecar i's recent text is the pre-run snapshot of every project OUTSIDE the sync set (one
+`recent_platform_texts` read per run, before anything is applied, so dry run and apply give the
+same verdicts) plus the final in-memory text of sidecars 0..i-1, and never a later one's. Its
+`check_batch` runs over the earlier sidecars' final records followed by its own trial plan, so
+the cross-sidecar rules (shared title prefix, repeated text) bind the later sidecar and only its
+own violations refuse it. The cross check sits in the same refusal loop as the neighbour-place
+check (`_successor_clashes`), so after any refusal the generator re-runs and both checks look
+at the sidecar's FINAL text. The published-titles ledger and the nightly title snapshot
+(`title_evidence.json`, written by `metrics collect`) are read once per run, not per title.
+Because each sidecar sees the same inputs on every run, a rerun is a no-op: two queued projects
+that share a place no longer flip description leads on every apply.
+
+### Nightly: `gomoveshift health sync-short-text`
+
+The nightly entry point (`gomoveshift/health/short_text_sync.py`) runs the sync with `--apply`
+and files incidents through the health incident store (`health-incident/1`, see
+`156-health-check.md`): `short_text_sync_refused:<project>` (one row per project, listing each
+refused Short and why) and `short_text_sync_crash`. Only a refusal that waits for a person files
+a row and counts (`ACTIONABLE_REFUSALS`: a review, payload, plan or anti-spam gate, an unusable
+sidecar or failed write, an unknown queue hash); a sibling row inside the lead time, a live lease,
+an old title with no stamp or a cascade after a failed write clears on its own and files nothing.
+Each row is pushed once (`health_short_text_sync_refused`, `health_short_text_sync_crash`; a push
+that fails is retried the next night) and a refusal row resolves on the first run that no longer refuses that project (the crash row, on the first run that completes). A crash leaves
+the refusal rows open (it proves nothing about them). `health check` lists these rows but never
+writes, resolves or pushes them: this command is their only writer (the incident store has no
+lock). Exit 0 clean, 1 when a Short was refused for an actionable reason, 2 on a crash.
+`queue sync-short-text` itself still exits 1 on any refusal.
+
+Failure handling: a new text is also checked against the final text of every LATER sidecar
+(including a Short it leaves as stored); a clash refuses the earlier sidecar's Short and the
+run is re-planned. After a failed write the sidecars still to be written are refused ("an earlier
+sidecar's write failed") and converge the next night.
+
+Schedule: run `gomoveshift health sync-short-text --data-root <workspaces>` from the service
+directory, from the staging mirror's venv, AFTER the nightly `metrics collect` (which writes
+the title snapshot the sync reads). The scheduler is a workspaces cron line (see
+`bin/gms-metrics-cron.sh`, `_ops/cron/`), a separate change from this one.
 A Short is also refused when its final place equals its neighbour's final place in the LF
 (new text if rewritten, stored otherwise; the later of two rewritten ones), when the generator
 refuses it alone (the LF is retried Short by Short; Shorts not being rewritten ride along as
@@ -56,4 +93,4 @@ audit row); a row on any other hash refuses the Short ("plan hash ... is unknown
 race remains between the sha256 check and the replace; a concurrent writer in that window is
 not detected.
 
-Tests: `tests/test_queue_sync_short_text.py`.
+Tests: `tests/test_queue_sync_short_text.py`, `tests/test_queue_sync_short_text_nightly.py`.
