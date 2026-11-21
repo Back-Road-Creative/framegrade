@@ -204,7 +204,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or unreadable).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed).
 
 ## Resume recipe and `health heal`
 

@@ -38,7 +38,7 @@ KEY_SYNC = f"{KIND}:sync"
 
 #: The nightly ``metrics collect`` refreshes the decisions file; a day plus a night of slack.
 DECISIONS_STALE_AFTER_H = 36
-#: ``health sync-short-text`` runs nightly, chained after ``metrics collect``, so its start drifts:
+#: ``health sync-short-text`` runs nightly, scheduled after ``metrics collect``, so its start can drift:
 #: the same limit as the decisions file.
 SYNC_STALE_AFTER_H = 36
 #: A ``ran_at`` further ahead of the check than this is clock skew: unreadable, never "fresh".
