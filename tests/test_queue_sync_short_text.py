@@ -30,17 +30,6 @@ NOW = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
 OLD_HASH = "c" * 64
 ORDINALS = ("1st", "2nd", "3rd")
 
-# A fact title carries no "Nth stretch" stamp and the generator's discarded sibling Shorts
-# consume the measured places in its per-batch used-title set; queue_short_text.py and
-# plan_bracket_sync.py (not owned by the fact-title change) need a follow-up that seeds the
-# stored titles and the ordinal from short_index. Strict: the day the follow-up lands these
-# start passing and the marker must go.
-SYNC_FOLLOWUP = pytest.mark.xfail(
-    strict=True,
-    reason="queue sync cannot re-derive the ordinal from a fact title nor skip its discarded "
-    "siblings' titles; follow-up in queue_short_text.py / plan_bracket_sync.py",
-)
-
 
 @pytest.fixture(autouse=True)
 def _no_published_titles(monkeypatch):
@@ -223,11 +212,6 @@ def test_dry_run_writes_nothing(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM response_log").fetchone()[0] == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a fact title carries no 'Nth stretch' stamp, so the sync cannot re-derive the "
-    "ordinal from a title it wrote; queue_short_text.py (not owned here) needs the follow-up",
-)
 def test_a_second_run_is_a_no_op(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
     sync_short_text(conn, apply=True, now=NOW)
@@ -304,7 +288,6 @@ def _untouched(world, mutate):
     return changes
 
 
-@SYNC_FOLLOWUP
 @pytest.mark.parametrize("status", ["published", "uploading"])
 def test_the_place_chain_is_seeded_from_the_stored_text_of_a_sibling(tmp_path, status):
     plan, conn = _world(tmp_path, [_named_first(), _short(2)])
@@ -453,7 +436,6 @@ def test_a_crash_after_commit_before_the_replace_converges_on_the_next_run(tmp_p
     assert [c.status for c in sync_short_text(conn, apply=True, now=NOW)] == ["unchanged"] * 2
 
 
-@SYNC_FOLLOWUP
 def test_a_queue_row_behind_a_synced_sidecar_is_moved_with_an_audit_row(tmp_path):
     plan, conn = _two(tmp_path)
     sync_short_text(conn, apply=True, now=NOW)
@@ -593,13 +575,24 @@ def test_the_queue_update_matches_the_rows_raw_sidecar_path(tmp_path):
     assert _converged(plan, conn)
 
 
-@SYNC_FOLLOWUP
-def test_a_stored_title_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
-    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
+def test_a_stored_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
+    # The title-body arms shape only the stamped fallback and are never assigned now, so the
+    # surviving stored arm is the hashtag set: it is rendered, not dropped.
+    plan, conn = _world(tmp_path, [_short(1, arms={"yt_hashtag_set": "road"})])
     [change] = sync_short_text(conn, apply=True, now=NOW)
     assert change.status == "changed"
-    assert _youtube(plan, 1).payloads.youtube.title.startswith("Mar 5, 1st stretch: 38 seconds, ")
-    assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "clip_led"}
+    assert _youtube(plan, 1).payloads.youtube.title.split(" #", 1)[0] == "Harrow"
+    assert "#RoadTrip" in _youtube(plan, 1).payloads.youtube.description
+    assert _youtube(plan, 1).experiment_arms == {"yt_hashtag_set": "road"}
+
+
+def test_a_stored_title_body_arm_is_refused_not_dropped(tmp_path):
+    # A fact title carries no title-body variant, so a plan holding one is left as it was.
+    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
+    before = plan.read_text()
+    [change] = sync_short_text(conn, apply=True, now=NOW)
+    assert change.status == "refused" and "can no longer be rendered" in change.reason
+    assert plan.read_text() == before
 
 
 def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
@@ -648,7 +641,6 @@ def test_the_cli_exits_non_zero_when_a_short_is_refused(tmp_path):
     assert cmd_queue(args, config) == 1
 
 
-@SYNC_FOLLOWUP
 def test_a_row_on_a_hash_this_sync_never_wrote_is_refused_not_moved(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)
@@ -741,8 +733,10 @@ def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
     assert plan.read_text() == before
 
 
-@SYNC_FOLLOWUP
-def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
+def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path, monkeypatch):
+    # Both places are already live titles, so each Short falls back to the stamped title
+    # ("<date>, Nth stretch: ..."), the only title the 3-word shared-prefix rule can see.
+    monkeypatch.setattr(lm, "load_published_titles", lambda: {"harrow", "ashby county"})
     plan, conn = _world(tmp_path, [_short(1)])
     _other(conn, tmp_path, day=5)  # same day and place, so the same text
     changes = sync_short_text(conn, apply=True, now=NOW)
@@ -755,7 +749,6 @@ def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
     assert not any(c.written for c in changes)
 
 
-@SYNC_FOLLOWUP
 def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_unchanged(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)
@@ -811,7 +804,6 @@ def test_a_skipped_short_that_cannot_compose_does_not_refuse_the_live_one(tmp_pa
     assert [c.status for c in changes] == ["changed"] and changes[0].short_index == 2
 
 
-@SYNC_FOLLOWUP
 def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypatch):
     real = qst._generate_lf
 
@@ -829,7 +821,6 @@ def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypat
     assert "place repeats" in changes[1].reason
 
 
-@SYNC_FOLLOWUP
 def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
     tmp_path, monkeypatch
 ):

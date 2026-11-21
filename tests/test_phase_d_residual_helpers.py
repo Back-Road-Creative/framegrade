@@ -203,9 +203,11 @@ class TestBuildSocialPostsPerLf:
             per_short_title_facts=None,
             shorts_arms_enabled=False,
             shorts_arm_history=None,
+            used_titles=None,
         ):
             assert shorts_arms_enabled is True  # Phase D always assigns the Shorts arms
             assert isinstance(shorts_arm_history, dict)  # one history across the drive
+            assert isinstance(used_titles, dict)  # one title ledger across the drive
             call = SimpleNamespace(
                 num=num_shorts, offset=index_offset, title_facts=per_short_title_facts
             )

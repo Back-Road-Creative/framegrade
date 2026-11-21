@@ -182,11 +182,6 @@ def test_dry_run_writes_nothing_and_leaves_no_temp_file(tmp_path):
     assert not list(tmp_path.glob("*.sync-tmp"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a fact title carries no 'Nth stretch' stamp, so the sync cannot re-derive the "
-    "ordinal from a title it wrote; plan_bracket_sync.py (not owned here) needs the follow-up",
-)
 def test_apply_is_idempotent_and_the_plan_still_loads(tmp_path):
     plan = _write(tmp_path, [_short(1), _short(2)])
     sync_bracket_short_text(plan, apply=True)

@@ -7,7 +7,7 @@ than :data:`SYNC_LEAD_TIME` away: it regenerates the Short's text through the ge
 path Phase D uses (``plan_bracket_sync._generate_lf``, over the parent LF) and writes
 title, description and tags back to the publish-plan sidecar.
 
-Kept as it was: the title stamp (``"<date>, Nth stretch"``), recording date, schedule,
+Kept as it was: recording date, schedule,
 media, and ``experiment_arms`` exactly as stored (the sync never picks, swaps or excludes
 an arm). The generator renders each Short's stored Shorts arms (``SHORTS_FACTORS``)
 verbatim; a Short whose known stored arm the regenerated text no longer carries is refused,
@@ -59,8 +59,15 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Collection, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
+from ..pipeline.text_format import split_trailing_hashtags
 from .experiments import SHORTS_ARMS
-from .plan_bracket_sync import _generate_lf, _ordinal, _stored_arms
+from .plan_bracket_sync import (
+    _generate_lf,
+    _stored_arms,
+    generated_title,
+    location_places,
+    ordinal_basis,
+)
 from .plan_io import load_publish_plan, plan_from_raw
 from .queue import TERMINAL_STATUSES
 
@@ -130,9 +137,9 @@ class ShortTextChange:
 #: Permanent, needs-a-human refusals (all actionable): "generator: ...", an unreadable LF
 #: sidecar or one with no location, a stored arm the generator cannot render, "no such Short in
 #: the plan", "already holds the new plan hash", a recovery row, a row in a non-queued state
-#: ("is <status>"), "has no usable scheduled_at", "no clip place ...", an old title with no
-#: "Nth stretch" stamp (nothing edits it for the sync), "its ... place repeats ...", a review,
-#: payload, plan or anti-spam gate refusal, "sidecar unusable: ..." (any other write failure
+#: ("is <status>"), "has no usable scheduled_at", "no clip place ...", an old title this
+#: plan did not generate (neither its "Nth stretch" stamp nor a measured place), "its ... place
+#: repeats ...", a review, payload, plan or anti-spam gate refusal, "sidecar unusable: ..." (any other write failure
 #: too), an unknown queue hash.
 #:
 #: Outcomes that are by design NOT refusals: "already holds the synced plan hash" (``unchanged``,
@@ -281,6 +288,7 @@ def _generate(
     lfs: Dict[Tuple[str, int], List[int]] = {}
     for pos, s in enumerate(shorts):
         lfs.setdefault((s["project_name"], int(s["lf_index"])), []).append(pos)
+    ordinals = ordinal_basis(shorts)
     for (project, lf_index), positions in lfs.items():
         mine = [p for p in positions if p in active]
         if not mine:
@@ -292,8 +300,8 @@ def _generate(
             skip = why
             if not skip and not s.get("sampled_regions"):
                 skip = "no clip place to compose a title from"
-            if not skip and _ordinal(s) is None:
-                skip = "old title has no verifiable 'Nth stretch' stamp"
+            if not skip and not generated_title(s, location_places(location, record)):
+                skip = "old title is not one this plan generated (no stamp, no measured place)"
             if skip:
                 refused[pos] = skip
         live = [p for p in mine if p not in refused]
@@ -306,12 +314,26 @@ def _generate(
             today = date.fromisoformat(shorts[positions[0]]["recording_date"])
 
         def run(which: List[int]) -> Dict[int, object]:
+            # The titles of the Shorts left as they were are taken: a rewritten Short may not
+            # repeat one. A Short asked for composes its own, so its old title is not.
+            used = {
+                "titles": {
+                    split_trailing_hashtags(shorts[p]["payloads"]["youtube"]["title"])[0]
+                    .strip()
+                    .lower()
+                    for p in range(len(shorts))
+                    if p not in which
+                }
+            }
             seeds = {
                 i: _stored_places(shorts[positions[i - 2]], location) if i > 1 else {}
                 for i in range(1, len(positions) + 1)
                 if i == 1 or positions[i - 2] not in which
             }
-            view = [{**shorts[p], "_discard": p not in which} for p in positions]
+            view = [
+                {**shorts[p], "_discard": p not in which, "_ordinal": ordinals[p]}
+                for p in positions
+            ]
             made = _generate_lf(
                 view,
                 record,
@@ -320,6 +342,7 @@ def _generate(
                 spooled_texts=spooled,
                 experiment_today=today,
                 previous_places_at=seeds,
+                used_titles=used,
             )
             return {p: g for p, g in zip(positions, made) if p in which}
 

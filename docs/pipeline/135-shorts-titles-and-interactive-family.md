@@ -249,11 +249,20 @@ generator logs `no unused measured place for the ... title`. A Short whose
 assigned (a fact title has no body to vary); `SHORTS_TITLE_BODY_ARMS` shapes only the
 stamped fallback.
 
-Known follow-up (not in this change): `queue_short_text.py` and `plan_bracket_sync.py`
-read the ordinal from the old title's stamp and seed no stored titles into
-`used_titles`, so a second sync run refuses a row whose title is a fact title and a
-rewritten sibling can lose its place to a discarded one. Both refuse safely
-(untouched); the affected tests are strict xfails (`SYNC_FOLLOWUP`).
+**One title ledger per drive.** Phase D hands every LF's `generate_all` the same
+`used_titles` dict, so a measured place titles one Short of the drive, not one per LF.
+
+**Queue and bracket sync re-derive fact titles.** `plan_bracket_sync.ordinal_basis` takes a
+Short's day ordinal from the plan itself: the day sidecar beside its media
+(`shorts_ost_audit_<DATE>.json`, start-time order, the same one Phase D reads), else the
+old title's verified stamp (a plan written before fact titles), else its position among the
+plan's Shorts of that recording date. It never parses "Nth stretch" out of a fact title.
+`generated_title` is the safety check that the old title is one this plan wrote: its stamp,
+or exactly one of the Short's measured places (or the LF location / bracket label); any
+other title is refused and left as it was. A discarded sibling (a stored Short the sync was
+not asked to rewrite) names no place, so it takes no measured place, and its stored title
+is seeded into `used_titles` so a rewritten Short cannot repeat it. Running sync over a plan
+the generator just wrote changes nothing.
 
 ### Stamped titles on the drive path
 

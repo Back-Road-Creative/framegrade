@@ -14,7 +14,6 @@ from test_queue_sync_short_text import (
     PROJECT,
     PROJECT2,
     REGION,
-    SYNC_FOLLOWUP,
     _other,
     _short,
     _two,
@@ -63,7 +62,7 @@ def _synced_text(scratch, project):
         "youtube row 3 is uploading",
         "youtube row 3 has no usable scheduled_at",
         "no clip place to compose a title from",
-        "old title has no verifiable 'Nth stretch' stamp",
+        "old title is not one this plan generated (no stamp, no measured place)",
         "its title place repeats the previous Short's",
         "still refused by the Short review: x",
         "payload limit: x",
@@ -199,7 +198,6 @@ def test_a_generator_that_always_raises_is_an_actionable_refusal(tmp_path, monke
     assert all(qst.is_actionable_refusal(c) for c in changes)
 
 
-@SYNC_FOLLOWUP
 def test_a_stale_row_whose_synced_hash_is_already_taken_is_a_no_op_not_a_refusal(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)  # the sidecar now holds the synced text
@@ -269,8 +267,11 @@ def test_a_sanction_for_a_short_generated_with_its_predecessor_holds_where_the_p
 # -- M2: an unusable sidecar's stored text still reaches the other sidecars' gates -----------
 
 
-@pytest.mark.parametrize("a_first", [pytest.param(True, marks=SYNC_FOLLOWUP), False])
-def test_an_unusable_sidecars_stored_text_is_seen_by_the_gates(tmp_path, a_first):
+@pytest.mark.parametrize("a_first", [True, False])
+def test_an_unusable_sidecars_stored_text_is_seen_by_the_gates(tmp_path, a_first, monkeypatch):
+    # Both places are already live titles, so each Short takes the stamped title, the one the
+    # 3-word shared-prefix rule can see (a bare place name is under its 3-word floor).
+    monkeypatch.setattr(lm, "load_published_titles", lambda: {"harrow", "ashby county"})
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     new_b = _synced_text(scratch, PROJECT2)

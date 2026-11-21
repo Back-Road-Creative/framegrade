@@ -506,6 +506,37 @@ def test_phase_d_hands_one_shared_history_to_every_long_form(tmp_path):
     assert len(seen) == 2 and seen[0] is seen[1] and isinstance(seen[0], dict)
 
 
+def test_phase_d_hands_one_shared_title_ledger_to_every_long_form(tmp_path):
+    """A measured place titles one Short of the drive: every LF's ``generate_all`` gets the
+    SAME ``used_titles`` dict, so a title cannot repeat across LFs."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from gomoveshift.pipeline.drive_phases.phase_d_scheduling import _build_social_posts_per_lf
+
+    seen = []
+
+    def gen_all(num_shorts, index_offset, **kw):
+        seen.append(kw.get("used_titles"))
+        return [
+            SimpleNamespace(short_index=index_offset + i, to_dict=dict) for i in range(num_shorts)
+        ]
+
+    inst = MagicMock()
+    inst.generate_all.side_effect = gen_all
+    _build_social_posts_per_lf(
+        social_gen_cls=MagicMock(return_value=inst),
+        drive_plan=SimpleNamespace(
+            regular_lfs=[SimpleNamespace(index=1), SimpleNamespace(index=2)]
+        ),
+        shorts_per_lf={1: ["a"], 2: ["b"]},
+        per_lf_locations_override={1: "x", 2: "x"},
+        project_base="p",
+        output_base=tmp_path,
+    )
+    assert len(seen) == 2 and isinstance(seen[0], dict) and seen[0] is seen[1]
+
+
 # --- the stored hashtag arm is always in the rendered description -------------
 
 LONG_COUNTY = "Llanfairpwllgwyngyllgogerychwyrndrobwll County, Pennsylvania"
