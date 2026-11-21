@@ -542,7 +542,7 @@ def test_two_sidecars_dry_run_and_apply_agree_on_one_snapshot_per_run(tmp_path, 
     applied = sync_short_text(conn, apply=True, now=NOW)
     assert key(dry) == key(applied) and {c.status for c in applied} == {"changed"}
     # one pre-run read per run (filtered per sidecar afterwards), never one per sidecar
-    assert reads == [{}, {}]
+    assert reads == [{"now": NOW}, {"now": NOW}]
 
 
 def test_a_hand_titled_short_is_left_alone(tmp_path):
@@ -732,7 +732,7 @@ def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
     assert not any(c.written for c in changes)
 
 
-def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):
+def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_unchanged(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)
     new_hash = _hashes(conn)[(1, "youtube")]
@@ -745,7 +745,8 @@ def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):
     )
     conn.commit()
     changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["refused"] and "already holds" in changes[0].reason
+    # nothing for the sync to write: by design `unchanged`, not a refusal (TRANSIENT_REFUSALS note)
+    assert [c.status for c in changes] == ["unchanged"] and "already holds" in changes[0].reason
 
 
 def test_a_crash_then_a_generator_change_still_converges(tmp_path, monkeypatch):
@@ -799,5 +800,32 @@ def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypat
     second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
     plan, conn = _world(tmp_path, [_short(1), second])
     changes = sync_short_text(conn, apply=False, now=NOW)
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "place repeats" in changes[1].reason
+
+
+def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
+    tmp_path, monkeypatch
+):
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        made = real(view, *a, **kw)
+        for post in made:  # the generator "sanctions" every repeat
+            post.place_variety = {
+                k: {"reason": "no_alternative", "body": "Ashby County"}
+                for k in ("title", "description")
+            }
+        return made
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    # its seed was the predecessor's STORED places, so the sanction says nothing about the
+    # predecessor's NEW ones: the clash stands
     assert [c.status for c in changes] == ["changed", "refused"]
     assert "place repeats" in changes[1].reason

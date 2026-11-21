@@ -31,8 +31,8 @@ _EVENTS = {
 }
 
 #: Kinds ``health sync-short-text`` owns end to end: it alone files, resolves and pushes them
-#: (the incident store has no lock, so two writers of one row would race). ``run_check`` lists
-#: them but never writes or pushes one.
+#: (it holds a lock around its store write; ``run_check`` takes none, so it never writes, pushes
+#: or resolves one). They are listed, and an open one keeps ``health check`` at exit 1.
 _SYNC_OWNED = ("short_text_sync_refused", "short_text_sync_crash")
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
@@ -74,10 +74,6 @@ def _footage_line(rows: List[Dict[str, Any]]) -> str:
 
 
 def _line(row: Dict[str, Any]) -> str:
-    if row["kind"] in _SYNC_OWNED:
-        from .short_text_sync import incident_line  # noqa: PLC0415
-
-        return incident_line(row)
     if row["kind"] == "drive_failed":
         return drives.summary(row)
     if row["kind"] == "failure_unattended":

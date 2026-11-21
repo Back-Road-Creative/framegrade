@@ -2117,9 +2117,6 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Incident rows dir (env GMS_HEALTH_INCIDENTS_DIR).",
     )
-    t.add_argument(
-        "--jobs-dir", type=Path, default=None, help="Accepted for cron symmetry; unused."
-    )
 
 
 def _add_sync_site_parser(subparsers: argparse._SubParsersAction) -> None:
