@@ -463,7 +463,8 @@ def test_a_failing_rule_11_does_not_skip_rule_10(tmp_path, monkeypatch):
     go = _checker(tmp_path, monkeypatch, [])
     (a,) = _cam(tmp_path / "trip", "GX01.MP4")
     out = go([_row("drive", a)], None, str(storage))
-    assert [r["key"] for r in out["incidents"]] == ["backlog_store_orphan:stray"]
+    keys = [r["key"] for r in out["incidents"] if r["kind"] != "seo_feedback_stale"]
+    assert keys == ["backlog_store_orphan:stray"]  # rule 13 is not this test's subject
     assert any("rule 11 not evaluated" in n for n in out["notes"])
 
 

@@ -253,7 +253,8 @@ def test_run_check_raises_files_and_resolves(tmp_path):
     pushed = []
 
     def notify(event, payload, text):
-        pushed.append((event, text))
+        if event != "health_seo_feedback_stale":  # rule 13 is not this test's subject
+            pushed.append((event, text))
         return True
 
     kw = dict(
@@ -266,7 +267,7 @@ def test_run_check_raises_files_and_resolves(tmp_path):
         tracking_root=root,
     )
     res = run_check(cfg, **kw)
-    assert res["new"] == ["short_bad_run"]
+    assert [k for k in res["new"] if not k.startswith("seo_feedback_stale")] == ["short_bad_run"]
     assert [e for e, _ in pushed] == ["health_short_bad_run"]
     rows, _bad = load_all(tmp_path / "inc")
     row = next(r for r in rows if r["kind"] == "short_bad_run")

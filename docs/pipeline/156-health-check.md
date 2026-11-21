@@ -148,7 +148,7 @@ sets `resolved_at`; a refusal for another reason, or a tick that never reached t
 (lease held, running drive), leaves it open. `health check` never resolves it. A dry run writes
 nothing.
 
-A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
+A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
 
 12. **Nightly Short text sync** (`gomoveshift health sync-short-text`,
    `gomoveshift/health/short_text_sync.py`; not part of `health check`, which never runs it).
@@ -168,6 +168,19 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
    them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
 
+13. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
+   Two conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
+   `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
+   h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
+   within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
+   gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
+   it resolves when the count is 0). An open row's detail, count and listing are refreshed
+   without a re-push; a listed Short that ages out of the lookback while still empty drops out
+   of the listing and the check says so once in a note ("not a fix"). Pushed once as `health_seo_feedback_stale`; detection only. An
+   unreadable tracking record is a note and keeps the open metrics row live; a missing
+   decisions file is condition (a)'s finding only and holds nothing else. Detail:
+   `docs/seo-feedback-stale.md`.
+
 ## Push and idempotency
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
@@ -177,7 +190,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -185,7 +198,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`).
 
 ## Resume recipe and `health heal`
 

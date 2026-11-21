@@ -422,3 +422,41 @@ def test_report_failure_is_logged_and_swallowed(tmp_path, monkeypatch, capsys, c
         handler._report_shorts_arm_decisions(config, "brand")  # must not raise
     assert "ARM_DECISION" not in capsys.readouterr().out
     assert "shorts arm decision report skipped" in caplog.text
+
+
+# --- the persisted decision record (read by health's seo_feedback_stale) --------
+
+
+def test_report_persists_every_arm_decision_with_a_timestamp(tmp_path, monkeypatch):
+    import json as _json
+
+    handler, config = _handler_world(tmp_path, monkeypatch, YT)
+    handler._report_shorts_arm_decisions(config, "brand")
+    data = _json.loads((tmp_path / "shorts_arm_decisions.json").read_text())
+    assert data["schema"] == 1
+    assert data["decided_at"].endswith("+00:00")
+    assert {(d["factor"], d["arm"], d["decision"]) for d in data["decisions"]} == {
+        ("yt_title_body", "A", "INSUFFICIENT_EVIDENCE")
+    }
+    assert {"n", "score", "reference", "gap", "reason"} <= set(data["decisions"][0])
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []  # atomic
+
+
+def test_partial_run_keeps_the_old_decided_at(tmp_path, monkeypatch):
+    import json as _json
+
+    handler, config = _handler_world(tmp_path, monkeypatch, YT)
+    path = tmp_path / "shorts_arm_decisions.json"
+    old = {"schema": 1, "decided_at": "2026-01-01T00:00:00+00:00", "decisions": []}
+    path.write_text(_json.dumps(old))
+    real, calls = handler.decide_shorts_arms, []
+
+    def second_factor_fails(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 2:
+            raise ValueError("second factor broke")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(handler, "decide_shorts_arms", second_factor_fails)
+    handler._report_shorts_arm_decisions(config, "brand")  # swallowed
+    assert _json.loads(path.read_text()) == old
