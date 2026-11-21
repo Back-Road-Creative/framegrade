@@ -30,7 +30,9 @@ def _relaunch(rig, now_fp, *, dry_run=False):
     return rig.relaunch
 
 
-def _failed_row(rig, stamped=OLD, *, klass="deterministic", status="failed", project="day-a"):
+def _failed_row(
+    rig, stamped=OLD, *, klass="deterministic", status="failed", project="day-a", error="BLUR GATE"
+):
     """A store row ``status`` whose stage dir holds only calibration.json, and the incident row
     ``health check`` filed for it (``stamped``: its failure fingerprint, None = legacy)."""
     rig.drives.append(drive(project, status))
@@ -40,7 +42,7 @@ def _failed_row(rig, stamped=OLD, *, klass="deterministic", status="failed", pro
     rig.incidents = rig.tmp / "incidents"
     row = new_incident(
         "drive_failed", f"drive_failed:{project}:r1", f"{project}.json", "2026-11-07T10:00:00Z",
-        drive=project, phase="x", error="BLUR GATE", resume_recipe=None, resume_attempts=[],
+        drive=project, phase="x", error=error, resume_recipe=None, resume_attempts=[],
     )  # fmt: skip
     if stamped:
         row["failure_fingerprint"] = {
@@ -207,3 +209,33 @@ def test_a_running_drive_blocks_the_relaunch(tmp_path):
     rig.running = True
     rig.run()
     assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+REC0060_ERROR = (
+    "phase_bc: cannot enter encoding - drive plan build FAILED (no DrivePlan): Day 2026-03-04: "
+    "kept (stop-masked) footage 2889s is under full_drive_part_min_sec=3600s. Footage is never "
+    "padded, repeated or joined to another day."
+)
+
+
+def test_rec0060_relaunches_from_source_once_the_short_day_release_installs(tmp_path):
+    """The short-day best_moments release changes the installed version, so the failure's
+    fingerprint changes and the deterministic InsufficientFootageError row relaunches with no
+    human step; under the old version it stays refused."""
+    klass = retry_policy.classify_failure(REC0060_ERROR, "x", None)
+    assert klass == retry_policy.DETERMINISTIC
+    newer = {**OLD, "versions": {"gomoveshift": "0.3.26"}}
+
+    rig = Rig(tmp_path / "same")
+    rig.rows = rig.rows[:1]
+    _failed_row(rig, klass=klass, error=REC0060_ERROR)
+    _relaunch(rig, OLD)
+    assert rig.run()["action"] != "launched" and not rig.launches
+
+    rig = Rig(tmp_path / "bumped")
+    _failed_row(rig, klass=klass, error=REC0060_ERROR)
+    _relaunch(rig, newer)
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert len(rig.launches) == 1
+    assert "fingerprint changed" in res["relaunch"]

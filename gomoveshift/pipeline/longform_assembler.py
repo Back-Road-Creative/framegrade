@@ -1310,6 +1310,8 @@ class LongFormAssembler:
                 short_day_min_sec=getattr(self.config, "full_drive_short_day_min_sec", None),
                 day=date,
             )
+            day_lf_mode = getattr(parts, "lf_mode", "full_drive")
+            day_lf_reason = getattr(parts, "lf_mode_reason", None)
             parts = [p for p in parts if p]
             if not parts:
                 continue
@@ -1348,6 +1350,9 @@ class LongFormAssembler:
                 if split:
                     plan.part_index = part_no
                     plan.part_count = len(parts)
+                if day_lf_mode != "full_drive":
+                    plan.lf_mode = day_lf_mode
+                    plan.lf_mode_reason = day_lf_reason
                 global_lf_index += 1
 
                 all_lfs.append(plan)

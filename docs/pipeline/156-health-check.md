@@ -427,7 +427,8 @@ render; its blockers are `refused`, and a crashed child is an error, never a pas
 **Render gate.** Before anything is moved, launched or registered, and in a dry run too, the row
 is checked against the drive's own pre-ingest refusal (`day_under_part_min_message`) under the
 row's `ingest_mode` and `lf_mode`: a `full_drive` day whose raw footage (with its neighbouring
-calendar days) is under `full_drive_part_min_sec` is skipped with `render gate: <message>`, and the
+calendar days) is under the 480 s minimum long-form (`min_lf_duration`; a day under
+`full_drive_part_min_sec` but over it is planned as `best_moments`, not refused) is skipped with `render gate: <message>`, and the
 next eligible row is tried, so one short day never stalls the region. When no row behind it is
 eligible, or the refused row is the `--supersede` target, the result is `refused` with that reason.
 The scan reads a throwaway dir of links to the row's sources until its subset dir exists.

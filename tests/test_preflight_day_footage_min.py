@@ -1,4 +1,7 @@
-"""Upstream gate: a full_drive day under the part minimum is refused before ingest."""
+"""Upstream gate: a full_drive day under the 480 s minimum LF is refused before ingest.
+
+A day under ``full_drive_part_min_sec`` but over it is planned as best_moments, so it passes.
+"""
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -55,12 +58,19 @@ def _run(tmp_path, monkeypatch, episodes, cfg):
     return res, pf, cal
 
 
-def test_day_under_part_min_is_refused_before_ingest(tmp_path, monkeypatch):
+def test_day_under_part_min_but_over_the_minimum_lf_passes(tmp_path, monkeypatch):
     eps = [_ep("2026-03-04", 1025.0), _ep("2026-03-04", 1025.0)]
+    res, pf, _cal = _run(tmp_path, monkeypatch, eps, _cfg(3600, 5400))
+    assert res is None
+    pf.assert_called_once()
+
+
+def test_day_under_the_minimum_lf_is_refused_before_ingest(tmp_path, monkeypatch):
+    eps = [_ep("2026-03-04", 200.0), _ep("2026-03-04", 200.0)]
     res, _pf, cal = _run(tmp_path, monkeypatch, eps, _cfg(3600, 5400))
     assert res is not None and res.success is False
     msg = res.errors[0]
-    assert "2026-03-04" in msg and "2050s" in msg and "full_drive_part_min_sec=3600s" in msg
+    assert "2026-03-04" in msg and "400s" in msg and "min_lf_duration=480s" in msg
     assert "never padded" in msg
     # Refused before the calibration encode, the run's first GPU work; the
     # cheap pre-flight checks run too so every blocker is reported together.

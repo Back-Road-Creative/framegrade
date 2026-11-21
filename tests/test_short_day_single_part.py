@@ -61,17 +61,35 @@ def test_planner_day_exactly_at_short_floor_is_one_part():
     assert len(_plan(SHORT_MIN, SHORT_MIN)) == 1
 
 
-def test_planner_day_under_short_floor_still_raises():
+def test_planner_day_under_short_floor_falls_back_to_best_moments():
+    parts = _plan(2600, SHORT_MIN)
+    assert parts.lf_mode == "best_moments"
+    assert "kept 2600s under full_drive_short_day_min_sec=2700s" in parts.lf_mode_reason
+
+
+def test_planner_key_unset_falls_back_at_2889():
+    parts = _plan(2889, None)
+    assert parts.lf_mode == "best_moments"
+    assert "kept 2889s under full_drive_part_min_sec=3600s" in parts.lf_mode_reason
+
+
+def test_planner_still_raises_when_best_moments_cannot_reach_the_minimum_either():
+    # 3000 s kept 100 s in every 300: 1000 s kept clears the 480 s check, but no
+    # 1140 s best_moments window holds 480 s of it, so the day is still refused.
+    n = 3000
+    mask = (np.arange(n) % 300) >= 100
     with pytest.raises(InsufficientFootageError, match=DAY) as exc:
-        _plan(2600, SHORT_MIN)
+        plan_full_drive_parts(
+            _scores(n),
+            min_duration_sec=480,
+            full_drive_max_duration_sec=7200,
+            stop_mask=mask,
+            part_min_sec=PART_MIN,
+            part_max_sec=PART_MAX,
+            day=DAY,
+        )
     msg = str(exc.value)
-    assert "2600s" in msg and "full_drive_short_day_min_sec=2700s" in msg
-    assert "never padded" in msg
-
-
-def test_planner_key_unset_still_raises_at_2889():
-    with pytest.raises(InsufficientFootageError, match="full_drive_part_min_sec=3600s"):
-        _plan(2889, None)
+    assert "480s minimum LF duration" in msg and "never padded" in msg
 
 
 def test_planner_short_day_does_not_call_the_splitter(monkeypatch):
@@ -135,14 +153,17 @@ def test_gps_gate_passes_a_day_the_planner_accepts():
     _gate(SHORT_MIN, 2889)
 
 
-def test_gps_gate_refuses_under_the_short_floor():
-    with pytest.raises(InsufficientFootageError, match="full_drive_short_day_min_sec=2700s"):
-        _gate(SHORT_MIN, 2600)
+def test_gps_gate_lets_a_day_under_the_short_floor_reach_the_best_moments_fallback():
+    _gate(SHORT_MIN, 2600)
 
 
-def test_gps_gate_key_unset_refuses_at_2889():
-    with pytest.raises(InsufficientFootageError, match="full_drive_part_min_sec=3600s"):
-        _gate(None, 2889)
+def test_gps_gate_key_unset_lets_2889_reach_the_fallback():
+    _gate(None, 2889)
+
+
+def test_gps_gate_refuses_a_day_under_the_minimum_lf():
+    with pytest.raises(InsufficientFootageError, match="min_lf_duration=480s"):
+        _gate(None, 400)
 
 
 # --- preflight / backlog refusal message ------------------------------------
@@ -174,14 +195,17 @@ def test_preflight_accepts_a_short_day_at_or_above_the_short_floor(monkeypatch, 
     assert _message(monkeypatch, tmp_path, 2889.0, SHORT_MIN) is None
 
 
-def test_preflight_refuses_under_the_short_floor(monkeypatch, tmp_path):
-    msg = _message(monkeypatch, tmp_path, 2600.0, SHORT_MIN)
-    assert msg and "full_drive_short_day_min_sec=2700s" in msg and "never padded" in msg
+def test_preflight_lets_a_day_under_the_short_floor_through(monkeypatch, tmp_path):
+    assert _message(monkeypatch, tmp_path, 2600.0, SHORT_MIN) is None
 
 
-def test_preflight_key_unset_refuses_at_2889(monkeypatch, tmp_path):
-    msg = _message(monkeypatch, tmp_path, 2889.0, None)
-    assert msg and "full_drive_part_min_sec=3600s" in msg
+def test_preflight_key_unset_lets_2889_through(monkeypatch, tmp_path):
+    assert _message(monkeypatch, tmp_path, 2889.0, None) is None
+
+
+def test_preflight_refuses_a_day_under_the_minimum_lf(monkeypatch, tmp_path):
+    msg = _message(monkeypatch, tmp_path, 400.0, None)
+    assert msg and "min_lf_duration=480s" in msg and "never padded" in msg
 
 
 # --- config ----------------------------------------------------------------
