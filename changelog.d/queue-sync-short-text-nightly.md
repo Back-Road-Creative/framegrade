@@ -1,0 +1,3 @@
+### Fixed
+
+- `queue sync-short-text` is idempotent across sidecars: sidecars are planned in earliest-slot order (ties by path), each seeing one pre-run read of the queue's text (published Shorts of a project with a queued Short included) plus the final text of the sidecars before it, and an earlier sidecar's new text is checked against later sidecars' final text, so two queued projects that share a place no longer flip description leads on every apply. The title ledger and nightly title snapshot are read once per run, and a refusal re-checks the neighbour-place and batch rules on the final text. After a failed write the remaining sidecars are refused for that run.

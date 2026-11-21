@@ -524,15 +524,15 @@ def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
     assert any("zebra words" in text for text in seen["recent_texts"]["youtube"])
 
 
-def test_two_sidecars_dry_run_and_apply_agree_on_a_snapshot_per_sidecar(tmp_path, monkeypatch):
+def test_two_sidecars_dry_run_and_apply_agree_on_one_snapshot_per_run(tmp_path, monkeypatch):
     _, conn = _two(tmp_path)
     _other(conn, tmp_path)
-    excluded = []
-    real = anti_spam_gate.recent_platform_texts
+    reads = []
+    real = anti_spam_gate.recent_text_entries
     monkeypatch.setattr(
         anti_spam_gate,
-        "recent_platform_texts",
-        lambda c, **kw: excluded.append(kw["exclude_projects"]) or real(c, **kw),
+        "recent_text_entries",
+        lambda c, **kw: reads.append(kw) or real(c, **kw),
     )
 
     def key(changes):
@@ -541,7 +541,8 @@ def test_two_sidecars_dry_run_and_apply_agree_on_a_snapshot_per_sidecar(tmp_path
     dry = sync_short_text(conn, apply=False, now=NOW)
     applied = sync_short_text(conn, apply=True, now=NOW)
     assert key(dry) == key(applied) and {c.status for c in applied} == {"changed"}
-    assert sorted(map(sorted, excluded)) == [[PROJECT]] * 2 + [[PROJECT2]] * 2  # per sidecar
+    # one pre-run read per run (filtered per sidecar afterwards), never one per sidecar
+    assert reads == [{}, {}]
 
 
 def test_a_hand_titled_short_is_left_alone(tmp_path):
@@ -703,13 +704,32 @@ def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
     assert any("location-cap" in c.reason for c in changes if c.status == "refused")
 
 
+def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
+    plan, conn = _two(tmp_path)
+    conn.close()
+    monkeypatch.setattr(
+        "gomoveshift.publishing.brand_policy.load_brand_policy",
+        lambda brand: SimpleNamespace(per_location_cap=1),
+    )
+    monkeypatch.setattr("gomoveshift.console.settings.current_brand", lambda: "brand")
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    args = SimpleNamespace(queue_action="sync-short-text", apply=False)
+    before = plan.read_text()
+    assert cmd_queue(args, config) == 1  # the second Short is refused for location-cap
+    assert plan.read_text() == before
+
+
 def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     _other(conn, tmp_path, day=5)  # same day and place, so the same text
     changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["changed", "refused"]
-    assert "anti-spam gate" in changes[1].reason
-    assert changes[0].written
+    # The second sidecar's text equals the first's, so it is refused; the first's new text in
+    # turn clashes with the second's text as STORED, so it is refused too (checked against later
+    # sidecars): nothing is written and the pair stays stable night to night.
+    assert [c.status for c in changes] == ["refused", "refused"]
+    assert all("anti-spam gate" in c.reason for c in changes)
+    assert "later sidecar" in changes[0].reason
+    assert not any(c.written for c in changes)
 
 
 def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):

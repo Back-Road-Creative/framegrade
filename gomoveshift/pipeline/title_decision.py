@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,11 @@ _ENTERED = ("in", "through")
 # Operator override for the pre-render stop below (same idiom as
 # ``GMS_ALLOW_CLIP_REUSE``): the run proceeds with a title no facts back.
 ALLOW_UNPROVEN_TITLE_ENV = "GMS_ALLOW_UNPROVEN_TITLE"
+
+#: Set to a dict by a caller (``queue_short_text.sync_short_text``) that wants the published-
+#: titles ledger and the nightly title snapshot read ONCE for a whole run; None (the default)
+#: reads them every time, as every other caller does.
+title_input_cache: ContextVar[Optional[dict]] = ContextVar("title_input_cache", default=None)
 
 
 class TitleDecisionMismatchError(RuntimeError):
@@ -175,7 +181,13 @@ def shipped_title_snapshot() -> Optional[EvidenceSnapshot]:
     from ..tracking.title_evidence import load_title_evidence
     from . import longform_metadata
 
-    return load_title_evidence(Path(longform_metadata.DEFAULT_SEO_STORAGE))
+    cache = title_input_cache.get()
+    if cache is not None and "snapshot" in cache:
+        return cache["snapshot"]
+    snapshot = load_title_evidence(Path(longform_metadata.DEFAULT_SEO_STORAGE))
+    if cache is not None:
+        cache["snapshot"] = snapshot
+    return snapshot
 
 
 def decide_title(
