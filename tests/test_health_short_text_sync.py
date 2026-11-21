@@ -514,6 +514,8 @@ def test_projects_whose_names_share_a_safe_filename_keep_separate_streaks(tmp_pa
     result = run()
     assert set(_refused_rows(tmp_path)) == {"short_text_sync_refused:a b"}
     assert result["refused"] == 1
+
+
 def test_the_store_lock_is_the_portable_file_lock_so_the_module_imports_on_windows():
     # ci/import_smoke.py imports every module on Windows, where fcntl does not exist.
     from gomoveshift.health import short_text_sync
