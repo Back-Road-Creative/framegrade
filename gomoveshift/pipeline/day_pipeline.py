@@ -2353,6 +2353,7 @@ def run_day_pipeline(
         # reading 1.0. ``file_boundaries`` (day-local, computed above) tiles
         # the episodes in master time.
         region = getattr(_drive, "region", "") if _drive is not None else ""
+        _day_mode = getattr(part_ranges, "lf_mode", "full_drive")
         lf_plans = []
         for part_no, full_drive_ranges in enumerate(part_ranges, 1):
             kept_duration = sum(r.duration_sec for r in full_drive_ranges)
@@ -2397,6 +2398,12 @@ def run_day_pipeline(
                     total_duration=kept_duration,
                     part_index=part_no if len(part_ranges) > 1 else None,
                     part_count=len(part_ranges) if len(part_ranges) > 1 else None,
+                    lf_mode=_day_mode if _day_mode != "full_drive" else None,
+                    lf_mode_reason=(
+                        getattr(part_ranges, "lf_mode_reason", None)
+                        if _day_mode != "full_drive"
+                        else None
+                    ),
                 )
             )
             logger.info(

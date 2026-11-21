@@ -117,14 +117,6 @@ def _assert_no_scored_gaps(valid_episodes: list, file_scores: list) -> None:
             )
 
 
-def _day_floor(drive, part_min):
-    """(name, seconds) of the per-day floor: the short-day key when it is lower."""
-    short = getattr(drive, "full_drive_short_day_min_sec", None)
-    if short is not None and short < part_min:
-        return "full_drive_short_day_min_sec", short
-    return "full_drive_part_min_sec", part_min
-
-
 def _assert_days_clear_gps_gap_floor(
     drive, file_boundaries: list, file_durations: list, episode_dates: list, gps_per_episode: list
 ) -> None:
@@ -133,7 +125,9 @@ def _assert_days_clear_gps_gap_floor(
     The drive planner cuts every second with no usable fix within the
     route-claim gap (``longform_assembler._with_gps_gap_mask``), ORed with the
     stop mask, then refuses a day whose kept footage is under
-    ``full_drive_part_min_sec`` (``plan_full_drive_parts``). The gap cut needs
+    minimum long-form duration (``plan_full_drive_parts`` plans a day under
+    ``full_drive_part_min_sec`` as ``best_moments``, so only a day under the
+    480 s minimum LF is certain to be refused). The gap cut needs
     only the parsed GPX, and the stop mask can only cut more, so a day already
     under the floor here is certain to be refused -- raised before the GPU
     scoring pass instead of after it. Mirrors the planner's per-day slicing
@@ -146,7 +140,7 @@ def _assert_days_clear_gps_gap_floor(
         return
     if resolve_lf_mode(drive) != "full_drive" or not file_boundaries:
         return
-    floor_name, floor = _day_floor(drive, part_min)
+    floor_name, floor = "min_lf_duration", float(getattr(drive, "min_lf_duration", 480.0))
     from ..longform_assembler import _with_gps_gap_mask
     from ..regular_lf_planner import InsufficientFootageError
     from ..route_claims import day_fix_gap_s
@@ -179,7 +173,7 @@ def _assert_days_clear_gps_gap_floor(
             raise InsufficientFootageError(
                 f"Day {day}: at most {kept}s of footage survives the GPS-gap cut "
                 f"({len(day_scores) - kept}s has no usable fix within "
-                f"{day_fix_gap_s(day_gps)}s), under {floor_name}={floor}s; the "
+                f"{day_fix_gap_s(day_gps)}s), under {floor_name}={floor:g}s; the "
                 "stop mask can only cut more, so the drive plan is certain to refuse "
                 "this day. Refused before scoring. Footage is never padded, repeated or "
                 "joined to another day."

@@ -309,6 +309,10 @@ class RegularLFPlan:
     # part count. None for every non-split LF.
     part_index: Optional[int] = None
     part_count: Optional[int] = None
+    # Set only when a full_drive day was planned another way: a day under the
+    # part floor is a ``best_moments`` long-form, with the reason it was.
+    lf_mode: Optional[str] = None
+    lf_mode_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -323,6 +327,9 @@ class RegularLFPlan:
         if self.part_index is not None:
             d["part_index"] = self.part_index
             d["part_count"] = self.part_count
+        if self.lf_mode is not None:
+            d["lf_mode"] = self.lf_mode
+            d["lf_mode_reason"] = self.lf_mode_reason
         return d
 
     @classmethod
@@ -337,6 +344,8 @@ class RegularLFPlan:
             undersized=d.get("undersized", False),
             part_index=d.get("part_index"),
             part_count=d.get("part_count"),
+            lf_mode=d.get("lf_mode"),
+            lf_mode_reason=d.get("lf_mode_reason"),
         )
 
 

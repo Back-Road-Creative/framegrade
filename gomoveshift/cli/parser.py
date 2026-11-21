@@ -607,8 +607,9 @@ def _add_drive_parser(subparsers: argparse._SubParsersAction) -> None:
         "'best_moments' = sliding-window "
         "best contiguous ranges. 'full_drive' = one LF per day spanning the entire "
         "post-stop-removal timeline, or K balanced parts per day when "
-        "config.drive.full_drive_part_min_sec/max_sec are set (Insta360 use case). Overrides "
-        "config.drive.lf_selection_mode.",
+        "config.drive.full_drive_part_min_sec/max_sec are set (Insta360 use case). A day too "
+        "short for a full-drive long-form is rendered as a shorter best_moments long-form, "
+        "never failed. Overrides config.drive.lf_selection_mode.",
     )
     # First-class operator knob for "I want a single highlight LF of EXACTLY N
     # minutes" — fills the gap between best_moments (variable duration, bins

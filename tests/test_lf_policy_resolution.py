@@ -94,9 +94,9 @@ def test_banner_shows_mode_source_and_bounds():
 
 
 # (d) short day
-def test_short_full_drive_day_raises_naming_day_seconds_and_minimum():
-    with pytest.raises(InsufficientFootageError) as ei:
-        plan_full_drive_parts(
+def test_short_full_drive_day_becomes_a_best_moments_long_form(caplog):
+    with caplog.at_level("WARNING"):
+        parts = plan_full_drive_parts(
             _scores(1620),
             min_duration_sec=480,
             full_drive_max_duration_sec=7200,
@@ -105,39 +105,74 @@ def test_short_full_drive_day_raises_naming_day_seconds_and_minimum():
             part_max_sec=5400,
             day="2026-02-20",
         )
-    msg = str(ei.value)
-    assert "2026-02-20" in msg and "1620" in msg and "3600" in msg
-    assert isinstance(ei.value, ValueError)
+    assert parts.lf_mode == "best_moments"
+    assert parts.lf_mode_reason == "kept 1620s under full_drive_part_min_sec=3600s"
+    assert (
+        "day 2026-02-20: kept 1620s under full_drive_part_min_sec=3600s -> best_moments long-form"
+        in caplog.text
+    )
+    assert len(parts) == 1
+    kept = sum(r.duration_sec for r in parts[0])
+    assert 480 <= kept <= 1620  # within the day: never padded past it
 
 
-def test_stop_masked_footage_counts_as_not_kept():
+def test_a_day_that_meets_the_floor_is_unchanged():
+    parts = plan_full_drive_parts(
+        _scores(3700),
+        min_duration_sec=480,
+        full_drive_max_duration_sec=7200,
+        stop_mask=np.zeros(3700, dtype=bool),
+        part_min_sec=3600,
+        part_max_sec=5400,
+        day="d",
+    )
+    assert parts.lf_mode == "full_drive" and parts.lf_mode_reason is None
+
+
+def test_stop_masked_footage_counts_as_not_kept_and_the_fallback_cuts_stops():
     mask = np.zeros(4000, dtype=bool)
     mask[1000:3000] = True  # only 2000 s kept of 4000
-    with pytest.raises(InsufficientFootageError, match="2000"):
-        plan_full_drive_parts(
-            _scores(4000),
+    parts = plan_full_drive_parts(
+        _scores(4000),
+        min_duration_sec=480,
+        full_drive_max_duration_sec=7200,
+        stop_mask=mask,
+        part_min_sec=3600,
+        part_max_sec=5400,
+        day="d",
+    )
+    assert parts.lf_mode == "best_moments" and "kept 2000s" in parts.lf_mode_reason
+    for r in parts[0]:  # no stopped second is inside any planned range
+        assert not mask[int(r.start_sec) : int(r.end_sec)].any()
+
+
+def test_each_short_day_is_planned_on_its_own_never_joined():
+    """Two short consecutive days are two separate best_moments LFs, not one joined LF."""
+    for day in ("2026-02-20", "2026-02-21"):
+        parts = plan_full_drive_parts(
+            _scores(1800),
             min_duration_sec=480,
             full_drive_max_duration_sec=7200,
-            stop_mask=mask,
+            stop_mask=np.zeros(1800, dtype=bool),
+            part_min_sec=3600,
+            part_max_sec=5400,
+            day=day,
+        )
+        assert len(parts) == 1 and sum(r.duration_sec for r in parts[0]) <= 1800
+        assert parts.lf_mode == "best_moments"
+
+
+def test_a_day_under_the_480s_minimum_is_still_refused():
+    with pytest.raises(ValueError, match="minimum LF duration"):
+        plan_full_drive_parts(
+            _scores(400),
+            min_duration_sec=480,
+            full_drive_max_duration_sec=7200,
+            stop_mask=np.zeros(400, dtype=bool),
             part_min_sec=3600,
             part_max_sec=5400,
             day="d",
         )
-
-
-def test_each_short_day_refuses_on_its_own_never_joined():
-    """Two short consecutive days are two refusals, not one joined LF."""
-    for day in ("2026-02-20", "2026-02-21"):
-        with pytest.raises(InsufficientFootageError, match=day):
-            plan_full_drive_parts(
-                _scores(1800),
-                min_duration_sec=480,
-                full_drive_max_duration_sec=7200,
-                stop_mask=np.zeros(1800, dtype=bool),
-                part_min_sec=3600,
-                part_max_sec=5400,
-                day=day,
-            )
 
 
 def test_no_escape_flag_exists():

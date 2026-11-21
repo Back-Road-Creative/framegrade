@@ -2,10 +2,11 @@
 
 The drive planner cuts every second with no usable fix within the route-claim
 gap (``longform_assembler._with_gps_gap_mask``) and then refuses a day whose
-kept footage is under ``full_drive_part_min_sec``. That cut needs only the
-parsed GPX, so the refusal is knowable before the GPU scoring pass. #229: the
-03-04 drive ran its whole scoring pass (about 35 minutes of the heavy slot)
-on every attempt, only for the planner to refuse 2889 s against a 3600 s floor.
+kept footage is under the 480 s minimum long-form (a day under
+``full_drive_part_min_sec`` but over it is planned as ``best_moments`` instead).
+That cut needs only the parsed GPX, so the refusal is knowable before the GPU
+scoring pass. #229: the 03-04 drive ran its whole scoring pass (about 35 minutes
+of the heavy slot) on every attempt, only for the planner to refuse the day.
 """
 
 from types import SimpleNamespace
@@ -52,13 +53,19 @@ def _check(drive, durations, dates, gps):
 
 
 def test_a_day_left_under_the_floor_by_its_gps_gap_is_refused_before_scoring():
-    # 6000 s raw, but the second episode carries no fix: 3000 s survive the cut.
+    # 6000 s raw, but the second episode carries no fix: 300 s survive the cut,
+    # under the 480 s minimum LF (3000 s would instead reach the best_moments fallback).
     with pytest.raises(InsufficientFootageError, match=DAY) as exc:
-        _check(_drive(), [3000.0, 3000.0], [DAY, DAY], [_gps(3000), (None, 0.0)])
+        _check(_drive(), [300.0, 3000.0], [DAY, DAY], [_gps(300), (None, 0.0)])
     msg = str(exc.value)
-    assert "3000s" in msg and "full_drive_part_min_sec=3600s" in msg
+    assert "300s" in msg and "min_lf_duration=480s" in msg
     assert "GPS" in msg and "before scoring" in msg
     assert "--fresh" not in msg
+
+
+def test_a_day_the_gap_cut_leaves_between_the_minimum_and_the_floor_passes():
+    # 3000 s survive: under the 3600 s part floor, so it falls back to best_moments.
+    _check(_drive(), [3000.0, 3000.0], [DAY, DAY], [_gps(3000), (None, 0.0)])
 
 
 def test_a_day_with_fixes_throughout_passes():
@@ -71,13 +78,13 @@ def test_a_gps_less_day_is_never_refused_here():
 
 
 def test_each_day_is_judged_on_its_own_footage():
-    # 03-04 is whole; 03-05 is 4000 s of which only 1000 s has fixes.
+    # 03-04 is whole; 03-05 is 700 s of which only 400 s has fixes.
     with pytest.raises(InsufficientFootageError, match="2026-03-05"):
         _check(
             _drive(),
-            [4000.0, 1000.0, 3000.0],
+            [4000.0, 400.0, 300.0],
             [DAY, "2026-03-05", "2026-03-05"],
-            [_gps(4000), _gps(1000, 2_000_000.0), (None, 0.0)],
+            [_gps(4000), _gps(400, 2_000_000.0), (None, 0.0)],
         )
 
 
@@ -91,18 +98,18 @@ def test_inactive_unless_full_drive_with_both_part_bounds(drive):
 
 
 def test_a_day_track_with_phone_holes_is_judged_at_the_day_track_gap():
-    # Clonakilty's shape: 4000 s with a 20 s hole every 120 s. At 5 s the holes
-    # cut 660 s and the day falls under 3600 s; a slicer-written track is
-    # judged at 30 s and passes.
+    # Clonakilty's shape: a 20 s hole every 120 s. At 5 s the holes cut about a
+    # sixth of the day and 400 s of it falls under the 480 s minimum LF; a
+    # slicer-written track is judged at 30 s and passes.
     with pytest.raises(InsufficientFootageError, match=DAY):
-        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=20)])
-    _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=20, creator=MARKER)])
+        _check(_drive(), [550.0], [DAY], [_gps(550, hole_len=20)])
+    _check(_drive(), [550.0], [DAY], [_gps(550, hole_len=20, creator=MARKER)])
 
 
 def test_the_refusal_names_the_tolerance_it_applied():
     with pytest.raises(InsufficientFootageError) as exc:
-        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=60, every=120, creator=MARKER)])
+        _check(_drive(), [900.0], [DAY], [_gps(900, hole_len=60, every=120, creator=MARKER)])
     assert "within 30.0s" in str(exc.value)
     with pytest.raises(InsufficientFootageError) as exc:
-        _check(_drive(), [4000.0], [DAY], [_gps(4000, hole_len=60, every=120)])
+        _check(_drive(), [900.0], [DAY], [_gps(900, hole_len=60, every=120)])
     assert "within 5.0s" in str(exc.value)

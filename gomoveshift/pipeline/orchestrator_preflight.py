@@ -194,12 +194,13 @@ def _ask(channel) -> str:
 
 
 def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
-    """Upstream gate: a full_drive day whose RAW footage is under the part minimum.
+    """Upstream gate: a full_drive day whose RAW footage is under the minimum LF.
 
     Kept (stop-masked) footage can never exceed a day's raw footage, so a day
-    whose summed raw source duration is under ``full_drive_part_min_sec`` is
+    whose summed raw source duration is under ``min_lf_duration`` (480 s) is
     certain to be refused by ``plan_full_drive_parts`` -- after the whole of
-    Phase A has run. ``create_ingest_plan`` is a no-file-ops scan (durations
+    Phase A has run. A day between that and ``full_drive_part_min_sec`` is not
+    refused: the planner makes it a ``best_moments`` long-form. ``create_ingest_plan`` is a no-file-ops scan (durations
     and container ``creation_time`` only), so the refusal is knowable here.
     Inactive unless both part bounds are set and the resolved LF mode is
     ``full_drive``. The planner's stop-masked check
@@ -220,10 +221,7 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
         # ``DriveConfig.warn_lf_policy_override``): ``plan_full_drive_parts``
         # never runs, so the day is not certain to be refused.
         return None
-    short = getattr(drive, "full_drive_short_day_min_sec", None)
-    floor_name, floor = "full_drive_part_min_sec", part_min
-    if short is not None and short < part_min:
-        floor_name, floor = "full_drive_short_day_min_sec", short
+    floor_name, floor = "min_lf_duration", float(getattr(drive, "min_lf_duration", 480.0))
     source_dir = Path(source_dir)
     if not source_dir.is_dir():
         return None  # run_preflight names the missing source dir
@@ -241,8 +239,8 @@ def day_under_part_min_message(config, source_dir: Path) -> Optional[str]:
         if near < floor:
             return (
                 f"Day {day}: raw source footage {raw[day]:.0f}s is under "
-                f"{floor_name}={floor}s, so the day can never fill a "
-                "part. Footage is never padded, repeated or joined to another day. "
+                f"{floor_name}={floor:g}s, so the day can never fill a "
+                "long-form. Footage is never padded, repeated or joined to another day. "
                 "Refused before ingest."
             )
     return None

@@ -102,7 +102,7 @@ class TestRefusalBeforeGpuWork:
             tmp_path,
             monkeypatch,
             preflight_fn=_raise("gopro-overlay is not installed"),
-            episodes=[_ep("2026-03-04", 1025.0)],
+            episodes=[_ep("2026-03-04", 300.0)],
             cfg=cfg,
         )
         assert res.success is False

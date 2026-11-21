@@ -310,12 +310,70 @@ def split_ranges_balanced(
 
 
 class InsufficientFootageError(ValueError):
-    """A full_drive day's kept footage is under ``full_drive_part_min_sec``.
+    """A full_drive day cannot yield even a ``min_duration_sec`` long-form.
 
     Raised at planning time, upstream of any encode. A ``ValueError`` so the
     existing planner-error handling still catches it. Never resolved by padding,
-    repeating footage or joining another day.
+    repeating footage or joining another day. A day merely under the part floor
+    is NOT this error: it falls back to ``best_moments`` (see
+    :func:`plan_full_drive_parts`).
     """
+
+
+class DayParts(list):
+    """``plan_full_drive_parts`` result: a list of parts plus how the day was planned.
+
+    ``lf_mode`` is ``"full_drive"`` or, for a day under the floor,
+    ``"best_moments"`` with ``lf_mode_reason`` naming the floor. A plain list
+    subclass so every existing caller keeps working unchanged.
+    """
+
+    lf_mode: str = "full_drive"
+    lf_mode_reason: Optional[str] = None
+
+
+def _best_moments_day_part(
+    scores: np.ndarray,
+    stop_mask: Optional[np.ndarray],
+    *,
+    min_duration_sec: float,
+    day: Optional[str],
+    kept_sec: float,
+    floor_name: str,
+) -> list[RegularLFRange]:
+    """One best_moments long-form for a day, from the same scores and stop mask.
+
+    The best_moments window (target width, 30 s stride) is scored on the
+    composite with stopped seconds worth nothing, so a window is preferred for
+    moving footage; the pick is the highest-scoring window whose kept (unmasked)
+    seconds reach ``min_duration_sec``. Its stops are cut out like a full_drive
+    part. It stays within the one day: nothing is padded, repeated or joined.
+    """
+    timestamps, composites = _score_at_each_second(scores)
+    keep = np.ones(len(timestamps), dtype=bool)
+    if stop_mask is not None:
+        m = np.asarray(stop_mask, dtype=bool)
+        if m.shape[0] == len(timestamps):
+            keep = ~m
+    target = (min_duration_sec + DEFAULT_MAX_DURATION_SEC) / 2.0
+    target = max(min_duration_sec, min(DEFAULT_MAX_DURATION_SEC, target))
+    effective = min(target, float(timestamps[-1] - timestamps[0] + 1.0))
+    windows = _build_candidate_windows(
+        timestamps, np.where(keep, composites, 0.0), effective, DEFAULT_STRIDE_SEC
+    )
+    for w in sorted(windows, key=lambda w: (-w.integrated_score, w.start_sec)):
+        inside = (timestamps >= w.start_sec) & (timestamps < w.end_sec)
+        ranges = _full_drive_unmasked_ranges(
+            timestamps[inside], composites[inside], None if stop_mask is None else ~keep[inside]
+        )
+        if sum(r.duration_sec for r in ranges) >= min_duration_sec:
+            return ranges
+    raise InsufficientFootageError(
+        f"Day {day or '?'}: kept (stop-masked) footage {kept_sec:.0f}s is under "
+        f"{floor_name} and no best_moments window reaches the "
+        f"{min_duration_sec:.0f}s minimum LF duration. Footage is never padded, "
+        "repeated or joined to another day."
+    )
 
 
 def plan_full_drive_parts(
@@ -337,10 +395,14 @@ def plan_full_drive_parts(
     480 s minimum and ``full_drive_max_duration_sec`` ceiling apply PER PART
     (a part over the ceiling raises; nothing is truncated).
 
-    With both bounds set, a day whose kept footage is under ``part_min_sec``
-    raises :class:`InsufficientFootageError` (naming ``day``). There is no
-    escape: one LF covers one calendar day, and footage is never padded,
-    repeated, slowed or joined to another day.
+    With both bounds set, a day whose kept footage is under the floor is
+    planned with the ``best_moments`` selection instead (one long-form from the
+    same scores and stop mask, within the day; logged, and recorded on the
+    result as ``lf_mode``/``lf_mode_reason``). Only when best_moments cannot
+    reach ``min_duration_sec`` either does it raise
+    :class:`InsufficientFootageError` (naming ``day``). One LF covers one
+    calendar day, and footage is never padded, repeated, slowed or joined to
+    another day.
 
     ``short_day_min_sec`` (optional, ``<= part_min_sec``) lowers the floor: a
     day in ``[short_day_min_sec, part_min_sec)`` is ONE part holding every
@@ -368,15 +430,25 @@ def plan_full_drive_parts(
     if short_day_min_sec is not None and short_day_min_sec < part_min_sec:
         floor_name, floor = "full_drive_short_day_min_sec", short_day_min_sec
     if kept_sec < floor:
-        raise InsufficientFootageError(
-            f"Day {day or '?'}: kept (stop-masked) footage {kept_sec:.0f}s is under "
-            f"{floor_name}={floor}s. Footage is never padded, "
-            "repeated or joined to another day."
+        part = _best_moments_day_part(
+            scores,
+            stop_mask,
+            min_duration_sec=min_duration_sec,
+            day=day,
+            kept_sec=kept_sec,
+            floor_name=f"{floor_name}={floor}s",
         )
+        reason = f"kept {kept_sec:.0f}s under {floor_name}={floor}s"
+        logger.warning("day %s: %s -> best_moments long-form", day or "?", reason)
+        result = DayParts([part])
+        result.lf_mode = "best_moments"
+        result.lf_mode_reason = reason
+        return result
     if kept_sec < part_min_sec:
         parts = [list(ranges)]  # short day: one part, never split
     else:
         parts = split_ranges_balanced(ranges, min_sec=part_min_sec, max_sec=part_max_sec)
+    parts = DayParts(parts)
     for i, part in enumerate(parts, 1):
         d = sum(r.duration_sec for r in part)
         if d < min_duration_sec:
