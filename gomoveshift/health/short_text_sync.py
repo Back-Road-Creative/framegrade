@@ -28,8 +28,9 @@ rows under the health incidents dir (``health-incident/1``), pushed once each:
 Schedule it AFTER ``metrics collect`` (it writes the nightly title snapshot the sync reads):
 ``gomoveshift health sync-short-text`` from the service directory (``--data-root`` as the
 hourly health cron passes it). Exit 0 clean, 1 when a Short was refused for an actionable reason, 2 on a crash.
-A run whose sync returned also stamps ``<incidents dir>.short_text_sync_run.json``
-(``run_record_path``; rule 13 flags the job stale when it stops being written).
+Every run, a crash and a held store lock included, also stamps
+``<incidents dir>.short_text_sync_run.json`` (``run_record_path``: ``ran_at``, ``changed``,
+``refused``, ``crashed``); rule 13 flags the job when it stops being written.
 Never raises: a failure anywhere (sync, store, push) is logged and reported as a crash.
 """
 
@@ -153,12 +154,15 @@ def _streaks_dir(incidents_dir: Path) -> Path:
 
 
 def run_record_path(incidents_dir: Path) -> Path:
-    """The stamp of the last completed run, next to the incidents dir (read by rule 13)."""
+    """The stamp of the last run, next to the incidents dir (read by rule 13)."""
     return incidents_dir.parent / f"{incidents_dir.name}.short_text_sync_run.json"
 
 
-def _write_run_record(incidents_dir: Path, now_iso: str, changed: int, refused: int) -> None:
-    """Atomically stamp a run whose sync returned. Best effort: a failure is logged, never raised."""
+def _write_run_record(
+    incidents_dir: Path, ran_at: str, changed: int, refused: int, crashed: bool
+) -> None:
+    """Atomically stamp this run (a crash too: ``crashed``). Best effort: a failure is logged,
+    never raised."""
     try:
         path = run_record_path(incidents_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +170,7 @@ def _write_run_record(incidents_dir: Path, now_iso: str, changed: int, refused: 
         try:
             tmp.write_text(
                 json.dumps(
-                    {"schema": 1, "completed_at": now_iso, "changed": changed, "refused": refused}
+                    dict(schema=1, ran_at=ran_at, changed=changed, refused=refused, crashed=crashed)
                 ),
                 encoding="utf-8",
             )
@@ -282,11 +286,11 @@ def run_short_text_sync(
     Returns ``{"exit", "changed", "refused", "crashed", "skipped", "changes", "new",
     "resolved", "pushed", "incidents"}``. Never raises: a crash of the sync, or of the
     incident work after it, is logged and becomes a crash incident (best effort)."""
+    injected = now is not None
     now = now or datetime.now(timezone.utc)
     now_iso = utc_iso(now.timestamp())
     changes: List[Any] = []
     crash: Optional[str] = None
-    synced = False
     try:
         if notify_fn is None:
             from ..console.notify import notify as notify_fn  # noqa: PLC0415
@@ -295,7 +299,6 @@ def run_short_text_sync(
             changes = sync_short_text(
                 conn, apply=True, now=now, per_location_cap=_brand_location_cap()
             )
-            synced = True
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 -- the crash is the incident
@@ -333,8 +336,10 @@ def run_short_text_sync(
 
     refused = sum(is_actionable_refusal(c) or _escalated(c, nights) for c in changes)
     changed = sum(c.status in ("changed", "reconciled") for c in changes)
-    if synced:  # a crash of the sync stamps nothing: short_text_sync_crash covers it
-        _write_run_record(incidents_dir, now_iso, changed, refused)
+    # every run stamps (a crash too); the injected ``now`` is for tests, else the clock at write
+    _write_run_record(
+        incidents_dir, now_iso if injected else utc_iso(), changed, refused, crash is not None
+    )
     if skipped and crash is None:
         code = 0
     else:

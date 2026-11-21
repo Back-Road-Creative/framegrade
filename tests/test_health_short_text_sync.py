@@ -543,11 +543,11 @@ def test_a_completed_run_writes_the_stamp_with_the_counts(tmp_path, monkeypatch)
     result = run()
     stamp = json.loads(_stamp(tmp_path).read_text())
     assert stamp["schema"] == 1 and stamp["changed"] == 2 and stamp["refused"] == result["refused"]
-    assert stamp["completed_at"].startswith("2026-")
+    assert stamp["ran_at"].startswith("2026-") and stamp["crashed"] is False
     assert not list(tmp_path.glob("*.tmp*"))  # atomic: no temp file left behind
 
 
-def test_a_crashed_sync_writes_no_stamp_and_keeps_the_old_one(tmp_path, monkeypatch):
+def test_a_crashed_sync_still_stamps_the_run_with_crashed_true(tmp_path, monkeypatch):
     state = {"fail": False}
 
     def sync(*a, **k):
@@ -556,14 +556,31 @@ def test_a_crashed_sync_writes_no_stamp_and_keeps_the_old_one(tmp_path, monkeypa
         return []
 
     run = _health(tmp_path, monkeypatch, sync, [])
-    state["fail"] = True
-    assert run()["exit"] == 2 and not _stamp(tmp_path).exists()
-    state["fail"] = False
     run()
-    before = _stamp(tmp_path).read_bytes()
+    assert json.loads(_stamp(tmp_path).read_text())["crashed"] is False
     state["fail"] = True
     assert run()["exit"] == 2
-    assert _stamp(tmp_path).read_bytes() == before
+    assert json.loads(_stamp(tmp_path).read_text())["crashed"] is True
+
+
+def test_the_stamp_time_is_the_clock_at_write_time_unless_now_is_injected(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from gomoveshift.health import short_text_sync
+
+    cfg = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    monkeypatch.setattr(short_text_sync, "sync_short_text", lambda *a, **k: [])
+    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: None)
+    monkeypatch.setattr(
+        short_text_sync, "open_queue_db", lambda p: SimpleNamespace(close=lambda: 0)
+    )
+    short_text_sync.run_short_text_sync(cfg, incidents_dir=tmp_path / "inc", notify_fn=lambda *a: 1)
+    ran = datetime.fromisoformat(json.loads(_stamp(tmp_path).read_text())["ran_at"])
+    assert abs((datetime.now(timezone.utc) - ran).total_seconds()) < 120
+    short_text_sync.run_short_text_sync(
+        cfg, incidents_dir=tmp_path / "inc", now=NOW, notify_fn=lambda *a: 1
+    )
+    assert json.loads(_stamp(tmp_path).read_text())["ran_at"].startswith(NOW.strftime("%Y-%m-%d"))
 
 
 def test_a_held_store_lock_still_writes_the_stamp(tmp_path, monkeypatch):

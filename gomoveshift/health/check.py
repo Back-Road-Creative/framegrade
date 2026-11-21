@@ -58,7 +58,7 @@ UNATTENDED_AFTER_FAILURES = 3
 
 _BACKFILL = ("resume_recipe", "log_path")
 #: Fields of an already-open grouped ``seo_feedback_stale`` row that follow the live finding.
-_REFRESH = ("detail", "count", "shorts", "decided_at", "completed_at")
+_REFRESH = ("detail", "count", "shorts", "decided_at", "ran_at")
 
 
 #: Camera file names a grouped footage push lists before "and N more".

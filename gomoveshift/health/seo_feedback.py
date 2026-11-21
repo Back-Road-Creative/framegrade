@@ -11,8 +11,10 @@ Detection only: nothing here edits a plan, a queue row, a tracking record or the
   yet have a null ``CORE_METRICS`` field; the detail lists the first ``LISTED`` of them.
 
 - ``seo_feedback_stale:sync`` -- the nightly ``health sync-short-text`` run record
-  (``short_text_sync.run_record_path``) is missing, unreadable, or its ``completed_at`` is over
-  ``SYNC_STALE_AFTER_H`` old: the job is not running. Reads only that file.
+  (``short_text_sync.run_record_path``) is missing, unreadable, or its ``ran_at`` is over
+  ``SYNC_STALE_AFTER_H`` old (or over ``SYNC_SKEW_H`` in the future): the job is not running.
+  A crashed run still stamps ``ran_at`` (``short_text_sync_crash`` covers it alone). Reads only
+  that file.
 
 An open row is refreshed (detail, count, listing) by the caller without a second push.
 """
@@ -36,8 +38,11 @@ KEY_SYNC = f"{KIND}:sync"
 
 #: The nightly ``metrics collect`` refreshes the decisions file; a day plus a night of slack.
 DECISIONS_STALE_AFTER_H = 36
-#: ``health sync-short-text`` runs nightly; a day plus two hours of slack (cron jitter, a long run).
-SYNC_STALE_AFTER_H = 26
+#: ``health sync-short-text`` runs nightly, chained after ``metrics collect``, so its start drifts:
+#: the same limit as the decisions file.
+SYNC_STALE_AFTER_H = 36
+#: A ``ran_at`` further ahead of the check than this is clock skew: unreadable, never "fresh".
+SYNC_SKEW_H = 1
 #: ``PlatformMetrics`` fields a settled Short must have reported (``tracking/schema.py``).
 CORE_METRICS = ("views", "avg_view_percentage")
 #: Only Shorts posted this recently are checked: an old Short the API never filled in is history,
@@ -93,7 +98,7 @@ def sync_incidents(stamp: Path, now: datetime, now_iso: str) -> List[Dict[str, A
     stamped = None
     try:
         record = json.loads(stamp.read_text(encoding="utf-8"))
-        stamped = datetime.fromisoformat(str(record["completed_at"]))
+        stamped = datetime.fromisoformat(str(record["ran_at"]))
     except FileNotFoundError:
         why = "is missing: no run of the job is on record"
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -101,19 +106,22 @@ def sync_incidents(stamp: Path, now: datetime, now_iso: str) -> List[Dict[str, A
     else:
         stamped = stamped if stamped.tzinfo else stamped.replace(tzinfo=timezone.utc)
         age_h = (now - stamped).total_seconds() / 3600
-        if age_h <= SYNC_STALE_AFTER_H:
+        if age_h < -SYNC_SKEW_H:
+            why = f"is unreadable (ran_at {stamped.isoformat()} is in the future)"
+        elif age_h <= SYNC_STALE_AFTER_H:
             return []
-        why = (
-            f"is stale: the last run completed {stamped.isoformat()}, {int(age_h)} h ago "
-            f"(limit {SYNC_STALE_AFTER_H} h)"
-        )
+        else:
+            why = (
+                f"is stale: the last run was {stamped.isoformat()}, {int(age_h)} h ago "
+                f"(limit {SYNC_STALE_AFTER_H} h)"
+            )
     return [
         _row(
             KEY_SYNC,
             now_iso,
             f"The nightly Short text sync run record {stamp.name} {why}. "
             "Check that `gomoveshift health sync-short-text` is scheduled and running.",
-            completed_at=stamped.isoformat() if stamped else None,
+            ran_at=stamped.isoformat() if stamped else None,
         )
     ]
 

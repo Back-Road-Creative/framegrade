@@ -18,11 +18,11 @@ refreshed; that missing refresh is what condition (a) catches.
 
 `gomoveshift health sync-short-text` (the nightly queued-Short text sync) writes
 `<incidents dir>.short_text_sync_run.json` atomically
-(`short_text_sync.run_record_path`): `{"schema": 1, "completed_at": <UTC ISO>, "changed": n,
-"refused": n}`. It is written whenever the sync returned, even when the incident work is skipped
-because the store lock is held; a crash writes nothing (`short_text_sync_crash` covers it). A
-failure to write it is logged and never changes the exit code. Condition (c) catches the job
-not running at all (cron line missing, cron dead).
+(`short_text_sync.run_record_path`): `{"schema": 1, "ran_at": <UTC ISO>, "changed": n,
+"refused": n, "crashed": bool}`. It is written on every run, even when the sync crashed or the
+incident work is skipped because the store lock is held. A crash is covered by
+`short_text_sync_crash` alone, so condition (c) means only that the job has not run (cron line
+missing, cron dead). A failure to write the record is logged and never changes the exit code.
 
 ## Conditions
 
@@ -30,7 +30,7 @@ not running at all (cron line missing, cron dead).
 |---|---|---|
 | `seo_feedback_stale:decisions` | the file is missing, unreadable, or `decided_at` is older than the limit | `seo_feedback.DECISIONS_STALE_AFTER_H` = 36 |
 | `seo_feedback_stale:metrics` | one grouped row: at least one YouTube Short whose day-7 window is settled and that was posted within the lookback has a null `views` or `avg_view_percentage`. The detail gives the count, up to `LISTED` = 10 `project#index (missing fields)` entries, then "and N more"; it resolves at a count of 0 | settled = `tracking.day7.window_settled` (posted + 7 d <= today - 2 d); `seo_feedback.CORE_METRICS`; `seo_feedback.METRICS_LOOKBACK_DAYS` = 28 |
-| `seo_feedback_stale:sync` | the run record is missing, unreadable, or `completed_at` is older than the limit; the detail says which and gives the age. Reads only that file; resolves on a fresh stamp | `seo_feedback.SYNC_STALE_AFTER_H` = 26 |
+| `seo_feedback_stale:sync` | the run record is missing, unreadable, or `ran_at` is older than the limit or more than `SYNC_SKEW_H` = 1 h in the future (unreadable); a naive `ran_at` is read as UTC; the detail says which and gives the age. Reads only that file; resolves on a fresh stamp | `seo_feedback.SYNC_STALE_AFTER_H` = 36 |
 
 A Short that ages out of the metrics lookback is simply no longer counted. Condition (c) says only that the nightly sync is not running; it does not compare queued Shorts with the generator.
 
