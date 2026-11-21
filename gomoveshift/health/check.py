@@ -544,7 +544,7 @@ def _seo_feedback_rows(
     """Rule 12 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
     condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
     could not be read: their open incidents stay live, never closed by an unreadable source.
-    A missing decisions file is not held: it is condition (a)'s finding."""
+    A missing decisions file is condition (a)'s finding only and holds nothing."""
     from . import seo_feedback as sf  # noqa: PLC0415
 
     storage = Path(config.seo.storage_path)
@@ -568,18 +568,9 @@ def _seo_feedback_rows(
         notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")
         held.append(sf.KEY_METRICS)
     db = storage / "social_queue.sqlite3"
-    demoted = sf.load_demoted(storage)
-    if demoted is None:
-        notes.append(
-            "seo_feedback_stale queued: decisions file unreadable, demoted arms not judged; "
-            "its open queued incidents stay live"
-        )
-        held.append(sf.KEY_QUEUED)
     if db.exists():
         try:
-            queued, queued_held = sf.queued_incidents(db, demoted, now, now_iso, notes)
-            rows += queued
-            held += queued_held
+            rows += sf.queued_incidents(db, now, now_iso)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"seo_feedback_stale queued not evaluated: {type(exc).__name__}: {exc}")
             held.append(sf.KEY_QUEUED)

@@ -123,15 +123,19 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    open, so a drive that goes offline and returns does not close and re-notify them.
 
 12. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
-   Three conditions, each its own key and its own resolution: `seo_feedback_stale:decisions`
-   (`shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
-   h), `seo_feedback_stale:metrics:<project>:<index>` (a settled YouTube Short, posted within
-   `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage`) and
-   `seo_feedback_stale:queued:<project>:<index>` (a queued YouTube row at least
-   `SYNC_LEAD_TIME` away that still repeats the previous Short's place text although the clip
-   measured another, or carries a demoted arm). Pushed once as `health_seo_feedback_stale`;
-   detection only. An unreadable tracking record, queue or sidecar is a note and keeps that
-   condition's open incidents live; a missing decisions file is condition (a)'s finding. Detail:
+   Three conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
+   `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
+   h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
+   within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
+   gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
+   it resolves when the count is 0, and a Short aging out of the lookback is just not counted).
+   `seo_feedback_stale:queued`: ONE grouped row listing each queued Short whose verdict from
+   `queue_short_text.sync_short_text(conn, apply=False)`, run on a read-only connection, is
+   `changed`: text the nightly `health sync-short-text` would rewrite but did not apply. A
+   `refused` verdict is not this rule's: the nightly sync files `short_text_sync_refused:*` for
+   it. Pushed once as `health_seo_feedback_stale`; detection only. An unreadable tracking record
+   or a queue/sync error is a note and keeps that condition's open incident live; a missing
+   decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
 
 **`drive_backlog_excluded.yaml`** sits beside `drive_backlog.yaml`
@@ -179,7 +183,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), `project`, `short_index`, `missing` (metrics), or `delivery_id`, `project`, `short_index`, `scheduled_at`, `causes` (queued).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`; queued: `delivery_id`, `project`, `short_index`).
 
 ## Resume recipe and `health heal`
 
