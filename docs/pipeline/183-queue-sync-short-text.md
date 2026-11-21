@@ -61,19 +61,23 @@ the few that clear on their own: each carries the structured flag
 (a reason can quote a Short's text). An unclassified or new reason is unflagged, so it is
 actionable and the check fails closed. Classified by reading `queue_short_text.py`:
 
-- Transient (flag set; no row, no exit 1): a sibling row's slot inside the lead time (it passes
-  or is moved), a sibling row holding a live lease (the dispatcher releases it), "retried next
+- Transient (flag set; no row, no exit 1, until the same Short has been refused as transient on
+  `TRANSIENT_ESCALATE_NIGHTS` = 3 consecutive runs: it is then filed like an actionable one, the
+  reason naming the run count; the count is one row per Short in `<incidents dir>.streaks`, reset
+  by the first run that no longer refuses it as transient): a sibling row's slot still ahead
+  inside the lead time (it passes or is moved), a sibling row holding a live lease (the dispatcher releases it), "retried next
   run" (the cascade after another sidecar's failed write, itself actionable), and a write that
   lost a race (`SidecarChangedError`, `LeaseRaceError`: rolled back whole) or met a busy
-  database (`sqlite3` BUSY/LOCKED, e.g. "database is locked"). A failed write whose reason
+  database (`sqlite3` BUSY, e.g. "database is locked"; LOCKED is a conflict inside one connection, so it repeats and stays actionable). A failed write whose reason
   carries the "clashes with this sidecar's stored text" note is never transient.
 - Actionable, needs a person: "generator: ...", an LF sidecar unreadable or without a location,
   a stored arm the generator cannot render, "no such Short in the plan", "already holds the new
-  plan hash", a recovery row, a row in another state ("is <status>"), "has no usable
+  plan hash", a recovery row, a sibling slot already past on a row still queued ("is past but still queued"),
+  a row in another state ("is <status>"), "has no usable
   scheduled_at", "no clip place to compose a title from", an old title with no verifiable
   "Nth stretch" stamp (nothing edits it for the sync, so it is permanent), "its ... place
   repeats ...", a review, payload, plan or anti-spam gate refusal, "sidecar unusable: ...",
-  an unknown queue hash, a failed write.
+  an unknown queue hash, a failed write (unless it lost a race or met a busy database with no clash).
 - Not refusals, by design: "already holds the synced plan hash" is reported `unchanged` (the
   text is already the generator's and the queue's UNIQUE key says another row carries the
   target hash: nothing for the sync to write), and a place the generator could not vary
@@ -92,9 +96,11 @@ Failure handling: a new text is also checked against the final text of every LAT
 (including a Short it leaves as stored); a clash refuses the earlier sidecar's Short and the
 run is re-planned. After a failed write the sidecars still to be written are refused ("an earlier
 sidecar's write failed") and converge the next night. Any exception in a write (not only I/O
-errors) rolls the queue back and refuses the rest; the failed sidecar's Shorts get a refused, actionable verdict (exit 1), not a crash verdict; the text the
+errors) rolls the queue back and refuses the rest; the failed sidecar's Shorts get a refused verdict (actionable unless the write lost a race or met a busy database with no clash; exit 1 when actionable), not a crash verdict; the text the
 earlier sidecars already wrote is re-checked against the failed sidecar's STORED text and a
-clash is named in its refusal.
+clash is named in its refusal. A sidecar skipped by the cascade stays as stored too, so the text
+written earlier is checked against ITS stored text as well: a clash is named in its reason and
+makes it actionable (otherwise it is transient).
 
 A sidecar that cannot be planned (a bad `titles.yaml`, a trial plan the gates reject, a missing
 `lf_index`) is refused but stays queued as stored, and its STORED text reaches the gates of the

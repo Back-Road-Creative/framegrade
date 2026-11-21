@@ -115,12 +115,13 @@ class ShortTextChange:
 #: text). EVERY other refusal is actionable, an unclassified or new one included, so the check
 #: fails closed. A write-failure reason that carries the clash note is always actionable.
 #:
-#: * a sibling row's slot inside the lead time: the slot passes or is moved by the queue.
+#: * a sibling row's slot inside the lead time (still ahead): the slot passes or is moved by the
+#:   queue. A slot already past on a still-queued row is actionable ("is past but still queued").
 #: * a sibling row holding a live lease: the dispatcher's lease expires or is released.
 #: * "retried next run": the cascade after another sidecar's failed write; that failure is
 #:   itself actionable.
 #: * a write that lost a race (``SidecarChangedError``, ``LeaseRaceError``) or met a busy
-#:   database (``sqlite3`` BUSY/LOCKED): it rolled back whole and the next run sees the settled
+#:   database (``sqlite3`` BUSY): it rolled back whole and the next run sees the settled
 #:   state.
 #:
 #: Permanent, needs-a-human refusals (all actionable): "generator: ...", an unreadable LF
@@ -142,13 +143,14 @@ def is_actionable_refusal(change: "ShortTextChange") -> bool:
 
 
 def _busy(exc: BaseException) -> bool:
-    """A ``sqlite3`` BUSY / LOCKED error: the database was in use, the write rolled back."""
+    """A ``sqlite3`` BUSY error (another connection holds the database): the write rolled back.
+    LOCKED is not: without shared cache it is a conflict inside this connection, so it repeats."""
     if not isinstance(exc, sqlite3.OperationalError):
         return False
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None:
-        return (code & 0xFF) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-    return "locked" in str(exc) or "busy" in str(exc)
+        return (code & 0xFF) == sqlite3.SQLITE_BUSY
+    return str(exc) == "database is locked"
 
 
 def _slot(raw) -> Optional[datetime]:
@@ -179,6 +181,8 @@ def _sibling_refusal(siblings, now: datetime) -> Tuple[str, bool]:
         at = _slot(r["scheduled_at"]) if r["scheduled_at"] else None
         if at is None:
             return f"{who} has no usable scheduled_at", False
+        if at <= now:  # the slot passed and the row is still queued: nothing clears that
+            return f"{who} slot {at.isoformat()} is past but still queued", False
         if at - now < SYNC_LEAD_TIME:
             return f"{who} slot {at.isoformat()} is inside the lead time", True
     return "", False
@@ -445,8 +449,9 @@ def _successor_clashes(
     and a Short asked alone sees its neighbours' stored text, so the pair is checked here;
     the rewritten one is refused, the later of two rewritten ones. A repeat the generator
     itself sanctioned for the later Short (``place_variety`` reason ``no_alternative``: no other
-    measured place existed) is not a clash, unless that Short was generated ``alone`` (the
-    fallback seeds it with its predecessor's STORED places, not the new ones compared here)."""
+    measured place existed) is not a clash, except, for a Short generated ``alone`` (the
+    fallback seeds it with its predecessor's STORED places), where the predecessor's NEW place
+    for that key differs from the stored one."""
     from gomoveshift.pipeline.social_generator import _norm
 
     out: Dict[int, str] = {}
@@ -462,10 +467,18 @@ def _successor_clashes(
             mine = _stored_places(rewritten.get(a, shorts[a]), location)
             theirs = _stored_places(rewritten.get(b, shorts[b]), location)
             shared = [k for k in mine if k in theirs and _norm(mine[k]) == _norm(theirs[k])]
-            if b in rewritten and b not in alone:
+            if b in rewritten:
                 variety = getattr((posts or {}).get(b), "place_variety", None) or {}
+                # asked alone, b was seeded with a's STORED places: its sanction holds for a key
+                # only if a's new place there is the stored one (a not rewritten: always)
+                seed = (
+                    _stored_places(shorts[a], location) if b in alone and a in rewritten else None
+                )
                 shared = [
-                    k for k in shared if (variety.get(k) or {}).get("reason") != "no_alternative"
+                    k
+                    for k in shared
+                    if (variety.get(k) or {}).get("reason") != "no_alternative"
+                    or (seed is not None and _norm(seed.get(k, "")) != _norm(mine[k]))
                 ]
             if shared:
                 later = b in rewritten
@@ -827,6 +840,13 @@ def _stored_records(path: str) -> list:
         return []
 
 
+def _clash_note(clash: Mapping[Tuple[str, int], str]) -> str:
+    return (
+        "; text written earlier in this run clashes with this sidecar's stored text: "
+        + "; ".join(f"{k[0]} #{k[1]} {v}" for k, v in sorted(clash.items()))
+    )
+
+
 def replace_index(violation, offset: int):
     """``violation`` re-addressed by ``offset`` (a batch run on a plan alone, read in a longer one)."""
     return replace(violation, index=violation.index + offset)
@@ -938,7 +958,13 @@ def sync_short_text(
         sidecar, group = Path(path), by_sidecar[path]
         writes = any(v.status in ("changed", "reconciled") for v in verdict.values())
         if apply and writes and write_failed:
-            refuse_all(group, "an earlier sidecar's write failed; retried next run", transient=True)
+            # Skipped, so it stays as STORED: what was written before the failure is checked
+            # against that, as for the sidecar whose own write failed (below).
+            why = "an earlier sidecar's write failed; retried next run"
+            clash = _new_text_clashes(written_new, _stored_records(path))
+            if clash:
+                why += _clash_note(clash)
+            refuse_all(group, why, transient=not clash)
             continue
         if apply and writes:
             try:
@@ -954,10 +980,7 @@ def sync_short_text(
                 # it stays as STORED, so check what they wrote against that.
                 clash = _new_text_clashes(written_new, _stored_records(path))
                 if clash:
-                    why += (
-                        "; text written earlier in this run clashes with this sidecar's stored text: "
-                        + "; ".join(f"{k[0]} #{k[1]} {v}" for k, v in sorted(clash.items()))
-                    )
+                    why += _clash_note(clash)
                 # Transient only when the write lost a race or met a busy database AND nothing
                 # earlier in this run clashes with what stays stored: a clash is always actionable.
                 raced = isinstance(exc, (SidecarChangedError, LeaseRaceError)) or _busy(exc)

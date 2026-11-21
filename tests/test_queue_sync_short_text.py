@@ -829,3 +829,42 @@ def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
     # predecessor's NEW ones: the clash stands
     assert [c.status for c in changes] == ["changed", "refused"]
     assert "place repeats" in changes[1].reason
+
+
+def _only_alone_sanctioned(monkeypatch):
+    """The generator refuses a multi-Short ask (forcing the alone fallback) and sanctions
+    every repeat with ``no_alternative``."""
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        made = real(view, *a, **kw)
+        for post in made:
+            post.place_variety = {
+                k: {"reason": "no_alternative", "body": "Ashby County"}
+                for k in ("title", "description")
+            }
+        return made
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+
+
+def test_a_short_asked_alone_keeps_the_exemption_where_its_predecessor_keeps_its_place(
+    tmp_path, monkeypatch
+):
+    _only_alone_sanctioned(monkeypatch)
+    from gomoveshift.pipeline import social_generator
+
+    # a single-place route: the only place the generator (and the stored-text reader) can name
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("county", "Ashby County")]
+    )
+    first, second = _short(1), _short(2)
+    # Short 1's STORED title and description already name the place its new text names, so
+    # Short 2's alone seed (the predecessor's STORED places) was the predecessor's final ones
+    # too: the sanctioned repeat is valid for each such key.
+    first["payloads"]["youtube"]["title"] = "Mar 5, 1st stretch: Ashby County #Shorts"
+    plan, conn = _world(tmp_path, [first, second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    assert [c.status for c in changes] == ["changed", "changed"], [c.reason for c in changes]

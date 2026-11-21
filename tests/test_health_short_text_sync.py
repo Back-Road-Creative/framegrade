@@ -352,3 +352,92 @@ def test_a_held_store_lock_skips_the_incident_work_and_exits_clean(tmp_path, mon
     assert not (tmp_path / "inc").exists() or _inc(tmp_path) == {}
     assert notified == []
     assert run()["exit"] == 1 and len(_inc(tmp_path)) == 1  # the next run, lock free, files it
+
+
+# -- a transient refusal that never clears escalates -----------------------------------------
+
+LEASE = "facebook row 4 holds a live lease"
+
+
+def _transient(project="p1", idx=1):
+    return _change("refused", project, idx, LEASE, transient=True)
+
+
+def _refused_rows(tmp_path):
+    return {
+        k: r for k, r in {r["key"]: r for r in _inc(tmp_path).values()}.items() if "refused" in k
+    }
+
+
+def test_two_transient_runs_file_no_incident(tmp_path, monkeypatch):
+    notified = []
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: [_transient()], notified)
+    for _ in range(2):
+        result = run()
+        assert (result["exit"], result["refused"], result["new"]) == (0, 0, [])
+    assert _refused_rows(tmp_path) == {} and notified == []
+    assert result["incidents"] == []  # the streak counter is not an incident
+
+
+def test_the_third_transient_run_files_one_incident_pushed_once(tmp_path, monkeypatch):
+    from gomoveshift.health.short_text_sync import TRANSIENT_ESCALATE_NIGHTS
+
+    assert TRANSIENT_ESCALATE_NIGHTS == 3
+    notified = []
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: [_transient()], notified)
+    run(), run()
+    result = run()
+    assert result["exit"] == 1 and result["refused"] == 1
+    (row,) = _refused_rows(tmp_path).values()
+    assert row["key"] == "short_text_sync_refused:p1" and not row["resolved_at"]
+    (short,) = row["shorts"]
+    assert short["short_index"] == 1
+    assert "3 consecutive runs" in short["reason"] and LEASE in short["reason"]
+    assert notified == [("health_short_text_sync_refused", "short_text_sync_refused:p1")]
+    again = run()  # still stuck on the 4th night: still one open row, never pushed twice
+    assert again["exit"] == 1 and len(_refused_rows(tmp_path)) == 1
+    assert (
+        "4 consecutive runs" in next(iter(_refused_rows(tmp_path).values()))["shorts"][0]["reason"]
+    )
+    assert len(notified) == 1
+
+
+def test_a_run_that_no_longer_refuses_the_short_resets_the_count(tmp_path, monkeypatch):
+    notified = []
+    state = {"out": [_transient()]}
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: state["out"], notified)
+    run(), run()
+    state["out"] = [_change("unchanged", "p1", 1)]
+    run()
+    state["out"] = [_transient()]
+    run(), run()
+    assert _refused_rows(tmp_path) == {} and notified == []  # 2 in a row again, not 4
+    assert run()["exit"] == 1  # the third consecutive one escalates
+    assert len(notified) == 1
+
+
+def test_an_escalated_incident_resolves_when_the_short_clears(tmp_path, monkeypatch):
+    notified = []
+    state = {"out": [_transient()]}
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: state["out"], notified)
+    run(), run(), run()
+    state["out"] = []
+    result = run()
+    assert result["exit"] == 0 and result["resolved"] == ["short_text_sync_refused:p1"]
+
+
+def test_a_crash_leaves_the_streak_alone(tmp_path, monkeypatch):
+    notified = []
+    state = {"out": [_transient()]}
+
+    def sync(*a, **k):
+        if isinstance(state["out"], Exception):
+            raise state["out"]
+        return state["out"]
+
+    run = _health(tmp_path, monkeypatch, sync, notified)
+    run(), run()
+    state["out"] = RuntimeError("boom")
+    assert run()["exit"] == 2
+    state["out"] = [_transient()]
+    assert run()["exit"] == 1  # the crash night proved nothing: this is the 3rd refusal
