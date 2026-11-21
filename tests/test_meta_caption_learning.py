@@ -176,7 +176,8 @@ def test_without_evidence_the_opener_order_is_unchanged_and_no_ranking_is_record
 
 
 def test_a_proven_facebook_opener_moves_to_the_front_and_the_ranking_is_recorded(titles, storage):
-    baseline = _gen(titles).generate_all(num_shorts=4)
+    # Two Shorts leave one of the three Facebook shapes unused for the evidence to promote.
+    baseline = _gen(titles).generate_all(num_shorts=2)
     used = {_opener_of(p, "facebook") for p in baseline}
     winner = next(t for t in _PLATFORM_CAPTION_TEMPLATES["facebook"] if t not in used)
     write_caption_evidence(

@@ -221,7 +221,8 @@ def test_no_arm_renders_byte_identical_to_origin_main():
     (e2eae14) before arms existed: 3 places x (no facts, place_ok, not place_ok) x 2 Shorts,
     spooled texts and the experiment date pinned, hex ids faked (``_fake_hex``).
     Arms off must reproduce it exactly. The one deliberate change since: a ``place_ok``
-    Short 1's titles are its measured place, not the stamp (fact titles)."""
+    Short 1's titles are its measured place, not the stamp (fact titles), and every
+    caption is a measured-fact shape with no filler tail (fact captions)."""
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
     places = {key.split("|")[0] for key in golden}
     assert len(places) == 3 and any("Llanfair" in p for p in places)
