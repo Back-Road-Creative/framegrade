@@ -187,6 +187,8 @@ class TestRunDayPipeline:
 
         day_batch = _make_day_batch("2026-02-20", 3, per_ep_duration=1200.0)
         day_scores = _make_scores(3600, score=0.6)
+        # a flat timeline plans no shorts; one clear peak gives the day one
+        day_scores[1000:1200, COL_COMPOSITE] = 0.95
         output_base = tmp_path / "out"
 
         master_path, mocks = TestRunDayPipeline()._patch_all_stages(tmp_path)
@@ -1306,6 +1308,11 @@ class TestLegacyPathRemoved:
             output_path.write_bytes(b"x")
             return output_path
 
+        # A flat timeline plans no shorts (nothing is above its own mean); give
+        # the day one clear peak so this test still renders a short.
+        day_scores = _make_scores(2400)
+        day_scores[500:700, COL_COMPOSITE] = 0.9
+
         with (
             patch(
                 "gomoveshift.pipeline.day_pipeline.encode_day_master",
@@ -1335,7 +1342,7 @@ class TestLegacyPathRemoved:
         ):
             artifacts = day_pipeline.run_day_pipeline(
                 day_batch=batch,
-                day_scores=_make_scores(2400),
+                day_scores=day_scores,
                 output_dir=tmp_path / "out",
                 location="L",
                 config=None,
@@ -1648,20 +1655,18 @@ class TestShortsPerLfTargetScaling:
         assert "shorts_target=volume_source.shorts_per_lf().value" in src
         assert "shorts_target=self.config.drive.min_shorts_per_lf" not in src
 
-    def test_derived_default_reaches_shorts_contract_gate(self, tmp_path):
-        """The DERIVED requirement is what the SHORTS-CONTRACT gate enforces:
-        no override, no --allow-short-count, planner yields 0 → hard-fail
-        names the derived 14, not the old hardcoded 9."""
-        import pytest
-
+    def test_derived_target_is_a_maximum_not_a_planned_stage_requirement(self, tmp_path):
+        """The derived 14 is the planner's MAXIMUM. No override, no
+        --allow-short-count, planner yields 0 (nothing cleared the quality bar):
+        the day proceeds with zero shorts instead of hard-failing."""
         from gomoveshift.config import DriveConfig
 
         dc = DriveConfig(shorts_min_gap_sec=60.0)
         lf_plans = [_make_lf_plan(1, [_make_seg(0, 100, 200)], [])]
-        with pytest.raises(RuntimeError, match=r"SHORTS-CONTRACT: planned 0 < required 14"):
-            self._run_with_config(
-                tmp_path, dc, lf_plans, state=make_state(ost_audit_confirmed=True)
-            )
+        captured = self._run_with_config(
+            tmp_path, dc, lf_plans, state=make_state(ost_audit_confirmed=True)
+        )
+        assert captured["target_count"] == 14
 
 
 class TestShortsTargetStateIsPerLf:

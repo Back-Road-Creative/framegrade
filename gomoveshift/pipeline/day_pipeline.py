@@ -137,6 +137,7 @@ from .short_planner import (
     DEFAULT_TARGET_DURATION_SEC,
     ShortRange,
     plan_shorts,
+    timeline_quality_bar,
 )
 from .shorts_extractor import reframe_kwargs
 from .shorts_extractor import render_short_ffmpeg as _render_short_ffmpeg
@@ -325,7 +326,9 @@ def fill_shorts_to_per_lf_capacity(
     discarded unless it lands on the intended LF. Refill picks are ranked after
     every existing short and appended, keeping the best-first order
     ``_render_day_shorts`` expects. An LF whose window cannot hold its share
-    is logged and left short; the SHORTS-CONTRACT gate judges the final count.
+    is logged and left short. Refill picks must also clear the day's quality
+    bar (``timeline_quality_bar`` over ``plan_mask``): an under-capacity LF stays
+    short rather than take a window the day-wide plan rejected.
 
     Returns ``(all_shorts, added)``. A ``None``/non-positive capacity, no LFs,
     no scores, or a failed attribution is a no-op.
@@ -388,7 +391,18 @@ def fill_shorts_to_per_lf_capacity(
                     mask |= (timestamps >= s0) & (timestamps < e0)
         for sr in shorts:
             mask |= (timestamps >= sr.start_sec - min_gap) & (timestamps < sr.end_sec + min_gap)
-        picks = plan_shorts(day_scores, stop_mask=mask, **{**plan_kwargs, "target_count": want})
+        # The DAY's bar, not the LF window's: the refill mask hides every other
+        # LF, so the default bar would be this window's own mean and could let a
+        # below-day-mean window through.
+        picks = plan_shorts(
+            day_scores,
+            stop_mask=mask,
+            **{
+                "quality_bar": timeline_quality_bar(day_scores, plan_mask),
+                **plan_kwargs,
+                "target_count": want,
+            },
+        )
         next_rank = max([int(getattr(sr, "rank", 0) or 0) for sr in shorts] + [0]) + 1
         accepted: list = []
         for pick in picks:
@@ -659,18 +673,20 @@ def _enforce_shorts_contract(
 ) -> None:
     """Hard-fail when a day's shorts fall below the required count.
 
-    Fires BEFORE any shorts encode/CSV/upload (``stage="planned"``) and
-    again after the render loop (``stage="rendered"``) so render-time
-    losses can't erode a passing plan. ``--allow-short-count`` is the
-    operator escape (shortfall explicitly accepted).
+    ``required`` is what the day PLANNED (the planner's quality-bar- and
+    gap-limited count after capacity capping/refill), never the target: a plan
+    with fewer shorts than the target is valid. It fires after the render loop
+    (``stage="rendered"``) so a planned short that fails to render can't erode
+    the plan, and on a resumed day (``stage="reconstructed"``).
+    ``--allow-short-count`` is the operator escape (shortfall explicitly
+    accepted).
     """
     if required is None or allow_short_count or produced >= required:
         return
     raise RuntimeError(
         f"SHORTS-CONTRACT: {stage} {produced} < required {required} for day "
-        f"{date} — the plan_shorts relaxation ladder is already exhausted "
-        f"(timeline physically can't hold {required} windows) or shorts were "
-        f"lost at render; pass --allow-short-count to accept the shortfall"
+        f"{date} — planned shorts were lost at render or are missing on resume; "
+        f"pass --allow-short-count to accept the shortfall"
     )
 
 
@@ -3091,9 +3107,8 @@ def run_day_pipeline(
         else []
     )
     logger.info("Day %s: %d short ranges planned", date, len(short_ranges))
-    # SHORTS-CONTRACT gate (enforced below, on the FINAL post-cap/refill count):
-    # compared BEFORE any shorts encode/CSV/upload instead of logging a
-    # shortfall and continuing.
+    # SHORTS-CONTRACT: ``allow_short_count`` still escapes the render-stage and
+    # resume gates; the planned count is the contract (see below).
     allow_short_count = bool(state.get("allow_short_count")) if state is not None else False
 
     # PER-LF CAPACITY: the contract above is drive-wide and
@@ -3142,14 +3157,17 @@ def run_day_pipeline(
                 len(_refilled),
                 len(short_ranges),
             )
+    # No planned-stage count gate: ``target_count`` is a maximum, and a plan with
+    # fewer shorts (quality bar, gap, per-LF window) is valid. The count that
+    # will be rendered is now the contract for the rest of the day: the
+    # render-stage gate and ``DayArtifacts.planned_shorts_count`` both use it.
     if day_scores is not None:
-        # Judge the count that will actually be rendered. The day total can
-        # never exceed what the LFs' publish windows hold, so the requirement
-        # is capped at ``per-LF capacity × LFs``.
-        _required_final = target_count
-        if target_count is not None and _per_lf_capacity is not None and lf_plans:
-            _required_final = min(target_count, _per_lf_capacity * len(lf_plans))
-        _enforce_shorts_contract(len(short_ranges), _required_final, date, allow_short_count)
+        logger.info(
+            "Day %s: %d shorts will be rendered (target maximum %s)",
+            date,
+            len(short_ranges),
+            target_count,
+        )
 
     # ── Step 5: extract + OST each short (rank-ordered) ───────────
     # Location anchor for a short on a GPS-less day: the operator

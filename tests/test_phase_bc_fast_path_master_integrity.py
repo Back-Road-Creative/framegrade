@@ -410,17 +410,32 @@ class TestReconstructedShortfallGate:
             state, self._reconstructed(49, n_lfs=4), entry
         )
 
-    def test_capped_day_still_gates_a_raised_target(self):
-        # Same recorded (capped) day, but the operator has since RAISED
-        # --shorts-target to 20 — the recorded expectation no longer applies
-        # (it was recorded for 14), so the strict 20*4=80 re-derivation binds
-        # and 49 < 80 must still raise.
+    def test_raised_target_does_not_demand_more_than_the_day_planned(self):
+        # Same recorded (capped) day, operator has since RAISED --shorts-target
+        # to 20. The target is a maximum: the day planned 49, so 49 is not short.
         state = SimpleNamespace(shorts_target=20, shorts_per_day=None, allow_short_count=None)
         entry = {"shorts_target_in_force": 14, "shorts_expected": 49}
+        self._phase()._enforce_reconstructed_shortfall(
+            state, self._reconstructed(49, n_lfs=4), entry
+        )
+
+    def test_quality_limited_day_resumes_without_raising(self):
+        # The day planned 3 of a target of 14 (nothing else cleared the bar).
+        state = SimpleNamespace(shorts_target=14, shorts_per_day=None, allow_short_count=None)
+        entry = {"shorts_target_in_force": 14, "shorts_expected": 3}
+        self._phase()._enforce_reconstructed_shortfall(state, self._reconstructed(3), entry)
+
+    def test_planned_short_missing_on_resume_still_raises(self):
+        state = SimpleNamespace(shorts_target=14, shorts_per_day=None, allow_short_count=None)
+        entry = {"shorts_target_in_force": 14, "shorts_expected": 3}
         with pytest.raises(RuntimeError, match="SHORTS-CONTRACT.*reconstructed"):
-            self._phase()._enforce_reconstructed_shortfall(
-                state, self._reconstructed(49, n_lfs=4), entry
-            )
+            self._phase()._enforce_reconstructed_shortfall(state, self._reconstructed(2), entry)
+
+    def test_lowered_target_still_binds(self):
+        state = SimpleNamespace(shorts_target=5, shorts_per_day=None, allow_short_count=None)
+        entry = {"shorts_target_in_force": 14, "shorts_expected": 14}
+        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT.*reconstructed"):
+            self._phase()._enforce_reconstructed_shortfall(state, self._reconstructed(4), entry)
 
     def test_no_target_in_force_disables_the_gate(self):
         # No explicit --shorts-target -> the gate is inert regardless of the
@@ -459,14 +474,13 @@ class TestReconstructedShortfallGate:
         entry = {"shorts_target_in_force": 7, "shorts_expected": 7}
         phase._enforce_reconstructed_shortfall(state, self._reconstructed(7), entry)
 
-    def test_flag_raised_toward_the_decision_still_gates(self):
+    def test_flag_raised_toward_the_decision_does_not_demand_more(self):
         # First run --shorts-target 2, resume --shorts-target 5 under a decided 7:
-        # the operator raised the cap, so the completed day is short of 5.
+        # the cap was raised, but the day planned 2 and 2 are on disk.
         self.decided["value"] = 7
         state = SimpleNamespace(shorts_target=5, shorts_per_day=None, allow_short_count=None)
         entry = {"shorts_target_in_force": 2, "shorts_expected": 2}
-        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT.*reconstructed"):
-            self._phase()._enforce_reconstructed_shortfall(state, self._reconstructed(2), entry)
+        self._phase()._enforce_reconstructed_shortfall(state, self._reconstructed(2), entry)
 
     def test_no_flag_never_reads_the_decision_store(self, monkeypatch):
         from gomoveshift.pipeline import volume_source

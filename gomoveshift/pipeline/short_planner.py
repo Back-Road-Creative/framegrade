@@ -42,6 +42,9 @@ DEFAULT_TARGET_DURATION_SEC = 38.0
 DEFAULT_TARGET_COUNT = 9
 DEFAULT_MIN_GAP_SEC = 60.0
 DEFAULT_STRIDE_SEC = 5.0
+# A window must beat the bar by more than float summation noise: on a flat
+# timeline a window's mean can differ from the timeline mean by ~1e-17.
+_BAR_EPSILON = 1e-9
 
 
 @dataclass
@@ -161,6 +164,33 @@ def _greedy_pick_with_gap(
     return chosen
 
 
+def timeline_quality_bar(scores: np.ndarray, stop_mask: np.ndarray | None = None) -> float | None:
+    """Mean per-second composite of the eligible (non-stopped) timeline.
+
+    A candidate window clears the quality bar only when its own mean composite is
+    strictly above this number. The bar is parameter-free: it is read from the
+    day's own footage, never a tuned constant. Returns ``None`` when there is no
+    eligible second (empty scores, or every second stopped).
+    """
+    if scores is None or scores.size == 0:
+        return None
+    composites = scores[:, COL_COMPOSITE]
+    if stop_mask is not None:
+        m = np.asarray(stop_mask, dtype=bool)
+        if m.shape[0] == len(composites):
+            composites = composites[~m]
+    if len(composites) == 0:
+        return None
+    return float(composites.mean())
+
+
+def _window_mean(timestamps: np.ndarray, composites: np.ndarray, start: float, end: float) -> float:
+    """Mean composite of the timeline rows inside ``[start, end)``."""
+    in_window = (timestamps >= start) & (timestamps < end)
+    n = int(in_window.sum())
+    return float(composites[in_window].sum()) / n if n else 0.0
+
+
 def plan_shorts(
     scores: np.ndarray,
     min_duration_sec: float = DEFAULT_MIN_DURATION_SEC,
@@ -170,6 +200,7 @@ def plan_shorts(
     min_gap_sec: float = DEFAULT_MIN_GAP_SEC,
     stride_sec: float = DEFAULT_STRIDE_SEC,
     stop_mask: np.ndarray | None = None,
+    quality_bar: float | None = None,
 ) -> list[ShortRange]:
     """Plan 15-55s short-clip ranges from a scored timeline.
 
@@ -181,12 +212,11 @@ def plan_shorts(
         max_duration_sec: maximum short duration (default 55).
         target_duration_sec: exact window width used for candidate scoring
             (default 38 — a comfortable middle of the 15-55 band).
-        target_count: maximum number of shorts returned (default 9).
-        min_gap_sec: preferred gap in seconds between consecutive shorts
-            (end of prior → start of next). Default 60. This is a rung-1
-            preference, not a hard constraint: when it would leave the
-            plan short of `target_count`, the relaxation ladder fills the
-            remainder at half gap, then gap 0, then half stride + gap 0.
+        target_count: MAXIMUM number of shorts returned (default 9). The
+            planner never lowers its standards to reach it.
+        min_gap_sec: required gap in seconds between consecutive shorts
+            (end of prior → start of next). Default 60. A hard constraint:
+            it is never relaxed to reach `target_count`.
         stride_sec: slide step for candidate window generation. Default 5.
         stop_mask: optional bool array (one entry per timeline second, aligned
             to ``scores`` rows; ``True`` == STOP). Any candidate window
@@ -194,14 +224,20 @@ def plan_shorts(
             sites, so the relaxation ladder can never surface parked footage.
             Default None = unchanged behavior. Root-cause fix: a published
             short once shipped extended parked/roadside footage.
+        quality_bar: optional explicit bar (mean per-second composite a window
+            must STRICTLY exceed). Default None = the mean composite of the
+            eligible (non-stopped) timeline in ``scores``. A caller planning
+            over a sub-window of a day (the per-LF refill) passes the DAY's bar
+            so a sub-window cannot lower it.
 
     Returns:
         List of `ShortRange` objects sorted by rank (best score first,
-        rank 1 = highest integrated score). Empty if the timeline is
-        shorter than `min_duration_sec`. Returns fewer than
-        `target_count` ONLY when the timeline physically can't hold that
-        many non-overlapping windows (ladder exhausted) — never raises;
-        the day-pipeline SHORTS-CONTRACT gate owns that failure.
+        rank 1 = highest integrated score). Only windows whose mean
+        composite is strictly above the quality bar are eligible, so a
+        flat timeline, or a day with nothing above its own mean, returns
+        fewer than `target_count` — possibly none. Fewer is a valid plan;
+        this never raises and the SHORTS-CONTRACT gate does not read a
+        bar- or gap-limited plan as a failure.
     """
     if scores is None or scores.size == 0:
         return []
@@ -238,51 +274,31 @@ def plan_shorts(
     if not windows:
         return []
 
-    # ── Deterministic relaxation ladder ───────────────────────────────────
-    # Rung 1 runs the historical pick. When it falls short of target,
-    # later rungs KEEP the picks already chosen (immutable across rungs)
-    # and only ADD fills under progressively relaxed constraints, so the
-    # planner under-delivers ONLY when the timeline physically can't hold
-    # `target_count` non-overlapping windows — never because of tunable
-    # gap spacing. Best-score-first order is preserved within each rung.
-    chosen = _greedy_pick_with_gap(windows, target_count, min_gap_sec)
-    rung_counts = [len(chosen)]
-    if len(chosen) < target_count:
-        # rung 2: half gap; rung 3: gap 0 (adjacent, non-overlapping);
-        # rung 4: halve the candidate stride (denser windows), gap 0.
-        rungs: list[tuple[float, float]] = [
-            (min_gap_sec * 0.5, stride_sec),
-            (0.0, stride_sec),
-            (0.0, stride_sec / 2.0),
-        ]
-        for gap, rung_stride in rungs:
-            cand = windows
-            if rung_stride != stride_sec:
-                cand = _build_candidate_windows(
-                    timestamps, composites, effective_window, rung_stride, stop_mask=stop_mask
-                )
-            before = len(chosen)
-            chosen = _greedy_pick_with_gap(cand, target_count, gap, preselected=chosen)
-            rung_counts.append(len(chosen) - before)
-            if len(chosen) >= target_count:
-                break
-        breakdown = " ".join(f"rung{i + 1}={n}" for i, n in enumerate(rung_counts))
-        if len(chosen) >= target_count:
-            logger.info(
-                "SHORTS-PLAN: target %d reached at rung %d (%s)",
-                target_count,
-                len(rung_counts),
-                breakdown,
-            )
-        else:
-            logger.info(
-                "SHORTS-PLAN: target %d unreachable — ladder exhausted at rung %d (%s); "
-                "timeline physically holds only %d windows",
-                target_count,
-                len(rung_counts),
-                breakdown,
-                len(chosen),
-            )
+    # ── Quality bar + hard gap ────────────────────────────────────────────
+    # No count-filling: a window qualifies only when its mean per-second
+    # composite is strictly above the bar (the eligible timeline's mean), and
+    # the gap and stride are never relaxed. ``target_count`` is a maximum.
+    bar = quality_bar if quality_bar is not None else timeline_quality_bar(scores, stop_mask)
+    if bar is None:
+        return []
+    qualifying = [
+        w for w in windows if _window_mean(timestamps, composites, w[0], w[1]) > bar + _BAR_EPSILON
+    ]
+    below_bar = len(windows) - len(qualifying)
+    chosen = _greedy_pick_with_gap(qualifying, target_count, min_gap_sec)
+    # What the gap alone cost: qualifying windows a gap of 0 would also have
+    # fit (non-overlapping), up to the target. Measured, never used to pick.
+    no_gap = _greedy_pick_with_gap(qualifying, target_count, 0.0)
+    lost_to_gap = max(0, len(no_gap) - len(chosen))
+    logger.info(
+        "SHORTS-PLAN: %d of target %d clear the quality bar "
+        "(%d candidates below the timeline mean, %d lost to the %gs gap)",
+        len(chosen),
+        target_count,
+        below_bar,
+        lost_to_gap,
+        min_gap_sec,
+    )
 
     pre_growth_ends = [end for _, end, _ in chosen]
     chosen = _grow_to_moment_length(
@@ -293,6 +309,16 @@ def plan_shorts(
         min_gap_sec,
         stop_mask=stop_mask,
     )
+
+    for i, (start, end, _score) in enumerate(chosen):
+        logger.info(
+            "SHORTS-PLAN: short %d %.0f-%.0fs mean composite %.4f (bar %.4f)",
+            i + 1,
+            start,
+            end,
+            _window_mean(timestamps, composites, start, end),
+            bar,
+        )
 
     # Assign ranks in the order chosen (already sorted by score desc).
     # A window that grew past its pre-growth end was still gaining

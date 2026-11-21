@@ -20,17 +20,19 @@ Each rung logs at INFO (`Day %s: shorts target %s (per LF %s × %d LFs, rung=%s)
 `rung` one of `cli`, `decision`, `brand-policy-cap`, or `none`. The moving-seconds-budget
 cap (`_cap_shorts_target_by_moving_budget`) and per-LF capacity trim
 (`cap_shorts_to_per_lf_capacity`) run downstream of this precedence and are unchanged — a thin day
-or a small publish window still yields fewer shorts than the target, same as before.
+or a small publish window still yields fewer shorts than the target, same as before. The target
+is a maximum: the planner also drops windows that are not above the timeline mean and never relaxes
+the gap to reach it (`59-shorts.md`, "Shorts quality bar").
 
 A per-location cap below `config.min_shorts_per_lf` is not a bug: `min_shorts_per_lf` is only ever
 a soft warning (`config.py`'s `check_shorts_consistency`), never an enforced floor. The SHORTS-
-CONTRACT gate and the master-deletion gate always check against the cap-derived `target_count`
-computed above — never the uncapped config/derived value.
+CONTRACT render-stage gate and the master-deletion gate check the count the day planned (at most
+the cap-derived `target_count` computed above), never the uncapped config/derived value.
 
 **Moment-length clips (`short_planner.py`).** `DEFAULT_MIN_DURATION_SEC`/`DEFAULT_MAX_DURATION_SEC`
 widen to 15/55 seconds (was 30/45); `DEFAULT_TARGET_DURATION_SEC` (38) is unchanged and is now only
 the fixed search width used to find each candidate window, and the fallback duration when a moment
-has no signal to grow into. After the existing rung-based greedy pick, `_grow_to_moment_length`
+has no signal to grow into. After the quality-bar greedy pick, `_grow_to_moment_length`
 extends each chosen window's end one second at a time for as long as the next second's composite
 score is *strictly greater* than the window's own running mean — a flat or declining moment (the
 common case: plateaus, isolated peaks, and every flat-score fixture in the existing suite) never

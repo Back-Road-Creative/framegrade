@@ -19,6 +19,7 @@ def _make_scores(duration_sec: int) -> np.ndarray:
     arr = np.zeros((duration_sec, 9), dtype=np.float64)
     arr[:, 0] = np.arange(duration_sec, dtype=np.float64)  # timestamp
     arr[:, 1], arr[:, 2] = 0.7, 0.02  # composite score, motion energy
+    arr[1000:1200, 1] = 0.95  # a flat timeline plans no shorts; give it one peak
     return arr
 
 
