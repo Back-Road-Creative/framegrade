@@ -264,8 +264,14 @@ def test_the_rule_reads_the_queue_without_writing_it(tmp_path):
     w = _fresh_world(tmp_path)
     w.sync_world([_short(1)])
     before = w.plan.read_bytes()
+    conn = sqlite3.connect(w.storage / "social_queue.sqlite3")
+    dump = list(conn.iterdump())
+    conn.close()
     w.check()
     assert w.plan.read_bytes() == before
+    conn = sqlite3.connect(w.storage / "social_queue.sqlite3")
+    assert list(conn.iterdump()) == dump
+    conn.close()
 
 
 def test_a_refused_verdict_is_not_this_rules_row(tmp_path, monkeypatch):
@@ -318,3 +324,94 @@ def test_a_missing_decisions_file_is_condition_a_only(tmp_path):
     w.apply_sync()
     w.check()
     assert w.open_keys() == {K_DEC}  # (c) resolves although the decisions file is still missing
+
+
+def test_the_dry_run_passes_the_brand_policys_location_cap_like_the_nightly_sync(
+    tmp_path, monkeypatch
+):
+    from gomoveshift.health import short_text_sync
+
+    seen: list = []
+    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: 3)
+    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: seen.append(kw) or [])
+    w = _fresh_world(tmp_path)
+    w.sync_world([_short(1)])
+    w.check()
+    assert seen and seen[0]["per_location_cap"] == 3 and seen[0]["apply"] is False
+
+
+def _verdict(reason, status="refused"):
+    return qst.ShortTextChange(1, "p", 1, status, "t", "t", reason)
+
+
+@pytest.mark.parametrize("reason", ["sidecar unusable: bad json", "generator: no place"])
+def test_an_unusable_sidecar_or_generator_verdict_holds_the_open_row(tmp_path, monkeypatch, reason):
+    w = _fresh_world(tmp_path)
+    w.sync_world([_short(1)])
+    w.check()
+    assert w.open_keys() == {K_QUE}
+    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: [_verdict(reason)])
+    res = w.check()
+    assert w.open_keys() == {K_QUE}  # held, not resolved as if the sync had applied it
+    assert any("queued" in n and reason.split(":")[0] in n for n in res["notes"])
+
+
+def test_a_really_unreadable_sidecar_holds_the_queued_row(tmp_path):
+    w = _fresh_world(tmp_path)
+    w.sync_world([_short(1)])
+    w.check()
+    assert w.open_keys() == {K_QUE}
+    w.plan.write_text("{not json")
+    res = w.check()
+    assert w.open_keys() == {K_QUE}
+    assert any("sidecar unusable" in n for n in res["notes"])
+
+
+def test_an_unusable_verdict_files_nothing_when_no_row_is_open(tmp_path, monkeypatch):
+    w = _fresh_world(tmp_path)
+    w.sync_world([_short(1)])
+    monkeypatch.setattr(
+        qst, "sync_short_text", lambda conn, **kw: [_verdict("sidecar unusable: x")]
+    )
+    res = w.check()
+    assert w.open_keys() == set() and any("sidecar unusable" in n for n in res["notes"])
+
+
+def test_an_open_row_refreshes_its_detail_and_count_without_a_second_push(tmp_path):
+    w = _fresh_world(tmp_path)
+    w.short(1, views=None)
+    w.check()
+    assert w.rows()[K_MET]["count"] == 1
+    w.short(2, views=None)
+    w.check()
+    row = w.rows()[K_MET]
+    assert row["count"] == 2 and len(row["shorts"]) == 2 and "p#2" in row["detail"]
+    assert row["pushed"] is True
+    assert w.pushed.count(("health_seo_feedback_stale", K_MET)) == 1
+
+
+def test_a_short_aging_out_resolves_the_row_and_says_so_in_a_note(tmp_path):
+    w = _fresh_world(tmp_path)
+    w.short(1, views=None, age_days=seo_feedback.METRICS_LOOKBACK_DAYS)
+    w.check()
+    w.now = NOW + timedelta(days=2)
+    w.decisions(age_h=1)
+    res = w.check()
+    assert w.open_keys() == set()
+    assert any("aged out" in n and "metrics" in n for n in res["notes"])
+    assert not any("aged out" in n for n in w.check()["notes"])  # said once, at the resolution
+
+
+def test_a_dry_run_that_overruns_its_deadline_is_a_note_and_holds_the_row(tmp_path, monkeypatch):
+    import time
+
+    w = _fresh_world(tmp_path)
+    w.sync_world([_short(1)])
+    w.check()
+    monkeypatch.setattr(seo_feedback, "DRY_RUN_DEADLINE_S", 0.2)
+    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: time.sleep(5) or [])
+    started = time.monotonic()
+    res = w.check()
+    assert time.monotonic() - started < 3
+    assert w.open_keys() == {K_QUE}
+    assert any("queued" in n and "exceeded" in n for n in res["notes"])

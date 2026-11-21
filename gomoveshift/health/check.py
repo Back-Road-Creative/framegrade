@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple
 
 from . import cadence, drives
 from .store import code_sha, load_all, utc_iso, write_row
@@ -27,7 +27,14 @@ _EVENTS = {
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
     "seo_feedback_stale": "health_seo_feedback_stale",
+    "short_text_sync_refused": "health_short_text_sync_refused",
+    "short_text_sync_crash": "health_short_text_sync_crash",
 }
+
+#: Kinds ``health sync-short-text`` owns end to end: it alone files, resolves and pushes them
+#: (it holds a lock around its store write; ``run_check`` takes none, so it never writes, pushes
+#: or resolves one). They are listed, and an open one keeps ``health check`` at exit 1.
+_SYNC_OWNED = ("short_text_sync_refused", "short_text_sync_crash")
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
 #: will fail at dispatch and its slot is never refilled; ``dispatch-queue`` already tried
@@ -50,6 +57,8 @@ UNATTENDED_AFTER_H = 26
 UNATTENDED_AFTER_FAILURES = 3
 
 _BACKFILL = ("resume_recipe", "log_path")
+#: Fields of an already-open grouped ``seo_feedback_stale`` row that follow the live finding.
+_REFRESH = ("detail", "count", "shorts", "decided_at")
 
 
 #: Camera file names a grouped footage push lists before "and N more".
@@ -539,7 +548,12 @@ def _bad_run_rows(
 
 
 def _seo_feedback_rows(
-    config: Any, tracking_root: Optional[Path], now: datetime, now_iso: str, notes: List[str]
+    config: Any,
+    tracking_root: Optional[Path],
+    now: datetime,
+    now_iso: str,
+    notes: List[str],
+    open_keys: Collection[str] = (),
 ) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
     """Rule 12 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
     condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
@@ -563,14 +577,28 @@ def _seo_feedback_rows(
 
         store = TrackingStore(tracking_root)
         records = [store.load(p) for p in store.list_projects()]
-        rows += sf.metrics_incidents(records, now.date(), now_iso)
+        metric_rows = sf.metrics_incidents(records, now.date(), now_iso)
+        rows += metric_rows
+        if not metric_rows and sf.KEY_METRICS in open_keys:
+            aged = sf.aged_out_count(records, now.date())
+            if aged:
+                notes.append(
+                    f"seo_feedback_stale metrics resolved: {aged} Short(s) aged out of the "
+                    f"{sf.METRICS_LOOKBACK_DAYS}-day lookback with no core metrics (not a fix)"
+                )
     except Exception as exc:  # noqa: BLE001
         notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")
         held.append(sf.KEY_METRICS)
     db = storage / "social_queue.sqlite3"
     if db.exists():
         try:
-            rows += sf.queued_incidents(db, now, now_iso)
+            queued, unjudged = sf.queued_incidents(db, now, now_iso)
+            rows += queued
+            if unjudged:
+                notes.append(
+                    f"seo_feedback_stale queued not fully evaluated: {'; '.join(unjudged)}"
+                )
+                held.append(sf.KEY_QUEUED)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"seo_feedback_stale queued not evaluated: {type(exc).__name__}: {exc}")
             held.append(sf.KEY_QUEUED)
@@ -645,7 +673,14 @@ def run_check(
     if bad_run is not None:
         found["short_bad_run"] = bad_run
 
-    seo_rows, seo_held = _seo_feedback_rows(config, tracking_root, now, now_iso, notes)
+    seo_rows, seo_held = _seo_feedback_rows(
+        config,
+        tracking_root,
+        now,
+        now_iso,
+        notes,
+        {r["key"] for r in existing if not r.get("resolved_at")},
+    )
     if seo_rows is not None:
         found["seo_feedback_stale"] = seo_rows
 
@@ -693,6 +728,11 @@ def run_check(
                 # Already on file: keeps its pushed state and resume_attempts, but takes the
                 # recipe and log an older reader missed, so heal can reach the drive.
                 fill = {k: row[k] for k in _BACKFILL if row.get(k) and not prior.get(k)}
+                if row["kind"] == "seo_feedback_stale":
+                    # A grouped row's count and listing move: refresh them, never `pushed`.
+                    fill.update(
+                        {k: row[k] for k in _REFRESH if k in row and row[k] != prior.get(k)}
+                    )
                 if fill:
                     prior.update(fill)
                     write_row(incidents_dir, prior)
@@ -728,7 +768,7 @@ def run_check(
     else:
         grouped = set()
     for row in open_rows:
-        if row.get("pushed") or row["key"] in grouped:
+        if row.get("pushed") or row["key"] in grouped or row["kind"] in _SYNC_OWNED:
             continue
         event = _EVENTS.get(row["kind"], "health_incident")
         if notify_fn(event, {"incident": row["key"]}, _line(row)) is False:

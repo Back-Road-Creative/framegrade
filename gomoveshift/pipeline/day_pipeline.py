@@ -1990,6 +1990,7 @@ def _gate_master_picture(day_batch, master_path: Path, date: str) -> None:
         master_path,
         float(getattr(day_batch, "total_duration", 0.0) or 0.0),
         lambda t: quality.timeline_position(files, durations, t),
+        contrast_match=True,
     )
     logger.info("Day %s: day-master picture gate: %s", date, gate.message)
     if not gate.passed:

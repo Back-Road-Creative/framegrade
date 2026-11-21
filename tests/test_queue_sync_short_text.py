@@ -524,15 +524,15 @@ def test_the_gates_see_the_queues_recent_text(tmp_path, monkeypatch):
     assert any("zebra words" in text for text in seen["recent_texts"]["youtube"])
 
 
-def test_two_sidecars_dry_run_and_apply_agree_on_a_snapshot_per_sidecar(tmp_path, monkeypatch):
+def test_two_sidecars_dry_run_and_apply_agree_on_one_snapshot_per_run(tmp_path, monkeypatch):
     _, conn = _two(tmp_path)
     _other(conn, tmp_path)
-    excluded = []
-    real = anti_spam_gate.recent_platform_texts
+    reads = []
+    real = anti_spam_gate.recent_text_entries
     monkeypatch.setattr(
         anti_spam_gate,
-        "recent_platform_texts",
-        lambda c, **kw: excluded.append(kw["exclude_projects"]) or real(c, **kw),
+        "recent_text_entries",
+        lambda c, **kw: reads.append(kw) or real(c, **kw),
     )
 
     def key(changes):
@@ -541,7 +541,8 @@ def test_two_sidecars_dry_run_and_apply_agree_on_a_snapshot_per_sidecar(tmp_path
     dry = sync_short_text(conn, apply=False, now=NOW)
     applied = sync_short_text(conn, apply=True, now=NOW)
     assert key(dry) == key(applied) and {c.status for c in applied} == {"changed"}
-    assert sorted(map(sorted, excluded)) == [[PROJECT]] * 2 + [[PROJECT2]] * 2  # per sidecar
+    # one pre-run read per run (filtered per sidecar afterwards), never one per sidecar
+    assert reads == [{"now": NOW}, {"now": NOW}]
 
 
 def test_a_hand_titled_short_is_left_alone(tmp_path):
@@ -703,16 +704,35 @@ def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
     assert any("location-cap" in c.reason for c in changes if c.status == "refused")
 
 
+def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
+    plan, conn = _two(tmp_path)
+    conn.close()
+    monkeypatch.setattr(
+        "gomoveshift.publishing.brand_policy.load_brand_policy",
+        lambda brand: SimpleNamespace(per_location_cap=1),
+    )
+    monkeypatch.setattr("gomoveshift.console.settings.current_brand", lambda: "brand")
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    args = SimpleNamespace(queue_action="sync-short-text", apply=False)
+    before = plan.read_text()
+    assert cmd_queue(args, config) == 1  # the second Short is refused for location-cap
+    assert plan.read_text() == before
+
+
 def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     _other(conn, tmp_path, day=5)  # same day and place, so the same text
     changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["changed", "refused"]
-    assert "anti-spam gate" in changes[1].reason
-    assert changes[0].written
+    # The second sidecar's text equals the first's, so it is refused; the first's new text in
+    # turn clashes with the second's text as STORED, so it is refused too (checked against later
+    # sidecars): nothing is written and the pair stays stable night to night.
+    assert [c.status for c in changes] == ["refused", "refused"]
+    assert all("anti-spam gate" in c.reason for c in changes)
+    assert "later sidecar" in changes[0].reason
+    assert not any(c.written for c in changes)
 
 
-def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):
+def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_unchanged(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)
     new_hash = _hashes(conn)[(1, "youtube")]
@@ -725,7 +745,8 @@ def test_a_reconcile_onto_a_hash_a_terminal_row_holds_is_refused(tmp_path):
     )
     conn.commit()
     changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["refused"] and "already holds" in changes[0].reason
+    # nothing for the sync to write: by design `unchanged`, not a refusal (TRANSIENT_REFUSALS note)
+    assert [c.status for c in changes] == ["unchanged"] and "already holds" in changes[0].reason
 
 
 def test_a_crash_then_a_generator_change_still_converges(tmp_path, monkeypatch):
@@ -781,3 +802,69 @@ def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypat
     changes = sync_short_text(conn, apply=False, now=NOW)
     assert [c.status for c in changes] == ["changed", "refused"]
     assert "place repeats" in changes[1].reason
+
+
+def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
+    tmp_path, monkeypatch
+):
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        made = real(view, *a, **kw)
+        for post in made:  # the generator "sanctions" every repeat
+            post.place_variety = {
+                k: {"reason": "no_alternative", "body": "Ashby County"}
+                for k in ("title", "description")
+            }
+        return made
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    # its seed was the predecessor's STORED places, so the sanction says nothing about the
+    # predecessor's NEW ones: the clash stands
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "place repeats" in changes[1].reason
+
+
+def _only_alone_sanctioned(monkeypatch):
+    """The generator refuses a multi-Short ask (forcing the alone fallback) and sanctions
+    every repeat with ``no_alternative``."""
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        made = real(view, *a, **kw)
+        for post in made:
+            post.place_variety = {
+                k: {"reason": "no_alternative", "body": "Ashby County"}
+                for k in ("title", "description")
+            }
+        return made
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+
+
+def test_a_short_asked_alone_keeps_the_exemption_where_its_predecessor_keeps_its_place(
+    tmp_path, monkeypatch
+):
+    _only_alone_sanctioned(monkeypatch)
+    from gomoveshift.pipeline import social_generator
+
+    # a single-place route: the only place the generator (and the stored-text reader) can name
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("county", "Ashby County")]
+    )
+    first, second = _short(1), _short(2)
+    # Short 1's STORED title and description already name the place its new text names, so
+    # Short 2's alone seed (the predecessor's STORED places) was the predecessor's final ones
+    # too: the sanctioned repeat is valid for each such key.
+    first["payloads"]["youtube"]["title"] = "Mar 5, 1st stretch: Ashby County #Shorts"
+    plan, conn = _world(tmp_path, [first, second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    assert [c.status for c in changes] == ["changed", "changed"], [c.reason for c in changes]

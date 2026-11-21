@@ -20,7 +20,7 @@ refreshed; that missing refresh is what condition (a) catches.
 |---|---|---|
 | `seo_feedback_stale:decisions` | the file is missing, unreadable, or `decided_at` is older than the limit | `seo_feedback.DECISIONS_STALE_AFTER_H` = 36 |
 | `seo_feedback_stale:metrics` | one grouped row: at least one YouTube Short whose day-7 window is settled and that was posted within the lookback has a null `views` or `avg_view_percentage`. The detail gives the count, up to `LISTED` = 10 `project#index (missing fields)` entries, then "and N more"; it resolves at a count of 0 | settled = `tracking.day7.window_settled` (posted + 7 d <= today - 2 d); `seo_feedback.CORE_METRICS`; `seo_feedback.METRICS_LOOKBACK_DAYS` = 28 |
-| `seo_feedback_stale:queued` | one grouped row: at least one queued Short has the verdict `changed` from `queue_short_text.sync_short_text(conn, apply=False, now=now)` on a read-only connection, i.e. text the sync would rewrite but the nightly `health sync-short-text` did not apply | the sync's own verdicts (it owns the lead time, lease and review checks) |
+| `seo_feedback_stale:queued` | one grouped row: at least one queued Short has the verdict `changed` from `queue_short_text.sync_short_text(conn, apply=False, now=now, per_location_cap=<brand policy's>)` on a read-only connection (the cap the nightly sync uses), i.e. text the sync would rewrite but the nightly `health sync-short-text` did not apply | the sync's own verdicts (it owns the lead time, lease and review checks) |
 
 A Short that ages out of the metrics lookback is simply no longer counted; it is not reported as
 a fix. The rule asks the sync itself instead of re-implementing it, so it can never flag a row
@@ -28,7 +28,15 @@ the sync refuses.
 
 **Refused rows are not this rule's job.** A `refused` verdict (for example a TikTok row of the
 same Short awaiting manual publish) is filed by the nightly `health sync-short-text` as its own
-`short_text_sync_refused:*` incident.
+`short_text_sync_refused:<project>` incident. The exception is a refusal that starts "sidecar
+unusable" or "generator:": the dry run could not judge that row, so it is a note and an open
+`queued` row is held, not resolved.
+
+**Open rows follow the finding.** A row already open has its `detail`, `count` and listing
+refreshed on each check; `pushed` stays true and nothing is pushed again. When the `metrics`
+row resolves because Shorts aged out of the lookback (not because metrics arrived), the check
+notes it. The dry run has a `DRY_RUN_DEADLINE_S` = 20 s deadline (as rule 11's listing does): an
+overrun is a note and holds the `queued` row.
 
 Arm assignment does not yet exclude demoted arms; that is a planned unit (C4c), not this rule.
 
