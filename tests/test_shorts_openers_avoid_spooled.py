@@ -59,8 +59,10 @@ def test_interactive_description_openers_also_rotate():
 
 @pytest.mark.parametrize("platform", [*CAPTION_PLATFORMS, "youtube"])
 def test_second_project_at_one_place_avoids_the_first_ones_spooled_openers(platform):
-    spooled = _texts(_gen("proj_alpha"))
-    second = _texts(_gen("proj_bravo", spooled_texts=spooled))[platform]
+    # Captions have three factual shapes per platform, so one short is spooled
+    # and the second project's two shorts walk past it to the other two.
+    spooled = _texts(_gen("proj_alpha"), n=1)
+    second = _texts(_gen("proj_bravo", spooled_texts=spooled), n=2)[platform]
     taken = {text_opener_key(t) for t in spooled[platform]}
     clashes = [t for t in second if text_opener_key(t) in taken]
     assert clashes == []

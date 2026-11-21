@@ -160,14 +160,14 @@ class TestTitleDiversity:
 class TestTemplatePoolSize:
     """Template pools must be large enough to avoid repetition."""
 
-    def test_caption_opener_pools_cover_a_twelve_short_batch(self):
-        """Each platform's opener pool holds >=12 entries, none repeated, and
-        every opener carries the mandatory {location} slot: a caption is an
-        opener composed with a detail/prompt part (never a whole fixed
-        template), and 12 distinct openers keep a 12-short batch from
-        repeating one (the anti-spam gate's 6-word-prefix rule)."""
+    def test_caption_opener_pools_are_few_distinct_factual_shapes(self):
+        """Each platform's opener pool holds >=3 distinct shapes, none repeated,
+        and every opener carries the mandatory {location} slot. A caption states
+        the measured place and nothing else, so the pool is the few ways to say
+        it, never filler padded out to a batch size; variety across a batch
+        comes from each Short naming its own place."""
         for platform, templates in _ALL_PLATFORM_CAPTION_TEMPLATES.items():
-            assert len(templates) >= 12, f"{platform}: only {len(templates)} openers"
+            assert len(templates) >= 3, f"{platform}: only {len(templates)} openers"
             assert len(set(templates)) == len(templates), f"{platform}: duplicate opener"
             assert all("{location}" in t for t in templates), platform
 

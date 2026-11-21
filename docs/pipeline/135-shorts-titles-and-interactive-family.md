@@ -344,14 +344,28 @@ starts with a month token.
 
 The single shared `CAPTION_TEMPLATES` pool + `HOOKS` prefix is gone. `SocialGenerator`
 composes ONE caption per platform (`SocialPost.captions: dict[str, str]`, keyed
-`"youtube" | "facebook" | "instagram" | "tiktok"`) from independently rotated parts: an
-opener from the platform's own pool (`YOUTUBE_CAPTION_TEMPLATES`,
-`FACEBOOK_CAPTION_TEMPLATES`, `INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES` —
-12+ openers each, no hook-pool prefix), then a data-only detail clause
-(`CAPTION_DETAIL_TEMPLATES`, built from `terrain_desc` only) or, for an `interactive`
-short, an engagement prompt (`INTERACTIVE_PROMPT_TEMPLATES`). Each part walks its own
-pool in a per-project shuffled order (`_rotating_pick`, seeded with `_project_seed`), so
-output is deterministic per project + short and two projects at one place open differently. `SocialPost.caption` stays and is an alias for the Instagram text —
+`"youtube" | "facebook" | "instagram" | "tiktok"`).
+
+**Facts only (2026-11).** A caption is the measured place and nothing else: one sentence
+shape from the platform's own pool (`YOUTUBE_CAPTION_TEMPLATES`, `FACEBOOK_CAPTION_TEMPLATES`,
+`INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES`), such as "Passing through Polk
+County." The pools are three shapes each, disjoint across platforms (so no two platforms
+collide), and every shape is a stable `caption_template_id` for the meta-learning ranker.
+A terrain clause ("Coastal roads.", from `CAPTION_DETAIL_TEMPLATES`) follows only when the
+terrain is classified (`coastal`, `mountain`, `winding`); `countryside` and unknown terrain
+state nothing, and nothing says "Mostly roads", "Just roads", "stretch", a count of seconds
+or a weekday. The drive path's per-Short clone carries no terrain (a clip's own GPS never
+classified one), so its captions are the place alone. The YouTube caption's closing line is
+"Filmed <Month YYYY>." (full month name), the plan builder adds the same sentence to the
+other platforms from the recording date, and hashtags and experiment arms are unchanged.
+An `interactive` short is its guess prompt alone (`INTERACTIVE_PROMPT_TEMPLATES`, one
+distinct prompt per platform): no opener and no terrain clause, since either would hint at
+the withheld place. A road is never named in a caption: the final-text review backs one
+cited place per text. Variety across a batch comes from each Short naming its own measured
+place (`desc_place`), not from padding the pools with filler; a batch at one place wraps
+after three shapes per platform, and `cross-batch-repeat` stays the gate on a repeat.
+Each pool walks a per-project shuffled order (`_rotating_pick`, seeded with `_project_seed`),
+so output is deterministic per project + short. `SocialPost.caption` stays and is an alias for the Instagram text —
 every legacy reader of `.caption` (`content_gates.py`, the Metricool CSV shared column,
 `console/pubqueue.py`, `instagram_adapter.py`) keeps reading it unchanged.
 
@@ -364,8 +378,8 @@ instead, so the place can never leak through a caption on an interactive short.
 
 **No two platforms identical.** `_build_platform_captions` also raises `ValueError`
 naming the short index and the two colliding platforms if any two platform captions for
-the same short come out byte-identical. Distinctness across shorts is by construction: a 12-short batch never repeats an
-opener (the pools hold 12+ entries), and the generic hashtags rotate per short
+the same short come out byte-identical. Distinctness across shorts is by construction: a batch never repeats an
+opener until the pool wraps (three shapes), and the generic hashtags rotate per short
 (`GENERIC_HASHTAGS`, `GENERIC_HASHTAGS_PER_POST` drawn with a `short_index` seed; the
 place and region tags are never part of that draw). Across batches,
 `anti_spam_gate.check_batch(..., recent_texts=...)` refuses (`cross-batch-repeat`) any

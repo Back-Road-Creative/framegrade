@@ -164,6 +164,15 @@ def assign_global_short_indexes(
     return assigned
 
 
+def _full_month_year(formatted: str) -> str:
+    """``"Sep 2025"`` (the generator's own date form) as ``"September 2025"``, the
+    form of the ``Filmed <Month YYYY>.`` sentence; an unparseable value is kept."""
+    try:
+        return datetime.strptime(formatted, "%b %Y").strftime("%B %Y")
+    except ValueError:
+        return formatted
+
+
 def format_recording_date(raw: "str | datetime | None") -> str:
     """Normalize a recording date string to 'Mon YYYY' format.
 
@@ -786,86 +795,45 @@ def _frame_fields(template: str) -> "set[str]":
 # Every opener requires {location} -- the mandatory place fact slot; when a
 # short is flagged ``interactive``, ``_build_platform_captions`` fills
 # {location} with LOCATION_WITHHELD instead so the place is never named,
-# never by omitting the slot from some openers and not others. Details draw
-# only from data the format map already carries (never an invented fact).
+# never by omitting the slot from some openers and not others. A caption states
+# the measured place and, for classified terrain only, one terrain clause:
+# facts the record holds, no filler. Shapes are few and disjoint per platform.
 YOUTUBE_CAPTION_TEMPLATES = [
-    "POV driving through {location}.",
+    "Driving through {location}.",
+    "Dashcam footage from {location}.",
     "A drive through {location}.",
-    "Behind the wheel through {location}.",
-    "This short follows the road through {location}.",
-    "Following the route through {location}.",
-    "Driving through {location} from the driver's seat.",
-    "A stretch of road in {location}.",
-    "Passing through {location} by car.",
-    "Out on the road in {location}.",
-    "The road through {location}, as driven.",
-    "Rolling along through {location}.",
-    "Traveling through {location}.",
 ]
 
 FACEBOOK_CAPTION_TEMPLATES = [
-    "Would you drive through {location}?",
-    "{location} \u2014 worth the detour?",
-    "Pulling into {location} on this one.",
-    "Next stop: {location}.",
-    "Back on the road in {location}.",
-    "Here's the drive through {location}.",
-    "Cutting through {location}.",
     "Passing through {location}.",
-    "Following the road into {location}.",
-    "Come along through {location}.",
-    "Behind the wheel in {location}.",
-    "Another mile through {location}.",
-    "Heading out through {location}.",
-    "Wheels rolling through {location}.",
+    "On the road in {location}.",
+    "Drive through {location}.",
 ]
 
 INSTAGRAM_CAPTION_TEMPLATES = [
     "POV driving through {location}",
-    "Rolling through {location}",
     "{location}, from behind the wheel",
-    "Just {location} and the open road",
-    "Open road, {location}",
-    "Cruising into {location}",
-    "Driving the stretch through {location}",
-    "Eyes on the road in {location}",
-    "Another drive through {location}",
-    "Hello from {location}",
-    "Along the road in {location}",
-    "Making our way through {location}",
-    "On the move in {location}",
-    "Wheel time in {location}",
+    "Driving in {location}",
 ]
 
 TIKTOK_CAPTION_TEMPLATES = [
     "POV: driving through {location}",
     "{location} from the driver's seat",
-    "Just driving through {location}",
-    "Ride along through {location}",
-    "Drive with me through {location}",
-    "Rolling into {location}",
-    "Pass through {location} with me",
-    "Stay on the road through {location}",
-    "Next up, {location}",
-    "Come drive {location} with me",
-    "Taking you through {location}",
-    "One drive through {location}",
-    "Heading into {location}",
-    "Back behind the wheel in {location}",
+    "{location}, by car",
 ]
 
-#: The data-only detail clause that follows an opener. Each slot is a field
-#: the format map always carries -- never an invented fact.
+#: The one terrain clause a caption may carry, and only for a terrain the
+#: classifier named. Unclassified terrain (``countryside``, ``None``) states
+#: nothing: a caption never says "Mostly roads".
 CAPTION_DETAIL_TEMPLATES = [
-    "{terrain_desc} the whole way.",
-    "Mostly {terrain_desc}.",
-    "Nothing but {terrain_desc} ahead.",
-    "Just {terrain_desc}.",
-    "Taking in the {terrain_desc}.",
+    "{terrain_desc}.",
 ]
 
-#: An ``interactive`` short withholds its place, so it asks for a guess
-#: instead of carrying a detail clause.
+#: Terrain classes whose clause a caption may state.
+_CAPTION_TERRAINS = ("coastal", "mountain", "winding")
+
+#: An ``interactive`` short withholds its place, so it is the guess prompt
+#: alone: no opener, no terrain clause (either would hint at the answer).
 INTERACTIVE_PROMPT_TEMPLATES = [
     "Where do you think this is?",
     "Can you guess the route?",
@@ -1568,7 +1536,8 @@ class SocialGenerator:
         interactive: bool,
         picked: Optional["dict[str, str]"] = None,
     ) -> str:
-        """One platform caption sentence: opener + (detail | engagement prompt).
+        """One platform caption: the place, plus a terrain clause only for classified
+        terrain; an interactive short is its guess prompt alone.
 
         ``picked``, when given, receives ``{platform: caption_template_id}`` of the
         opener this caption opens with."""
@@ -1580,6 +1549,14 @@ class SocialGenerator:
         def fill(pool: "list[str]", part: str) -> str:
             return render(self._rotating_pick(pool, platform, part, short_index))
 
+        if interactive:
+            prompts = list(INTERACTIVE_PROMPT_TEMPLATES)
+            random.Random(self._project_seed("captions:interactive:prompt")).shuffle(prompts)
+            slot = list(_PLATFORM_CAPTION_TEMPLATES).index(platform)
+            prompt = prompts[(short_index - 1 + slot) % len(prompts)]
+            if picked is not None:
+                picked[platform] = caption_template_id(prompt)
+            return prompt
         template = self._fresh_rotating_pick(
             _PLATFORM_CAPTION_TEMPLATES[platform], platform, "opener", short_index, render
         )
@@ -1588,10 +1565,9 @@ class SocialGenerator:
         opener = render(template)
         if opener[-1] not in ".?!":
             opener += "."
-        tail = fill(
-            INTERACTIVE_PROMPT_TEMPLATES if interactive else CAPTION_DETAIL_TEMPLATES, "tail"
-        )
-        return f"{opener} {tail}"
+        if self.terrain_type not in _CAPTION_TERRAINS:
+            return opener
+        return f"{opener} {fill(CAPTION_DETAIL_TEMPLATES, 'tail')}"
 
     def _platform_hashtags(
         self,
@@ -1771,7 +1747,7 @@ class SocialGenerator:
             else self._compose_caption("youtube", short_index, fmap, interactive, picked)
         )
         if self.recording_date:
-            yt += f"\n\nFilmed {self.recording_date}."
+            yt += f"\n\nFilmed {_full_month_year(self.recording_date)}."
         captions["youtube"] = yt
 
         # Facebook — one line, <=2 hashtags.
