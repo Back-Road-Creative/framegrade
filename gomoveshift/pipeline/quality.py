@@ -339,8 +339,11 @@ def gate_timestamps(duration: float, n: int = PICTURE_GATE_SAMPLES) -> list[floa
     return [span * (i + 0.5) / n for i in range(n)]
 
 
-def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float] | None:
-    """``(sharpness, ringing)`` of the frame at ``ts`` of ``path``, or ``None``.
+def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float, float] | None:
+    """``(sharpness, ringing, luma_variance)`` of the frame at ``ts`` of ``path``, or ``None``.
+
+    The variance is of the same bounded luma ``sharpness_score`` measures, so a
+    caller can put two frames' sharpness at one contrast.
 
     ``vf`` runs before the gate's own reduction, so a reference can be given a
     delivered file's geometry (a Short's crop of the master).
@@ -360,7 +363,8 @@ def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float] | None:
     gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return None
-    return sharpness_score(gray), ringing_score(gray)
+    luma_var = float(_bounded_luma(gray, SHARPEN_DETAIL_MAX_DIM).var())
+    return sharpness_score(gray), ringing_score(gray), luma_var
 
 
 def sample_delivered_picture(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES):
@@ -397,10 +401,21 @@ def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GA
 
     ``reference_at(t)`` gives ``(reference_file, seconds)`` for delivered second
     ``t``; ``vf`` gives the reference the delivered file's geometry. Returns
-    ``(delivered_sharp, delivered_ring, reference_sharp, reference_ring)`` over
-    the pairs where both frames decoded, so each median comes from the same frames.
+    ``(delivered_sharp, delivered_ring, reference_sharp, reference_ring,
+    contrast_ratio)`` over the pairs where both frames decoded, so each median
+    comes from the same frames.
+
+    Laplacian variance scales with contrast squared, so a deliberate tone grade
+    (shadow lift, highlight pull) would read as softness. Each reference
+    sharpness is therefore put at its delivered frame's contrast:
+    ``r_sharp * var(delivered luma) / var(reference luma)``. ``contrast_ratio``
+    is that factor per pair (1.0 when either frame is flat, or unmeasured). It
+    is symmetric: a grade that raises contrast raises the reference, so added
+    contrast cannot hide softening.
     """
-    out: tuple[list[float], list[float], list[float], list[float]] = ([], [], [], [])
+    out: tuple[list[float], list[float], list[float], list[float], list[float]] = (
+        [], [], [], [], []
+    )  # fmt: skip
     for ts in gate_timestamps(duration, n):
         got = frame_picture(delivered, ts)
         if got is None:
@@ -409,7 +424,10 @@ def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GA
         ref = frame_picture(ref_path, ref_ts, vf)
         if ref is None:
             continue
-        for values, v in zip(out, (*got, *ref)):
+        ratio = 1.0
+        if len(got) > 2 and len(ref) > 2 and got[2] > 1e-9 and ref[2] > 1e-9:
+            ratio = got[2] / ref[2]
+        for values, v in zip(out, (got[0], got[1], ref[0] * ratio, ref[1], ratio)):
             values.append(v)
     return out
 

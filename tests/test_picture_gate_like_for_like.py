@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import statistics
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,17 +35,21 @@ def _scene(pos: float) -> float:
     return 40.0 if math.floor(pos / 8.0) % 2 == 0 else 12.0
 
 
-def _png(amp: float, seed: int) -> bytes:
+def _png(amp: float, seed: int, blur: float = 0.0) -> bytes:
     rng = np.random.default_rng(seed)
     frame = np.clip(128.0 + amp * rng.uniform(-1.0, 1.0, (96, 96)), 0, 255).astype(np.uint8)
+    if blur:
+        frame = cv2.GaussianBlur(frame, (0, 0), blur)
     return cv2.imencode(".png", frame)[1].tobytes()
 
 
-def _fake_ffmpeg(monkeypatch, where, *, keep: float = 0.91):
+def _fake_ffmpeg(monkeypatch, where, *, keep: float = 0.91, blur: float = 0.0):
     """Patch ffmpeg: ``where(name, second, vf)`` gives the frame's timeline second.
 
     A delivered file (``keep`` of the texture) and its reference render the same
     noise at the same timeline second, so a faithful file differs only by ``keep``.
+    ``blur`` smears the delivered frame (a real loss of detail: the gate puts the
+    reference at the delivered contrast, so a lower ``keep`` alone is a tone grade).
     """
     calls = []
 
@@ -55,7 +60,9 @@ def _fake_ffmpeg(monkeypatch, where, *, keep: float = 0.91):
         calls.append((name, round(second, 3), vf))
         pos, delivered = where(name, second, vf)
         amp = _scene(pos) * (keep if delivered else 1.0)
-        return SimpleNamespace(returncode=0, stdout=_png(amp, int(round(pos * 1000))))
+        return SimpleNamespace(
+            returncode=0, stdout=_png(amp, int(round(pos * 1000)), blur if delivered else 0.0)
+        )
 
     monkeypatch.setattr(quality.subprocess, "run", run)
     return calls
@@ -99,7 +106,7 @@ def test_a_faithful_master_passes_when_its_frames_are_paired(tmp_path, monkeypat
 
 
 def test_a_soft_master_still_fails_on_the_same_frames(tmp_path, monkeypatch):
-    _fake_ffmpeg(monkeypatch, _on_day_timeline, keep=0.6)
+    _fake_ffmpeg(monkeypatch, _on_day_timeline, keep=1.0, blur=1.0)
     batch, master = _day(tmp_path)
     with pytest.raises(RuntimeError, match=f"Day {DATE}.*delivered sharpness"):
         day_pipeline._gate_master_picture(batch, master, DATE)
@@ -134,7 +141,7 @@ def test_an_lf_is_judged_against_its_pre_text_input(tmp_path, monkeypatch):
     assert gate.passed, gate.message
     assert {n for n, _, _ in calls} == {final.name, before.name}
 
-    _fake_ffmpeg(monkeypatch, _same_seconds, keep=0.6)
+    _fake_ffmpeg(monkeypatch, _same_seconds, keep=1.0, blur=1.0)
     soft = lv.paired_picture_gate(final, 1800.0, lambda t: (before, t))
     assert not soft.passed and "delivered sharpness" in soft.message
 
@@ -194,3 +201,84 @@ def test_picture_inputs_never_sample_the_source(tmp_path, monkeypatch):
     )
     assert quality.picture_inputs_from_state(state)[2] == {1: True}
     assert calls == []
+
+
+# ── contrast: the gate judges detail, not the grade's tone curve ────────────
+# Courtmacsherry (Ireland 2025-09-19, 2026-11-20): the day's grade lowered the
+# master's luma spread 8.6%, Laplacian variance scales with contrast squared,
+# and the gate read 240.0 < 250.3 as softness on 25 faithful frames.
+
+
+def _textured(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    fine = rng.uniform(0.0, 255.0, (96, 96)).astype(np.float32)
+    return cv2.GaussianBlur(fine, (0, 0), 0.7)
+
+
+def _tone(frame: np.ndarray, gain: float) -> np.ndarray:
+    return np.clip(128.0 + gain * (frame - 128.0), 0, 255)
+
+
+def _smear(frame: np.ndarray, sigma: float) -> np.ndarray:
+    return cv2.GaussianBlur(frame, (0, 0), sigma)
+
+
+def _paired(monkeypatch, make_delivered, seeds=range(25)):
+    refs = {i: _textured(i) for i in seeds}
+    state = {"i": -1}
+
+    def run(cmd, capture_output=True, timeout=None):
+        name = Path(cmd[cmd.index("-i") + 1]).name
+        if name.endswith("_master.mp4"):
+            state["i"] += 1
+            frame = make_delivered(refs[state["i"] % len(refs)])
+        else:
+            frame = refs[state["i"] % len(refs)]
+        png = cv2.imencode(".png", np.rint(frame).astype(np.uint8))[1].tobytes()
+        return SimpleNamespace(returncode=0, stdout=png)
+
+    monkeypatch.setattr(quality.subprocess, "run", run)
+
+
+def _gate(make_delivered, monkeypatch):
+    _paired(monkeypatch, make_delivered)
+    return lv.paired_picture_gate(Path("m_master.mp4"), 250.0, lambda t: (Path("ref.mp4"), t))
+
+
+def test_a_tone_compressed_master_with_no_detail_loss_passes(monkeypatch):
+    graded = lambda f: _tone(f, 0.6)  # noqa: E731
+    # The raw ratio is below the 0.75 the old gate needed.
+    raw = quality.sharpness_score(graded(_textured(0))) / quality.sharpness_score(_textured(0))
+    assert raw < 0.75
+    gate = _gate(graded, monkeypatch)
+    assert gate.passed, gate.message
+    assert "reference at delivered contrast ×0.36" in gate.message
+
+
+def test_a_tone_compressed_master_that_is_also_smeared_still_fails(monkeypatch):
+    gate = _gate(lambda f: _smear(_tone(f, 0.6), 1.2), monkeypatch)
+    assert not gate.passed and "delivered sharpness" in gate.message
+
+
+def test_added_contrast_cannot_hide_softening(monkeypatch):
+    soft_and_punchy = lambda f: _tone(_smear(f, 0.5), 1.5)  # noqa: E731
+    _paired(monkeypatch, soft_and_punchy)
+    raw = quality.sample_paired_picture(Path("m_master.mp4"), 250.0, lambda t: (Path("r.mp4"), t))
+    # The old raw comparison would have passed this pair...
+    assert statistics.median(raw[0]) >= 0.75 * statistics.median(
+        [r / k for r, k in zip(raw[2], raw[4])]
+    )
+    # ...the contrast-matched gate does not.
+    gate = lv.paired_picture_gate(Path("m_master.mp4"), 250.0, lambda t: (Path("ref.mp4"), t))
+    assert not gate.passed and "delivered sharpness" in gate.message
+
+
+def test_flat_frames_do_not_divide_by_zero(monkeypatch):
+    def run(cmd, capture_output=True, timeout=None):
+        png = cv2.imencode(".png", np.full((96, 96), 90, np.uint8))[1].tobytes()
+        return SimpleNamespace(returncode=0, stdout=png)
+
+    monkeypatch.setattr(quality.subprocess, "run", run)
+    out = quality.sample_paired_picture(Path("m.mp4"), 100.0, lambda t: (Path("r.mp4"), t))
+    assert out[4] and set(out[4]) == {1.0}
+    assert all(math.isfinite(v) for v in out[2])

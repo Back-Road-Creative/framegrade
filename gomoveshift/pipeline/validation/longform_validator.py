@@ -149,8 +149,14 @@ def paired_picture_gate(
     file's geometry. Both medians come from the same pairs, so a scene change
     cannot move one side alone (Mizen 2026-11-16: a faithful master read 335.8
     against 405.8 on paired frames and failed against 597.5 on unpaired ones).
+
+    Each reference sharpness is put at its delivered frame's contrast first
+    (Courtmacsherry 2026-11-20: the day's tone grade lowered luma spread 8.6%,
+    which Laplacian variance squares, and read 240.0 against 333.7 as softness).
+    The gate judges detail, not the grade's tone curve; the message says by what
+    factor the reference moved.
     """
-    d_sharp, d_ring, r_sharp, r_ring = quality.sample_paired_picture(
+    d_sharp, d_ring, r_sharp, r_ring, ratios = quality.sample_paired_picture(
         video_path, duration, reference_at, quality.PICTURE_GATE_SAMPLES, reference_vf
     )
     if not d_sharp:
@@ -165,7 +171,10 @@ def paired_picture_gate(
         float(statistics.median(r_sharp)),
         float(statistics.median(r_ring)),
     )
-    gate.message += f" on {len(d_sharp)} paired frames"
+    gate.message += (
+        f" on {len(d_sharp)} paired frames"
+        f" (reference at delivered contrast \u00d7{statistics.median(ratios):.2f})"
+    )
     return gate
 
 

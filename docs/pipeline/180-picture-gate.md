@@ -22,6 +22,22 @@ the reference's plus 25%.
 | Long-form | the same second of its pre-text input (`lf_XX_with_montage.mp4`) | after the text burn, before photo inserts shift the timeline |
 | Short | the master at the Short's start plus the same second, through the Short's own crop (`build_crop_filter`) | right after the Short renders; a tracked reframe is compared with the centre crop of the same seconds |
 
+### Contrast-matched reference
+
+Laplacian variance scales with contrast squared, so a deliberate tone grade (shadow lift,
+highlight pull) would read as softness. `quality.sample_paired_picture` therefore puts each pair's
+reference sharpness at the delivered frame's contrast before the medians are taken:
+`reference_sharpness x var(delivered luma) / var(reference luma)`, on the same bounded luma
+`sharpness_score` measures. A flat frame (zero variance) leaves the pair unadjusted. The factor is
+symmetric: a grade that raises contrast raises the reference, so added contrast cannot hide
+softening. The verdict message ends `(reference at delivered contrast x0.83)` (the median factor)
+so an operator can see the adjustment. The 25% tolerance, `sharpness_score`, the phase A source
+gate and the unpaired gate are unchanged.
+
+Courtmacsherry (2026-11-19): a master whose grade lowered luma spread 8.6% read 240.0 against
+333.7 (`240.0 < 250.3`) and failed on every retry; contrast-matched, the median ratio is about
+0.86, inside the tolerance.
+
 A failed check stops the day with `failed the picture gate: <reason>`.
 
 ### The record Phase D reads
