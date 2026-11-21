@@ -19,7 +19,10 @@ _STEP_DEG = 0.0002  # ~22 m/s: always moving
 
 def _scores(n):
     """Planner score array: column 0 timestamp, column 1 composite."""
-    return np.column_stack([np.arange(n, dtype=float), np.ones(n)])
+    composite = np.ones(n)
+    composite[100:200] = 2.0  # moments above the timeline mean on both sides of
+    composite[min(900, n - 100) : min(1000, n)] = 2.0  # the county line (t=600)
+    return np.column_stack([np.arange(n, dtype=float), composite])
 
 
 def _trace(n):

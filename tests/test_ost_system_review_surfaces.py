@@ -427,6 +427,11 @@ def _full_day(tmp_path, state, *, short_text="Harrow"):
 
     from test_day_pipeline import TestRunDayPipeline as _StageMocks
     from test_day_pipeline import _make_day_batch, _make_lf_plan, _make_scores, _make_seg
+
+    def _peaked(scores):
+        scores[1000:1200, 1] = 0.95  # a flat timeline plans no shorts; give it one peak
+        return scores
+
     from test_day_pipeline_shorts_ost_gate import DATE, _touch_concat, _touch_montage
     from test_retained_gps_claims import _BandGeocoder
 
@@ -449,7 +454,7 @@ def _full_day(tmp_path, state, *, short_text="Harrow"):
     ):
         result = day_pipeline.run_day_pipeline(
             day_batch=_make_day_batch(DATE, 3, per_ep_duration=1200.0),
-            day_scores=_make_scores(3600, score=0.6),
+            day_scores=_peaked(_make_scores(3600, score=0.6)),
             output_dir=output_base,
             location="Drive Wide",
             config=None,

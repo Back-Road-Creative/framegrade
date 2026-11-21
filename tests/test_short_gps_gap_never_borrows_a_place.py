@@ -122,6 +122,8 @@ def test_the_planner_never_picks_a_window_over_a_dropout():
     scores[:, 1] = 0.2
     scores[:, 2] = 0.5
     scores[250:350, 1] = 1.0  # the day's best moment sits in the dropout
+    scores[30:130, 1] = 0.8  # moments with fixes, above the timeline mean
+    scores[450:550, 1] = 0.8
     pts = _trace((0, 240), (360, 599))
     unvetoed = plan_shorts(scores, target_count=3, min_gap_sec=10.0)
     assert any(r.start_sec < 350 and r.end_sec > 250 for r in unvetoed)  # would pick it

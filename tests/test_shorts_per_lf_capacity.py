@@ -149,14 +149,21 @@ class TestPerLfFill:
     CAP = 3
     GAP = 60.0
 
-    def _day(self):
-        """1200 s master: LF 1 = [0, 600), LF 2 = [600, 1200). LF 2 scores far higher."""
+    def _day(self, lf1_level=0.3, lf2_tail=None):
+        """1200 s master: LF 1 = [0, 600), LF 2 = [600, 1200). LF 2 scores far higher.
+
+        ``lf1_level`` is LF 1's base composite. At 0.3 every LF 1 window is below
+        the day's mean (the quality bar); a level near the day mean lets LF 1
+        windows clear it. ``lf2_tail`` (if set) is LF 2's composite after t=1000,
+        pulling the day mean down."""
         import numpy as np
 
         ts = np.arange(1200, dtype=float)
         scores = np.zeros((1200, 9))
         scores[:, 0] = ts
-        scores[:, 1] = np.where(ts >= 600, 0.9, 0.3)
+        scores[:, 1] = np.where(ts >= 600, 0.9, lf1_level)
+        if lf2_tail is not None:
+            scores[:, 1] = np.where(ts >= 1000, lf2_tail, scores[:, 1])
         # a little texture so windows differ
         scores[:, 1] += 0.01 * np.sin(ts / 7.0)
         boundaries = compute_day_file_boundaries(_batch([1200.0]))
@@ -183,10 +190,12 @@ class TestPerLfFill:
 
         from gomoveshift.pipeline.day_pipeline import assign_shorts_to_lfs_by_source_window
 
-        scores, boundaries, lfs = self._day()
+        # LF 2's tail is weak, so the day mean falls below LF 1's level and LF 1's
+        # windows clear the bar.
+        scores, boundaries, lfs = self._day(lf1_level=0.75, lf2_tail=0.1)
         mask = np.zeros(1200, dtype=bool)
         mask[100:140] = True  # a parked stretch inside LF 1
-        kept = self._planned_and_capped(scores, boundaries, lfs, self.CAP + 2)
+        kept = [_short(1, 600.0, 638.0), _short(2, 700.0, 738.0), _short(3, 800.0, 838.0)]
         assert {int(s.start_sec // 600) for s in kept} == {1}  # all LF 2 before refill
         result, added = self._fill(kept, scores, boundaries, lfs, mask)
         buckets = assign_shorts_to_lfs_by_source_window(result, lfs, boundaries)
@@ -202,7 +211,22 @@ class TestPerLfFill:
         assert [s.rank for s in added] == sorted(s.rank for s in added)
         assert min(s.rank for s in added) > max(s.rank for s in kept)
 
-    def test_fully_masked_lf_gets_no_refill_and_reaches_the_contract_gate(self):
+    def test_refill_never_takes_a_window_below_the_day_bar(self):
+        import numpy as np
+
+        from gomoveshift.pipeline.day_pipeline import assign_shorts_to_lfs_by_source_window
+
+        # LF 1 (0.3) is far below the day mean (~0.6): LF 2 holds all the
+        # shorts and LF 1 stays empty rather than take a below-bar window.
+        scores, boundaries, lfs = self._day()
+        mask = np.zeros(1200, dtype=bool)
+        kept = self._planned_and_capped(scores, boundaries, lfs, self.CAP + 2)
+        result, added = self._fill(kept, scores, boundaries, lfs, mask)
+        assert added == []
+        buckets = assign_shorts_to_lfs_by_source_window(result, lfs, boundaries)
+        assert len(buckets.get(1, [])) == 0
+
+    def test_fully_masked_lf_gets_no_refill_and_the_plan_is_the_contract(self):
         import numpy as np
         import pytest
 
@@ -215,9 +239,12 @@ class TestPerLfFill:
         result, added = self._fill(kept, scores, boundaries, lfs, mask)
         assert added == []
         assert len(result) == self.CAP
+        # The planned count is the contract: nothing demands the vetoed LF's share.
+        _enforce_shorts_contract(len(result), len(result), "2026-10-28", False, stage="rendered")
         with pytest.raises(RuntimeError, match="SHORTS-CONTRACT"):
-            _enforce_shorts_contract(len(result), 2 * self.CAP, "2026-10-28", False)
-        _enforce_shorts_contract(len(result), 2 * self.CAP, "2026-10-28", True)
+            _enforce_shorts_contract(
+                len(result) - 1, len(result), "2026-10-28", False, stage="rendered"
+            )
 
     def test_balanced_day_is_unchanged(self):
         scores, boundaries, lfs = self._day()

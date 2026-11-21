@@ -46,6 +46,7 @@ def _patch_and_run(tmp_path, state, *, lf_confirmed=True, shorts_confirmed=False
 
     day_batch = _make_day_batch(DATE, 3, per_ep_duration=1200.0)
     day_scores = _make_scores(3600, score=0.6)
+    day_scores[1000:1200, 1] = 0.95  # a flat timeline plans no shorts; give it one peak
     output_base = tmp_path / "out"
     _, mocks = _StageMocks()._patch_all_stages(tmp_path)
     lf_plans = [_make_lf_plan(1, [_make_seg(0, 100, 200)], [])]

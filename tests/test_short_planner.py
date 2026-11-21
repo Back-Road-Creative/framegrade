@@ -14,6 +14,7 @@ best, etc.
 import logging
 
 import numpy as np
+import pytest
 
 
 # Score-array column indices (mirror unified_scorer)
@@ -59,14 +60,12 @@ class TestPlanShortsEdgeCases:
         result = plan_shorts(_make_scores(10))
         assert result == []
 
-    def test_scores_exactly_target_duration_returns_one_short(self):
+    def test_scores_exactly_target_duration_has_no_window_above_its_own_mean(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        # 38 sec → one target-sized short covering everything
-        result = plan_shorts(_make_scores(38))
-        assert len(result) == 1
-        assert result[0].start_sec == 0
-        assert result[0].end_sec == 38
+        # 38 sec → the only window IS the whole timeline, so its mean equals the
+        # timeline mean and cannot be strictly above it: no short.
+        assert plan_shorts(_make_scores(38)) == []
 
 
 class TestPlanShortsRanking:
@@ -216,8 +215,8 @@ class TestPlanShortsDurationBounds:
 class TestPlanShortsRealisticFixture:
     def test_realistic_day_picks_distributed_shorts(self):
         """3-hour day with continuous moderate scoring and two clear peaks.
-        Planner should pick 9 shorts spread across the day, with rank 1-2
-        landing in the peak regions."""
+        Planner should pick the two peaks (the only windows above the
+        timeline mean), ranked 1-2, never padding to the target of 9."""
         from gomoveshift.pipeline.short_planner import plan_shorts
 
         def fn(t):
@@ -236,7 +235,9 @@ class TestPlanShortsRealisticFixture:
             min_gap_sec=120,
         )
 
-        assert len(result) == 9
+        # Only the two peaks clear the timeline-mean bar; the moderate baseline
+        # does not, so the day yields 2 shorts, not the target of 9.
+        assert len(result) == 2
 
         # Rank 1 and rank 2 should be at or near the peaks
         top_two = sorted(result, key=lambda r: r.rank)[:2]
@@ -332,77 +333,126 @@ class TestConfigFlowToShorts:
         assert not any("shorts_target_count" in msg for msg in caplog.messages)
 
 
-class TestRelaxationLadder:
-    """Deterministic relaxation ladder: plan_shorts may under-deliver ONLY when the
-    timeline physically can't hold target_count windows — never because of
-    tunable gap spacing."""
+class TestQualityBar:
+    """No count-filling: a window qualifies only when its mean composite is
+    strictly above the eligible timeline's mean, the gap is never relaxed, and
+    target_count is a maximum. Fewer shorts (even zero) is a valid plan."""
 
-    def test_rung_1_sufficient_stays_silent_and_unchanged(self, caplog):
-        """A timeline where rung 1 reaches target emits no SHORTS-PLAN log
-        and all picks respect the full min_gap_sec (historical behavior)."""
+    @staticmethod
+    def _peaks(centers, n=3600, hi=0.9, lo=0.1, half=25):
+        return _make_scores(
+            n, composite_fn=lambda t: hi if any(abs(t - c) < half for c in centers) else lo
+        )
+
+    def test_flat_timeline_yields_fewer_than_target(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        scores = _make_scores(3600)
+        # Every window's mean equals the timeline mean: none is strictly above.
+        assert plan_shorts(_make_scores(3600), target_count=9, min_gap_sec=60) == []
+
+    def test_nothing_above_mean_returns_zero_without_raising(self, caplog):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
         with caplog.at_level(logging.INFO):
-            result = plan_shorts(scores, target_count=9, min_gap_sec=60)
-        assert len(result) == 9
-        assert not any("SHORTS-PLAN" in msg for msg in caplog.messages)
-        sorted_by_time = sorted(result, key=lambda r: r.start_sec)
-        for i in range(1, len(sorted_by_time)):
-            assert sorted_by_time[i].start_sec - sorted_by_time[i - 1].end_sec >= 60
+            result = plan_shorts(_make_scores(600), target_count=7, min_gap_sec=60)
+        assert result == []
+        assert any("SHORTS-PLAN: 0 of target 7 clear the quality bar" in m for m in caplog.messages)
 
-    def test_shortfall_fills_at_relaxed_gap(self, caplog):
-        """250s flat timeline, gap 60: rung 1 holds only 3 windows of 38s;
-        target 5 is reached by gap-0 fills (rung 3) without raising."""
+    def test_only_windows_above_the_timeline_mean_are_picked(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        scores = _make_scores(250)
+        scores = self._peaks([600, 1800, 3000])
+        mean = float(scores[:, COL_COMPOSITE].mean())
+        result = plan_shorts(scores, target_count=9, min_gap_sec=60)
+        assert 1 <= len(result) < 9
+        for r in result:
+            window = scores[
+                (scores[:, COL_TIMESTAMP] >= r.start_sec) & (scores[:, COL_TIMESTAMP] < r.end_sec)
+            ]
+            assert window[:, COL_COMPOSITE].mean() > mean
+
+    def test_target_count_is_still_a_maximum(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        scores = self._peaks([300, 900, 1500, 2100, 2700])
+        assert len(plan_shorts(scores, target_count=2, min_gap_sec=60)) == 2
+
+    def test_gap_is_never_relaxed_to_reach_the_target(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # Three peaks 60s apart centre to centre: the old ladder would fill the
+        # extras at half gap / gap 0. Now only the gap-respecting ones remain.
+        scores = self._peaks([300, 360, 420], n=900, half=20)
+        result = plan_shorts(scores, target_count=3, min_gap_sec=60)
+        assert len(result) < 3
+        ordered = sorted(result, key=lambda r: r.start_sec)
+        for prev, nxt in zip(ordered, ordered[1:]):
+            assert nxt.start_sec - prev.end_sec >= 60
+
+    def test_gap_loss_is_logged(self, caplog):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        scores = self._peaks([300, 360, 420], n=900, half=20)
         with caplog.at_level(logging.INFO):
-            result = plan_shorts(scores, target_count=5, min_gap_sec=60)
-        assert len(result) == 5
-        assert any("SHORTS-PLAN: target 5 reached at rung 3" in m for m in caplog.messages)
-        # Fills are non-overlapping even at gap 0
-        sorted_by_time = sorted(result, key=lambda r: r.start_sec)
-        for i in range(1, len(sorted_by_time)):
-            assert sorted_by_time[i].start_sec >= sorted_by_time[i - 1].end_sec
+            result = plan_shorts(scores, target_count=3, min_gap_sec=60)
+        line = next(
+            m
+            for m in caplog.messages
+            if m.startswith("SHORTS-PLAN: ") and "clear the quality bar" in m
+        )
+        assert line.startswith(f"SHORTS-PLAN: {len(result)} of target 3 clear the quality bar (")
+        assert "candidates below the timeline mean" in line
+        assert "lost to the 60s gap)" in line
+        lost = int(line.split("mean, ")[1].split(" lost")[0])
+        assert lost >= 1
 
-    def test_prior_rung_picks_immutable_across_rungs(self):
-        """The relaxed-target run's first picks are exactly the picks a
-        rung-1-sufficient (smaller-target) run makes — later rungs only
-        ADD, never drop or reorder."""
+    def test_stride_is_never_halved(self, monkeypatch):
+        from gomoveshift.pipeline import short_planner
+
+        strides = []
+        real = short_planner._build_candidate_windows
+
+        def spy(timestamps, composites, window_sec, stride_sec, stop_mask=None):
+            strides.append(stride_sec)
+            return real(timestamps, composites, window_sec, stride_sec, stop_mask=stop_mask)
+
+        monkeypatch.setattr(short_planner, "_build_candidate_windows", spy)
+        short_planner.plan_shorts(
+            self._peaks([300], n=900), target_count=5, min_gap_sec=60, stride_sec=5.0
+        )
+        assert strides == [5.0]
+
+    def test_one_log_line_per_chosen_short_with_its_mean(self, caplog):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        scores = _make_scores(250)
-        rung1_only = plan_shorts(scores, target_count=3, min_gap_sec=60)
-        ladder = plan_shorts(scores, target_count=5, min_gap_sec=60)
-        assert len(rung1_only) == 3
-        assert [(r.start_sec, r.end_sec) for r in ladder[:3]] == [
-            (r.start_sec, r.end_sec) for r in rung1_only
-        ]
-
-    def test_rung_4_denser_stride_fills(self, caplog):
-        """A coarse stride (76s) leaves a 38s hole only a half-stride
-        candidate can fill — rung 4 reaches the target."""
-        from gomoveshift.pipeline.short_planner import plan_shorts
-
-        scores = _make_scores(190)
         with caplog.at_level(logging.INFO):
-            result = plan_shorts(scores, target_count=4, min_gap_sec=60, stride_sec=76.0)
-        assert len(result) == 4
-        assert any("SHORTS-PLAN: target 4 reached at rung 4" in m for m in caplog.messages)
-        assert any("rung1=2 rung2=1 rung3=0 rung4=1" in m for m in caplog.messages)
+            result = plan_shorts(self._peaks([600, 1800]), target_count=9, min_gap_sec=60)
+        per_short = [m for m in caplog.messages if m.startswith("SHORTS-PLAN: short ")]
+        assert len(per_short) == len(result) == 2
+        assert all("mean composite" in m for m in per_short)
 
-    def test_physical_impossibility_returns_max_without_raising(self, caplog):
-        """A 60s timeline physically holds one 38s window: target 5 returns
-        1 and logs ladder exhaustion — the SHORTS-CONTRACT gate (not the
-        planner) owns the contract failure."""
+    def test_explicit_quality_bar_overrides_the_timeline_mean(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        scores = _make_scores(60)
-        with caplog.at_level(logging.INFO):
-            result = plan_shorts(scores, target_count=5, min_gap_sec=60)
-        assert len(result) == 1
-        assert any("ladder exhausted" in m for m in caplog.messages)
+        scores = self._peaks([600, 1800])
+        assert plan_shorts(scores, target_count=9, min_gap_sec=60, quality_bar=0.95) == []
+        assert len(plan_shorts(scores, target_count=9, min_gap_sec=60, quality_bar=0.0)) == 9
+
+    def test_bar_excludes_stopped_seconds(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts, timeline_quality_bar
+
+        scores = self._peaks([600])
+        mask = np.zeros(len(scores), dtype=bool)
+        mask[560:640] = True  # the only peak is stopped
+        assert timeline_quality_bar(scores, mask) == pytest.approx(0.1)
+        assert plan_shorts(scores, target_count=9, min_gap_sec=60, stop_mask=mask) == []
+
+    def test_no_eligible_second_has_no_bar(self):
+        from gomoveshift.pipeline.short_planner import timeline_quality_bar
+
+        scores = _make_scores(100)
+        assert timeline_quality_bar(scores, np.ones(100, dtype=bool)) is None
+        assert timeline_quality_bar(np.zeros((0, NUM_COLUMNS))) is None
 
 
 class TestPlannerDeterminism:
@@ -440,7 +490,7 @@ class TestPlannerDeterminism:
 
 class TestPlanShortsStopMask:
     """The stop mask STRUCTURALLY vetoes candidate windows overlapping a
-    stopped second — the relaxation ladder can relax gap/stride, never the
+    stopped second — nothing relaxes the
     mask, so a masked (parked) region can never surface a short."""
 
     def _peaked_scores(self, n: int = 900) -> np.ndarray:
@@ -455,7 +505,7 @@ class TestPlanShortsStopMask:
         stop_mask = np.zeros(len(scores), dtype=bool)
         stop_mask[395:465] = True  # covers the plateau + its window edges
 
-        # Even at the fullest relaxation (large target forces the whole ladder)
+        # Even with a large target
         # no chosen short may overlap the masked span.
         result = plan_shorts(scores, target_count=20, min_gap_sec=60, stop_mask=stop_mask)
         for r in result:
@@ -495,7 +545,8 @@ class TestMomentLengthVariesPerMoment:
     def test_flat_moment_stays_at_target_duration(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
 
-        scores = _make_scores(600)  # flat 0.5 everywhere -- no growth signal
+        # One flat plateau above a low baseline: no growth signal inside it.
+        scores = _make_scores(600, composite_fn=lambda t: 0.5 if 200 <= t < 300 else 0.25)
         result = plan_shorts(scores, target_count=1, min_gap_sec=60)
         assert len(result) == 1
         assert 37 <= result[0].duration_sec <= 38

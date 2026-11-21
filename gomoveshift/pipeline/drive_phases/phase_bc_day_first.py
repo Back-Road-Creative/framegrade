@@ -1244,33 +1244,28 @@ class PhaseBCDayFirst:
         (``volume_source.apply_flag``) -- the same per-LF number a fresh day plans.
 
         When ``entry`` (the day's ``per_day_completed`` record) carries
-        both ``shorts_target_in_force`` and ``shorts_expected`` AND the CURRENT
-        per-LF target is unchanged from the one the day actually ran under,
-        return the recorded post-per-LF-capacity-cap expectation instead —
-        a day legitimately capped below ``per_lf * num_lfs`` by
-        ``cap_shorts_to_per_lf_capacity`` must not be misread as short. A
-        target that has since been RAISED (or an entry with no keys, e.g. a
-        day recorded before these keys existed) falls through to the strict derivation below.
+        ``shorts_expected`` (the count the day planned after the quality bar,
+        gap and per-LF capacity), return the lesser of that and the strict
+        derivation: the target is a maximum, so a day that planned fewer shorts
+        than the target (or was capped below ``per_lf * num_lfs``) must not be
+        misread as short, and a raised target does not demand more. An entry
+        with no ``shorts_expected`` (a day recorded before the key existed)
+        falls through to the strict derivation below.
 
-        Deliberately NOT the pure publish-plan derivation otherwise: a
-        reconstructed day already satisfied that derived count when it was
-        completed under the same config, so re-deriving it can't reveal a new
-        shortfall. The case this guards is a resume that RAISED the explicit
-        target — that's what the strict fallback re-checks. ``None`` (no
-        explicit target set) disables the gate.
+        ``None`` (no explicit target set) disables the gate.
         """
         flag = getattr(state, "shorts_target", None)
         if flag is None:
             return None
         per_lf = volume_source.apply_flag(volume_source.shorts_per_lf().value, flag)
-        if (
-            isinstance(entry, dict)
-            and "shorts_target_in_force" in entry
-            and "shorts_expected" in entry
-            and entry["shorts_target_in_force"] == per_lf
-        ):
-            return entry["shorts_expected"]
-        return per_lf * num_lfs
+        strict = per_lf * num_lfs
+        if isinstance(entry, dict) and entry.get("shorts_expected") is not None:
+            # The target is a maximum and the day's own plan (quality bar, gap,
+            # per-LF window) is the contract: a day recorded with fewer shorts
+            # than the target is not short, and a raised target promises
+            # nothing more. A LOWERED target still binds.
+            return min(entry["shorts_expected"], strict)
+        return strict
 
     def _enforce_reconstructed_shortfall(
         self, state, reconstructed, entry: Optional[dict] = None

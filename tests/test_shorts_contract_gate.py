@@ -1,10 +1,10 @@
 """SHORTS-CONTRACT gate.
 
-A day that plans or renders fewer shorts than the required target must
-hard-fail BEFORE any shorts encode/CSV/upload — not log the shortfall and
-continue (a silent ceiling below the target). The master-deletion gate must
-count-match against the planned target, never produced-vs-produced.
-``--allow-short-count`` is the only escape.
+The target is a maximum: a plan with fewer shorts (quality bar, gap, per-LF
+window) is valid and the planned count becomes the contract. A short that was
+planned but is missing after render (or on resume) must still hard-fail. The
+master-deletion gate must count-match against the planned count, never
+produced-vs-produced. ``--allow-short-count`` is the only escape.
 """
 
 import pytest
@@ -16,13 +16,20 @@ from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
 
 
 class TestEnforceShortsContract:
-    def test_shortfall_raises_before_encode(self):
-        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT: planned 9 < required 14"):
-            _enforce_shorts_contract(9, 14, "2026-06-01", False)
+    def test_shortfall_raises(self):
+        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT: rendered 2 < required 3"):
+            _enforce_shorts_contract(2, 3, "2026-06-01", False, stage="rendered")
+
+    def test_rendered_below_planned_still_raises_when_plan_was_quality_limited(self):
+        # The plan returned 3 of a target of 14; one of the 3 then fails to render.
+        planned = 3
+        with pytest.raises(RuntimeError, match="SHORTS-CONTRACT: rendered 2 < required 3"):
+            _enforce_shorts_contract(2, planned, "2026-06-01", False, stage="rendered")
+        _enforce_shorts_contract(3, planned, "2026-06-01", False, stage="rendered")
 
     def test_message_names_day_and_escape_flag(self):
         with pytest.raises(RuntimeError, match=r"2026-06-01.*--allow-short-count"):
-            _enforce_shorts_contract(9, 14, "2026-06-01", False)
+            _enforce_shorts_contract(9, 14, "2026-06-01", False, stage="rendered")
 
     def test_at_target_passes(self):
         _enforce_shorts_contract(14, 14, "2026-06-01", False)
@@ -31,7 +38,11 @@ class TestEnforceShortsContract:
         _enforce_shorts_contract(0, None, "2026-06-01", False)
 
     def test_allow_short_count_suppresses(self):
-        _enforce_shorts_contract(9, 14, "2026-06-01", True)
+        _enforce_shorts_contract(2, 3, "2026-06-01", True, stage="rendered")
+
+    def test_zero_planned_zero_rendered_passes(self):
+        # A day with nothing above its timeline mean plans zero shorts: valid.
+        _enforce_shorts_contract(0, 0, "2026-06-01", False, stage="rendered")
 
     def test_rendered_stage_in_message(self):
         with pytest.raises(RuntimeError, match="SHORTS-CONTRACT: rendered 8 < required 9"):
@@ -39,6 +50,15 @@ class TestEnforceShortsContract:
 
 
 class TestMasterDropUsesPlannedTarget:
+    def test_quality_limited_day_expects_its_planned_count(self):
+        art = DayArtifacts(
+            date="2026-06-01",
+            master_path=None,
+            short_paths=["a.mp4", "b.mp4", "c.mp4"],
+            planned_shorts_count=3,
+        )
+        assert _expected_shorts_for_master_drop(art, allow_short_count=False) == 3
+
     def _art(self, produced: int, planned):
         return DayArtifacts(
             date="2026-06-01",
