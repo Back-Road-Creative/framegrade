@@ -38,8 +38,11 @@ snapshot of projects OUTSIDE the sync set plus the FINAL in-memory text of the s
 planned before it, never a later one's, so a rerun sees the same inputs and is a no-op.
 A Short is also checked, across sidecars, against those earlier records inside the same
 refusal loop as the neighbour-place check, so a refusal always re-checks the final text.
+A sidecar that cannot be planned (a bad ``titles.yaml``, a trial plan the gates reject) still
+contributes its STORED text, as it stays queued unchanged, to the sidecars around it.
 The title ledger and the nightly title snapshot are read once per run. The brand's per-location
-cap (``per_location_cap``) is passed to every ``check_batch`` call, as enqueue passes it.
+cap (``per_location_cap``) is applied exactly as enqueue applies it: within ONE sidecar's own
+plan, never across sidecars (the cross-sidecar passes run without it).
 """
 
 from __future__ import annotations
@@ -98,23 +101,41 @@ class ShortTextChange:
     expect_moved: int = 0
 
 
-#: A refusal that waits for a person: a gate, a payload or review refusal, an unusable
-#: sidecar (read or write failed), or a queue hash nothing explains. Anything else (a sibling
-#: row inside the lead time, a live lease, an old title with no stamp, a cascade after another
-#: sidecar's failed write) clears on its own, so the nightly run neither files an incident for
-#: it nor counts it.
-ACTIONABLE_REFUSALS = (
-    "still refused by the Short review",
-    "payload limit",
-    "plan gate",
-    "anti-spam gate",
-    "sidecar unusable",
-    "a queue row's plan hash",
+#: Refusals that clear on their own the next run, so the nightly entry point neither files an
+#: incident for them nor counts them. Matched anywhere in the reason (a sibling row's reason
+#: starts with that row's name). EVERY other refusal is actionable, an unclassified or new one
+#: included, so the check fails closed.
+#:
+#: * "is inside the lead time": a sibling-platform row's slot is still too close; the slot passes
+#:   or is moved by the queue.
+#: * "holds a live lease": the dispatcher's lease expires or is released.
+#: * "retried next run": the cascade after another sidecar's failed write; that failure is
+#:   itself actionable.
+#: * "was leased during the write" / "changed while the sync ran": a race with the dispatcher
+#:   or an editor; the write rolled back whole and the next run sees the settled state.
+#:
+#: Permanent, needs-a-human refusals (all actionable): "generator: ...", an unreadable LF
+#: sidecar or one with no location, a stored arm the generator cannot render, "no such Short in
+#: the plan", "already holds the new plan hash", a recovery row, a row in a non-queued state
+#: ("is <status>"), "has no usable scheduled_at", "no clip place ...", an old title with no
+#: "Nth stretch" stamp (nothing edits it for the sync), "its ... place repeats ...", a review,
+#: payload, plan or anti-spam gate refusal, "sidecar unusable: ...", an unknown queue hash.
+#:
+#: Outcomes that are by design NOT refusals: "already holds the synced plan hash" (``unchanged``,
+#: below: the text is already the generator's, the queue's UNIQUE key says another row carries
+#: the target hash, and there is nothing for the sync to write) and a place the generator
+#: could not vary (``place_variety`` ``no_alternative``: the generator sanctioned the repeat).
+TRANSIENT_REFUSALS = (
+    "is inside the lead time",
+    "holds a live lease",
+    "retried next run",
+    "was leased during the write",
+    "changed while the sync ran",
 )
 
 
 def is_actionable_refusal(change: "ShortTextChange") -> bool:
-    return change.status == "refused" and change.reason.startswith(ACTIONABLE_REFUSALS)
+    return change.status == "refused" and not any(m in change.reason for m in TRANSIENT_REFUSALS)
 
 
 def _slot(raw) -> Optional[datetime]:
@@ -311,8 +332,9 @@ def _gate_refusals(
     ``validate_payloads``, the plan-text gates (``plan_gates``, on the generator's post as
     ``build_publish_plan`` calls them) and ``check_batch`` over THIS sidecar's trial plan
     behind the ``earlier`` sidecars' final records (the cross-sidecar rules; their own
-    violations are not this sidecar's). The brand location cap applies to the
-    forward pass as well."""
+    violations are not this sidecar's). The brand location cap is counted over this sidecar's
+    own plan only, as enqueue counts it over one invocation's batch, so a Short is never
+    refused on the cap where enqueue would have accepted it."""
     from . import plan_gates
     from .anti_spam_gate import check_batch
     from .models import PayloadLimitError, validate_payloads
@@ -320,9 +342,12 @@ def _gate_refusals(
 
     out: Dict[int, str] = {}
     offset = len(earlier)
-    batch = check_batch(
-        [*earlier, *plan.shorts], per_location_cap=per_location_cap, recent_texts=spooled
-    )
+    batch = check_batch([*earlier, *plan.shorts], per_location_cap=None, recent_texts=spooled)
+    if per_location_cap is not None:
+        own = check_batch(
+            list(plan.shorts), per_location_cap=per_location_cap, recent_texts=spooled
+        )
+        batch = [*batch, *(replace_index(v, offset) for v in own if v.rule == "location-cap")]
     for pos in positions:
         record = plan.shorts[pos]
         refusal = short_review_refusal(record)
@@ -389,12 +414,17 @@ def _hash_taken(siblings, conn: sqlite3.Connection, new_hash: str) -> str:
 
 
 def _successor_clashes(
-    sidecar: Path, shorts: List[dict], rewritten: Dict[int, dict]
+    sidecar: Path,
+    shorts: List[dict],
+    rewritten: Dict[int, dict],
+    posts: Optional[Mapping[int, object]] = None,
 ) -> Dict[int, str]:
     """Neighbouring Shorts of one LF (any of the pair rewritten) that name the same place
     in their FINAL text (new if rewritten, else stored). The generator only looks backwards
     and a Short asked alone sees its neighbours' stored text, so the pair is checked here;
-    the rewritten one is refused, the later of two rewritten ones."""
+    the rewritten one is refused, the later of two rewritten ones. A repeat the generator
+    itself sanctioned for the later Short (``place_variety`` reason ``no_alternative``: no other
+    measured place existed) is not a clash."""
     from gomoveshift.pipeline.social_generator import _norm
 
     out: Dict[int, str] = {}
@@ -410,6 +440,11 @@ def _successor_clashes(
             mine = _stored_places(rewritten.get(a, shorts[a]), location)
             theirs = _stored_places(rewritten.get(b, shorts[b]), location)
             shared = [k for k in mine if k in theirs and _norm(mine[k]) == _norm(theirs[k])]
+            if b in rewritten:
+                variety = getattr((posts or {}).get(b), "place_variety", None) or {}
+                shared = [
+                    k for k in shared if (variety.get(k) or {}).get("reason") != "no_alternative"
+                ]
             if shared:
                 later = b in rewritten
                 out.setdefault(
@@ -541,7 +576,7 @@ def _sidecar_changes(
             else:
                 unchanged.add(pos)
         again = set(refused)
-        clash = _successor_clashes(sidecar, shorts, rewritten)
+        clash = _successor_clashes(sidecar, shorts, rewritten, posts)
         for pos, why in clash.items():
             settle(targets[pos], pos, "refused", why)
             active.discard(pos)
@@ -587,7 +622,9 @@ def _sidecar_changes(
                 f"a queue row's plan hash {foreign[0][:12]} is unknown",
             )
         elif stale and taken:
-            settle(targets[pos], pos, "refused", f"{taken} already holds the synced plan hash")
+            settle(  # by design not a refusal (see TRANSIENT_REFUSALS)
+                targets[pos], pos, "unchanged", f"{taken} already holds the synced plan hash"
+            )
         elif stale:
             settle(
                 targets[pos],
@@ -737,9 +774,7 @@ def _slot_order(by_sidecar: Dict[str, List[sqlite3.Row]]) -> List[str]:
     return sorted(by_sidecar, key=lambda path: (earliest(path), path))
 
 
-def _new_text_clashes(
-    new_records: Sequence, later: Sequence, per_location_cap: Optional[int] = None
-) -> Dict[Tuple[str, int], str]:
+def _new_text_clashes(new_records: Sequence, later: Sequence) -> Dict[Tuple[str, int], str]:
     """``(project, short_index)`` -> why, for each of ``new_records`` (one sidecar's rewritten
     text) whose text collides with the FINAL text of a LATER sidecar, one the later sidecar's
     own gates never saw change (a Short left as stored)."""
@@ -748,9 +783,7 @@ def _new_text_clashes(
     if not new_records or not later:
         return {}
     batch = check_batch(
-        [*new_records, *later],
-        per_location_cap=per_location_cap,
-        recent_texts=_with_texts({}, later),
+        [*new_records, *later], per_location_cap=None, recent_texts=_with_texts({}, later)
     )
     out: Dict[Tuple[str, int], str] = {}
     for v in batch:
@@ -762,6 +795,19 @@ def _new_text_clashes(
             why = f"{v.rule}: {v.detail}"
             out[key] = f"{out[key]}; {why}" if key in out else why
     return {k: f"anti-spam gate: {why} (against a later sidecar's text)" for k, why in out.items()}
+
+
+def _stored_records(path: str) -> list:
+    """The records of the sidecar as stored ([] when it cannot be loaded)."""
+    try:
+        return list(load_publish_plan(Path(path)).shorts)
+    except (OSError, ValueError, LookupError):
+        return []
+
+
+def replace_index(violation, offset: int):
+    """``violation`` re-addressed by ``offset`` (a batch run on a plan alone, read in a longer one)."""
+    return replace(violation, index=violation.index + offset)
 
 
 def sync_short_text(
@@ -802,7 +848,7 @@ def sync_short_text(
         # leaves out its own projects and the Shorts this run rewrites for other sidecars (their
         # text comes from `earlier`, final): everything else, a published Short beside a queued
         # one included, reaches its gates. A rerun therefore sees the same inputs.
-        entries = recent_text_entries(conn)
+        entries = recent_text_entries(conn, now=now)
 
         def spooled_for(path: str, earlier: Sequence) -> Dict[str, List[str]]:
             own = {r["project_name"] for r in by_sidecar[path]}
@@ -835,6 +881,10 @@ def sync_short_text(
                     )
                 except (OSError, ValueError, LookupError) as exc:
                     unusable[path] = f"sidecar unusable: {exc}"
+                    # It stays queued as stored, so its STORED text still reaches every other
+                    # sidecar's gates (as an earlier or a later one); unloadable = nothing to see.
+                    finals[path] = _stored_records(path)
+                    earlier.extend(finals[path])
                     continue
                 finals[path] = planned[path][3]
                 earlier.extend(finals[path])
@@ -849,7 +899,7 @@ def sync_short_text(
                 }
                 later = [r for p in order[i + 1 :] for r in finals.get(p, ())]
                 new = [r for r in finals[path] if (r.project_name, r.short_index) in new_keys]
-                found.update(_new_text_clashes(new, later, per_location_cap))
+                found.update(_new_text_clashes(new, later))
             fresh = {k: v for k, v in found.items() if k not in forced}
             if not fresh:
                 break
@@ -857,10 +907,11 @@ def sync_short_text(
     for path, why in unusable.items():
         refuse_all(by_sidecar[path], why)
     write_failed = False
+    written_new: list = []
     for path in order:
         if path not in planned:
             continue
-        verdict, rewritten, sha, _finals = planned[path]
+        verdict, rewritten, sha, finals_ = planned[path]
         sidecar, group = Path(path), by_sidecar[path]
         writes = any(v.status in ("changed", "reconciled") for v in verdict.values())
         if apply and writes and write_failed:
@@ -869,10 +920,26 @@ def sync_short_text(
         if apply and writes:
             try:
                 _apply_sidecar(conn, sidecar, verdict, rewritten, sha, now)
-            except (OSError, ValueError, sqlite3.Error) as exc:
-                refuse_all(group, f"sidecar unusable: write failed: {exc}")
+            except Exception as exc:  # noqa: BLE001 - a crash after partial writes helps no one
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                known = isinstance(exc, (OSError, ValueError, sqlite3.Error))
+                why = f"sidecar unusable: write failed: {exc if known else f'{type(exc).__name__}: {exc}'}"
+                # The sidecars written before this one were checked against its PLANNED text;
+                # it stays as STORED, so check what they wrote against that.
+                clash = _new_text_clashes(written_new, _stored_records(path))
+                if clash:
+                    why += (
+                        "; text written earlier in this run clashes with this sidecar's stored text: "
+                        + "; ".join(f"{k[0]} #{k[1]} {v}" for k, v in sorted(clash.items()))
+                    )
+                refuse_all(group, why)
                 write_failed = True
                 continue
+            new_keys = {(n["project_name"], int(n["short_index"])) for n in rewritten.values()}
+            written_new.extend(r for r in finals_ if (r.project_name, r.short_index) in new_keys)
             verdict = {
                 k: replace(v, written=True) if v.status in ("changed", "reconciled") else v
                 for k, v in verdict.items()

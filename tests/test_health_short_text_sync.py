@@ -66,8 +66,8 @@ def test_health_check_names_the_sync_incidents_but_never_writes_or_pushes_them(t
         "short_text_sync_refused:p1",
         "short_text_sync_crash",
     }
-    assert check._line(row) == short_text_sync.incident_line(row)
-    assert check._line(crash) == short_text_sync.incident_line(crash)
+    # an open sync-owned row is an open incident: it keeps `health check` at exit 1
+    assert len(result["incidents"]) == 2
 
 
 # -- the health entry point ---------------------------------------------------------------
@@ -216,18 +216,18 @@ def test_the_failed_notification_is_retried(tmp_path, monkeypatch):
 def test_the_health_cli_command_runs_the_sync(tmp_path, monkeypatch, capsys):
     from gomoveshift.cli.handlers.health import cmd_health
 
+    from gomoveshift.health import short_text_sync
+
     plan, conn = _world(tmp_path, [_short(1)])
     conn.close()
+    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: None)
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
-    args = SimpleNamespace(
-        health_command="sync-short-text",
-        data_root=tmp_path,
-        incidents_dir=tmp_path / "inc",
-        jobs_dir=None,
+    args = SimpleNamespace(  # no jobs_dir: the sync-short-text subparser defines none
+        health_command="sync-short-text", data_root=tmp_path, incidents_dir=tmp_path / "inc"
     )
     monkeypatch.setattr("gomoveshift.console.notify.notify", lambda *a, **k: True)
-    assert cmd_health(args, config) in (0, 1)
-    assert "sync-short-text:" in capsys.readouterr().out
+    assert cmd_health(args, config) == 0
+    assert "sync-short-text: 1 changed" in capsys.readouterr().out
 
 
 def test_the_entry_point_loads_the_brand_location_cap_and_passes_it(tmp_path, monkeypatch):
@@ -248,3 +248,94 @@ def test_the_entry_point_loads_the_brand_location_cap_and_passes_it(tmp_path, mo
         config, incidents_dir=tmp_path / "inc", now=NOW, notify_fn=lambda *a: True
     )
     assert [k["per_location_cap"] for k in seen] == [1]
+
+
+def test_a_generator_that_always_raises_gives_an_incident_and_exit_one(tmp_path, monkeypatch):
+    from gomoveshift.health import short_text_sync
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    plan, conn = _world(tmp_path, [_short(1)])
+    conn.close()
+    monkeypatch.setattr(qst, "_generate_lf", boom)
+    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: None)
+    notified = []
+    config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+    result = short_text_sync.run_short_text_sync(
+        config,
+        incidents_dir=tmp_path / "inc",
+        now=NOW,
+        notify_fn=lambda ev, ident, line: notified.append(ident["incident"]) or True,
+    )
+    assert result["exit"] == 1 and result["refused"] == 1
+    (row,) = _inc(tmp_path).values()
+    assert "generator: boom" in row["detail"] and notified == [row["key"]]
+
+
+def test_an_open_incident_whose_shorts_change_is_refreshed_without_a_second_push(
+    tmp_path, monkeypatch
+):
+    notified = []
+    state = {"out": [_change("refused", "p1", 1, "plan gate: a")]}
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: state["out"], notified)
+    run()
+    state["out"] = [
+        _change("refused", "p1", 1, "plan gate: a"),
+        _change("refused", "p1", 2, "plan gate: b"),
+    ]
+    result = run()
+    (row,) = _inc(tmp_path).values()
+    assert [s["short_index"] for s in row["shorts"]] == [1, 2] and "2 queued Short" in row["detail"]
+    assert result["new"] == [] and len(notified) == 1
+
+
+@pytest.mark.parametrize("where", ["notify", "load_all", "write_row"])
+def test_the_entry_point_never_raises(tmp_path, monkeypatch, where):
+    from gomoveshift.health import short_text_sync
+
+    notified = []
+    run = _health(
+        tmp_path,
+        monkeypatch,
+        lambda *a, **k: [_change("refused", "p1", 1, "plan gate: a")],
+        notified,
+    )
+    if where == "notify":
+        config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
+
+        def run():  # noqa: F811
+            def bad(*a):
+                raise RuntimeError("push down")
+
+            return short_text_sync.run_short_text_sync(
+                config, incidents_dir=tmp_path / "inc", now=NOW, notify_fn=bad
+            )
+
+    else:
+
+        def bad(*a, **k):
+            raise OSError("disk gone")
+
+        monkeypatch.setattr(short_text_sync, where, bad)
+    result = run()
+    assert result["exit"] == 2 and result["crashed"]
+
+
+def test_a_held_store_lock_skips_the_incident_work_and_exits_clean(tmp_path, monkeypatch):
+    import fcntl
+
+    notified = []
+    run = _health(
+        tmp_path,
+        monkeypatch,
+        lambda *a, **k: [_change("refused", "p1", 1, "plan gate: a")],
+        notified,
+    )
+    with open(tmp_path / "inc.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run()
+    assert result["skipped"] and result["exit"] == 0
+    assert not (tmp_path / "inc").exists() or _inc(tmp_path) == {}
+    assert notified == []
+    assert run()["exit"] == 1 and len(_inc(tmp_path)) == 1  # the next run, lock free, files it

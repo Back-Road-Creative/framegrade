@@ -218,7 +218,7 @@ def test_a_cross_sidecar_refusal_rechecks_the_final_text(tmp_path, monkeypatch):
     monkeypatch.setattr(
         qst,
         "_successor_clashes",
-        lambda sc, shorts, rewritten: (
+        lambda sc, shorts, rewritten, *a: (
             clash_calls.append(sorted(rewritten)) or real_clash(sc, shorts, rewritten)
         ),
     )
@@ -250,22 +250,6 @@ def test_a_cross_sidecar_refusal_rechecks_the_final_text(tmp_path, monkeypatch):
     assert "Harrow" in title and "Ashby County" not in title  # seeded from Short 1's stored text
     assert generated[-1] == [1] and len(generated) >= 3  # the later sidecar ran twice
     assert clash_calls[-1] == [1]  # the neighbour check ran again, on the final text
-
-
-def test_every_sync_batch_check_carries_the_brand_location_cap(tmp_path, monkeypatch):
-    # forward pass of each sidecar, its refusal loop and the backward pass against later sidecars
-    plan, other, conn = _world2(tmp_path)
-    seen = []
-    real = anti_spam_gate.check_batch
-    monkeypatch.setattr(
-        anti_spam_gate, "check_batch", lambda r, **kw: seen.append((len(r), kw)) or real(r, **kw)
-    )
-    changes = sync_short_text(conn, apply=False, now=NOW, per_location_cap=1)
-    assert len(seen) >= 3 and all(kw["per_location_cap"] == 1 for _n, kw in seen)
-    assert any("location-cap" in c.reason for c in changes if c.status == "refused")
-    seen.clear()
-    sync_short_text(conn, apply=False, now=NOW)
-    assert seen and all(kw["per_location_cap"] is None for _n, kw in seen)
 
 
 def _project2_world(conn, tmp_path):
@@ -433,24 +417,3 @@ def test_a_refused_hash_check_reseeds_the_neighbour_on_the_final_text(tmp_path):
     assert first.status == "refused" and "is unknown" in first.reason
     title = second.new_title.split(" #")[0]
     assert "Harrow" in title and "Ashby County" not in title  # Short 1 keeps its stored place
-
-
-def test_only_actionable_refusals_count():
-    rows = [
-        ("still refused by the Short review: x", True),
-        ("payload limit: x", True),
-        ("plan gate: x", True),
-        ("anti-spam gate: shared-prefix: x", True),
-        ("sidecar unusable: write failed: disk full", True),
-        ("sidecar unusable: bad json", True),
-        ("a queue row's plan hash abcdef is unknown", True),
-        ("facebook row 3 holds a live lease", False),
-        ("youtube row 3 slot 2026-11-21 is inside the lead time", False),
-        ("old title has no verifiable 'Nth stretch' stamp", False),
-        ("an earlier sidecar's write failed; retried next run", False),
-        ("its place repeats the previous Short's", False),
-    ]
-    for reason, expected in rows:
-        change = qst.ShortTextChange(1, "p", 1, "refused", "a", "b", reason)
-        assert qst.is_actionable_refusal(change) is expected, reason
-    assert not qst.is_actionable_refusal(qst.ShortTextChange(1, "p", 1, "changed", "a", "b", "x"))

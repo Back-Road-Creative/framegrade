@@ -26,7 +26,8 @@ def cmd_health(args, config) -> int:
         if getattr(args, "incidents_dir", None)
         else default_incidents_dir(root)
     )
-    jobs_dir = Path(args.jobs_dir) if args.jobs_dir else root / "logs" / "jobs"
+    jobs_dir_arg = getattr(args, "jobs_dir", None)  # `sync-short-text` has no such option
+    jobs_dir = Path(jobs_dir_arg) if jobs_dir_arg else root / "logs" / "jobs"
     if args.health_command == "heal":
         return _cmd_heal(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "backlog":
