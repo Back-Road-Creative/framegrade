@@ -465,3 +465,89 @@ def test_a_failing_rule_11_does_not_skip_rule_10(tmp_path, monkeypatch):
     out = go([_row("drive", a)], None, str(storage))
     assert [r["key"] for r in out["incidents"]] == ["backlog_store_orphan:stray"]
     assert any("rule 11 not evaluated" in n for n in out["notes"])
+
+
+# -- B5a2: exclusion edge cases --------------------------------------------------------------
+
+
+def test_an_entry_that_turns_invalid_keeps_its_folder_listed_and_nothing_closes(
+    tmp_path, monkeypatch
+):
+    sent: list = []
+    go = _checker(tmp_path, monkeypatch, sent)
+    d = tmp_path / "only-excluded"
+    g1, g2 = _cam(d, "G1.MP4", "G2.MP4")
+    first = go([], yaml.safe_dump([_entry(g1)]))
+    assert first["new"] == [f"backlog_unlisted_footage:{g2}"]
+    bad = go([], yaml.safe_dump([_entry(g1, reason="")]))
+    keys = {r["key"] for r in bad["incidents"]}
+    assert f"backlog_unlisted_footage:{g2}" in keys  # still open, not closed
+    assert f"backlog_unlisted_footage:{g1}" in keys  # the invalid entry excludes nothing
+    assert f"backlog_exclusion_invalid:{g1}" in keys
+    assert bad["resolved"] == []
+    fixed = go([], yaml.safe_dump([_entry(g1)]))
+    assert f"backlog_unlisted_footage:{g2}" not in fixed["new"]  # no re-notify of G2
+
+
+def test_an_unreadable_exclusions_file_keeps_open_per_entry_invalid_incidents(
+    tmp_path, monkeypatch
+):
+    sent: list = []
+    go = _checker(tmp_path, monkeypatch, sent)
+    entry_key = "backlog_exclusion_invalid:/x/G.MP4"
+    first = go([], "- sources: [/x/G.MP4]\n")
+    assert entry_key in [r["key"] for r in first["incidents"]] and len(sent) == 1
+    held = go([], "[unclosed")
+    assert entry_key in [r["key"] for r in held["incidents"]]
+    assert held["resolved"] == []
+    assert len(sent) == 2  # only the :file finding is new
+    back = go([], "- sources: [/x/G.MP4]\n")
+    assert back["new"] == [] and len(sent) == 2
+    assert back["resolved"] == ["backlog_exclusion_invalid:file"]
+
+
+def test_many_new_unlisted_files_send_one_push_naming_the_count(tmp_path, monkeypatch):
+    sent: list = []
+    go = _checker(tmp_path, monkeypatch, sent)
+    d = tmp_path / "trip"
+    listed, *_rest = _cam(d, "G000.MP4", *[f"G{n:03d}.MP4" for n in range(1, 41)])
+    out = go([_row("drive", listed)])
+    assert len(out["new"]) == 40 and len(out["incidents"]) == 40
+    assert len(sent) == 1
+    assert "40" in sent[0][2]
+    assert "and 30 more" in sent[0][2] and "G001.MP4" in sent[0][2]
+    assert all(r["pushed"] for r in out["incidents"])
+    assert len(go([_row("drive", listed)])["incidents"]) == 40 and len(sent) == 1
+
+
+def test_one_new_unlisted_file_keeps_its_own_push(tmp_path, monkeypatch):
+    sent: list = []
+    go = _checker(tmp_path, monkeypatch, sent)
+    a, b = _cam(tmp_path / "trip", "G1.MP4", "G2.MP4")
+    go([_row("drive", a)])
+    assert [e[1]["incident"] for e in sent] == [f"backlog_unlisted_footage:{b}"]
+
+
+def test_two_invalid_entries_sharing_a_first_source_get_a_numbered_second_key(tmp_path):
+    f = _exfile(tmp_path, [{"sources": ["/b"]}, {"sources": ["/b", "/c"]}])
+    _, problems = accounting.load_exclusions(f, [])
+    rows = accounting.exclusion_problem_incidents(problems, ISO)
+    assert [r["key"] for r in rows] == [
+        "backlog_exclusion_invalid:/b",
+        "backlog_exclusion_invalid:/b#2",
+    ]
+    assert rows[0]["file"] != rows[1]["file"]
+
+
+def test_paths_that_flatten_to_one_safe_name_get_distinct_incident_files(tmp_path, monkeypatch):
+    sent: list = []
+    go = _checker(tmp_path, monkeypatch, sent)
+    p1, k1 = _cam(tmp_path / "a_b", "x.mp4", "keep1.mp4")
+    p2, k2 = _cam(tmp_path / "a", "b_x.mp4", "keep2.mp4")
+    out = go([_row("drive", k1, k2)])
+    assert len(out["incidents"]) == 2
+    assert len({r["file"] for r in out["incidents"]}) == 2
+    again = go([_row("drive", k1, k2)])
+    assert len(again["incidents"]) == 2 and again["resolved"] == []
+    inc = list((tmp_path / "inc").glob("backlog_unlisted_footage_*.json"))
+    assert len(inc) == 2

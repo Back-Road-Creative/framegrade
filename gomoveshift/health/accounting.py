@@ -16,6 +16,7 @@ opened, probed or decoded.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import threading
@@ -69,8 +70,21 @@ def _is_absolute(text: str) -> bool:
     return text.startswith("/")
 
 
-def _problem(entry: Optional[int], detail: str, tag: Optional[str] = None) -> Dict[str, Any]:
-    return {"entry": entry, "detail": detail, "tag": tag}
+def _problem(
+    entry: Optional[int],
+    detail: str,
+    tag: Optional[str] = None,
+    sources: Sequence[str] = (),
+) -> Dict[str, Any]:
+    return {"entry": entry, "detail": detail, "tag": tag, "sources": list(sources)}
+
+
+def _entry_sources(raw: Any) -> List[str]:
+    """The absolute POSIX string sources of an entry (valid or not): folders rule 11 still lists
+    for an invalid entry, which excludes nothing."""
+    if isinstance(raw, dict) and isinstance(raw.get("sources"), list):
+        return [s.strip() for s in raw["sources"] if isinstance(s, str) and _is_absolute(s.strip())]
+    return []
 
 
 def _entry_tag(raw: Any) -> Optional[str]:
@@ -139,7 +153,7 @@ def load_exclusions(
     for n, item in enumerate(raw, start=1):
         why = _entry_problem(item, row_sources, seen)
         if why:
-            problems.append(_problem(n, why, _entry_tag(item)))
+            problems.append(_problem(n, why, _entry_tag(item), _entry_sources(item)))
             continue
         entries.append(
             Exclusion(tuple(item["sources"]), item["reason"].strip(), item.get("project"))
@@ -207,6 +221,10 @@ def store_orphan_incidents(
     ]
 
 
+def _key_hash(path: str) -> str:
+    return hashlib.sha256(f"backlog_unlisted_footage:{path}".encode("utf-8")).hexdigest()[:10]
+
+
 def _scan(folder: str) -> List[str]:
     """The camera files directly in ``folder`` (names only; nothing is opened)."""
     with os.scandir(folder) as it:
@@ -265,17 +283,21 @@ def unlisted_footage_incidents(
     now_iso: str,
     notes: List[str],
     unreadable: Optional[List[str]] = None,
+    listed_only: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
     """One incident per camera file (top level of a folder holding a row or exclusion source)
     that no row and no exclusion names, keyed by its path so each opens, resolves and notifies
     on its own. A folder that cannot be listed is a note and is appended to ``unreadable``
-    (comparison form, see :func:`norm`) so the caller keeps its open incidents live."""
+    (comparison form, see :func:`norm`) so the caller keeps its open incidents live.
+    ``listed_only`` are sources of invalid exclusion entries: their folders are listed but they
+    account for nothing."""
     accounted = {norm(str(s)) for r in rows for s in (getattr(r, "sources", ()) or ())}
     accounted.update(norm(s) for e in exclusions for s in e.sources)
     originals: Dict[str, str] = {}
     for src in sorted(
         {str(s) for r in rows for s in (getattr(r, "sources", ()) or ())}
         | {s for e in exclusions for s in e.sources}
+        | {s for s in listed_only if _is_absolute(s)}
     ):
         originals.setdefault(
             norm(os.path.dirname(os.path.normpath(src))), os.path.dirname(os.path.normpath(src))
@@ -293,7 +315,8 @@ def unlisted_footage_incidents(
                 new_incident(
                     "backlog_unlisted_footage",
                     f"backlog_unlisted_footage:{path}",
-                    f"backlog_unlisted_footage_{safe_name(path)}.json",
+                    # safe_name alone flattens /a_b/x and /a/b_x to one file: add a key hash.
+                    f"backlog_unlisted_footage_{safe_name(path)}_{_key_hash(path)}.json",
                     now_iso,
                     directory=folder,
                     name=name,

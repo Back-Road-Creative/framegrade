@@ -110,8 +110,11 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    least one source of a manifest row or an exclusion entry, the camera files (case-insensitive
    `.mp4`, `.insv`, `.mov`; files only, not recursive) that no row's `sources` and no exclusion's
    `sources` names. One incident per file (key `backlog_unlisted_footage:<absolute path>`, fields
-   `directory`, `name`, `path`), so each opens, resolves and notifies on its own
-   (`health_backlog_unlisted_footage`). Directory listing only: a media file is never opened,
+   `directory`, `name`, `path`; row file `backlog_unlisted_footage_<safe name>_<10 hex of
+   sha256(key)>.json`, the hash so `/a_b/x.mp4` and `/a/b_x.mp4` never share a file), so each
+   opens and resolves on its own. New ones push as ONE `health_backlog_unlisted_footage` per tick
+   when there are several (count plus up to `check.FOOTAGE_PUSH_NAMES` = 10 names, then "and N
+   more"; a lone file keeps its own push); every row still names its own file. Directory listing only: a media file is never opened,
    probed or decoded. Paths compare after `os.path.normpath`, and case-folded under
    `/mnt/<single letter>/` (a Windows drive). A folder that cannot be listed (D: offline: a
    listing error, a `/mnt/<letter>` with nothing mounted, or no answer within
@@ -129,9 +132,11 @@ keys. A source is an absolute POSIX path (a Windows `D:\...` path is refused), a
 the file and in no manifest row (compared as in rule 11). An entry that breaks this opens a
 `backlog_exclusion_invalid` incident (key `backlog_exclusion_invalid:<the entry's first source
 path>`, or the entry number when it has no usable source; fields `entry`, `detail`) and excludes
-nothing, so its footage still shows under rule 11. An unreadable file or a non-list top level opens
+nothing, so its footage still shows under rule 11 (the folders of an invalid entry's absolute
+sources are still listed, but account for nothing, so open incidents there stay open). An unreadable file or a non-list top level opens
 `backlog_exclusion_invalid:file` and rules 10 and 11 are not evaluated that tick (a note; their open
-incidents stay open) instead of flooding every excluded file in as a finding.
+incidents stay open, as do open per-entry `backlog_exclusion_invalid` incidents: only the `:file` finding is live)
+instead of flooding every excluded file in as a finding.
 
 **Backlog launch refused for space.** Not a check rule: `health backlog` writes it. A launch
 refused with `storage:` (a device's free space is under the staging plus output need,
