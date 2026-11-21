@@ -279,6 +279,23 @@ RINGING_MAX = 0.01
 # picture (denoise too hard, bad scale) loses far more. Tune on real footage.
 DELIVERED_SHARPNESS_TOLERANCE = 0.25
 
+# Lowest factor the day master's paired gate may put a reference's sharpness
+# through when it matches the reference to the delivered frame's contrast (the
+# luma variance ratio, delivered over reference). MEASURED: the strongest grade
+# the colour filters can legitimately build (lift 20, pull 15, saturation 1.25,
+# gamma 1.3) lowers luma variance to 0.61-0.66 of the source on 11 real photos;
+# the Courtmacsherry 2026-11-20 incident grade was ~0.84. Below 0.55 the picture
+# is collapsing toward flat grey or black, not graded: the reference is held at
+# this floor, so a crushed frame fails instead of shrinking its own yardstick.
+# There is no ceiling: a raised contrast must keep making the gate stricter.
+CONTRAST_MATCH_FLOOR = 0.55
+
+# Downscale applied to the luma before its variance is taken for the contrast
+# factor. A blur lowers full-resolution variance too, which would excuse the
+# very softening the gate looks for; a coarse view tracks a tone curve but not
+# fine detail.
+CONTRAST_VARIANCE_DOWNSCALE = 8
+
 # Frames per side of the picture gate. Source and delivery are sampled the same
 # way, at gate time, so the comparison is like for like. Measured on the
 # Kingsport 2026-03-04 drive: one GoPro clip's per-frame sharpness spans 993 to
@@ -339,11 +356,25 @@ def gate_timestamps(duration: float, n: int = PICTURE_GATE_SAMPLES) -> list[floa
     return [span * (i + 0.5) / n for i in range(n)]
 
 
+def luma_variance(gray_or_rgb: np.ndarray) -> float:
+    """Variance of the bounded luma on a coarse view, the gate's measure of contrast.
+
+    Taken after an ``INTER_AREA`` downscale by ``CONTRAST_VARIANCE_DOWNSCALE`` so a
+    blur does not lower it (it falls back to full resolution under 8 px a side).
+    """
+    luma = _bounded_luma(gray_or_rgb, SHARPEN_DETAIL_MAX_DIM)
+    h, w = luma.shape[:2]
+    k = CONTRAST_VARIANCE_DOWNSCALE
+    if min(h, w) >= k:
+        luma = cv2.resize(luma, (w // k, h // k), interpolation=cv2.INTER_AREA)
+    return float(luma.var())
+
+
 def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float, float] | None:
     """``(sharpness, ringing, luma_variance)`` of the frame at ``ts`` of ``path``, or ``None``.
 
-    The variance is of the same bounded luma ``sharpness_score`` measures, so a
-    caller can put two frames' sharpness at one contrast.
+    The variance is ``luma_variance`` of the same bounded luma ``sharpness_score``
+    measures, so a caller can put two frames' sharpness at one contrast.
 
     ``vf`` runs before the gate's own reduction, so a reference can be given a
     delivered file's geometry (a Short's crop of the master).
@@ -363,8 +394,7 @@ def frame_picture(path, ts: float, vf: str = "") -> tuple[float, float, float] |
     gray = cv2.imdecode(np.frombuffer(r.stdout, np.uint8), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return None
-    luma_var = float(_bounded_luma(gray, SHARPEN_DETAIL_MAX_DIM).var())
-    return sharpness_score(gray), ringing_score(gray), luma_var
+    return sharpness_score(gray), ringing_score(gray), luma_variance(gray)
 
 
 def sample_delivered_picture(path, duration: float, n: int = SOURCE_SHARPNESS_SAMPLES):
@@ -396,7 +426,15 @@ def timeline_position(files, durations, t: float):
     return files[-1], durations[-1]
 
 
-def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GATE_SAMPLES, vf=""):
+def sample_paired_picture(
+    delivered,
+    duration: float,
+    reference_at,
+    n=PICTURE_GATE_SAMPLES,
+    vf="",
+    *,
+    contrast_match: bool = False,
+):
     """Sharpness and ringing of ``n`` delivered frames and the frames they were made from.
 
     ``reference_at(t)`` gives ``(reference_file, seconds)`` for delivered second
@@ -405,13 +443,15 @@ def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GA
     contrast_ratio)`` over the pairs where both frames decoded, so each median
     comes from the same frames.
 
-    Laplacian variance scales with contrast squared, so a deliberate tone grade
-    (shadow lift, highlight pull) would read as softness. Each reference
-    sharpness is therefore put at its delivered frame's contrast:
-    ``r_sharp * var(delivered luma) / var(reference luma)``. ``contrast_ratio``
-    is that factor per pair (1.0 when either frame is flat, or unmeasured). It
-    is symmetric: a grade that raises contrast raises the reference, so added
-    contrast cannot hide softening.
+    With ``contrast_match`` (the day master, the only graded file) each reference
+    is put at its delivered frame's contrast, because Laplacian variance scales
+    with contrast squared and a deliberate tone grade would read as softness:
+    ``contrast_ratio = var(delivered luma) / var(reference luma)``, floored at
+    ``CONTRAST_MATCH_FLOOR`` (so a crushed frame fails rather than shrinking its
+    reference) and not capped (added contrast raises the reference). The reference
+    sharpness is multiplied by it and the reference ringing, which scales linearly
+    with contrast, by its square root. A flat frame leaves the pair unadjusted.
+    Without the flag nothing is adjusted and every ratio is 1.0.
     """
     out: tuple[list[float], list[float], list[float], list[float], list[float]] = (
         [], [], [], [], []
@@ -425,9 +465,10 @@ def sample_paired_picture(delivered, duration: float, reference_at, n=PICTURE_GA
         if ref is None:
             continue
         ratio = 1.0
-        if len(got) > 2 and len(ref) > 2 and got[2] > 1e-9 and ref[2] > 1e-9:
-            ratio = got[2] / ref[2]
-        for values, v in zip(out, (got[0], got[1], ref[0] * ratio, ref[1], ratio)):
+        if contrast_match and got[2] > 1e-9 and ref[2] > 1e-9:
+            ratio = max(got[2] / ref[2], CONTRAST_MATCH_FLOOR)
+        ring_scale = ratio**0.5
+        for values, v in zip(out, (got[0], got[1], ref[0] * ratio, ref[1] * ring_scale, ratio)):
             values.append(v)
     return out
 

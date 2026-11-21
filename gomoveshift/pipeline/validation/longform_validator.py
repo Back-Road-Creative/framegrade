@@ -140,7 +140,12 @@ def picture_quality_gate(
 
 
 def paired_picture_gate(
-    video_path: Path, duration: float, reference_at, *, reference_vf: str = ""
+    video_path: Path,
+    duration: float,
+    reference_at,
+    *,
+    reference_vf: str = "",
+    contrast_match: bool = False,
 ) -> GateResult:
     """The picture gate on frames paired with the frames they were made from.
 
@@ -150,14 +155,22 @@ def paired_picture_gate(
     cannot move one side alone (Mizen 2026-11-16: a faithful master read 335.8
     against 405.8 on paired frames and failed against 597.5 on unpaired ones).
 
-    Each reference sharpness is put at its delivered frame's contrast first
-    (Courtmacsherry 2026-11-20: the day's tone grade lowered luma spread 8.6%,
-    which Laplacian variance squares, and read 240.0 against 333.7 as softness).
-    The gate judges detail, not the grade's tone curve; the message says by what
-    factor the reference moved.
+    ``contrast_match`` is for the day master, the only graded file (an LF or a
+    Short carries no tone change, so it is judged exactly as before). Each
+    reference sharpness is then put at its delivered frame's contrast, floored at
+    ``quality.CONTRAST_MATCH_FLOOR`` (Courtmacsherry 2026-11-20: the day's tone
+    grade lowered luma spread 8.6%, which Laplacian variance squares, and read
+    240.0 against 333.7 as softness). The gate judges detail, not the grade's tone
+    curve; the message says by what factor the reference moved and how many pairs
+    hit the floor.
     """
     d_sharp, d_ring, r_sharp, r_ring, ratios = quality.sample_paired_picture(
-        video_path, duration, reference_at, quality.PICTURE_GATE_SAMPLES, reference_vf
+        video_path,
+        duration,
+        reference_at,
+        quality.PICTURE_GATE_SAMPLES,
+        reference_vf,
+        contrast_match=contrast_match,
     )
     if not d_sharp:
         return GateResult(
@@ -171,10 +184,12 @@ def paired_picture_gate(
         float(statistics.median(r_sharp)),
         float(statistics.median(r_ring)),
     )
-    gate.message += (
-        f" on {len(d_sharp)} paired frames"
-        f" (reference at delivered contrast \u00d7{statistics.median(ratios):.2f})"
-    )
+    gate.message += f" on {len(d_sharp)} paired frames"
+    if contrast_match:
+        gate.message += f" (reference at delivered contrast \u00d7{statistics.median(ratios):.2f})"
+        collapsed = sum(1 for r in ratios if r <= quality.CONTRAST_MATCH_FLOOR)
+        if collapsed:
+            gate.message += f"; contrast collapsed on {collapsed} pairs"
     return gate
 
 
