@@ -24,6 +24,11 @@ UNKNOWN = "unknown"
 #: on the failure's own fingerprint (see ``refusal``); ``publish_only`` is never a render retry.
 BUDGET: Dict[str, int] = {DETERMINISTIC: 1, TRANSIENT: 3, PUBLISH_ONLY: 0, UNKNOWN: 1}
 
+#: Interrupted heal runs (a host restart or killed runner left the job at "running" with a dead
+#: nanny) per fingerprint that do not use the budget. Past it each counts like a failure, so a
+#: crash-looping host cannot relaunch forever.
+HEAL_INTERRUPTED_RETRIES = 3
+
 #: ``(pattern, class)``, first match wins, matched against the failure text (error line + gate).
 #: Each pattern names the raise site it was grounded on. Anything unmatched is ``unknown``.
 CLASS_TABLE: Tuple[Tuple["re.Pattern[str]", str], ...] = tuple(
@@ -181,12 +186,21 @@ def sha256_json(obj: Any) -> str:
 
 
 def launched_count(attempts: Iterable[Mapping[str, Any]], fp_hash: str) -> int:
-    """Launched, non-pre-flight attempts recorded under ``fp_hash``."""
-    return sum(
-        1 for a in attempts
-        if a.get("action") == "launched" and a.get("fp_hash") == fp_hash
-        and a.get("outcome") != "preflight_failed"
-    )  # fmt: skip
+    """Launched attempts recorded under ``fp_hash`` that used budget: not pre-flight failures and
+    not the first ``HEAL_INTERRUPTED_RETRIES`` interrupted ones (a host restart is not a failure)."""
+    used, interrupted = 0, 0
+    for a in attempts:
+        if a.get("action") != "launched" or a.get("fp_hash") != fp_hash:
+            continue
+        outcome = a.get("outcome")
+        if outcome == "preflight_failed":
+            continue
+        if outcome == "interrupted":
+            interrupted += 1
+            if interrupted <= HEAL_INTERRUPTED_RETRIES:
+                continue
+        used += 1
+    return used
 
 
 def refusal(klass: str, fp_hash: str, *, launched: int, failed_under: bool) -> Optional[str]:

@@ -24,6 +24,9 @@ would run the old code.
 A launch that failed in drive pre-flight (before any encode) is outcome ``preflight_failed``: it does
 not count toward the backoff, so the next tick retries, ``HEAL_PREFLIGHT_RETRIES`` times on the same
 code; then the retry waits ``HEAL_RETRY_MAX_S`` from the newest pre-flight failure, and so on.
+A run killed by a host restart (its job record stays "running" but its nanny is gone) is outcome
+``interrupted``: it does not count toward the budget or the backoff either, up to
+``retry_policy.HEAL_INTERRUPTED_RETRIES`` per fingerprint; past that it counts like a failure.
 A same-code retry reuses ``job_name(drive, sha)``; ``_outcomes`` matches a job record to an attempt by
 creation time, so each attempt gets its own run's outcome.
 Every attempt is appended to the row's ``resume_attempts``."""
@@ -372,8 +375,16 @@ def preflight_detail(log_path: Path) -> Optional[str]:
     return blocker.strip()[:_DETAIL_MAX]
 
 
-def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
-    """Push once per launched attempt whose heal job has since succeeded or failed."""
+def _outcomes(
+    rows,
+    jobs_dir,
+    notify_fn,
+    incidents_dir,
+    now_iso,
+    proc_alive: Callable[[Any], bool] = _proc_alive,
+) -> List[str]:
+    """Push once per launched attempt whose heal job has since succeeded, failed, or was
+    interrupted (left at "running" by a nanny and worker that no longer exist)."""
     done: List[str] = []
     records = sorted(_job_records(jobs_dir), key=lambda r: float(r.get("created_at") or 0))
     for row in rows:
@@ -395,6 +406,14 @@ def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
                 outcome = "succeeded"
             elif state == "failed" or (state not in (None, "running") and code not in (None, 0)):
                 outcome = "failed"
+            elif (
+                state in (None, "running")
+                and isinstance(runs[-1].get("nanny"), dict)
+                and runs[-1]["nanny"]
+                and not proc_alive(runs[-1]["nanny"])
+                and not (runs[-1].get("worker") and proc_alive(runs[-1]["worker"]))
+            ):
+                outcome = "interrupted"
             else:
                 continue
             detail = None
@@ -409,6 +428,9 @@ def _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso) -> List[str]:
                 {"incident": row["key"], "job": att["job_name"]},
                 f"Auto-resume of {row['drive']} failed pre-flight: {detail}."
                 if detail is not None
+                else f"Auto-resume of {row['drive']} was interrupted (host restart or killed "
+                "runner); it will be retried."
+                if outcome == "interrupted"
                 else f"Auto-resume of {row['drive']} {outcome}.",
             )
             done.append(f"{row['key']}:{outcome}")
@@ -435,6 +457,7 @@ def run_heal(
     sibling_versions_fn: Optional[Callable[[str], Dict[str, Optional[str]]]] = None,
     manifest_sha_fn: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
     config_sha_fn: Optional[Callable[[Any], Optional[str]]] = None,
+    proc_alive: Callable[[Any], bool] = _proc_alive,
 ) -> Dict[str, Any]:
     """``{"launched", "would_launch", "outcomes", "attempts", "notes"}``. Never raises on input."""
     if notify_fn is None:
@@ -460,7 +483,7 @@ def run_heal(
         "launched": [], "would_launch": [], "outcomes": [], "attempts": [], "notes": [],
     }  # fmt: skip
     if not dry_run:
-        out["outcomes"] = _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso)
+        out["outcomes"] = _outcomes(rows, jobs_dir, notify_fn, incidents_dir, now_iso, proc_alive)
     if not sha:
         out["notes"].append("mirror SHA unknown: nothing launched")
         return out
@@ -520,10 +543,16 @@ def run_heal(
         # stamps it from the current code, which would count the very release meant to recover it
         # as the one the failure happened under. ``health check`` stamps new rows when it files them.
         group = [a for _w, a in launches.get(recipe_path, ())]
-        launched_at = [
-            w for w, a in launches.get(recipe_path, ())
-            if _same(a, fph) and a.get("outcome") != "preflight_failed"
-        ]  # fmt: skip
+        launched_at = []
+        interrupted_n = 0
+        for w, a in launches.get(recipe_path, ()):
+            if not _same(a, fph) or a.get("outcome") == "preflight_failed":
+                continue
+            if a.get("outcome") == "interrupted":
+                interrupted_n += 1
+                if interrupted_n <= retry_policy.HEAL_INTERRUPTED_RETRIES:
+                    continue  # a host restart is not a failed attempt: no backoff either
+            launched_at.append(w)
         preflight_at = [
             w for w, a in launches.get(recipe_path, ())
             if _same(a, fph) and a.get("outcome") == "preflight_failed"
