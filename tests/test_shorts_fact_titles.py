@@ -182,3 +182,48 @@ def test_shared_used_titles_keep_titles_unique_across_calls():
         )
         titles.append(post.youtube_title)
     assert titles[0] == "Tryon" and titles[1] == "Polk County"
+
+
+def test_a_fallback_title_never_repeats_the_previous_shorts_title_place():
+    # Queue sync seeds a rewritten Short with its neighbour's STORED places and its own
+    # ledger cannot see that neighbour, so when the varied place is taken the walk must
+    # not land on the neighbour's place: the Short keeps its stamped title instead.
+    gen = SocialGenerator(
+        location=LABEL,
+        project_name="drive",
+        series_part=1,
+        spooled_texts={"youtube": ["Tryon"]},
+        experiments=(),
+    )
+    (post,) = gen.generate_all(
+        num_shorts=1,
+        per_short_locations=[LABEL],
+        per_short_regions=[REGIONS],
+        per_short_route_records=[_route("Tryon")],
+        per_short_title_facts=[TitleFacts(DATE, 1, 38, True)],
+        previous_places_at={1: {"title": "Polk County", "description": "Polk County"}},
+    )
+    assert post.youtube_title.startswith(title_stamp(DATE, 1) + ": ")
+    assert "Polk County" not in post.youtube_title
+
+
+def test_the_place_record_names_the_place_the_title_says():
+    # Tryon is taken, so Short 1's title falls through to the county; the record must say
+    # so, or Short 2 would vary from Tryon straight back onto Short 1's county.
+    gen = SocialGenerator(
+        location=LABEL,
+        project_name="drive",
+        series_part=1,
+        spooled_texts={"youtube": ["Tryon"]},
+        experiments=(),
+    )
+    first, second = gen.generate_all(
+        num_shorts=2,
+        per_short_locations=[LABEL] * 2,
+        per_short_regions=[REGIONS] * 2,
+        per_short_route_records=[_route("Tryon")] * 2,
+        per_short_title_facts=[TitleFacts(DATE, k, 38, True) for k in (1, 2)],
+    )
+    assert first.youtube_title == "Polk County"
+    assert first.place_variety["title"]["body"] == "Polk County"
+    assert "Polk County" not in second.youtube_title

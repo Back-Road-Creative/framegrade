@@ -243,8 +243,10 @@ published ledger, is not already used by this batch (`used_titles`, shared acros
 LFs of one drive when the caller passes `generate_all(used_titles=...)`), shares no
 first-3-word prefix with a batch title, and does not open like a spooled YouTube text
 (the queue gate's `cross-batch-repeat`). On a collision the next measured place is
-used; when none is left that one Short takes its stamped title (below) and the
-generator logs `no unused measured place for the ... title`. A Short whose
+used, never the previous Short's title place; when none is left that one Short takes
+its stamped title (below) and the generator logs `no unused measured place for the ...
+title`. `place_variety["title"]` records the place the title actually names, so the
+next Short, and a queue-sync rewrite seeded from it, varies from that place. A Short whose
 `place_ok` is false keeps the place-free stamped title. `yt_title_body` is no longer
 assigned (a fact title has no body to vary); `SHORTS_TITLE_BODY_ARMS` shapes only the
 stamped fallback.
