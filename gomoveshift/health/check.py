@@ -580,12 +580,14 @@ def _seo_feedback_rows(
         metric_rows = sf.metrics_incidents(records, now.date(), now_iso)
         rows += metric_rows
         prior = open_rows.get(sf.KEY_METRICS)
-        if not metric_rows and prior is not None:
+        if prior is not None:
+            # A Short past the lookback cannot be in the current row, so a listed one that is
+            # now past it was dropped by ageing (the refresh removes it: said once).
             aged = sf.aged_out_count(records, now.date(), prior.get("shorts") or [])
             if aged:
                 notes.append(
-                    f"seo_feedback_stale metrics resolved: {aged} Short(s) aged out of the "
-                    f"{sf.METRICS_LOOKBACK_DAYS}-day lookback with no core metrics (not a fix)"
+                    f"seo_feedback_stale metrics: {aged} listed Short(s) aged out of the "
+                    f"{sf.METRICS_LOOKBACK_DAYS}-day lookback still missing metrics (not a fix)"
                 )
     except Exception as exc:  # noqa: BLE001
         notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")

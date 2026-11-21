@@ -4,7 +4,6 @@ core metrics. Detection only; every condition resolves when it clears."""
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -241,3 +240,23 @@ def test_a_short_aging_out_resolves_the_row_and_says_so_in_a_note(tmp_path):
     assert w.open_keys() == set()
     assert any("aged out" in n and "metrics" in n for n in res["notes"])
     assert not any("aged out" in n for n in w.check()["notes"])  # said once, at the resolution
+
+
+def test_a_listed_short_aging_out_while_the_row_stays_open_is_noted_once(tmp_path):
+    w = _fresh_world(tmp_path)
+    w.short(1, views=None, age_days=27)
+    w.short(2, views=None, age_days=20)
+    w.check()
+    assert [e["short_index"] for e in w.rows()[K_MET]["shorts"]] == [1, 2]
+    w.now = NOW + timedelta(days=2)  # p#1 is now past the lookback and still empty
+    w.decisions(age_h=1)
+    res = w.check()
+    assert [e["short_index"] for e in w.rows()[K_MET]["shorts"]] == [2]  # refreshed, still open
+    assert w.open_keys() == {K_MET}
+    assert [n for n in res["notes"] if "aged out" in n and "not a fix" in n]
+    assert not any("resolved" in n for n in res["notes"] if "aged out" in n)
+    w.short(2, views=5, pct=40.0)
+    res = w.check()
+    assert w.open_keys() == set()
+    assert not any("aged out" in n for n in res["notes"])  # said once, on the tick it happened
+    assert w.pushed.count(("health_seo_feedback_stale", K_MET)) == 1

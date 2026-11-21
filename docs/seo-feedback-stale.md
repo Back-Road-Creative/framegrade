@@ -25,15 +25,15 @@ A Short that ages out of the metrics lookback is simply no longer counted. The q
 
 **Open rows follow the finding.** A row already open has its `detail`, `count` and listing
 refreshed on each check; `pushed` stays true and nothing is pushed again. When the `metrics`
-row resolves and some Shorts it listed are still without metrics because they aged out of the
-lookback (not because metrics arrived), the check notes it; Shorts the row never listed are not
-counted.
+row drops a Short it listed because that Short aged out of the lookback still without metrics
+(not because metrics arrived), the check notes it once, on the tick it happens, whether the row
+stays open or resolves; Shorts the row never listed are not counted.
 
 Arm assignment does not yet exclude demoted arms; that is a planned unit (C4c), not this rule.
 
 ## Unreadable inputs
 
 An input that cannot be read is a note, and the open incident it feeds stays open instead of
-closing: a tracking record that fails to load holds the `metrics` row; A **missing or unreadable decisions file is
+closing: a tracking record that fails to load holds the `metrics` row. A **missing or unreadable decisions file is
 itself condition (a)'s finding only**: it holds nothing else. A relative `seo.storage_path`
 skips the whole rule with a note.

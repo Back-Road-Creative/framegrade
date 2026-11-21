@@ -122,19 +122,6 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    no timeout) is a note naming it, never a finding and never "empty": its open incidents stay
    open, so a drive that goes offline and returns does not close and re-notify them.
 
-13. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
-   Two conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
-   `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
-   h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
-   within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
-   gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
-   it resolves when the count is 0; when it resolves with listed Shorts still empty because they
-   aged out of the lookback, the check says so in a note). An open row's detail and count are
-   refreshed without a re-push. Pushed once as `health_seo_feedback_stale`; detection only. An
-   unreadable tracking record is a note and keeps the open metrics row live; a missing
-   decisions file is condition (a)'s finding only and holds nothing else. Detail:
-   `docs/seo-feedback-stale.md`.
-
 **`drive_backlog_excluded.yaml`** sits beside `drive_backlog.yaml`
 (`paths.drive_backlog_excluded_path()`). It is a separate file on purpose: the backlog loader and
 `seo-manager schedule backlog-next` never read it, so an exclusion can never launch. A top-level
@@ -181,6 +168,19 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would res
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
    them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
 
+13. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
+   Two conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
+   `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
+   h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
+   within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
+   gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
+   it resolves when the count is 0). An open row's detail, count and listing are refreshed
+   without a re-push; a listed Short that ages out of the lookback while still empty drops out
+   of the listing and the check says so once in a note ("not a fix"). Pushed once as `health_seo_feedback_stale`; detection only. An
+   unreadable tracking record is a note and keeps the open metrics row live; a missing
+   decisions file is condition (a)'s finding only and holds nothing else. Detail:
+   `docs/seo-feedback-stale.md`.
+
 ## Push and idempotency
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
@@ -198,7 +198,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`; queued: `delivery_id`, `project`, `short_index`).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`).
 
 ## Resume recipe and `health heal`
 
