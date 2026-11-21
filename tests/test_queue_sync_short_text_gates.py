@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -74,20 +76,49 @@ def test_every_refusal_is_actionable_unless_named_transient(reason):
     assert qst.is_actionable_refusal(change) is True
 
 
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "facebook row 3 holds a live lease",
-        "youtube row 3 slot 2026-11-21T00:00:00+00:00 is inside the lead time",
-        "an earlier sidecar's write failed; retried next run",
-        "sidecar unusable: write failed: a row was leased during the write",
-        "sidecar unusable: write failed: p.json changed while the sync ran",
-    ],
-)
-def test_the_named_transient_refusals_clear_on_their_own(reason):
-    change = qst.ShortTextChange(1, "p", 1, "refused", "a", "b", reason)
+TRANSIENT_TEXT = [
+    "facebook row 3 holds a live lease",
+    "youtube row 3 slot 2026-11-21T00:00:00+00:00 is inside the lead time",
+    "an earlier sidecar's write failed; retried next run",
+    "sidecar unusable: write failed: a row was leased during the write",
+    "sidecar unusable: write failed: p.json changed while the sync ran",
+]
+
+
+@pytest.mark.parametrize("reason", TRANSIENT_TEXT)
+def test_the_flagged_transient_refusals_clear_on_their_own(reason):
+    change = qst.ShortTextChange(1, "p", 1, "refused", "a", "b", reason, transient=True)
     assert qst.is_actionable_refusal(change) is False
     assert not qst.is_actionable_refusal(qst.ShortTextChange(1, "p", 1, "changed", "a", "b", "x"))
+
+
+@pytest.mark.parametrize("reason", TRANSIENT_TEXT)
+def test_transience_is_the_flag_never_the_words_of_the_reason(reason):
+    """A reason quoting a transient phrase (a Short's text can) is still actionable unflagged,
+    and a flagged one is transient whatever it says."""
+    assert qst.is_actionable_refusal(qst.ShortTextChange(1, "p", 1, "refused", "a", "b", reason))
+    odd = qst.ShortTextChange(1, "p", 1, "refused", "a", "b", "anything at all", transient=True)
+    assert not qst.is_actionable_refusal(odd)
+
+
+def test_the_real_transient_refusals_carry_the_flag(tmp_path):
+    plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
+    conn.execute(
+        "UPDATE deliveries SET lease_owner = 'd', lease_expires_at = ? WHERE platform = 'facebook'",
+        ((NOW + timedelta(hours=1)).isoformat(),),
+    )
+    conn.commit()
+    (change,) = sync_short_text(conn, apply=False, now=NOW)
+    assert "holds a live lease" in change.reason
+    assert change.transient and not qst.is_actionable_refusal(change)
+
+
+def test_the_cascade_after_a_failed_write_is_flagged_transient(tmp_path, monkeypatch):
+    plan, other, conn = _world2(tmp_path)
+    _fail_write_of(monkeypatch, plan, OSError("disk full"))
+    by = {c.project_name: c for c in sync_short_text(conn, apply=True, now=NOW)}
+    assert "retried next run" in by[PROJECT2].reason and by[PROJECT2].transient
+    assert qst.is_actionable_refusal(by[PROJECT])
 
 
 def test_a_generator_that_always_raises_is_an_actionable_refusal(tmp_path, monkeypatch):
@@ -217,21 +248,67 @@ def test_any_exception_in_a_write_is_a_refusal_not_a_crash_after_partial_writes(
     assert not any(c.written for c in changes)
 
 
-def test_after_a_failed_write_the_written_text_is_checked_against_the_failed_stored_text(
-    tmp_path, monkeypatch
-):
+def _break_write(monkeypatch, conn, sidecar, how):
+    """Make the real ``_apply_sidecar`` of ``sidecar`` fail the way ``how`` names."""
+    real = qst._apply_sidecar
+
+    def apply(conn_, path, *a):
+        if path == sidecar:
+            if how == "oserror":
+                raise OSError("disk full")
+            if how == "locked":
+                raise sqlite3.OperationalError("database is locked")
+            if how == "changed":  # an editor saves it between planning and writing
+                path.write_text(path.read_text() + "\n")
+            if how == "leased":  # the dispatcher leases the row between planning and writing
+                conn_.execute(
+                    "UPDATE deliveries SET lease_owner = 'd', lease_expires_at = ? "
+                    "WHERE project_name = ?",
+                    ((NOW + timedelta(hours=1)).isoformat(), PROJECT2),
+                )
+                conn_.commit()
+        return real(conn_, path, *a)
+
+    monkeypatch.setattr(qst, "_apply_sidecar", apply)
+
+
+def _clashing_world(tmp_path):
+    """B's STORED description is A's NEW one, so A (written) clashes with B (stays as stored)."""
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     new_a = _synced_text(scratch, PROJECT)
     plan, other, conn = _world2(tmp_path)
-    raw = json.loads(other.read_text())  # B's STORED text is A's new text
-    raw["shorts"][0]["payloads"]["youtube"].update(new_a)
+    raw = json.loads(other.read_text())
+    raw["shorts"][0]["payloads"]["youtube"]["description"] = new_a["description"]
     other.write_text(json.dumps(raw, sort_keys=True, indent=2) + "\n")
-    _fail_write_of(monkeypatch, other, OSError("disk full"))
-    changes = sync_short_text(conn, apply=True, now=NOW)
-    first = next(c for c in changes if c.project_name == PROJECT)
-    if first.written:  # planned against B's NEW text, which differs from what stays queued
-        assert "stored text" in first.reason
+    return plan, other, conn
+
+
+@pytest.mark.parametrize("how", ["oserror", "changed", "leased"])
+def test_a_failed_write_that_leaves_a_clash_is_always_actionable(tmp_path, monkeypatch, how):
+    plan, other, conn = _clashing_world(tmp_path)
+    _break_write(monkeypatch, conn, other, how)
+    by = {c.project_name: c for c in sync_short_text(conn, apply=True, now=NOW)}
+    assert (by[PROJECT].status, by[PROJECT].written) == ("changed", True)
+    b = by[PROJECT2]
+    assert b.status == "refused" and "write failed" in b.reason
+    assert "clashes with this sidecar's stored text" in b.reason
+    assert not b.transient and qst.is_actionable_refusal(b)
+
+
+@pytest.mark.parametrize(
+    ("how", "transient"),
+    [("changed", True), ("leased", True), ("locked", True), ("oserror", False)],
+)
+def test_a_failed_write_without_a_clash_is_transient_only_for_a_race_or_a_busy_database(
+    tmp_path, monkeypatch, how, transient
+):
+    plan, other, conn = _world2(tmp_path)
+    _break_write(monkeypatch, conn, other, how)
+    b = {c.project_name: c for c in sync_short_text(conn, apply=True, now=NOW)}[PROJECT2]
+    assert b.status == "refused" and "write failed" in b.reason
+    assert "clashes" not in b.reason
+    assert b.transient is transient and qst.is_actionable_refusal(b) is not transient
 
 
 # -- m3: the location cap matches enqueue ---------------------------------------------------

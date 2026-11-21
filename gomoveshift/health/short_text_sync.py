@@ -5,9 +5,9 @@ rows under the health incidents dir (``health-incident/1``), pushed once each:
 
 * ``short_text_sync_refused:<project>``: at least one queued Short of that project was
   refused for any reason EXCEPT the few that clear on their own
-  (``queue_short_text.TRANSIENT_REFUSALS``: a sibling row inside the lead time, a live lease,
-  the cascade after a failed write, a write race); an unclassified reason is actionable, so
-  the check fails closed. The row lists each Short and why; resolved by the first run that no
+  (the structured ``ShortTextChange.transient`` flag: a sibling row inside the lead time, a live
+  lease, the cascade after a failed write, a write race or a busy database); an unflagged
+  reason is actionable, so the check fails closed. The row lists each Short and why; resolved by the first run that no
   longer refuses it. A transient refusal files nothing and does not count toward exit 1.
 * ``health check`` lists these rows (an open one keeps ``health check`` at exit 1, like any
   open incident) but never writes, resolves or pushes them: this command is their only

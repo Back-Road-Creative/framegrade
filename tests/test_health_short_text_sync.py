@@ -73,8 +73,8 @@ def test_health_check_names_the_sync_incidents_but_never_writes_or_pushes_them(t
 # -- the health entry point ---------------------------------------------------------------
 
 
-def _change(status, project="p1", idx=1, reason=""):
-    return qst.ShortTextChange(1, project, idx, status, "old", "new", reason)
+def _change(status, project="p1", idx=1, reason="", transient=False):
+    return qst.ShortTextChange(1, project, idx, status, "old", "new", reason, transient=transient)
 
 
 def _health(tmp_path, monkeypatch, sync, notified):
@@ -129,9 +129,21 @@ def test_a_refusal_that_clears_on_its_own_files_nothing_and_exits_clean(tmp_path
         tmp_path,
         monkeypatch,
         lambda *a, **k: [
-            _change("refused", "p1", 1, "youtube row 3 slot 2026-11-21 is inside the lead time"),
-            _change("refused", "p1", 2, "facebook row 4 holds a live lease"),
-            _change("refused", "p2", 1, "an earlier sidecar's write failed; retried next run"),
+            _change(
+                "refused",
+                "p1",
+                1,
+                "youtube row 3 slot 2026-11-21 is inside the lead time",
+                transient=True,
+            ),
+            _change("refused", "p1", 2, "facebook row 4 holds a live lease", transient=True),
+            _change(
+                "refused",
+                "p2",
+                1,
+                "an earlier sidecar's write failed; retried next run",
+                transient=True,
+            ),
         ],
         notified,
     )
@@ -142,7 +154,7 @@ def test_a_refusal_that_clears_on_its_own_files_nothing_and_exits_clean(tmp_path
         tmp_path,
         monkeypatch,
         lambda *a, **k: [
-            _change("refused", "p1", 1, "facebook row 4 holds a live lease"),
+            _change("refused", "p1", 1, "facebook row 4 holds a live lease", transient=True),
             _change("refused", "p1", 2, "anti-spam gate: shared-prefix: x"),
         ],
         notified,
@@ -197,6 +209,7 @@ def test_the_failed_notification_is_retried(tmp_path, monkeypatch):
         "sync_short_text",
         lambda *a, **k: [_change("refused", "p1", 1, "plan gate: b")],
     )
+    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: None)
     monkeypatch.setattr(
         short_text_sync, "open_queue_db", lambda path: SimpleNamespace(close=lambda: None)
     )

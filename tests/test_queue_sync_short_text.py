@@ -802,3 +802,30 @@ def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypat
     changes = sync_short_text(conn, apply=False, now=NOW)
     assert [c.status for c in changes] == ["changed", "refused"]
     assert "place repeats" in changes[1].reason
+
+
+def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
+    tmp_path, monkeypatch
+):
+    real = qst._generate_lf
+
+    def only_alone(view, *a, **kw):
+        if len([s for s in view if not s.get("_discard")]) > 1:
+            raise ValueError("ask each Short alone")
+        made = real(view, *a, **kw)
+        for post in made:  # the generator "sanctions" every repeat
+            post.place_variety = {
+                k: {"reason": "no_alternative", "body": "Ashby County"}
+                for k in ("title", "description")
+            }
+        return made
+
+    monkeypatch.setattr(qst, "_generate_lf", only_alone)
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=False, now=NOW)
+    # its seed was the predecessor's STORED places, so the sanction says nothing about the
+    # predecessor's NEW ones: the clash stands
+    assert [c.status for c in changes] == ["changed", "refused"]
+    assert "place repeats" in changes[1].reason
