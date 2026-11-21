@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.129] - 2026-11-21
+
+### Fixed
+
+- `health heal`: a resume killed by a host restart (its job record stays "running" with a dead
+  nanny) is now outcome `interrupted`, pushed once, and does not use the retry budget or the
+  backoff, so the drive is relaunched on the same fingerprint instead of being refused as
+  "1 of 1 attempts used". Interrupted relaunches are capped at
+  `retry_policy.HEAL_INTERRUPTED_RETRIES` (3) per fingerprint; past that they count like a failure.
+
 ## [0.3.128] - 2026-11-21
 
 ### Added
@@ -1455,7 +1465,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.128...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.129...HEAD
+[0.3.129]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.128...v0.3.129
 [0.3.128]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.127...v0.3.128
 [0.3.127]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.126...v0.3.127
 [0.3.126]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...v0.3.126
