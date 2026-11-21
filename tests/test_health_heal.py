@@ -42,6 +42,7 @@ class Rig:
         self.changed: list = []  # git is pathspec-filtered: only generator files can appear
         self.slot = FUTURE
         self.launch_ok = True
+        self.alive = True  # what the injected ``proc_alive`` says of any nanny identity
         self.installed = None  # the venv's gomoveshift-video version; None = unknown
         self.pinned = None  # the checkout's pinned version; None = unknown
         self.siblings: dict = {}  # seo_manager / redactcam versions; {} = unknown
@@ -91,6 +92,7 @@ class Rig:
             sibling_versions_fn=lambda python: self.siblings,
             manifest_sha_fn=lambda row: self.manifest,
             config_sha_fn=lambda config: "cfg",
+            proc_alive=lambda ident: self.alive,
         )  # fmt: skip
 
     def row(self):
@@ -1170,3 +1172,108 @@ def test_a_heal_of_a_heal_reuses_the_base_drive_name(tmp_path):
     rig.run()
     argv = rig.launches[0][0]
     assert argv[argv.index("--name") + 1] == "gms-heal-demo-drive-a-abcdef1"
+
+
+# -- A run killed by a host restart is retried, not counted as used ----------------------------
+NANNY = {"pid": 4242, "start_ticks": "77", "boot_id": "old-boot"}
+
+
+def _running_heal_job(rig: Rig, n: int, *, nanny=NANNY) -> None:
+    """The heal job the last launch started, left at "running" (its nanny died with the host)."""
+    d = rig.jobs / f"i{n}"
+    d.mkdir(parents=True)
+    rec = {
+        "schema": "job/1", "run_id": f"i{n}", "name": heal.job_name("demo-drive-a", SHA),
+        "argv": ["x"], "created_at": _tick(n).timestamp() - 300, "result": {"state": "running"},
+    }  # fmt: skip
+    if nanny is not None:
+        rec["nanny"] = nanny
+    (d / "job.json").write_text(json.dumps(rec))
+
+
+def _unknown_row(tmp_path) -> Rig:
+    # class ``unknown``: one attempt per fingerprint, so a counted attempt is a refusal
+    return Rig(tmp_path, error="SomethingNobodyClassified")
+
+
+def test_dead_nanny_running_record_is_interrupted_and_pushed_once(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _running_heal_job(rig, 1)
+    rig.alive = False
+    rig.run(now=_tick(1))
+    att = rig.row()["resume_attempts"][0]
+    assert att["outcome"] == "interrupted" and att["outcome_at"]
+    rig.run(now=_tick(2))
+    outcomes = [s for e, s in rig.pushes if e == "health_heal_outcome"]
+    assert len(outcomes) == 1 and "interrupted" in outcomes[0]
+    assert "will be retried" in outcomes[0]
+
+
+def test_live_nanny_running_record_gets_no_outcome(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _running_heal_job(rig, 1)
+    rig.alive = True
+    rig.run(now=_tick(1))
+    assert "outcome" not in rig.row()["resume_attempts"][0]
+    assert [e for e, _ in rig.pushes] == ["health_heal_launched"]
+
+
+def test_running_record_without_a_nanny_identity_stays_unknown(tmp_path):
+    rig = Rig(tmp_path)
+    rig.run()
+    _running_heal_job(rig, 1, nanny=None)
+    rig.alive = False
+    rig.run(now=_tick(1))
+    assert "outcome" not in rig.row()["resume_attempts"][0]
+
+
+def test_an_interrupted_attempt_does_not_block_a_relaunch_on_the_same_fingerprint(tmp_path):
+    rig = _unknown_row(tmp_path)
+    rig.run()
+    _running_heal_job(rig, 1)
+    rig.alive = False
+    out = rig.run(now=_tick(1))  # 45 min later: inside the 1 h backoff a used attempt buys
+    atts = rig.row()["resume_attempts"]
+    assert atts[0]["outcome"] == "interrupted"
+    assert len(rig.launches) == 2 and out["launched"] == ["drive_failed:demo-drive-a:r1"]
+    assert atts[1]["action"] == "launched"
+
+
+def test_a_failed_attempt_still_counts_against_the_budget(tmp_path):
+    rig = _unknown_row(tmp_path)
+    rig.run()
+    _finish_heal_job(rig, 1, ENCODE_LOG)
+    rig.run(now=_tick(1))
+    assert len(rig.launches) == 1
+    last = rig.row()["resume_attempts"][-1]
+    assert last["action"] == "refused" and "1 of 1 attempts used" in last["reason"]
+
+
+def test_interrupted_relaunches_are_capped_per_fingerprint(tmp_path):
+    rig = _unknown_row(tmp_path)
+    rig.alive = False
+    cap = retry_policy.HEAL_INTERRUPTED_RETRIES
+    for n in range(1, cap + 1):
+        rig.run(now=_tick(n - 1))
+        assert len(rig.launches) == n
+        _running_heal_job(rig, n)
+    rig.run(now=_tick(cap))  # the cap-th interrupt is recorded, then one more relaunch is allowed
+    assert len(rig.launches) == cap + 1
+    _running_heal_job(rig, cap + 1)
+    rig.run(now=_tick(cap + 1))  # past the cap the interrupted attempt counts like a failure
+    rig.run(now=_tick(cap + 2))
+    assert len(rig.launches) == cap + 1
+    atts = rig.row()["resume_attempts"]
+    assert [a.get("outcome") for a in atts[: cap + 1]] == ["interrupted"] * (cap + 1)
+    assert "attempts used" in atts[-1]["reason"]
+
+
+def test_past_the_interrupted_cap_an_interrupted_attempt_counts_like_a_failure():
+    cap = retry_policy.HEAL_INTERRUPTED_RETRIES
+    attempts = [
+        {"action": "launched", "fp_hash": "f", "outcome": "interrupted"} for _ in range(cap)
+    ]
+    assert retry_policy.launched_count(attempts, "f") == 0
+    assert retry_policy.launched_count(attempts + attempts[:1], "f") == 1

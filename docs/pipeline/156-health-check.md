@@ -309,7 +309,10 @@ with n launched attempts of the recipe (counted across every row sharing it) on 
 SHA and installed version, the next waits `min(3600 * 2**(n-1), 86400)` s (`HEAL_RETRY_BASE_S`,
 `HEAL_RETRY_MAX_S`) after the newest, skip reason `retry backoff: next attempt at <iso>`; a new SHA
 or version retries at once, and pre-flight failures do not count (after `HEAL_PREFLIGHT_RETRIES`
-of them on one code the retry waits the 24 h max from the newest); (b) a drive job is running
+of them on one code the retry waits the 24 h max from the newest). A run killed by a host
+restart (job record left at `running`, nanny and worker gone per `_proc_alive`) gets attempt outcome
+`interrupted` and one `health_heal_outcome` push; it uses neither budget nor backoff for the first
+`HEAL_INTERRUPTED_RETRIES` (3) on a fingerprint, then counts like a failure; (b) a drive job is running
 (job/1 record with no result, or `pgrep`); (c) none: the publish slot (the recipe's
 `--lf-publish-date`, else the soonest free slot of `gomoveshift schedule`) is recorded as `slot`
 but never gates, since an audit-only drive keeps only the weekday check and `health backlog` /
