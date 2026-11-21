@@ -189,7 +189,7 @@ def paired_picture_gate(
         gate.message += f" (reference at delivered contrast \u00d7{statistics.median(ratios):.2f})"
         collapsed = sum(1 for r in ratios if r <= quality.CONTRAST_MATCH_FLOOR)
         if collapsed:
-            gate.message += f"; contrast collapsed on {collapsed} pairs"
+            gate.message += f"; reference held at the contrast floor on {collapsed} pairs"
     return gate
 
 

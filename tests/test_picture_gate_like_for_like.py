@@ -278,7 +278,7 @@ def _raw_ratio(graded) -> float:
     return quality.sharpness_score(graded(_textured(0))) / quality.sharpness_score(_textured(0))
 
 
-def test_a_tone_compressed_master_with_no_detail_loss_passes(monkeypatch):
+def test_a_tone_compressed_master_with_slight_encode_loss_passes(monkeypatch):
     # The incident grade: variance x0.84 (gain ~0.92) plus the slight encode loss.
     graded = lambda f: _smear(_tone(f, 0.92), 0.36)  # noqa: E731
     # The raw ratio is below the 0.75 the old gate needed.
@@ -286,7 +286,7 @@ def test_a_tone_compressed_master_with_no_detail_loss_passes(monkeypatch):
     gate = _gate(graded, monkeypatch)
     assert gate.passed, gate.message
     assert "reference at delivered contrast \u00d70.84" in gate.message
-    assert "collapsed" not in gate.message
+    assert "contrast floor" not in gate.message
 
 
 def test_the_strongest_legitimate_grade_passes(monkeypatch):
@@ -295,7 +295,7 @@ def test_the_strongest_legitimate_grade_passes(monkeypatch):
     assert _raw_ratio(graded) < 0.75
     gate = _gate(graded, monkeypatch)
     assert gate.passed, gate.message
-    assert "collapsed" not in gate.message
+    assert "contrast floor" not in gate.message
 
 
 def test_a_crushed_grey_master_fails_instead_of_shrinking_the_reference(monkeypatch):
@@ -304,7 +304,7 @@ def test_a_crushed_grey_master_fails_instead_of_shrinking_the_reference(monkeypa
     gate = _gate(crushed, monkeypatch)
     assert not gate.passed and "delivered sharpness" in gate.message
     assert "reference at delivered contrast \u00d70.55" in gate.message
-    assert "; contrast collapsed on 25 pairs" in gate.message
+    assert "; reference held at the contrast floor on 25 pairs" in gate.message
 
 
 def test_a_tone_compressed_master_that_is_also_smeared_still_fails(monkeypatch):
@@ -350,16 +350,17 @@ def test_a_tiny_frame_measures_variance_at_full_resolution():
 # ── the strict edge of the gate, on the day master path ─────────────────────
 
 
-@pytest.mark.parametrize("sigma", [0.45, 0.6])
+@pytest.mark.parametrize("sigma", [0.41, 0.6])
 def test_a_fine_texture_smear_at_the_fail_onset_fails_the_day_master(tmp_path, monkeypatch, sigma):
-    # sigma 0.45 scores ~0.73 against the 0.75 line: the smear must not shave the
-    # variance the factor divides by (it is measured on a coarse downscale).
+    # sigma 0.41 scores ~0.73 against the 0.75 line. Measured at full resolution the smear would
+    # shave the variance the factor divides by and pass (~0.83); a 0.30 tolerance would pass it too.
     failure = _day_gate(tmp_path, monkeypatch, lambda f: _smear(f, sigma))
     assert failure and "delivered sharpness" in failure
 
 
 def test_a_fine_texture_smear_just_inside_the_line_passes_the_day_master(tmp_path, monkeypatch):
-    assert _day_gate(tmp_path, monkeypatch, lambda f: _smear(f, 0.35)) is None
+    # sigma 0.39 scores ~0.79: inside the 0.75 line, outside a 0.20 tolerance.
+    assert _day_gate(tmp_path, monkeypatch, lambda f: _smear(f, 0.39)) is None
 
 
 # ── LF and Short are not graded: they never adjust ──────────────────────────

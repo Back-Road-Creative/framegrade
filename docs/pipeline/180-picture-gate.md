@@ -38,11 +38,14 @@ resolution under 8 px a side), so a smear, which also lowers full-resolution var
 excuse itself. A flat frame (zero variance) leaves the pair unadjusted.
 
 - **Floor 0.55** (`quality.CONTRAST_MATCH_FLOOR`). The strongest grade the colour filters can build
-  (lift 20, pull 15, saturation 1.25, gamma 1.3) measures a variance ratio of 0.61-0.66 on real
-  photos; the incident grade is about 0.84. A delivered frame crushed toward flat grey or black
-  would otherwise shrink its own reference to nothing and pass, so the ratio never goes below the
-  floor and such a frame fails on the clamped reference. The message then ends
-  `; contrast collapsed on N pairs`.
+  (lift 20, pull 15, saturation 1.25, gamma 1.3) measures a variance ratio of 0.60-0.67 on normally
+  exposed photos, but 0.45-0.47 on snow or sky, 0.52-0.55 on fog and 0.51-0.59 on overexposed
+  frames (2026-11-20, 11 photos per scene); those still pass on tone alone (worst 0.87). The
+  incident grade is about 0.84. A delivered frame crushed toward flat grey or black would otherwise
+  shrink its own reference to nothing and pass, so the ratio never goes below the floor: with
+  detail otherwise intact, a frame passes down to a variance ratio of about 0.41 (0.75 × 0.55) and
+  fails below it. The message then ends `; reference held at the contrast floor on N pairs`, which
+  a bright, legitimately graded scene can also show on a passing gate.
 - **No ceiling.** A grade that raises contrast raises the reference, so added contrast cannot hide
   softening.
 - **Ringing.** Ringing scales linearly with contrast, so the reference ringing is multiplied by the
