@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.126] - 2026-11-20
+
+### Fixed
+
+- `gomoveshift health check` rule 11 keeps listing the folders named by an invalid exclusion entry (the entry still excludes nothing), so its open `backlog_unlisted_footage` incidents no longer close and re-notify when the entry is fixed; an unreadable `drive_backlog_excluded.yaml` keeps open per-entry `backlog_exclusion_invalid` incidents instead of closing them.
+- Several new unlisted camera files in one tick send one grouped push (count plus up to 10 names) instead of one per file; each file keeps its own incident row.
+- `backlog_unlisted_footage` incident files carry a short hash of the key, so two paths that flatten to the same safe name (`/a_b/x.mp4`, `/a/b_x.mp4`) no longer share one file.
+- `queue sync-short-text` refuses a queued Short whose known stored Shorts arm (`yt_title_body`, `yt_hashtag_set`) the regenerated text no longer carries, and leaves it unchanged, instead of writing text that mislabels the experiment. An arm id outside `SHORTS_ARMS` is never rendered and never causes a refusal.
+
 ## [0.3.125] - 2026-11-20
 
 ### Added
@@ -1421,7 +1430,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.126...HEAD
+[0.3.126]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...v0.3.126
 [0.3.125]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.124...v0.3.125
 [0.3.124]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.123...v0.3.124
 [0.3.123]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.122...v0.3.123
