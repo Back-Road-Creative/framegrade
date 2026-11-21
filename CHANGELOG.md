@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.127] - 2026-11-20
+
+### Fixed
+
+- The day master's paired picture gate no longer reads a tone grade as softness. Each reference frame's sharpness is put at the delivered frame's contrast (luma variance ratio, measured on a coarse downscale so a blur cannot hide itself) before the medians are compared, and the reference ringing moves by the square root of the same ratio. The ratio is floored at 0.55, the strongest legitimate grade on normally exposed frames being about 0.60, so a master crushed toward flat grey or black still fails and the message says `reference held at the contrast floor on N pairs`. A grade that raises contrast makes the gate stricter. Long-forms and Shorts are not graded and are judged exactly as before.
+
 ## [0.3.126] - 2026-11-20
 
 ### Fixed
@@ -1430,7 +1436,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.126...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.127...HEAD
+[0.3.127]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.126...v0.3.127
 [0.3.126]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.125...v0.3.126
 [0.3.125]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.124...v0.3.125
 [0.3.124]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.123...v0.3.124
