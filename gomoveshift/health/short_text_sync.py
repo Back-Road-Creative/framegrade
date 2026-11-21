@@ -5,10 +5,19 @@ rows under the health incidents dir (``health-incident/1``), pushed once each:
 
 * ``short_text_sync_refused:<project>``: at least one queued Short of that project was
   refused for any reason EXCEPT the few that clear on their own
-  (the structured ``ShortTextChange.transient`` flag: a sibling row inside the lead time, a live
-  lease, the cascade after a failed write, a write race or a busy database); an unflagged
-  reason is actionable, so the check fails closed. The row lists each Short and why; resolved by the first run that no
-  longer refuses it. A transient refusal files nothing and does not count toward exit 1.
+  (the structured ``ShortTextChange.transient`` flag: a sibling row inside the lead time or
+  under the dispatcher's retry backoff, a live lease, the cascade after a failed write that left
+  no clash, a write race or a busy database); an unflagged
+  reason is actionable, so the check fails closed. The row lists each Short and why; resolved by
+  the first run that no longer refuses it. A transient refusal files nothing and does not count
+  toward exit 1 UNTIL the same Short has been refused on ``TRANSIENT_ESCALATE_RUNS`` (3)
+  consecutive runs (an actionable night in between counts too) and is transient on this one:
+  then it is filed like an actionable one, its reason naming the run count. The count lives in one ``short_text_sync_streak:<project>#<n>``
+  row per Short in ``<incidents dir>.streaks`` (written with the store's own helpers; a counter,
+  not an incident, so ``health check`` and the push never see it), resolved, so the count
+  resets, by the first run that no longer refuses the Short. A crash run, and a run that finds
+  the store lock held, neither count nor reset it (the count is of runs that completed the
+  incident work, not of nights).
 * ``health check`` lists these rows (an open one keeps ``health check`` at exit 1, like any
   open incident) but never writes, resolves or pushes them: this command is their only
   writer, and it holds an exclusive non-blocking lock (``<incidents dir>.lock``) around
@@ -24,6 +33,7 @@ Never raises: a failure anywhere (sync, store, push) is logged and reported as a
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -40,6 +50,13 @@ logger = logging.getLogger(__name__)
 REFUSED_KIND = "short_text_sync_refused"
 CRASH_KIND = "short_text_sync_crash"
 CRASH_KEY = "short_text_sync_crash"
+#: A Short refused as transient on this many consecutive runs is filed as an actionable incident:
+#: a rewrite that never settles (a writer always holding the lock, a row stuck behind a lease)
+#: is no longer clearing on its own.
+TRANSIENT_ESCALATE_RUNS = 3
+#: A streak row is a counter, not an incident, so it lives in a sibling dir of the incidents dir
+#: (like its ``.lock``): the incident rows, ``health check`` and the push never see it.
+STREAK_KIND = "short_text_sync_streak"
 EVENTS = {
     REFUSED_KIND: "health_short_text_sync_refused",
     CRASH_KIND: "health_short_text_sync_crash",
@@ -57,16 +74,34 @@ def incident_line(row: Dict[str, Any]) -> str:
     )
 
 
-def _refused_rows(changes: List[Any], now_iso: str) -> Dict[str, Dict[str, Any]]:
+def _streak_key(project: Any, index: Any) -> str:
+    return f"{STREAK_KIND}:{project}#{index}"
+
+
+def _escalated(c: Any, nights: Dict[str, int]) -> bool:
+    return (
+        c.status == "refused"
+        and c.transient
+        and nights.get(_streak_key(c.project_name, c.short_index), 0) >= TRANSIENT_ESCALATE_RUNS
+    )
+
+
+def _refused_rows(
+    changes: List[Any], now_iso: str, nights: Optional[Dict[str, int]] = None
+) -> Dict[str, Dict[str, Any]]:
+    """One row per project with an actionable refusal; a transient one that has repeated
+    ``TRANSIENT_ESCALATE_RUNS`` runs (``nights``: streak key -> runs) counts as actionable."""
+    nights = nights or {}
     by_project: Dict[str, List[Dict[str, Any]]] = {}
     for c in changes:
-        if is_actionable_refusal(c):
+        long_transient = _escalated(c, nights)
+        if is_actionable_refusal(c) or long_transient:
+            reason = " ".join(c.reason.split())
+            if long_transient:
+                n = nights[_streak_key(c.project_name, c.short_index)]
+                reason = f"refused as transient on {n} consecutive runs: {reason}"
             by_project.setdefault(c.project_name, []).append(
-                {
-                    "delivery_id": c.delivery_id,
-                    "short_index": c.short_index,
-                    "reason": " ".join(c.reason.split()),
-                }
+                {"delivery_id": c.delivery_id, "short_index": c.short_index, "reason": reason}
             )
     out: Dict[str, Dict[str, Any]] = {}
     for project, shorts in sorted(by_project.items()):
@@ -109,6 +144,46 @@ def _store_lock(incidents_dir: Path) -> Iterator[bool]:
             unlock(handle)
 
 
+def _streaks_dir(incidents_dir: Path) -> Path:
+    return incidents_dir.parent / f"{incidents_dir.name}.streaks"
+
+
+def _update_streaks(changes: List[Any], incidents_dir: Path, now_iso: str) -> Dict[str, int]:
+    """Count the consecutive runs each Short has been refused as transient: one streak row per
+    Short (``short_text_sync_streak:<project>#<index>``, resolved the first run that no longer
+    refuses it, like every other row here). -> streak key -> runs, this one included."""
+    streaks_dir = _streaks_dir(incidents_dir)
+    prior = {r["key"]: r for r in load_all(streaks_dir)[0] if r.get("kind") == STREAK_KIND}
+    seen = {
+        _streak_key(c.project_name, c.short_index): c
+        for c in changes
+        if c.status == "refused"  # every refusal counts; only a transient one escalates
+    }
+    for key, row in prior.items():
+        if key not in seen and not row.get("resolved_at"):
+            row["resolved_at"] = now_iso
+            write_row(streaks_dir, row)
+    nights: Dict[str, int] = {}
+    for key, c in seen.items():
+        row = prior.get(key)
+        if row is None or row.get("resolved_at"):
+            row = new_incident(
+                STREAK_KIND,
+                key,
+                f"{STREAK_KIND}_{safe_name(c.project_name)}_{c.short_index}_"
+                f"{hashlib.sha1(key.encode()).hexdigest()[:8]}.json",  # noqa: S324 -- a filename tag
+                now_iso,
+                project=c.project_name,
+                short_index=c.short_index,
+                nights=0,
+            )
+        row["nights"] = int(row.get("nights") or 0) + 1
+        row["last_seen_at"] = now_iso
+        write_row(streaks_dir, row)
+        nights[key] = row["nights"]
+    return nights
+
+
 def _file_incidents(
     changes: List[Any],
     crash: Optional[str],
@@ -116,16 +191,19 @@ def _file_incidents(
     now_iso: str,
     notify_fn: Callable[[str, Dict[str, Any], str], Any],
 ):
-    """File, refresh and resolve the rows, push each new one once. -> (new, resolved, pushed, open)."""
+    """File, refresh and resolve the rows, push each new one once. -> (new, resolved, pushed, open, nights)."""
     existing, _bad = load_all(incidents_dir)
     by_key = {r["key"]: r for r in existing}
+    nights: Dict[str, int] = {}
     found: Dict[str, Dict[str, Any]] = {}
     if crash is not None:
         found[CRASH_KEY] = new_incident(
             CRASH_KIND, CRASH_KEY, f"{CRASH_KIND}.json", now_iso, detail=crash
         )
     else:
-        found = _refused_rows(changes, now_iso)
+        # a crash proves nothing about the Shorts' refusals: it neither counts nor resets a streak
+        nights = _update_streaks(changes, incidents_dir, now_iso)
+        found = _refused_rows(changes, now_iso, nights)
 
     resolved: List[str] = []
     for row in existing:
@@ -160,7 +238,7 @@ def _file_incidents(
         row["pushed_at"] = now_iso
         write_row(incidents_dir, row)
         pushed.append(row["key"])
-    return new, resolved, pushed, sorted(open_rows, key=lambda r: r["key"])
+    return new, resolved, pushed, sorted(open_rows, key=lambda r: r["key"]), nights
 
 
 def run_short_text_sync(
@@ -197,6 +275,7 @@ def run_short_text_sync(
     resolved: List[str] = []
     pushed: List[str] = []
     open_rows: List[Dict[str, Any]] = []
+    nights: Dict[str, int] = {}
     skipped = False
     try:
         with _store_lock(incidents_dir) as got:
@@ -207,7 +286,7 @@ def run_short_text_sync(
                 notify = notify_fn
                 if notify is None:  # the import above failed: file, push nothing
                     notify = lambda *_a: False  # noqa: E731
-                new, resolved, pushed, open_rows = _file_incidents(
+                new, resolved, pushed, open_rows, nights = _file_incidents(
                     changes, crash, incidents_dir, now_iso, notify
                 )
     except Exception as exc:  # noqa: BLE001 -- never raises
@@ -221,7 +300,7 @@ def run_short_text_sync(
         except Exception:  # noqa: BLE001
             logger.exception("sync-short-text could not file its crash incident")
 
-    refused = sum(is_actionable_refusal(c) for c in changes)
+    refused = sum(is_actionable_refusal(c) or _escalated(c, nights) for c in changes)
     if skipped and crash is None:
         code = 0
     else:

@@ -158,8 +158,13 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve
    the exception). Pushed once (`health_short_text_sync_refused`, `health_short_text_sync_crash`);
    a refusal row resolves on the first later run that no longer refuses THAT project (other
    projects' rows stay open), the crash row on the first run that completes; a crash leaves
-   refusal rows open. Every refusal files a row except the named transient ones (a lead time, a
-   live lease, a write race or its cascade); an old title with no stamp is permanent, so it files.
+   refusal rows open. Every refusal files a row except the named transient ones (a sibling slot
+   still ahead inside the lead time or past on a row under the dispatcher's retry backoff, a live lease, a write race or busy database, or the cascade
+   without a clash); a sibling slot already past but still queued (past its retry backoff), and an old title with no stamp,
+   are permanent, so they file. A Short refused on 3 consecutive runs (an actionable one counts, the latest must be transient)
+   (`TRANSIENT_ESCALATE_RUNS`) files too, its reason naming the run count; the count is one row
+   per Short in `<incidents dir>.streaks` (not an incident: never listed or pushed), reset by the
+   first run that no longer refuses it (a crash, or a run that finds the store lock held, neither counts nor resets: runs, not nights).
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
    them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
 

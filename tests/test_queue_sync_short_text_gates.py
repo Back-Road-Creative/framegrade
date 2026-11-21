@@ -13,6 +13,7 @@ from test_queue_sync_short_text import (
     NOW,
     PROJECT,
     PROJECT2,
+    REGION,
     _other,
     _short,
     _two,
@@ -22,6 +23,7 @@ from test_queue_sync_short_text import (
 from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.publishing import anti_spam_gate
 from gomoveshift.publishing import queue_short_text as qst
+from gomoveshift.publishing.queue import enqueue
 from gomoveshift.publishing.queue_short_text import sync_short_text
 
 
@@ -113,6 +115,69 @@ def test_the_real_transient_refusals_carry_the_flag(tmp_path):
     assert change.transient and not qst.is_actionable_refusal(change)
 
 
+def _facebook_sibling(tmp_path, **set_):
+    """A world whose Short also has a facebook row, which ``set_`` (column -> value) edits."""
+    plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
+    row = conn.execute("SELECT * FROM deliveries WHERE platform = 'facebook'").fetchone()
+    cols = ("scheduled_at", "recovers_delivery_id", "status", "next_attempt_at")
+    now = {c: set_.get(c, row[c]) for c in cols}
+    conn.execute(
+        "UPDATE deliveries SET scheduled_at = ?, recovers_delivery_id = ?, status = ?, "
+        "next_attempt_at = ? WHERE platform = 'facebook'",
+        (now["scheduled_at"], now["recovers_delivery_id"], now["status"], now["next_attempt_at"]),
+    )
+    conn.commit()
+    return sync_short_text(conn, apply=False, now=NOW)[0]
+
+
+@pytest.mark.parametrize(
+    ("set_", "words", "transient"),
+    [
+        ({"scheduled_at": (NOW + timedelta(hours=1)).isoformat()}, "inside the lead time", True),
+        (
+            {"scheduled_at": (NOW - timedelta(hours=1)).isoformat()},
+            "is past but still queued",
+            False,
+        ),
+        ({"scheduled_at": NOW.isoformat()}, "is past but still queued", False),
+        (  # under the dispatcher's retry backoff: it is tried again once that passes
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": (NOW + timedelta(minutes=5)).isoformat(),
+            },
+            "is past but still queued",
+            True,
+        ),
+        (  # the backoff has passed (due now, and equal counts as due): nothing clears it
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": NOW.isoformat(),
+            },
+            "is past but still queued",
+            False,
+        ),
+        (
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": (NOW - timedelta(minutes=5)).isoformat(),
+            },
+            "is past but still queued",
+            False,
+        ),
+        ({"recovers_delivery_id": 1}, "is a recovery row", False),
+        ({"status": "uploading"}, "is uploading", False),
+        ({"scheduled_at": None}, "has no usable scheduled_at", False),
+        ({"scheduled_at": "not a time"}, "has no usable scheduled_at", False),
+    ],
+)
+def test_each_sibling_reason_is_transient_only_when_it_clears_by_itself(
+    tmp_path, set_, words, transient
+):
+    change = _facebook_sibling(tmp_path, **set_)
+    assert change.status == "refused" and words in change.reason
+    assert change.transient is transient and qst.is_actionable_refusal(change) is not transient
+
+
 def test_the_cascade_after_a_failed_write_is_flagged_transient(tmp_path, monkeypatch):
     plan, other, conn = _world2(tmp_path)
     _fail_write_of(monkeypatch, plan, OSError("disk full"))
@@ -165,6 +230,38 @@ def test_a_place_the_generator_could_not_vary_is_not_a_refusal(tmp_path):
         )
     }
     assert qst._successor_clashes(sidecar, shorts, {1: shorts[1]}, kept) == {}
+
+
+def test_a_sanction_for_a_short_generated_with_its_predecessor_holds_where_the_place_moved(
+    tmp_path, monkeypatch
+):
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator,
+        "measured_places",
+        lambda *a, **k: [("county", "Ashby County"), ("region", "Brunswick County")],
+    )
+    sidecar = tmp_path / f"{PROJECT}_publish_plan.json"
+    (tmp_path / f"{PROJECT}_lf01_youtube.json").write_text(
+        json.dumps({"location": "Ashby County, Virginia"})
+    )
+    a, b = _short(1), _short(2)  # both STORED texts name Ashby County
+    new_a = json.loads(json.dumps(a))
+    new_b = json.loads(json.dumps(b))
+    for new in (new_a, new_b):  # a's place moved, and b (generated WITH a) follows it
+        new["payloads"]["youtube"]["title"] = "Mar 5: Brunswick County #Shorts"
+        new["payloads"]["youtube"]["description"] = "Driving Brunswick County #Shorts"
+    kept = {
+        1: SimpleNamespace(
+            place_variety={k: {"reason": "no_alternative"} for k in ("title", "description")}
+        )
+    }
+    shorts = [a, b]
+    # b was not asked alone: it saw a's NEW text, so the sanction stands whatever a's stored place
+    assert qst._successor_clashes(sidecar, shorts, {0: new_a, 1: new_b}, kept, alone=()) == {}
+    # asked alone it was seeded with a's STORED places, which a's new text no longer holds
+    assert 1 in qst._successor_clashes(sidecar, shorts, {0: new_a, 1: new_b}, kept, alone={1})
 
 
 # -- M2: an unusable sidecar's stored text still reaches the other sidecars' gates -----------
@@ -258,6 +355,17 @@ def _break_write(monkeypatch, conn, sidecar, how):
                 raise OSError("disk full")
             if how == "locked":
                 raise sqlite3.OperationalError("database is locked")
+            if how in ("busy_code", "busy_snapshot_code", "locked_code", "io_code"):
+                exc = sqlite3.OperationalError("x")
+                exc.sqlite_errorcode = {
+                    "busy_code": sqlite3.SQLITE_BUSY,
+                    "busy_snapshot_code": 517,  # SQLITE_BUSY_SNAPSHOT: BUSY with an extended code
+                    "locked_code": sqlite3.SQLITE_LOCKED,
+                    "io_code": sqlite3.SQLITE_IOERR_WRITE,
+                }[how]
+                raise exc
+            if how == "disk_io":
+                raise sqlite3.OperationalError("disk I/O error")
             if how == "changed":  # an editor saves it between planning and writing
                 path.write_text(path.read_text() + "\n")
             if how == "leased":  # the dispatcher leases the row between planning and writing
@@ -296,9 +404,63 @@ def test_a_failed_write_that_leaves_a_clash_is_always_actionable(tmp_path, monke
     assert not b.transient and qst.is_actionable_refusal(b)
 
 
+def _third(conn, tmp_path):
+    """A third plan (own directory and project, ordered after the other two by path) whose
+    STORED description is the first sidecar's NEW one."""
+    scratch = tmp_path / "scratch3"
+    scratch.mkdir()
+    new_a = _synced_text(scratch, PROJECT)
+    d = tmp_path / "third"
+    d.mkdir()
+    project = "nctopa-2026-03-07-rec0072"
+    (d / f"{project}_lf01_youtube.json").write_text(json.dumps({"location": REGION}))
+    short = _short(1, project_name=project, recording_date="2026-03-07")
+    short["payloads"]["youtube"]["title"] = "Mar 7, 1st stretch: giraffe words #Shorts"
+    short["payloads"]["youtube"]["description"] = new_a["description"]
+    plan = d / f"{project}_publish_plan.json"
+    plan.write_text(json.dumps({"shorts": [short]}, sort_keys=True, indent=2) + "\n")
+    enqueue(
+        conn,
+        project,
+        1,
+        "youtube",
+        short["reviewed_plan_hash"],
+        sidecar_path=str(plan),
+        scheduled_at=short["schedule"]["scheduled_at_utc"],
+    )
+    return plan, project
+
+
+@pytest.mark.parametrize("how", ["changed", "oserror"])
+def test_a_sidecar_skipped_by_the_cascade_is_clash_checked_against_what_was_written(
+    tmp_path, monkeypatch, how
+):
+    """A is written, B's write fails, C is skipped and stays as STORED: C's stored text equals
+    A's new text, so C is actionable and names the clash (not transient, not silent)."""
+    plan, other, conn = _world2(tmp_path)
+    third, project3 = _third(conn, tmp_path)
+    _break_write(monkeypatch, conn, other, how)
+    by = {c.project_name: c for c in sync_short_text(conn, apply=True, now=NOW)}
+    assert (by[PROJECT].status, by[PROJECT].written) == ("changed", True)
+    c = by[project3]
+    assert c.status == "refused" and "retried next run" in c.reason
+    assert "clashes with this sidecar's stored text" in c.reason
+    assert not c.transient and qst.is_actionable_refusal(c)
+
+
 @pytest.mark.parametrize(
     ("how", "transient"),
-    [("changed", True), ("leased", True), ("locked", True), ("oserror", False)],
+    [
+        ("changed", True),
+        ("leased", True),
+        ("locked", True),
+        ("busy_code", True),
+        ("busy_snapshot_code", True),  # the extended code 517 masks down to BUSY
+        ("oserror", False),
+        ("disk_io", False),
+        ("io_code", False),
+        ("locked_code", False),  # SQLITE_LOCKED is an intra-connection conflict: deterministic
+    ],
 )
 def test_a_failed_write_without_a_clash_is_transient_only_for_a_race_or_a_busy_database(
     tmp_path, monkeypatch, how, transient
