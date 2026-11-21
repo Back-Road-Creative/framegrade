@@ -33,7 +33,6 @@ Never raises: a failure anywhere (sync, store, push) is logged and reported as a
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 from contextlib import contextmanager
@@ -41,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from ..pipeline._file_lock import lock_exclusive, unlock
 from ..publishing.queue import open_queue_db
 from ..publishing.queue_short_text import is_actionable_refusal, sync_short_text
 from .store import load_all, new_incident, safe_name, utc_iso, write_row
@@ -129,19 +129,19 @@ def _brand_location_cap() -> Optional[int]:
 
 @contextmanager
 def _store_lock(incidents_dir: Path) -> Iterator[bool]:
-    """Exclusive, non-blocking ``flock`` on a sibling of the incidents dir; False if held."""
+    """Exclusive, non-blocking portable file lock on a sibling of the incidents dir; False if held."""
     lock_path = incidents_dir.parent / f"{incidents_dir.name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_exclusive(handle, blocking=False)
         except OSError:
             yield False
             return
         try:
             yield True
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            unlock(handle)
 
 
 def _streaks_dir(incidents_dir: Path) -> Path:

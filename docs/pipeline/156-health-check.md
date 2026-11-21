@@ -166,7 +166,7 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve
    per Short in `<incidents dir>.streaks` (not an incident: never listed or pushed), reset by the
    first run that no longer refuses it (a crash, or a run that finds the store lock held, neither counts nor resets: runs, not nights).
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
-   them; the sync takes a `flock` on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
+   them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
 
 ## Push and idempotency
 

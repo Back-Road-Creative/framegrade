@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from test_queue_sync_short_text import NOW, _short, _world
 
+from gomoveshift.pipeline import _file_lock
 from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.publishing import queue_short_text as qst
 
@@ -513,3 +514,9 @@ def test_projects_whose_names_share_a_safe_filename_keep_separate_streaks(tmp_pa
     result = run()
     assert set(_refused_rows(tmp_path)) == {"short_text_sync_refused:a b"}
     assert result["refused"] == 1
+def test_the_store_lock_is_the_portable_file_lock_so_the_module_imports_on_windows():
+    # ci/import_smoke.py imports every module on Windows, where fcntl does not exist.
+    from gomoveshift.health import short_text_sync
+
+    assert not hasattr(short_text_sync, "fcntl")
+    assert short_text_sync.lock_exclusive is _file_lock.lock_exclusive
