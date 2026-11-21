@@ -2285,13 +2285,19 @@ class SocialGenerator:
         title_bodies: "list[str]" = []
         if t_choice is not None:
             record = {"title": t_choice.to_dict(), **record}
-            title_bodies = [t_choice.body] + [b for _, b in title if b != t_choice.body]
+            # A fallback body may not be the previous Short's title place: the chosen one
+            # already weighed that repeat, and a queue-sync rewrite's ledger cannot see it.
+            prev = _norm(previous.get("title", ""))
+            title_bodies = [t_choice.body] + [
+                b for _, b in title if b != t_choice.body and _norm(b) != prev
+            ]
         return (
             t_choice,
             title_bodies,
             d_choice if d_choice.reason == REASON_VARIED else None,
             d_choice.kind,
             record,
+            {b: k for k, b in title},
         )
 
     def _shorts_arm_factors(self, hand_idx: int, title_facts: Optional[TitleFacts]) -> "list[str]":
@@ -2386,9 +2392,10 @@ class SocialGenerator:
         }
         arms.update(shorts_arms)
         title_place, title_bodies, desc_place, desc_kind, variety = None, [], None, "", {}
+        title_kinds: "dict[str, str]" = {}
         if hand is None and title_facts is not None and title_facts.place_ok:
-            title_place, title_bodies, desc_place, desc_kind, variety = self._choose_places(
-                previous_places or {}, route_record
+            title_place, title_bodies, desc_place, desc_kind, variety, title_kinds = (
+                self._choose_places(previous_places or {}, route_record)
             )
         for attempt in range(max_attempts):
             # Vary the seed on retries so we pick different hooks/titles
@@ -2513,7 +2520,19 @@ class SocialGenerator:
                 # a bare "County, State".
                 sampled_regions=([_strip_series_suffix(self.location)] if self.location else []),
                 interactive=interactive,
-                place_variety=variety,
+                # The record names the place the title SAYS: a fact title that fell
+                # through to a later measured place records that one, so the next
+                # Short (and a queue-sync rewrite seeded from it) varies from it.
+                place_variety=(
+                    {
+                        **variety,
+                        "title": PlaceChoice(title, REASON_VARIED, title_kinds[title]).to_dict(),
+                    }
+                    if title_place is not None
+                    and title != title_place.body
+                    and title in title_kinds
+                    else variety
+                ),
             )
 
             try:
