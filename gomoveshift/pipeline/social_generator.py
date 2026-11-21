@@ -797,29 +797,33 @@ def _frame_fields(template: str) -> "set[str]":
 # {location} with LOCATION_WITHHELD instead so the place is never named,
 # never by omitting the slot from some openers and not others. A caption states
 # the measured place and, for classified terrain only, one terrain clause:
-# facts the record holds, no filler. Shapes are few and disjoint per platform.
+# facts the record holds, no filler. Shapes are few and disjoint per platform. No shape
+# claims a camera, a vehicle, a viewpoint or the weather: the pipeline measures none of
+# them ("Dashcam footage from ...", "POV", "from the driver's seat", "by car" are gone).
+# "Passing through" stays on Facebook only because ``facebook_caption_edit.MEASURED_TEMPLATE``
+# is pinned to it.
 YOUTUBE_CAPTION_TEMPLATES = [
-    "Driving through {location}.",
-    "Dashcam footage from {location}.",
-    "A drive through {location}.",
+    "{location}.",
+    "Location: {location}.",
+    "Clip location: {location}.",
 ]
 
 FACEBOOK_CAPTION_TEMPLATES = [
     "Passing through {location}.",
-    "On the road in {location}.",
-    "Drive through {location}.",
+    "In {location}.",
+    "This is {location}.",
 ]
 
 INSTAGRAM_CAPTION_TEMPLATES = [
-    "POV driving through {location}",
-    "{location}, from behind the wheel",
-    "Driving in {location}",
+    "📍 {location}",
+    "Here: {location}",
+    "At {location}",
 ]
 
 TIKTOK_CAPTION_TEMPLATES = [
-    "POV: driving through {location}",
-    "{location} from the driver's seat",
-    "{location}, by car",
+    "{location} clip",
+    "Clip from {location}",
+    "Footage from {location}",
 ]
 
 #: The one terrain clause a caption may carry, and only for a terrain the
@@ -1765,8 +1769,9 @@ class SocialGenerator:
 
         # Instagram — short line + recording date + up to 8 tags. This is
         # the legacy shared-column shape (``post.caption`` below).
-        ig_base = first_sentence or (
-            f"{self._compose_caption('instagram', short_index, fmap, interactive, picked)} {weather_emoji}"
+        # No weather or vehicle emoji: the weather is a brightness guess, not a fact.
+        ig_base = first_sentence or self._compose_caption(
+            "instagram", short_index, fmap, interactive, picked
         )
         if self.recording_date:
             ig_base += f"\n\n📹 {self.recording_date}"

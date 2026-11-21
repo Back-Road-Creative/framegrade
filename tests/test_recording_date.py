@@ -235,7 +235,8 @@ class TestWeatherWiring:
     """Weather detection wired to social generator via orchestrator."""
 
     def test_social_gen_receives_weather_results(self):
-        """When weather_results are passed, captions get weather emoji."""
+        """Weather results are accepted, but no caption claims the weather: the sunny/rainy
+        call is a brightness guess the pipeline cannot stand behind, so it is no emoji."""
         gen = SocialGenerator(
             location="County Kerry, Ireland",
             project_name="testproject",
@@ -249,9 +250,8 @@ class TestWeatherWiring:
             segment_end=60.0,
         )
         posts = gen.generate_all(num_shorts=3, weather_results=[weather, weather, weather])
-        # At least one caption should have the sunny emoji
-        has_sun = any("☀️" in p.caption for p in posts)
-        assert has_sun, "No sunny emoji found in any caption"
+        assert len(posts) == 3
+        assert not any("☀" in p.caption or "🚗" in p.caption for p in posts)
 
     def test_social_gen_backward_compatible_without_weather(self):
         """Still works without weather_results (None)."""

@@ -118,15 +118,12 @@ def test_every_caption_fact_is_in_the_record():
                 "Polk",
                 "County",
                 "Passing",
-                "Driving",
                 "Through",
-                "Dashcam",
-                "View",
-                "Driver",
-                "From",
-                "Seat",
-                "Drive",
-                "Road",
+                "Location",
+                "Clip",
+                "Footage",
+                "Here",
+                "This",
             }
             others = [s for s in sentences if s is not place[0]]
             assert others == [], (platform, others)
@@ -167,3 +164,27 @@ def test_caption_template_id_is_one_stable_id_per_shape():
     assert caption_template_id("Passing through {location}.") == caption_template_id(
         "Passing through {location}."
     )
+
+
+#: Words and emoji that claim a camera, a vehicle, a viewpoint, the weather or a time of day:
+#: things the pipeline does not measure, so no caption shape may say them.
+UNBACKED = re.compile(
+    r"dashcam|dash cam|camera|gopro|insta360|\bpov\b|driver|wheel|windshield|front[- ]seat|"
+    r"by car|\bcar\b|sunny|rain|cloud|overcast|foggy|snow|sunrise|sunset|morning|evening|"
+    r"night|golden hour|[\u2600-\u26ff\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF]",
+    re.I,
+)
+
+
+def test_no_caption_shape_claims_what_the_pipeline_does_not_measure():
+    from gomoveshift.pipeline import social_generator as sg
+
+    for platform, pool in sg._PLATFORM_CAPTION_TEMPLATES.items():
+        for template in pool:
+            # the pin icon is a map marker for the place, not a weather or vehicle claim
+            assert not UNBACKED.search(template.replace("\U0001f4cd", "")), (platform, template)
+    for post in _posts("coastal"):
+        for platform in PLATFORMS:
+            text = post.captions[platform].replace("\U0001f4cd", "").replace("\U0001f4f9", "")
+            body = text.split("\n\n#")[0].split("#")[0]
+            assert not UNBACKED.search(body), (platform, body)
