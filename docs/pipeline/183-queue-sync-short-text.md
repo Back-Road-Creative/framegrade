@@ -114,8 +114,11 @@ by an earlier run, settling may take two runs.
 
 Schedule: run `gomoveshift health sync-short-text --data-root <workspaces>` from the service
 directory, from the staging mirror's venv, AFTER the nightly `metrics collect` (which writes
-the title snapshot the sync reads). The scheduler is a workspaces cron line (see
-`bin/gms-metrics-cron.sh`, `_ops/cron/`), a separate change from this one.
+the title snapshot the sync reads). The scheduler is the workspaces nightly metrics cron
+(`bin/gms-metrics-cron.sh`, 03:30, installed from `_ops/cron/`; workspaces #5919): it runs the
+sync once after the collect loop, logs exit 1 (refusals, already filed) as a line, and names
+any other non-zero exit `SHORT_TEXT_SYNC_FAILED`. A night it does not run is alerted by health
+rule 13 (`seo_feedback_stale:sync`).
 A Short is also refused when its final place equals its neighbour's final place in the LF
 (new text if rewritten, stored otherwise; the later of two rewritten ones), when the generator
 refuses it alone (the LF is retried Short by Short; Shorts not being rewritten ride along as
