@@ -42,7 +42,7 @@ def _master(tmp_path, amount):
 
 
 def _sampler(monkeypatch, *, source, master):
-    """Source episode frames read ``source``, master frames ``master`` (sharp, ring)."""
+    """Source episode frames read ``source``, master frames ``master`` (sharp, ring, luma var)."""
     calls = []
 
     def fake(path, ts, vf=""):
@@ -54,19 +54,19 @@ def _sampler(monkeypatch, *, source, master):
 
 
 def test_soft_master_fails_straight_after_encode(tmp_path, monkeypatch):
-    _sampler(monkeypatch, source=(1450.0, 0.015), master=(600.0, 0.015))
+    _sampler(monkeypatch, source=(1450.0, 0.015, 100.0), master=(600.0, 0.015, 100.0))
     with pytest.raises(RuntimeError, match=f"Day {DATE}.*delivered sharpness 600.0"):
         day_pipeline._gate_master_picture(_batch(tmp_path), _master(tmp_path, 0.3), DATE)
 
 
 def test_master_ringing_above_its_source_fails(tmp_path, monkeypatch):
-    _sampler(monkeypatch, source=(1450.0, 0.015), master=(1400.0, 0.03))
+    _sampler(monkeypatch, source=(1450.0, 0.015, 100.0), master=(1400.0, 0.03, 100.0))
     with pytest.raises(RuntimeError, match="ringing 0.0300"):
         day_pipeline._gate_master_picture(_batch(tmp_path), _master(tmp_path, 0.3), DATE)
 
 
 def test_faithful_master_passes_kingsport_numbers(tmp_path, monkeypatch):
-    calls = _sampler(monkeypatch, source=(1450.1, 0.0152), master=(1289.6, 0.0151))
+    calls = _sampler(monkeypatch, source=(1450.1, 0.0152, 100.0), master=(1289.6, 0.0151, 100.0))
     day_pipeline._gate_master_picture(_batch(tmp_path), _master(tmp_path, 0.011), DATE)
     # Each master frame is followed by the episode frame it was made from.
     names = [c[0] for c in calls]
@@ -76,13 +76,13 @@ def test_faithful_master_passes_kingsport_numbers(tmp_path, monkeypatch):
 
 
 def test_unchanged_picture_samples_nothing(tmp_path, monkeypatch):
-    calls = _sampler(monkeypatch, source=(1.0, 1.0), master=(1.0, 1.0))
+    calls = _sampler(monkeypatch, source=(1.0, 1.0, 100.0), master=(1.0, 1.0, 100.0))
     day_pipeline._gate_master_picture(_batch(tmp_path), _master(tmp_path, 0.0), DATE)
     assert calls == []
 
 
 def test_unmeasurable_source_defers_to_phase_d(tmp_path, monkeypatch):
-    calls = _sampler(monkeypatch, source=(1.0, 1.0), master=(1.0, 1.0))
+    calls = _sampler(monkeypatch, source=(1.0, 1.0, 100.0), master=(1.0, 1.0, 100.0))
     batch = _batch(tmp_path)
     batch.episodes[0].concat_path = tmp_path / "gone.mp4"
     day_pipeline._gate_master_picture(batch, _master(tmp_path, 0.3), DATE)
@@ -117,7 +117,7 @@ def test_run_day_pipeline_gates_before_any_lf_is_cut(tmp_path, monkeypatch):
 
 
 def test_no_colour_records_is_quiet(tmp_path, monkeypatch, caplog):
-    calls = _sampler(monkeypatch, source=(1.0, 1.0), master=(1.0, 1.0))
+    calls = _sampler(monkeypatch, source=(1.0, 1.0, 100.0), master=(1.0, 1.0, 100.0))
     master = tmp_path / f"day_{DATE}_master.mp4"
     master.write_bytes(b"m")
     day_pipeline._gate_master_picture(_batch(tmp_path), master, DATE)
