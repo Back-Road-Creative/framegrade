@@ -61,18 +61,20 @@ the few that clear on their own: each carries the structured flag
 (a reason can quote a Short's text). An unclassified or new reason is unflagged, so it is
 actionable and the check fails closed. Classified by reading `queue_short_text.py`:
 
-- Transient (flag set; no row, no exit 1, until the same Short has been refused as transient on
-  `TRANSIENT_ESCALATE_NIGHTS` = 3 consecutive runs: it is then filed like an actionable one, the
+- Transient (flag set; no row, no exit 1, until the same Short has been refused on
+  `TRANSIENT_ESCALATE_RUNS` = 3 consecutive runs, an actionable night in between counting too, and
+  is transient on this one: it is then filed like an actionable one, the
   reason naming the run count; the count is one row per Short in `<incidents dir>.streaks`, reset
-  by the first run that no longer refuses it as transient): a sibling row's slot still ahead
-  inside the lead time (it passes or is moved), a sibling row holding a live lease (the dispatcher releases it), "retried next
+  by the first run that no longer refuses it. It counts runs, not nights: a crash run and a run that finds the incident
+  store lock held neither count nor reset it): a sibling row's slot still ahead
+  inside the lead time (it passes or is moved), a sibling slot already past on a still-queued row whose `next_attempt_at` is still ahead (the dispatcher's retry backoff; a row stuck there escalates), a sibling row holding a live lease (the dispatcher releases it), "retried next
   run" (the cascade after another sidecar's failed write, itself actionable), and a write that
   lost a race (`SidecarChangedError`, `LeaseRaceError`: rolled back whole) or met a busy
   database (`sqlite3` BUSY, e.g. "database is locked"; LOCKED is a conflict inside one connection, so it repeats and stays actionable). A failed write whose reason
   carries the "clashes with this sidecar's stored text" note is never transient.
 - Actionable, needs a person: "generator: ...", an LF sidecar unreadable or without a location,
   a stored arm the generator cannot render, "no such Short in the plan", "already holds the new
-  plan hash", a recovery row, a sibling slot already past on a row still queued ("is past but still queued"),
+  plan hash", a recovery row, a sibling slot already past on a row still queued and past its retry backoff ("is past but still queued"),
   a row in another state ("is <status>"), "has no usable
   scheduled_at", "no clip place to compose a title from", an old title with no verifiable
   "Nth stretch" stamp (nothing edits it for the sync, so it is permanent), "its ... place

@@ -119,11 +119,12 @@ def _facebook_sibling(tmp_path, **set_):
     """A world whose Short also has a facebook row, which ``set_`` (column -> value) edits."""
     plan, conn = _world(tmp_path, [_short(1)], platforms=("youtube", "facebook"))
     row = conn.execute("SELECT * FROM deliveries WHERE platform = 'facebook'").fetchone()
-    now = {c: set_.get(c, row[c]) for c in ("scheduled_at", "recovers_delivery_id", "status")}
+    cols = ("scheduled_at", "recovers_delivery_id", "status", "next_attempt_at")
+    now = {c: set_.get(c, row[c]) for c in cols}
     conn.execute(
-        "UPDATE deliveries SET scheduled_at = ?, recovers_delivery_id = ?, status = ? "
-        "WHERE platform = 'facebook'",
-        (now["scheduled_at"], now["recovers_delivery_id"], now["status"]),
+        "UPDATE deliveries SET scheduled_at = ?, recovers_delivery_id = ?, status = ?, "
+        "next_attempt_at = ? WHERE platform = 'facebook'",
+        (now["scheduled_at"], now["recovers_delivery_id"], now["status"], now["next_attempt_at"]),
     )
     conn.commit()
     return sync_short_text(conn, apply=False, now=NOW)[0]
@@ -139,6 +140,30 @@ def _facebook_sibling(tmp_path, **set_):
             False,
         ),
         ({"scheduled_at": NOW.isoformat()}, "is past but still queued", False),
+        (  # under the dispatcher's retry backoff: it is tried again once that passes
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": (NOW + timedelta(minutes=5)).isoformat(),
+            },
+            "is past but still queued",
+            True,
+        ),
+        (  # the backoff has passed (due now, and equal counts as due): nothing clears it
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": NOW.isoformat(),
+            },
+            "is past but still queued",
+            False,
+        ),
+        (
+            {
+                "scheduled_at": (NOW - timedelta(hours=1)).isoformat(),
+                "next_attempt_at": (NOW - timedelta(minutes=5)).isoformat(),
+            },
+            "is past but still queued",
+            False,
+        ),
         ({"recovers_delivery_id": 1}, "is a recovery row", False),
         ({"status": "uploading"}, "is uploading", False),
         ({"scheduled_at": None}, "has no usable scheduled_at", False),
@@ -205,6 +230,38 @@ def test_a_place_the_generator_could_not_vary_is_not_a_refusal(tmp_path):
         )
     }
     assert qst._successor_clashes(sidecar, shorts, {1: shorts[1]}, kept) == {}
+
+
+def test_a_sanction_for_a_short_generated_with_its_predecessor_holds_where_the_place_moved(
+    tmp_path, monkeypatch
+):
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator,
+        "measured_places",
+        lambda *a, **k: [("county", "Ashby County"), ("region", "Brunswick County")],
+    )
+    sidecar = tmp_path / f"{PROJECT}_publish_plan.json"
+    (tmp_path / f"{PROJECT}_lf01_youtube.json").write_text(
+        json.dumps({"location": "Ashby County, Virginia"})
+    )
+    a, b = _short(1), _short(2)  # both STORED texts name Ashby County
+    new_a = json.loads(json.dumps(a))
+    new_b = json.loads(json.dumps(b))
+    for new in (new_a, new_b):  # a's place moved, and b (generated WITH a) follows it
+        new["payloads"]["youtube"]["title"] = "Mar 5: Brunswick County #Shorts"
+        new["payloads"]["youtube"]["description"] = "Driving Brunswick County #Shorts"
+    kept = {
+        1: SimpleNamespace(
+            place_variety={k: {"reason": "no_alternative"} for k in ("title", "description")}
+        )
+    }
+    shorts = [a, b]
+    # b was not asked alone: it saw a's NEW text, so the sanction stands whatever a's stored place
+    assert qst._successor_clashes(sidecar, shorts, {0: new_a, 1: new_b}, kept, alone=()) == {}
+    # asked alone it was seeded with a's STORED places, which a's new text no longer holds
+    assert 1 in qst._successor_clashes(sidecar, shorts, {0: new_a, 1: new_b}, kept, alone={1})
 
 
 # -- M2: an unusable sidecar's stored text still reaches the other sidecars' gates -----------
@@ -298,10 +355,11 @@ def _break_write(monkeypatch, conn, sidecar, how):
                 raise OSError("disk full")
             if how == "locked":
                 raise sqlite3.OperationalError("database is locked")
-            if how in ("busy_code", "locked_code", "io_code"):
+            if how in ("busy_code", "busy_snapshot_code", "locked_code", "io_code"):
                 exc = sqlite3.OperationalError("x")
                 exc.sqlite_errorcode = {
                     "busy_code": sqlite3.SQLITE_BUSY,
+                    "busy_snapshot_code": 517,  # SQLITE_BUSY_SNAPSHOT: BUSY with an extended code
                     "locked_code": sqlite3.SQLITE_LOCKED,
                     "io_code": sqlite3.SQLITE_IOERR_WRITE,
                 }[how]
@@ -397,6 +455,7 @@ def test_a_sidecar_skipped_by_the_cascade_is_clash_checked_against_what_was_writ
         ("leased", True),
         ("locked", True),
         ("busy_code", True),
+        ("busy_snapshot_code", True),  # the extended code 517 masks down to BUSY
         ("oserror", False),
         ("disk_io", False),
         ("io_code", False),

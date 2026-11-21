@@ -116,10 +116,13 @@ class ShortTextChange:
 #: fails closed. A write-failure reason that carries the clash note is always actionable.
 #:
 #: * a sibling row's slot inside the lead time (still ahead): the slot passes or is moved by the
-#:   queue. A slot already past on a still-queued row is actionable ("is past but still queued").
+#:   queue. A slot already past on a still-queued row is transient only while the row's
+#:   ``next_attempt_at`` (the dispatcher's retry backoff) is still ahead, else actionable
+#:   ("is past but still queued").
 #: * a sibling row holding a live lease: the dispatcher's lease expires or is released.
-#: * "retried next run": the cascade after another sidecar's failed write; that failure is
-#:   itself actionable.
+#: * "retried next run": the cascade after another sidecar's failed write, when the sidecar
+#:   skipped by it clashes with nothing that was written (a clash is actionable: the write's
+#:   own failure is too, unless it is a race or a busy database).
 #: * a write that lost a race (``SidecarChangedError``, ``LeaseRaceError``) or met a busy
 #:   database (``sqlite3`` BUSY): it rolled back whole and the next run sees the settled
 #:   state.
@@ -181,8 +184,12 @@ def _sibling_refusal(siblings, now: datetime) -> Tuple[str, bool]:
         at = _slot(r["scheduled_at"]) if r["scheduled_at"] else None
         if at is None:
             return f"{who} has no usable scheduled_at", False
-        if at <= now:  # the slot passed and the row is still queued: nothing clears that
-            return f"{who} slot {at.isoformat()} is past but still queued", False
+        if at <= now:  # the slot passed and the row is still queued
+            # under the dispatcher's retry backoff (``next_attempt_at`` still ahead) it is tried
+            # again on its own, and the escalation catches one that never is; else nothing clears it
+            retry = _slot(r["next_attempt_at"]) if r["next_attempt_at"] else None
+            backoff = retry is not None and retry > now
+            return f"{who} slot {at.isoformat()} is past but still queued", backoff
         if at - now < SYNC_LEAD_TIME:
             return f"{who} slot {at.isoformat()} is inside the lead time", True
     return "", False
