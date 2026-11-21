@@ -1097,6 +1097,20 @@ def test_a_privacy_detection_that_failed_on_a_host_cause_is_transient_a_leak_is_
         assert retry_policy.classify_failure(text) == "deterministic", text
 
 
+def test_a_day_under_the_minimum_lf_is_deterministic_at_every_gate():
+    # a day under the 480 s minimum LF can never fill a long-form: preflight and the
+    # phase_a GPS-gap gate name min_lf_duration, and retrying the same footage never helps
+    for text in (
+        "Day 2026-03-04: raw source footage 300s is under min_lf_duration=480s, so the day "
+        "can never fill a long-form. Refused before ingest.",
+        "Day 2026-03-04: at most 200s of footage survives the GPS-gap cut (90s has no usable "
+        "fix within 30s), under min_lf_duration=480s; the",
+        "Day 2026-03-04: kept (stop-masked) footage 300s is under full_drive_part_min_sec=3600s "
+        "and no best_moments window reaches the 480s minimum LF duration.",
+    ):
+        assert retry_policy.classify_failure(text) == "deterministic", text
+
+
 def test_a_legacy_deterministic_row_gets_one_launch_then_is_refused_under_the_same_fingerprint(
     tmp_path,
 ):

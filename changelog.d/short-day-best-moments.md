@@ -10,3 +10,5 @@
   `InsufficientFootageError` is raised only when best_moments cannot reach 480 s either. A failed
   drive blocked on this error relaunches from source once this version installs (its failure
   fingerprint changes with the installed version).
+- `health heal`/`health backlog`: the new "under `min_lf_duration`" refusal is classed
+  deterministic (a retry of the same footage never helps), like the floor refusal it replaces.

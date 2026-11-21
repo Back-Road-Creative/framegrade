@@ -57,9 +57,10 @@ CLASS_TABLE: Tuple[Tuple["re.Pattern[str]", str], ...] = tuple(
             DETERMINISTIC,
         ),  # pipeline/final_text_record.py:116
         (
-            r"InsufficientFootageError|is under full_drive_(?:part|short_day)_min_sec",
+            r"InsufficientFootageError|is under full_drive_(?:part|short_day)_min_sec"
+            r"|under min_lf_duration=",
             DETERMINISTIC,
-        ),  # pipeline/regular_lf_planner.py:312,373; orchestrator_preflight.py:243
+        ),  # pipeline/regular_lf_planner.py:312,371; orchestrator_preflight.py:241; drive_phases/phase_a.py:173
         (r"BatchDurationIntegrityError", DETERMINISTIC),  # pipeline/day_master_encoder.py:111
         (r"GPS fix density .* below the", DETERMINISTIC),  # pipeline/title_decision.py:78
         # transient: the host or a remote source, not the inputs
