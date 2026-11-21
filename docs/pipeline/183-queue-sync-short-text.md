@@ -9,7 +9,10 @@ It touches every `queued`, unleased YouTube row whose slot is more than 24 hours
 (`SYNC_LEAD_TIME` in `gomoveshift/publishing/queue_short_text.py`), regenerating title,
 description and tags through the per-LF path Phase D uses (`plan_bracket_sync._generate_lf`,
 now also usable without a bracket record). The title stamp, recording date, schedule, media and
-`experiment_arms` stay as stored: the sync never picks, swaps or excludes an arm.
+`experiment_arms` stay as stored: the sync never picks, swaps or excludes an arm. The
+generator renders each Short's stored Shorts arms (`yt_title_body`, `yt_hashtag_set`) verbatim,
+and a Short whose known stored arm the new text no longer carries is refused whole, so the
+experiment is never mislabeled; an arm id outside `SHORTS_ARMS` is never rendered.
 
 The whole Short is refused (nothing written) when any delivery row of it, on any platform, is
 neither `queued` nor terminal, holds a live lease, has no `scheduled_at`, or has a slot inside
