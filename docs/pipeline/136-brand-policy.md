@@ -179,7 +179,7 @@ carry the block itself to keep the experiment running.
   median retention is known and no better than the others'; anything else is `hold`. The record
   only reports: it changes no text sent to YouTube. Once both factors are decided it also writes
   `<seo storage>/shorts_arm_decisions.json` (`schema`, `decided_at`, one entry per arm); a run that
-  fails part-way leaves the old `decided_at`, which `health check` rule 12 reads as stale
+  fails part-way leaves the old `decided_at`, which `health check` rule 13 reads as stale
   (`docs/seo-feedback-stale.md`). A paused arm is re-tested every
   `retest_days` (`pause_retest_due`). Thresholds: `policy.arm_thresholds`, parsed only by the report path (`load_arm_thresholds`), so a bad value
   never stops dispatch or planning (`min_n` 36 (at least 4),

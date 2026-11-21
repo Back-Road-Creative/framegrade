@@ -1,6 +1,5 @@
-"""Rule ``seo_feedback_stale``: stale arm decisions, one grouped row of settled Shorts with no core
-metrics, and one grouped row of queued YouTube Shorts whose rewrite ``sync_short_text`` reports as
-``changed``. Detection only; every condition resolves when it clears."""
+"""Rule ``seo_feedback_stale``: stale arm decisions and one grouped row of settled Shorts with no
+core metrics. Detection only; every condition resolves when it clears."""
 
 from __future__ import annotations
 
@@ -12,26 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_queue_sync_short_text import NOW as SYNC_CLOCK
-from test_queue_sync_short_text import _short, _world
-
-from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.health import run_check, seo_feedback
 from gomoveshift.health.check import _line
 from gomoveshift.health.store import load_all
 from gomoveshift.publishing.experiments import ARM_DECISIONS_FILENAME
-from gomoveshift.publishing import queue_short_text as qst
-from gomoveshift.publishing.queue import open_queue_db
-from gomoveshift.publishing.queue_short_text import SYNC_LEAD_TIME
 from gomoveshift.tracking.day7 import window_settled
 from gomoveshift.tracking.schema import ContentMeta, PlatformMetrics, ShortRecord, TrackingRecord
 from gomoveshift.tracking.store import TrackingStore
 
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
-SYNC_NOW = SYNC_CLOCK
 K_DEC = "seo_feedback_stale:decisions"
 K_MET = "seo_feedback_stale:metrics"
-K_QUE = "seo_feedback_stale:queued"
 
 
 class World:
@@ -67,23 +57,6 @@ class World:
         old = store.load("p") if store.exists("p") else TrackingRecord(project="p", shorts=[])
         old.shorts = [s for s in old.shorts if s.index != index] + [rec]
         store.save(old)
-
-    def sync_world(self, shorts):
-        """The C5 fixture world (plan, sidecar, queue rows) inside this storage dir; the rule
-        then runs at that fixture's clock."""
-        self.now = SYNC_NOW
-        if (self.storage / ARM_DECISIONS_FILENAME).exists():
-            self.decisions()  # keep the fixture's decisions fresh at the new clock
-        plan, conn = _world(self.storage, shorts)
-        self.plan = plan
-        return conn
-
-    def apply_sync(self):
-        conn = open_queue_db(self.storage)
-        try:
-            qst.sync_short_text(conn, apply=True, now=SYNC_NOW)
-        finally:
-            conn.close()
 
     def check(self):
         cfg = SimpleNamespace(seo=SimpleNamespace(storage_path=str(self.storage)))
@@ -233,150 +206,6 @@ def test_unreadable_tracking_record_keeps_metrics_rows_live(tmp_path):
     assert any("metrics" in n and "not evaluated" in n for n in res["notes"])
 
 
-# --- (c) queued rows the sync would rewrite -------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _no_published_titles(monkeypatch):
-    monkeypatch.setattr(lm, "load_published_titles", lambda: set())
-
-
-def test_changed_verdicts_open_one_grouped_row_and_resolve_once_the_sync_applies(tmp_path):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1), _short(2)])
-    res = w.check()
-    assert res["new"] == [K_QUE] and w.open_keys() == {K_QUE}
-    row = w.rows()[K_QUE]
-    assert row["count"] == 2
-    assert {s["short_index"] for s in row["shorts"]} == {1, 2}
-    assert (
-        "nightly sync did not apply" in _line(row) or "nightly sync did not apply" in row["detail"]
-    )
-    assert "#1" in row["detail"] and "#2" in row["detail"]
-    w.check()
-    assert w.pushed.count(("health_seo_feedback_stale", K_QUE)) == 1
-    w.apply_sync()
-    res = w.check()
-    assert res["resolved"] == [K_QUE] and w.open_keys() == set()
-
-
-def test_the_rule_reads_the_queue_without_writing_it(tmp_path):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    before = w.plan.read_bytes()
-    conn = sqlite3.connect(w.storage / "social_queue.sqlite3")
-    dump = list(conn.iterdump())
-    conn.close()
-    w.check()
-    assert w.plan.read_bytes() == before
-    conn = sqlite3.connect(w.storage / "social_queue.sqlite3")
-    assert list(conn.iterdump()) == dump
-    conn.close()
-
-
-def test_a_refused_verdict_is_not_this_rules_row(tmp_path, monkeypatch):
-    from gomoveshift.publishing import youtube_adapter
-
-    monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: "title_bad")
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1), _short(2)])
-    w.check()
-    assert w.open_keys() == set()
-
-
-def test_a_row_inside_the_lead_time_is_not_flagged(tmp_path):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1, hours_ahead=SYNC_LEAD_TIME.total_seconds() / 3600 - 1)])
-    w.check()
-    assert w.open_keys() == set()
-
-
-def test_a_sync_crash_is_a_note_and_holds_the_queued_row(tmp_path, monkeypatch):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    assert w.open_keys() == {K_QUE}
-
-    def boom(conn, **kw):
-        raise sqlite3.OperationalError("disk I/O error")
-
-    monkeypatch.setattr(qst, "sync_short_text", boom)
-    res = w.check()
-    assert w.open_keys() == {K_QUE}
-    assert any("queued" in n and "not evaluated" in n for n in res["notes"])
-
-
-def test_a_missing_queue_db_is_a_note_and_keeps_the_queued_row_live(tmp_path):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    (w.storage / "social_queue.sqlite3").unlink()
-    res = w.check()
-    assert w.open_keys() == {K_QUE}
-    assert any("social_queue.sqlite3" in n for n in res["notes"])
-
-
-def test_a_missing_decisions_file_is_condition_a_only(tmp_path):
-    w = World(tmp_path)  # no decisions file
-    w.sync_world([_short(1)])
-    w.check()
-    assert w.open_keys() == {K_DEC, K_QUE}
-    w.apply_sync()
-    w.check()
-    assert w.open_keys() == {K_DEC}  # (c) resolves although the decisions file is still missing
-
-
-def test_the_dry_run_passes_the_brand_policys_location_cap_like_the_nightly_sync(
-    tmp_path, monkeypatch
-):
-    from gomoveshift.health import short_text_sync
-
-    seen: list = []
-    monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: 3)
-    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: seen.append(kw) or [])
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    assert seen and seen[0]["per_location_cap"] == 3 and seen[0]["apply"] is False
-
-
-def _verdict(reason, status="refused"):
-    return qst.ShortTextChange(1, "p", 1, status, "t", "t", reason)
-
-
-@pytest.mark.parametrize("reason", ["sidecar unusable: bad json", "generator: no place"])
-def test_an_unusable_sidecar_or_generator_verdict_holds_the_open_row(tmp_path, monkeypatch, reason):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    assert w.open_keys() == {K_QUE}
-    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: [_verdict(reason)])
-    res = w.check()
-    assert w.open_keys() == {K_QUE}  # held, not resolved as if the sync had applied it
-    assert any("queued" in n and reason.split(":")[0] in n for n in res["notes"])
-
-
-def test_a_really_unreadable_sidecar_holds_the_queued_row(tmp_path):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    assert w.open_keys() == {K_QUE}
-    w.plan.write_text("{not json")
-    res = w.check()
-    assert w.open_keys() == {K_QUE}
-    assert any("sidecar unusable" in n for n in res["notes"])
-
-
-def test_an_unusable_verdict_files_nothing_when_no_row_is_open(tmp_path, monkeypatch):
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    monkeypatch.setattr(
-        qst, "sync_short_text", lambda conn, **kw: [_verdict("sidecar unusable: x")]
-    )
-    res = w.check()
-    assert w.open_keys() == set() and any("sidecar unusable" in n for n in res["notes"])
-
-
 def test_an_open_row_refreshes_its_detail_and_count_without_a_second_push(tmp_path):
     w = _fresh_world(tmp_path)
     w.short(1, views=None)
@@ -390,6 +219,18 @@ def test_an_open_row_refreshes_its_detail_and_count_without_a_second_push(tmp_pa
     assert w.pushed.count(("health_seo_feedback_stale", K_MET)) == 1
 
 
+def test_a_fixed_short_resolution_is_not_blamed_on_an_unrelated_old_short(tmp_path):
+    w = _fresh_world(tmp_path)
+    w.short(5, views=None)
+    w.short(9, pct=None, age_days=90)  # months old, never filled: not in the row
+    w.check()
+    assert w.rows()[K_MET]["shorts"] == [{"project": "p", "short_index": 5, "missing": ["views"]}]
+    w.short(5, views=5, pct=40.0)  # p#5 got real metrics
+    res = w.check()
+    assert w.open_keys() == set()
+    assert not any("aged out" in n for n in res["notes"])
+
+
 def test_a_short_aging_out_resolves_the_row_and_says_so_in_a_note(tmp_path):
     w = _fresh_world(tmp_path)
     w.short(1, views=None, age_days=seo_feedback.METRICS_LOOKBACK_DAYS)
@@ -400,18 +241,3 @@ def test_a_short_aging_out_resolves_the_row_and_says_so_in_a_note(tmp_path):
     assert w.open_keys() == set()
     assert any("aged out" in n and "metrics" in n for n in res["notes"])
     assert not any("aged out" in n for n in w.check()["notes"])  # said once, at the resolution
-
-
-def test_a_dry_run_that_overruns_its_deadline_is_a_note_and_holds_the_row(tmp_path, monkeypatch):
-    import time
-
-    w = _fresh_world(tmp_path)
-    w.sync_world([_short(1)])
-    w.check()
-    monkeypatch.setattr(seo_feedback, "DRY_RUN_DEADLINE_S", 0.2)
-    monkeypatch.setattr(qst, "sync_short_text", lambda conn, **kw: time.sleep(5) or [])
-    started = time.monotonic()
-    res = w.check()
-    assert time.monotonic() - started < 3
-    assert w.open_keys() == {K_QUE}
-    assert any("queued" in n and "exceeded" in n for n in res["notes"])

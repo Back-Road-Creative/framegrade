@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import cadence, drives
 from .store import code_sha, load_all, utc_iso, write_row
@@ -553,9 +553,9 @@ def _seo_feedback_rows(
     now: datetime,
     now_iso: str,
     notes: List[str],
-    open_keys: Collection[str] = (),
+    open_rows: Mapping[str, Dict[str, Any]] = {},
 ) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
-    """Rule 12 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
+    """Rule 13 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
     condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
     could not be read: their open incidents stay live, never closed by an unreadable source.
     A missing decisions file is condition (a)'s finding only and holds nothing."""
@@ -563,7 +563,7 @@ def _seo_feedback_rows(
 
     storage = Path(config.seo.storage_path)
     if not storage.is_absolute():
-        notes.append("seo.storage_path is relative; rule 12 (seo_feedback_stale) not evaluated")
+        notes.append("seo.storage_path is relative; rule 13 (seo_feedback_stale) not evaluated")
         return None, []
     rows: List[Dict[str, Any]] = []
     held: List[str] = []
@@ -579,8 +579,9 @@ def _seo_feedback_rows(
         records = [store.load(p) for p in store.list_projects()]
         metric_rows = sf.metrics_incidents(records, now.date(), now_iso)
         rows += metric_rows
-        if not metric_rows and sf.KEY_METRICS in open_keys:
-            aged = sf.aged_out_count(records, now.date())
+        prior = open_rows.get(sf.KEY_METRICS)
+        if not metric_rows and prior is not None:
+            aged = sf.aged_out_count(records, now.date(), prior.get("shorts") or [])
             if aged:
                 notes.append(
                     f"seo_feedback_stale metrics resolved: {aged} Short(s) aged out of the "
@@ -589,22 +590,6 @@ def _seo_feedback_rows(
     except Exception as exc:  # noqa: BLE001
         notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")
         held.append(sf.KEY_METRICS)
-    db = storage / "social_queue.sqlite3"
-    if db.exists():
-        try:
-            queued, unjudged = sf.queued_incidents(db, now, now_iso)
-            rows += queued
-            if unjudged:
-                notes.append(
-                    f"seo_feedback_stale queued not fully evaluated: {'; '.join(unjudged)}"
-                )
-                held.append(sf.KEY_QUEUED)
-        except Exception as exc:  # noqa: BLE001
-            notes.append(f"seo_feedback_stale queued not evaluated: {type(exc).__name__}: {exc}")
-            held.append(sf.KEY_QUEUED)
-    else:
-        notes.append("social_queue.sqlite3 absent: seo_feedback_stale queued not evaluated")
-        held.append(sf.KEY_QUEUED)
     return rows, held
 
 
@@ -679,7 +664,7 @@ def run_check(
         now,
         now_iso,
         notes,
-        {r["key"] for r in existing if not r.get("resolved_at")},
+        {r["key"]: r for r in existing if not r.get("resolved_at")},
     )
     if seo_rows is not None:
         found["seo_feedback_stale"] = seo_rows

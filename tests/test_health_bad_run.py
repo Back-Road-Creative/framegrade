@@ -253,7 +253,7 @@ def test_run_check_raises_files_and_resolves(tmp_path):
     pushed = []
 
     def notify(event, payload, text):
-        if event != "health_seo_feedback_stale":  # rule 12 is not this test's subject
+        if event != "health_seo_feedback_stale":  # rule 13 is not this test's subject
             pushed.append((event, text))
         return True
 

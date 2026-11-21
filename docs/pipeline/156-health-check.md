@@ -122,22 +122,16 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    no timeout) is a note naming it, never a finding and never "empty": its open incidents stay
    open, so a drive that goes offline and returns does not close and re-notify them.
 
-12. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
-   Three conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
+13. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
+   Two conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
    `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
    h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
    within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
    gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
-   it resolves when the count is 0, and a Short aging out of the lookback is just not counted).
-   `seo_feedback_stale:queued`: ONE grouped row listing each queued Short whose verdict from
-   `queue_short_text.sync_short_text(conn, apply=False, per_location_cap=<brand's>)`, run on a
-   read-only connection under a `DRY_RUN_DEADLINE_S` = 20 s deadline, is `changed`: text the
-   nightly `health sync-short-text` would rewrite but did not apply. A `refused` verdict is not
-   this rule's (`short_text_sync_refused:<project>` is the nightly sync's), except "sidecar
-   unusable" and "generator:" refusals: a note, and an open row is held. Pushed once as
-   `health_seo_feedback_stale`, an open row's detail/count are refreshed without a re-push;
-   detection only. An unreadable tracking record
-   or a queue/sync error is a note and keeps that condition's open incident live; a missing
+   it resolves when the count is 0; when it resolves with listed Shorts still empty because they
+   aged out of the lookback, the check says so in a note). An open row's detail and count are
+   refreshed without a re-push. Pushed once as `health_seo_feedback_stale`; detection only. An
+   unreadable tracking record is a note and keeps the open metrics row live; a missing
    decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
 
@@ -167,7 +161,7 @@ sets `resolved_at`; a refusal for another reason, or a tick that never reached t
 (lease held, running drive), leaves it open. `health check` never resolves it. A dry run writes
 nothing.
 
-A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
+A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
 
 12. **Nightly Short text sync** (`gomoveshift health sync-short-text`,
    `gomoveshift/health/short_text_sync.py`; not part of `health check`, which never runs it).
