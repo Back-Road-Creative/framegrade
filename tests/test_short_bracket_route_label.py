@@ -50,8 +50,9 @@ def _posts(gen, label=LABEL, n=3):
 def test_backed_bracket_label_titles_the_short_with_the_whole_label():
     posts = _posts(_gen())
     assert posts
+    # the first Short is titled the label alone; a repeat of it takes the stamped title
+    assert posts[0].youtube_title == LABEL
     for post in posts:
-        assert "stretch: " in post.youtube_title
         assert LABEL in post.youtube_title
         assert post.sampled_regions == [LABEL]
 

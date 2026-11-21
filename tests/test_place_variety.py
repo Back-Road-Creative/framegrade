@@ -106,7 +106,8 @@ def test_second_short_with_the_same_top_place_varies_its_title_to_a_measured_tow
     posts = _run([[], []], [None, _route()])
     assert posts[0].youtube_title.endswith("Polk County")
     assert "Tryon" in posts[1].youtube_title and "Polk County" not in posts[1].youtube_title
-    assert posts[1].place_variety["title"]["reason"] == REASON_VARIED
+    # the town is the title's first choice: the Short's most specific measured place
+    assert posts[1].place_variety["title"]["reason"] == REASON_DISTINCT
     # the review accepts it: a town the clip's route held for every retained second
     assert short_place_facts(
         posts[1].youtube_title,
@@ -140,10 +141,10 @@ def test_the_previous_days_last_short_counts_as_previous():
     prev = {"title": "Polk County", "description": "Polk County"}
     posts = _run([[]], [_route()], ordinals=(1,), previous_places=prev, date="2026-02-25")
     assert "Tryon" in posts[0].youtube_title
-    assert posts[0].place_variety["title"]["reason"] == REASON_VARIED
-    # and the first Short of a project with nothing before it is untouched
+    assert posts[0].place_variety["title"]["reason"] == REASON_DISTINCT
+    # the first Short of a project with nothing before it names the town as well
     first = _run([[]], [_route()], ordinals=(1,))
-    assert first[0].youtube_title.endswith("Polk County")
+    assert first[0].youtube_title == "Tryon"
 
 
 def test_a_town_the_review_would_refuse_is_never_chosen():

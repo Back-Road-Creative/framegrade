@@ -823,7 +823,7 @@ class TestGenerateChaptersAllLfs:
 
 def test_publish_run_no_titles_yaml_composes_for_every_short(tmp_path):
     """titles.yaml is an optional override: a publish run with verified sidecars
-    and NO titles.yaml composes a stamped title for every short."""
+    and NO titles.yaml composes a title for every short."""
     from gomoveshift.pipeline.drive_phases.phase_d_scheduling import _build_social_posts_per_lf
     from gomoveshift.pipeline.social_generator import SocialGenerator
     from _state_helpers import verified_shorts_per_lf
@@ -844,8 +844,11 @@ def test_publish_run_no_titles_yaml_composes_for_every_short(tmp_path):
     )
     titles = [p.youtube_title for lf_posts in posts.values() for p in lf_posts]
     assert len(titles) == 3
-    assert all(t.strip() and "stretch:" in t for t in titles)
-    assert len(set(titles)) == 3
+    assert all(t.strip() for t in titles)
+    # a place is the title of one Short per long-form; a repeat takes the stamped title
+    for lf_posts in posts.values():
+        lf_titles = [p.youtube_title for p in lf_posts]
+        assert len(set(lf_titles)) == len(lf_titles)
 
 
 def _config():

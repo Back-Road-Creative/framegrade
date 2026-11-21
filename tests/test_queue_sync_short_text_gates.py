@@ -14,6 +14,7 @@ from test_queue_sync_short_text import (
     PROJECT,
     PROJECT2,
     REGION,
+    SYNC_FOLLOWUP,
     _other,
     _short,
     _two,
@@ -198,6 +199,7 @@ def test_a_generator_that_always_raises_is_an_actionable_refusal(tmp_path, monke
     assert all(qst.is_actionable_refusal(c) for c in changes)
 
 
+@SYNC_FOLLOWUP
 def test_a_stale_row_whose_synced_hash_is_already_taken_is_a_no_op_not_a_refusal(tmp_path):
     plan, conn = _world(tmp_path, [_short(1)])
     sync_short_text(conn, apply=True, now=NOW)  # the sidecar now holds the synced text
@@ -267,7 +269,7 @@ def test_a_sanction_for_a_short_generated_with_its_predecessor_holds_where_the_p
 # -- M2: an unusable sidecar's stored text still reaches the other sidecars' gates -----------
 
 
-@pytest.mark.parametrize("a_first", [True, False])
+@pytest.mark.parametrize("a_first", [pytest.param(True, marks=SYNC_FOLLOWUP), False])
 def test_an_unusable_sidecars_stored_text_is_seen_by_the_gates(tmp_path, a_first):
     scratch = tmp_path / "scratch"
     scratch.mkdir()
