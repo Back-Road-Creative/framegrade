@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gomoveshift.health import run_check, seo_feedback
+from gomoveshift.health import run_check, seo_feedback, short_text_sync
 from gomoveshift.health.check import _line
 from gomoveshift.health.store import load_all
 from gomoveshift.publishing.experiments import ARM_DECISIONS_FILENAME
@@ -21,6 +21,7 @@ from gomoveshift.tracking.store import TrackingStore
 NOW = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
 K_DEC = "seo_feedback_stale:decisions"
 K_MET = "seo_feedback_stale:metrics"
+K_SYNC = "seo_feedback_stale:sync"
 
 
 class World:
@@ -34,6 +35,16 @@ class World:
         self.tracking.mkdir()
         self.pushed: list = []
         self.now = NOW
+        self.auto_stamp = True  # a fresh sync run record at every check, unless a test sets it
+
+    def stamp_path(self) -> Path:
+        return short_text_sync.run_record_path(self.tmp / "inc")
+
+    def stamp(self, *, age_h=1.0):
+        at = self.now - timedelta(hours=age_h)
+        self.stamp_path().write_text(
+            json.dumps({"schema": 1, "completed_at": at.isoformat(), "changed": 0, "refused": 0})
+        )
 
     def decisions(self, *, age_h=1.0, decisions=()):
         at = self.now - timedelta(hours=age_h)
@@ -58,6 +69,8 @@ class World:
         store.save(old)
 
     def check(self):
+        if self.auto_stamp:
+            self.stamp()
         cfg = SimpleNamespace(seo=SimpleNamespace(storage_path=str(self.storage)))
 
         def notify(event, payload, text):
@@ -260,3 +273,89 @@ def test_a_listed_short_aging_out_while_the_row_stays_open_is_noted_once(tmp_pat
     assert w.open_keys() == set()
     assert not any("aged out" in n for n in res["notes"])  # said once, on the tick it happened
     assert w.pushed.count(("health_seo_feedback_stale", K_MET)) == 1
+
+
+# --- (c) the nightly Short text sync has stopped running ------------------------------
+
+
+def _sync_world(tmp_path) -> World:
+    w = _fresh_world(tmp_path)
+    w.auto_stamp = False
+    return w
+
+
+def test_a_missing_stamp_opens_the_sync_row(tmp_path):
+    w = _sync_world(tmp_path)
+    res = w.check()
+    assert K_SYNC in res["new"] and w.open_keys() == {K_SYNC}
+    assert "missing" in w.rows()[K_SYNC]["detail"]
+    assert ("health_seo_feedback_stale", K_SYNC) in w.pushed
+
+
+def test_a_stamp_over_the_limit_opens_the_row_and_names_the_age(tmp_path):
+    w = _sync_world(tmp_path)
+    w.stamp(age_h=27)
+    w.check()
+    assert w.open_keys() == {K_SYNC}
+    assert "27" in w.rows()[K_SYNC]["detail"] and "stale" in w.rows()[K_SYNC]["detail"]
+
+
+def test_a_stamp_inside_the_limit_does_not_open_the_row(tmp_path):
+    assert seo_feedback.SYNC_STALE_AFTER_H == 26
+    w = _sync_world(tmp_path)
+    w.stamp(age_h=25)
+    w.check()
+    assert w.open_keys() == set()
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]", '{"completed_at": "nope"}', ""])
+def test_an_unreadable_stamp_is_a_finding(tmp_path, body):
+    w = _sync_world(tmp_path)
+    w.stamp_path().write_text(body)
+    w.check()
+    assert w.open_keys() == {K_SYNC} and "unreadable" in w.rows()[K_SYNC]["detail"]
+
+
+def test_a_fresh_stamp_resolves_the_row(tmp_path):
+    w = _sync_world(tmp_path)
+    w.check()
+    assert w.open_keys() == {K_SYNC}
+    w.stamp(age_h=1)
+    res = w.check()
+    assert K_SYNC in res["resolved"] and w.open_keys() == set()
+
+
+def test_an_open_sync_row_refreshes_its_detail_without_a_second_push(tmp_path):
+    w = _sync_world(tmp_path)
+    w.stamp(age_h=27)
+    w.check()
+    first = w.rows()[K_SYNC]["detail"]
+    w.now = NOW + timedelta(hours=10)
+    w.decisions(age_h=1)
+    w.check()
+    row = w.rows()[K_SYNC]
+    assert row["detail"] != first and "37" in row["detail"]
+    assert row["pushed"] is True
+    assert w.pushed.count(("health_seo_feedback_stale", K_SYNC)) == 1
+
+
+def test_one_push_across_open_refresh_and_resolve(tmp_path):
+    w = _sync_world(tmp_path)
+    w.check()  # open: pushed
+    w.check()  # still open: refresh only
+    w.stamp(age_h=1)
+    w.check()  # resolved
+    assert w.open_keys() == set()
+    assert w.pushed.count(("health_seo_feedback_stale", K_SYNC)) == 1
+
+
+def test_the_sync_condition_reads_only_the_stamp_file(tmp_path, monkeypatch):
+    import gomoveshift.health.seo_feedback as sf
+
+    w = _sync_world(tmp_path)
+    w.stamp(age_h=1)
+    monkeypatch.setattr(
+        "gomoveshift.publishing.queue.open_queue_db",
+        lambda *a, **k: pytest.fail("the sync condition must not open the queue DB"),
+    )
+    assert sf.sync_incidents(w.stamp_path(), NOW, "t") == []

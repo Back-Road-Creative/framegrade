@@ -522,3 +522,67 @@ def test_the_store_lock_is_the_portable_file_lock_so_the_module_imports_on_windo
 
     assert not hasattr(short_text_sync, "fcntl")
     assert short_text_sync.lock_exclusive is _file_lock.lock_exclusive
+
+
+# -- the run record the stale check reads ---------------------------------------------------
+
+
+def _stamp(tmp_path):
+    from gomoveshift.health import short_text_sync
+
+    return short_text_sync.run_record_path(tmp_path / "inc")
+
+
+def test_the_run_record_sits_next_to_the_incidents_dir(tmp_path):
+    assert _stamp(tmp_path) == tmp_path / "inc.short_text_sync_run.json"
+
+
+def test_a_completed_run_writes_the_stamp_with_the_counts(tmp_path, monkeypatch):
+    out = [_change("changed"), _change("reconciled", idx=2), _change("refused", idx=3, reason="x")]
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: out, [])
+    result = run()
+    stamp = json.loads(_stamp(tmp_path).read_text())
+    assert stamp["schema"] == 1 and stamp["changed"] == 2 and stamp["refused"] == result["refused"]
+    assert stamp["completed_at"].startswith("2026-")
+    assert not list(tmp_path.glob("*.tmp*"))  # atomic: no temp file left behind
+
+
+def test_a_crashed_sync_writes_no_stamp_and_keeps_the_old_one(tmp_path, monkeypatch):
+    state = {"fail": False}
+
+    def sync(*a, **k):
+        if state["fail"]:
+            raise RuntimeError("db locked")
+        return []
+
+    run = _health(tmp_path, monkeypatch, sync, [])
+    state["fail"] = True
+    assert run()["exit"] == 2 and not _stamp(tmp_path).exists()
+    state["fail"] = False
+    run()
+    before = _stamp(tmp_path).read_bytes()
+    state["fail"] = True
+    assert run()["exit"] == 2
+    assert _stamp(tmp_path).read_bytes() == before
+
+
+def test_a_held_store_lock_still_writes_the_stamp(tmp_path, monkeypatch):
+    import fcntl
+
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: [], [])
+    with open(tmp_path / "inc.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = run()
+    assert result["skipped"] and _stamp(tmp_path).exists()
+
+
+def test_a_stamp_write_failure_never_changes_the_exit_code(tmp_path, monkeypatch, caplog):
+    from gomoveshift.health import short_text_sync
+
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")  # a directory cannot be made under a regular file
+    monkeypatch.setattr(short_text_sync, "run_record_path", lambda d: blocker / "run.json")
+    run = _health(tmp_path, monkeypatch, lambda *a, **k: [_change("refused", reason="a: b")], [])
+    result = run()
+    assert result["exit"] == 1 and not result["crashed"]
+    assert "run record" in caplog.text

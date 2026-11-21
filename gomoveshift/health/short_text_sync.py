@@ -28,13 +28,17 @@ rows under the health incidents dir (``health-incident/1``), pushed once each:
 Schedule it AFTER ``metrics collect`` (it writes the nightly title snapshot the sync reads):
 ``gomoveshift health sync-short-text`` from the service directory (``--data-root`` as the
 hourly health cron passes it). Exit 0 clean, 1 when a Short was refused for an actionable reason, 2 on a crash.
+A run whose sync returned also stamps ``<incidents dir>.short_text_sync_run.json``
+(``run_record_path``; rule 13 flags the job stale when it stops being written).
 Never raises: a failure anywhere (sync, store, push) is logged and reported as a crash.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,6 +152,31 @@ def _streaks_dir(incidents_dir: Path) -> Path:
     return incidents_dir.parent / f"{incidents_dir.name}.streaks"
 
 
+def run_record_path(incidents_dir: Path) -> Path:
+    """The stamp of the last completed run, next to the incidents dir (read by rule 13)."""
+    return incidents_dir.parent / f"{incidents_dir.name}.short_text_sync_run.json"
+
+
+def _write_run_record(incidents_dir: Path, now_iso: str, changed: int, refused: int) -> None:
+    """Atomically stamp a run whose sync returned. Best effort: a failure is logged, never raised."""
+    try:
+        path = run_record_path(incidents_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(
+                    {"schema": 1, "completed_at": now_iso, "changed": changed, "refused": refused}
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 -- never changes the exit code
+        logger.exception("sync-short-text could not write its run record")
+
+
 def _update_streaks(changes: List[Any], incidents_dir: Path, now_iso: str) -> Dict[str, int]:
     """Count the consecutive runs each Short has been refused as transient: one streak row per
     Short (``short_text_sync_streak:<project>#<index>``, resolved the first run that no longer
@@ -257,6 +286,7 @@ def run_short_text_sync(
     now_iso = utc_iso(now.timestamp())
     changes: List[Any] = []
     crash: Optional[str] = None
+    synced = False
     try:
         if notify_fn is None:
             from ..console.notify import notify as notify_fn  # noqa: PLC0415
@@ -265,6 +295,7 @@ def run_short_text_sync(
             changes = sync_short_text(
                 conn, apply=True, now=now, per_location_cap=_brand_location_cap()
             )
+            synced = True
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 -- the crash is the incident
@@ -301,13 +332,16 @@ def run_short_text_sync(
             logger.exception("sync-short-text could not file its crash incident")
 
     refused = sum(is_actionable_refusal(c) or _escalated(c, nights) for c in changes)
+    changed = sum(c.status in ("changed", "reconciled") for c in changes)
+    if synced:  # a crash of the sync stamps nothing: short_text_sync_crash covers it
+        _write_run_record(incidents_dir, now_iso, changed, refused)
     if skipped and crash is None:
         code = 0
     else:
         code = 2 if crash is not None else (1 if refused else 0)
     return {
         "exit": code,
-        "changed": sum(c.status in ("changed", "reconciled") for c in changes),
+        "changed": changed,
         "refused": refused,
         "crashed": crash,
         "skipped": skipped,
