@@ -92,7 +92,10 @@ non-blocking file lock (`pipeline/_file_lock.py`, portable to Windows) on `<inci
 the incident work, exit 0). An open sync-owned row keeps `health check` at exit 1 like any open
 incident. Exit 0 clean, 1 when a Short was refused for an actionable reason, 2 on a crash; the
 entry point never raises (a failure in the store or the push is a crash). It takes no `--jobs-dir`.
-`queue sync-short-text` itself still exits 1 on any refusal.
+`queue sync-short-text` itself still exits 1 on any refusal. Every run, a crash and a held lock
+included, stamps `<incidents dir>.short_text_sync_run.json` atomically (`schema`, `ran_at`,
+`changed`, `refused`, `crashed`); a write failure is logged and never changes the exit code, and
+`health check` rule 13 (`seo_feedback_stale:sync`) reads it to notice a job that stopped running.
 
 Failure handling: a new text is also checked against the final text of every LATER sidecar
 (including a Short it leaves as stored); a clash refuses the earlier sidecar's Short and the

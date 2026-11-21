@@ -58,7 +58,7 @@ UNATTENDED_AFTER_FAILURES = 3
 
 _BACKFILL = ("resume_recipe", "log_path")
 #: Fields of an already-open grouped ``seo_feedback_stale`` row that follow the live finding.
-_REFRESH = ("detail", "count", "shorts", "decided_at")
+_REFRESH = ("detail", "count", "shorts", "decided_at", "ran_at")
 
 
 #: Camera file names a grouped footage push lists before "and N more".
@@ -549,6 +549,7 @@ def _bad_run_rows(
 
 def _seo_feedback_rows(
     config: Any,
+    incidents_dir: Path,
     tracking_root: Optional[Path],
     now: datetime,
     now_iso: str,
@@ -558,7 +559,7 @@ def _seo_feedback_rows(
     """Rule 13 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
     condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
     could not be read: their open incidents stay live, never closed by an unreadable source.
-    A missing decisions file is condition (a)'s finding only and holds nothing."""
+    A missing decisions file or sync run record is that condition's finding only and holds nothing."""
     from . import seo_feedback as sf  # noqa: PLC0415
 
     storage = Path(config.seo.storage_path)
@@ -572,6 +573,13 @@ def _seo_feedback_rows(
     except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
         notes.append(f"seo_feedback_stale decisions not evaluated: {type(exc).__name__}: {exc}")
         held.append(sf.KEY_DECISIONS)
+    try:
+        from .short_text_sync import run_record_path  # noqa: PLC0415
+
+        rows += sf.sync_incidents(run_record_path(incidents_dir), now, now_iso)
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"seo_feedback_stale sync not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_SYNC)
     try:
         from ..tracking.store import TrackingStore  # noqa: PLC0415
 
@@ -662,6 +670,7 @@ def run_check(
 
     seo_rows, seo_held = _seo_feedback_rows(
         config,
+        incidents_dir,
         tracking_root,
         now,
         now_iso,

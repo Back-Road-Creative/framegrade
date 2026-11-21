@@ -1,6 +1,6 @@
 """Rule 13, ``seo_feedback_stale``: the Shorts feedback loop has stopped feeding itself.
 
-Two conditions, each one grouped incident with a stable key, each resolving when it clears.
+Three conditions, each one grouped incident with a stable key, each resolving when it clears.
 Detection only: nothing here edits a plan, a queue row, a tracking record or the decisions file.
 
 - ``seo_feedback_stale:decisions`` -- ``<seo storage>/shorts_arm_decisions.json`` (written by
@@ -10,12 +10,19 @@ Detection only: nothing here edits a plan, a queue row, a tracking record or the
   settled (``tracking.day7.window_settled``) and that were posted within ``METRICS_LOOKBACK_DAYS``
   yet have a null ``CORE_METRICS`` field; the detail lists the first ``LISTED`` of them.
 
+- ``seo_feedback_stale:sync`` -- the nightly ``health sync-short-text`` run record
+  (``short_text_sync.run_record_path``) is missing, unreadable, or its ``ran_at`` is over
+  ``SYNC_STALE_AFTER_H`` old (or over ``SYNC_SKEW_H`` in the future): the job is not running.
+  A crashed run still stamps ``ran_at`` (``short_text_sync_crash`` covers it alone). Reads only
+  that file.
+
 An open row is refreshed (detail, count, listing) by the caller without a second push.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -27,9 +34,15 @@ from .store import new_incident, safe_name
 KIND = "seo_feedback_stale"
 KEY_DECISIONS = f"{KIND}:decisions"
 KEY_METRICS = f"{KIND}:metrics"
+KEY_SYNC = f"{KIND}:sync"
 
 #: The nightly ``metrics collect`` refreshes the decisions file; a day plus a night of slack.
 DECISIONS_STALE_AFTER_H = 36
+#: ``health sync-short-text`` runs nightly, scheduled after ``metrics collect``, so its start can drift:
+#: the same limit as the decisions file.
+SYNC_STALE_AFTER_H = 36
+#: A ``ran_at`` further ahead of the check than this is clock skew: unreadable, never "fresh".
+SYNC_SKEW_H = 1
 #: ``PlatformMetrics`` fields a settled Short must have reported (``tracking/schema.py``).
 CORE_METRICS = ("views", "avg_view_percentage")
 #: Only Shorts posted this recently are checked: an old Short the API never filled in is history,
@@ -76,6 +89,39 @@ def decisions_incidents(storage: Path, now: datetime, now_iso: str) -> List[Dict
             now_iso,
             f"Shorts arm decisions file shorts_arm_decisions.json {why}.",
             decided_at=stamp.isoformat() if stamp else None,
+        )
+    ]
+
+
+def sync_incidents(stamp: Path, now: datetime, now_iso: str) -> List[Dict[str, Any]]:
+    """Condition (c): reads only the sync run record. Missing or unreadable IS the finding."""
+    stamped = None
+    try:
+        record = json.loads(stamp.read_text(encoding="utf-8"))
+        stamped = datetime.fromisoformat(str(record["ran_at"]))
+    except FileNotFoundError:
+        why = "is missing: no run of the job is on record"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        why = f"is unreadable ({type(exc).__name__}: {exc})"
+    else:
+        stamped = stamped if stamped.tzinfo else stamped.replace(tzinfo=timezone.utc)
+        age_h = (now - stamped).total_seconds() / 3600
+        if age_h < -SYNC_SKEW_H:
+            why = f"is unreadable (ran_at {stamped.isoformat()} is in the future)"
+        elif age_h <= SYNC_STALE_AFTER_H:
+            return []
+        else:
+            why = (
+                f"is stale: the last run was {stamped.isoformat()}, {int(age_h)} h ago "
+                f"(limit {SYNC_STALE_AFTER_H} h)"
+            )
+    return [
+        _row(
+            KEY_SYNC,
+            now_iso,
+            f"The nightly Short text sync run record {stamp.name} {why}. "
+            "Check that `gomoveshift health sync-short-text` is scheduled and running.",
+            ran_at=stamped.isoformat() if stamped else None,
         )
     ]
 

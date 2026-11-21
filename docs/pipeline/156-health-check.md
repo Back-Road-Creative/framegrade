@@ -166,17 +166,23 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would res
    per Short in `<incidents dir>.streaks` (not an incident: never listed or pushed), reset by the
    first run that no longer refuses it (a crash, or a run that finds the store lock held, neither counts nor resets: runs, not nights).
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
-   them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
+   them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write.
+   Every run (a crash and a held store lock included) also writes the run record
+   `<incidents dir>.short_text_sync_run.json` atomically (`{"schema": 1, "ran_at", "changed",
+   "refused", "crashed"}`; a write failure is logged, never changes the exit code); rule 13 reads it. Details: `183-queue-sync-short-text.md`.
 
 13. **SEO feedback gone stale** (`seo_feedback_stale`, `gomoveshift/health/seo_feedback.py`).
-   Two conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
+   Three conditions, each one stable key and its own resolution. `seo_feedback_stale:decisions`:
    `shorts_arm_decisions.json` missing, unreadable or older than `DECISIONS_STALE_AFTER_H` = 36
    h. `seo_feedback_stale:metrics`: ONE grouped row counting the settled YouTube Shorts, posted
    within `METRICS_LOOKBACK_DAYS` = 28, with null `views` or `avg_view_percentage` (the detail
    gives the count, then up to 10 `project#index (missing fields)` entries, then "and N more";
    it resolves when the count is 0). An open row's detail, count and listing are refreshed
    without a re-push; a listed Short that ages out of the lookback while still empty drops out
-   of the listing and the check says so once in a note ("not a fix"). Pushed once as `health_seo_feedback_stale`; detection only. An
+   of the listing and the check says so once in a note ("not a fix"). `seo_feedback_stale:sync`: the item-12 run record is missing, unreadable (a `ran_at` over 1 h in the future
+   counts) or its `ran_at` is over `SYNC_STALE_AFTER_H` = 36 h old (the detail says which, and the
+   age); it means only "the job has not run" (a crashed run is `short_text_sync_crash`'s alone),
+   reads only that file and resolves on a fresh stamp. Pushed once as `health_seo_feedback_stale`; detection only. An
    unreadable tracking record is a note and keeps the open metrics row live; a missing
    decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
@@ -198,7 +204,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed).
 
 ## Resume recipe and `health heal`
 
