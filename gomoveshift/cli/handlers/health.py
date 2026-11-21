@@ -26,13 +26,16 @@ def cmd_health(args, config) -> int:
         if getattr(args, "incidents_dir", None)
         else default_incidents_dir(root)
     )
-    jobs_dir = Path(args.jobs_dir) if args.jobs_dir else root / "logs" / "jobs"
+    jobs_dir_arg = getattr(args, "jobs_dir", None)  # `sync-short-text` has no such option
+    jobs_dir = Path(jobs_dir_arg) if jobs_dir_arg else root / "logs" / "jobs"
     if args.health_command == "heal":
         return _cmd_heal(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "backlog":
         return _cmd_backlog(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "publish":
         return _cmd_publish(args, config, root, jobs_dir)
+    if args.health_command == "sync-short-text":
+        return _cmd_sync_short_text(config, incidents_dir)
     result = run_check(
         config,
         incidents_dir=incidents_dir,
@@ -54,6 +57,28 @@ def cmd_health(args, config) -> int:
         for note in result["notes"]:
             print(f"note: {note}")
     return 1 if result["incidents"] else 0
+
+
+def _cmd_sync_short_text(config, incidents_dir) -> int:
+    from ...health.short_text_sync import run_short_text_sync
+
+    result = run_short_text_sync(config, incidents_dir=incidents_dir)
+    for c in result["changes"]:
+        if c.status in ("changed", "reconciled", "refused"):
+            print(
+                f"sync-short-text: {c.status} delivery {c.delivery_id} "
+                f"{c.project_name}#{c.short_index}: {c.reason or c.new_title!r}"
+            )
+    if result["crashed"]:
+        print(f"sync-short-text: CRASHED: {result['crashed']}")
+    for key in result["resolved"]:
+        print(f"sync-short-text: resolved {key}")
+    print(
+        f"sync-short-text: {result['changed']} changed, {result['refused']} refused, "
+        f"{len(result['new'])} new incident(s), {len(result['pushed'])} pushed, "
+        f"{len(result['resolved'])} resolved"
+    )
+    return result["exit"]
 
 
 def _cmd_heal(args, config, root, jobs_dir, incidents_dir) -> int:

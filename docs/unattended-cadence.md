@@ -107,7 +107,7 @@ backlog-next --manifest <path>` prints the same row. The hourly `bin/gms-health-
 runs `gomoveshift health backlog --region R` per region, which launches the next eligible row as
 an audit-only drive for any free slot inside the render horizon (the wider of 7 days and
 `lead_hours`, 70 days in the packaged `brand.yaml`), so rows render back to back
-(`docs/pipeline/156-health-check.md`). Uploading that drive is `gomoveshift health publish <project> --region R` (approve,
+(`docs/pipeline/156-health-check.md`). Uploading that drive is `gomoveshift health publish <project> --region R` (`docs/pipeline/184-health-publish.md`: approve,
 claim a Waypost slot, launch Phase D), not a hand-launched `drive --youtube-upload`. The page reaches the operator only while the
 `gms-health` cron job is enabled on the host.
 

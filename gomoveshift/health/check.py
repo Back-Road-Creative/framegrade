@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import cadence, drives
 from .store import code_sha, load_all, utc_iso, write_row
@@ -26,7 +26,15 @@ _EVENTS = {
     "backlog_store_orphan": "health_backlog_store_orphan",
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
+    "seo_feedback_stale": "health_seo_feedback_stale",
+    "short_text_sync_refused": "health_short_text_sync_refused",
+    "short_text_sync_crash": "health_short_text_sync_crash",
 }
+
+#: Kinds ``health sync-short-text`` owns end to end: it alone files, resolves and pushes them
+#: (it holds a lock around its store write; ``run_check`` takes none, so it never writes, pushes
+#: or resolves one). They are listed, and an open one keeps ``health check`` at exit 1.
+_SYNC_OWNED = ("short_text_sync_refused", "short_text_sync_crash")
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
 #: will fail at dispatch and its slot is never refilled; ``dispatch-queue`` already tried
@@ -49,6 +57,8 @@ UNATTENDED_AFTER_H = 26
 UNATTENDED_AFTER_FAILURES = 3
 
 _BACKFILL = ("resume_recipe", "log_path")
+#: Fields of an already-open grouped ``seo_feedback_stale`` row that follow the live finding.
+_REFRESH = ("detail", "count", "shorts", "decided_at", "ran_at")
 
 
 #: Camera file names a grouped footage push lists before "and N more".
@@ -537,6 +547,62 @@ def _bad_run_rows(
         return None
 
 
+def _seo_feedback_rows(
+    config: Any,
+    incidents_dir: Path,
+    tracking_root: Optional[Path],
+    now: datetime,
+    now_iso: str,
+    notes: List[str],
+    open_rows: Mapping[str, Dict[str, Any]] = {},
+) -> Tuple[Optional[List[Dict[str, Any]]], List[str]]:
+    """Rule 13 (``seo_feedback_stale``): ``(rows, held)``. ``rows`` is ``None`` (noted) when no
+    condition could run. ``held`` lists key prefixes (a condition's, or one row's) whose input
+    could not be read: their open incidents stay live, never closed by an unreadable source.
+    A missing decisions file or sync run record is that condition's finding only and holds nothing."""
+    from . import seo_feedback as sf  # noqa: PLC0415
+
+    storage = Path(config.seo.storage_path)
+    if not storage.is_absolute():
+        notes.append("seo.storage_path is relative; rule 13 (seo_feedback_stale) not evaluated")
+        return None, []
+    rows: List[Dict[str, Any]] = []
+    held: List[str] = []
+    try:
+        rows += sf.decisions_incidents(storage, now, now_iso)
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"seo_feedback_stale decisions not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_DECISIONS)
+    try:
+        from .short_text_sync import run_record_path  # noqa: PLC0415
+
+        rows += sf.sync_incidents(run_record_path(incidents_dir), now, now_iso)
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"seo_feedback_stale sync not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_SYNC)
+    try:
+        from ..tracking.store import TrackingStore  # noqa: PLC0415
+
+        store = TrackingStore(tracking_root)
+        records = [store.load(p) for p in store.list_projects()]
+        metric_rows = sf.metrics_incidents(records, now.date(), now_iso)
+        rows += metric_rows
+        prior = open_rows.get(sf.KEY_METRICS)
+        if prior is not None:
+            # A Short past the lookback cannot be in the current row, so a listed one that is
+            # now past it was dropped by ageing (the refresh removes it: said once).
+            aged = sf.aged_out_count(records, now.date(), prior.get("shorts") or [])
+            if aged:
+                notes.append(
+                    f"seo_feedback_stale metrics: {aged} listed Short(s) aged out of the "
+                    f"{sf.METRICS_LOOKBACK_DAYS}-day lookback still missing metrics (not a fix)"
+                )
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"seo_feedback_stale metrics not evaluated: {type(exc).__name__}: {exc}")
+        held.append(sf.KEY_METRICS)
+    return rows, held
+
+
 def _reconcile_publishes(config: Any, jobs_dir: Path, notes: List[str]) -> List[Dict[str, str]]:
     """Close the Waypost claims of finished ``health publish`` jobs (idempotent)."""
     if not Path(config.seo.storage_path).is_absolute():
@@ -602,6 +668,18 @@ def run_check(
     if bad_run is not None:
         found["short_bad_run"] = bad_run
 
+    seo_rows, seo_held = _seo_feedback_rows(
+        config,
+        incidents_dir,
+        tracking_root,
+        now,
+        now_iso,
+        notes,
+        {r["key"]: r for r in existing if not r.get("resolved_at")},
+    )
+    if seo_rows is not None:
+        found["seo_feedback_stale"] = seo_rows
+
     live_drives = {r["key"]: r for r in drive_rows}
     open_drives = [
         r
@@ -629,6 +707,10 @@ def run_check(
             from .accounting import norm  # noqa: PLC0415
 
             gone = gone and norm(str(row.get("directory", ""))) not in held_dirs
+        if kind == "seo_feedback_stale" and any(
+            row["key"] == p or row["key"].startswith(p + ":") for p in seo_held
+        ):
+            gone = False  # that condition's input was unreadable: it could not be re-judged
         if kind == "drive_failed" and row.get("job_name") in succeeded:
             gone = True
         if gone:
@@ -642,6 +724,11 @@ def run_check(
                 # Already on file: keeps its pushed state and resume_attempts, but takes the
                 # recipe and log an older reader missed, so heal can reach the drive.
                 fill = {k: row[k] for k in _BACKFILL if row.get(k) and not prior.get(k)}
+                if row["kind"] == "seo_feedback_stale":
+                    # A grouped row's count and listing move: refresh them, never `pushed`.
+                    fill.update(
+                        {k: row[k] for k in _REFRESH if k in row and row[k] != prior.get(k)}
+                    )
                 if fill:
                     prior.update(fill)
                     write_row(incidents_dir, prior)
@@ -677,7 +764,7 @@ def run_check(
     else:
         grouped = set()
     for row in open_rows:
-        if row.get("pushed") or row["key"] in grouped:
+        if row.get("pushed") or row["key"] in grouped or row["kind"] in _SYNC_OWNED:
             continue
         event = _EVENTS.get(row["kind"], "health_incident")
         if notify_fn(event, {"incident": row["key"]}, _line(row)) is False:

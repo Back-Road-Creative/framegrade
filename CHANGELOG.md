@@ -5,11 +5,24 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.3.128] - 2026-11-20
+## [0.3.128] - 2026-11-21
+
+### Added
+
+- `gomoveshift metrics collect` now records the Shorts arm decisions in `<seo storage>/shorts_arm_decisions.json` (`schema`, `decided_at`, one entry per arm) once every factor is decided; a run that fails part-way leaves the old `decided_at`. The `ARM_DECISION` lines are unchanged.
+- `gomoveshift health check` rule 13, `seo_feedback_stale`, files an incident when the decisions file is missing, unreadable or over 36 h old (`seo_feedback_stale:decisions`), one grouped incident when settled YouTube Shorts posted in the last 28 days have null views or average view percentage (`seo_feedback_stale:metrics`). An open row's detail and count are refreshed without a second push. Each resolves when it clears; an unreadable input is a note and keeps its open incident live. See `docs/seo-feedback-stale.md`.
+- `gomoveshift health sync-short-text` now writes a run record on every run, a crash included (`<incidents dir>.short_text_sync_run.json`: `schema`, `ran_at`, `changed`, `refused`, `crashed`), atomically; a write failure never changes the exit code. `gomoveshift health check` rule 13 gains `seo_feedback_stale:sync`, which opens when that record is missing, unreadable, dated over an hour ahead, or over 36 h old and resolves on a fresh one, so a nightly sync that stops running is noticed. A crashed run is still reported by `short_text_sync_crash` alone. See `docs/seo-feedback-stale.md`.
+- `gomoveshift health sync-short-text` runs the Short text sync (`queue sync-short-text --apply`) unattended and files a `short_text_sync_refused:<project>` or `short_text_sync_crash` health incident for a refusal or a crash, resolves it when a run is clean, and pushes it once. Schedule it after the nightly `metrics collect`.
+
+### Changed
+
+- redactcam is pinned to 143b3be. The blur mask is now rendered only inside the box regions, and frames with no box are skipped (redactcam #21). The output is byte-identical to the previous full-frame render, so the privacy result does not change; the blur stage does less work per frame.
+- The box-region crop is kept out of OpenCV's small-image threading race (redactcam #22), so the faster render is deterministic under multiple threads.
 
 ### Fixed
 
-- `queue sync-short-text` is idempotent across sidecars: sidecars are planned in earliest-slot order (ties by path), each seeing one pre-run read of the queue's text (published Shorts of a project with a queued Short included) plus the final text of the sidecars before it, and an earlier sidecar's new text is checked against later sidecars' final text, so two queued projects that share a place no longer flip description leads on every apply. The title ledger and nightly title snapshot are read once per run, and a refusal re-checks the neighbour-place and batch rules on the final text. After a failed write the remaining sidecars are refused for that run.
+- `queue sync-short-text` is idempotent across sidecars: sidecars are planned in earliest-slot order (ties by path), each seeing one pre-run read of the queue's text (published Shorts of a project with a queued Short included) plus the final text of the sidecars before it, and an earlier sidecar's new text is checked against later sidecars' final text, so two queued projects that share a place no longer flip description leads on every apply. The title ledger and nightly title snapshot are read once per run, and a refusal re-checks the neighbour-place and batch rules on the final text. After a failed write the remaining sidecars are refused for that run. The nightly entry point files an incident for every refusal except the few flagged transient where they are made (lead time, live lease, a write race or busy database, the cascade after a failed write; never matched by their words), so an unflagged reason fails closed; an unplannable sidecar's stored text still reaches the other sidecars' gates, the per-location cap is counted within one sidecar's whole plan (an approximation of enqueue's batch count), the entry point never raises and takes a lock around its incident write.
+- The nightly Short text sync refines what clears on its own: a sidecar skipped after another's failed write is clash-checked against what was written (a clash is actionable), only a busy database (not SQLite LOCKED) is transient, a sibling slot already past on a still-queued row is actionable unless the dispatcher's retry backoff (`next_attempt_at`) is still ahead, a sanctioned repeat in the one-at-a-time fallback is kept where the predecessor keeps its place, and a Short refused on three consecutive runs (an actionable night counts toward the streak) whose latest refusal is transient is filed as an incident naming the run count; a crash run or a run that finds the store lock held neither counts nor resets it.
 
 ## [0.3.127] - 2026-11-20
 
