@@ -150,6 +150,17 @@ nothing.
 
 A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
 
+12. **Nightly Short text sync** (`gomoveshift health sync-short-text`,
+   `gomoveshift/health/short_text_sync.py`; not part of `health check`, which never runs it).
+   `short_text_sync_refused` (key `short_text_sync_refused:<project>`, row file
+   `short_text_sync_refused_<project>.json`, `shorts` = each refused Short's `delivery_id`,
+   `short_index`, `reason`) and `short_text_sync_crash` (key `short_text_sync_crash`, `detail` =
+   the exception). Pushed once (`health_short_text_sync_refused`, `health_short_text_sync_crash`);
+   a refusal row resolves on the first later run that no longer refuses THAT project (other
+   projects' rows stay open), the crash row on the first run that completes; a crash leaves
+   refusal rows open. Only actionable refusals file a row; `health check` lists these rows but
+   never writes or pushes them. Details: `183-queue-sync-short-text.md`.
+
 ## Push and idempotency
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves

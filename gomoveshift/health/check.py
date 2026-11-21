@@ -26,7 +26,14 @@ _EVENTS = {
     "backlog_store_orphan": "health_backlog_store_orphan",
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
+    "short_text_sync_refused": "health_short_text_sync_refused",
+    "short_text_sync_crash": "health_short_text_sync_crash",
 }
+
+#: Kinds ``health sync-short-text`` owns end to end: it alone files, resolves and pushes them
+#: (the incident store has no lock, so two writers of one row would race). ``run_check`` lists
+#: them but never writes or pushes one.
+_SYNC_OWNED = ("short_text_sync_refused", "short_text_sync_crash")
 
 #: A queued Short the final-text review still refuses this close to its slot (or past it)
 #: will fail at dispatch and its slot is never refilled; ``dispatch-queue`` already tried
@@ -67,6 +74,10 @@ def _footage_line(rows: List[Dict[str, Any]]) -> str:
 
 
 def _line(row: Dict[str, Any]) -> str:
+    if row["kind"] in _SYNC_OWNED:
+        from .short_text_sync import incident_line  # noqa: PLC0415
+
+        return incident_line(row)
     if row["kind"] == "drive_failed":
         return drives.summary(row)
     if row["kind"] == "failure_unattended":
@@ -677,7 +688,7 @@ def run_check(
     else:
         grouped = set()
     for row in open_rows:
-        if row.get("pushed") or row["key"] in grouped:
+        if row.get("pushed") or row["key"] in grouped or row["kind"] in _SYNC_OWNED:
             continue
         event = _EVENTS.get(row["kind"], "health_incident")
         if notify_fn(event, {"incident": row["key"]}, _line(row)) is False:

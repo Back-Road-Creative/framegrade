@@ -2102,6 +2102,24 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
         u.add_argument(flag, type=kind, default=None, help=text)
     u.add_argument("--dry-run", action="store_true", help="Report every step; change nothing.")
     u.add_argument("--json", action="store_true", help="Print the result as JSON.")
+    t = sub.add_parser(
+        "sync-short-text",
+        help="Nightly: re-write every eligible queued YouTube Short's text with the current "
+        "generator (`queue sync-short-text --apply`), file an incident for a crash or a "
+        "refused Short, resolve it when clean (exit 0 clean, 1 refused, 2 crash)",
+    )
+    t.add_argument(
+        "--data-root", type=Path, default=None, help="Root the health state lives under."
+    )
+    t.add_argument(
+        "--incidents-dir",
+        type=Path,
+        default=None,
+        help="Incident rows dir (env GMS_HEALTH_INCIDENTS_DIR).",
+    )
+    t.add_argument(
+        "--jobs-dir", type=Path, default=None, help="Accepted for cron symmetry; unused."
+    )
 
 
 def _add_sync_site_parser(subparsers: argparse._SubParsersAction) -> None:
