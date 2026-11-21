@@ -118,12 +118,7 @@ def test_every_caption_fact_is_in_the_record():
                 "Polk",
                 "County",
                 "Passing",
-                "Through",
-                "Location",
-                "Clip",
-                "Footage",
-                "Here",
-                "This",
+                "Driving",
             }
             others = [s for s in sentences if s is not place[0]]
             assert others == [], (platform, others)
@@ -166,10 +161,11 @@ def test_caption_template_id_is_one_stable_id_per_shape():
     )
 
 
-#: Words and emoji that claim a camera, a vehicle, a viewpoint, the weather or a time of day:
-#: things the pipeline does not measure, so no caption shape may say them.
+#: Words and emoji that claim a camera, a vehicle, the weather or a time of day: things the
+#: pipeline does not measure, so no caption shape may say them. "POV" and "driving" are
+#: allowed: every short is a first-person drive.
 UNBACKED = re.compile(
-    r"dashcam|dash cam|camera|gopro|insta360|\bpov\b|driver|wheel|windshield|front[- ]seat|"
+    r"dashcam|dash cam|camera|gopro|insta360|driver|wheel|windshield|front[- ]seat|"
     r"by car|\bcar\b|sunny|rain|cloud|overcast|foggy|snow|sunrise|sunset|morning|evening|"
     r"night|golden hour|[\u2600-\u26ff\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF]",
     re.I,
@@ -188,3 +184,25 @@ def test_no_caption_shape_claims_what_the_pipeline_does_not_measure():
             text = post.captions[platform].replace("\U0001f4cd", "").replace("\U0001f4f9", "")
             body = text.split("\n\n#")[0].split("#")[0]
             assert not UNBACKED.search(body), (platform, body)
+
+
+def test_caption_shapes_keep_the_channel_voice():
+    """The owner's hand titles say "Driving X" and "X \u2014 POV"; a shape that reads like a
+    form label ("Location: X", "Clip from X") is not the channel's voice."""
+    from gomoveshift.pipeline import social_generator as sg
+
+    shapes = [t for pool in sg._PLATFORM_CAPTION_TEMPLATES.values() for t in pool]
+    assert not [t for t in shapes if re.search(r"location:|\bclip\b|footage|this is", t, re.I)]
+    assert any(re.search(r"\bpov\b", t, re.I) for t in shapes)
+
+
+def test_every_caption_shape_passes_the_plan_grammar_gate():
+    """A shape the plan grammar gate refuses (a bare leading "Through ...") fails the whole
+    plan at enqueue, so no shape may carry one."""
+    from gomoveshift.pipeline import social_generator as sg
+    from gomoveshift.pipeline.validation.content_gates import find_grammar_issues
+
+    for platform, pool in sg._PLATFORM_CAPTION_TEMPLATES.items():
+        for template in pool:
+            text = template.format(location="Ashby County")
+            assert find_grammar_issues(text) == [], (platform, template)

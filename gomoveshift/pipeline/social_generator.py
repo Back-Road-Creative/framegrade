@@ -797,33 +797,34 @@ def _frame_fields(template: str) -> "set[str]":
 # {location} with LOCATION_WITHHELD instead so the place is never named,
 # never by omitting the slot from some openers and not others. A caption states
 # the measured place and, for classified terrain only, one terrain clause:
-# facts the record holds, no filler. Shapes are few and disjoint per platform. No shape
-# claims a camera, a vehicle, a viewpoint or the weather: the pipeline measures none of
-# them ("Dashcam footage from ...", "POV", "from the driver's seat", "by car" are gone).
+# facts the record holds, no filler. Shapes are few and disjoint per platform, in the
+# channel's own hand-title voice ("Driving X", "X — POV"). Every
+# short is a first-person drive, so "POV" and "driving" are true of all of them; no shape
+# claims a camera, a vehicle or the weather, which the pipeline does not measure.
 # "Passing through" stays on Facebook only because ``facebook_caption_edit.MEASURED_TEMPLATE``
 # is pinned to it.
 YOUTUBE_CAPTION_TEMPLATES = [
-    "{location}.",
-    "Location: {location}.",
-    "Clip location: {location}.",
+    "Driving {location} \u2014 POV.",
+    "{location} \u2014 POV.",
+    "POV drive through {location}.",
 ]
 
 FACEBOOK_CAPTION_TEMPLATES = [
     "Passing through {location}.",
-    "In {location}.",
-    "This is {location}.",
+    "Out in {location}.",
+    "Driving {location}.",
 ]
 
 INSTAGRAM_CAPTION_TEMPLATES = [
-    "📍 {location}",
-    "Here: {location}",
-    "At {location}",
+    "\U0001f4cd {location}",
+    "{location}, POV",
+    "Driving in {location}",
 ]
 
 TIKTOK_CAPTION_TEMPLATES = [
-    "{location} clip",
-    "Clip from {location}",
-    "Footage from {location}",
+    "POV: driving {location}",
+    "{location} drive",
+    "A drive in {location}",
 ]
 
 #: The one terrain clause a caption may carry, and only for a terrain the

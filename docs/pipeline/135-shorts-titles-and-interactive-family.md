@@ -348,10 +348,11 @@ composes ONE caption per platform (`SocialPost.captions: dict[str, str]`, keyed
 
 **Facts only (2026-11).** A caption is the measured place and nothing else: one sentence
 shape from the platform's own pool (`YOUTUBE_CAPTION_TEMPLATES`, `FACEBOOK_CAPTION_TEMPLATES`,
-`INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES`), such as "Location: Polk County."
-No shape claims a camera, a vehicle, a viewpoint or the weather ("Dashcam footage from",
-"POV", "from the driver's seat", "by car" and the Instagram weather/car emoji are gone):
-the pipeline measures none of them. "Passing through {location}." stays on Facebook only
+`INSTAGRAM_CAPTION_TEMPLATES`, `TIKTOK_CAPTION_TEMPLATES`), such as "Driving Polk County — POV."
+Shapes follow the channel's hand-title voice ("Driving X", "X — POV");
+"POV" and "driving" are true of every short. No shape claims a camera, a vehicle or the
+weather ("Dashcam footage from", "from the driver's seat", "by car" and the Instagram
+weather/car emoji are gone): the pipeline measures none of them. "Passing through {location}." stays on Facebook only
 because `facebook_caption_edit.MEASURED_TEMPLATE` is pinned to it. The pools are three shapes each, disjoint across platforms (so no two platforms
 collide), and every shape is a stable `caption_template_id` for the meta-learning ranker.
 A terrain clause ("Coastal roads.", from `CAPTION_DETAIL_TEMPLATES`) follows only when the
