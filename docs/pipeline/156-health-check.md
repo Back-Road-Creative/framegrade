@@ -161,7 +161,7 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9 and 10 (it would resolve
    refusal rows open. Every refusal files a row except the named transient ones (a lead time, a
    live lease, a write race or its cascade); an old title with no stamp is permanent, so it files.
    `health check` lists these rows (an open one keeps it at exit 1) but never writes or pushes
-   them; the sync takes a `flock` on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
+   them; the sync takes a non-blocking file lock on `<incidents dir>.lock` around its store write. Details: `183-queue-sync-short-text.md`.
 
 ## Push and idempotency
 

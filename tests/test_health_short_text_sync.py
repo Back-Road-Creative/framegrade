@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from test_queue_sync_short_text import NOW, _short, _world
 
+from gomoveshift.pipeline import _file_lock
 from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.publishing import queue_short_text as qst
 
@@ -352,3 +353,11 @@ def test_a_held_store_lock_skips_the_incident_work_and_exits_clean(tmp_path, mon
     assert not (tmp_path / "inc").exists() or _inc(tmp_path) == {}
     assert notified == []
     assert run()["exit"] == 1 and len(_inc(tmp_path)) == 1  # the next run, lock free, files it
+
+
+def test_the_store_lock_is_the_portable_file_lock_so_the_module_imports_on_windows():
+    # ci/import_smoke.py imports every module on Windows, where fcntl does not exist.
+    from gomoveshift.health import short_text_sync
+
+    assert not hasattr(short_text_sync, "fcntl")
+    assert short_text_sync.lock_exclusive is _file_lock.lock_exclusive

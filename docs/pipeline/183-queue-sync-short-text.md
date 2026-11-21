@@ -82,7 +82,7 @@ Each row is pushed once (`health_short_text_sync_refused`, `health_short_text_sy
 that fails is retried the next night) and a refusal row resolves on the first run that no longer refuses that project (the crash row, on the first run that completes). A crash leaves
 the refusal rows open (it proves nothing about them). `health check` lists these rows but never
 writes, resolves or pushes them: this command is their only writer, and it takes an exclusive
-non-blocking `flock` on `<incidents dir>.lock` around the store write (held: log a line, skip
+non-blocking file lock (`pipeline/_file_lock.py`, portable to Windows) on `<incidents dir>.lock` around the store write (held: log a line, skip
 the incident work, exit 0). An open sync-owned row keeps `health check` at exit 1 like any open
 incident. Exit 0 clean, 1 when a Short was refused for an actionable reason, 2 on a crash; the
 entry point never raises (a failure in the store or the push is a crash). It takes no `--jobs-dir`.
