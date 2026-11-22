@@ -7,7 +7,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from test_queue_sync_short_text import NOW, _short, _world
+from test_queue_sync_short_text import NOW, _live_schedule, _short, _world
 
 from gomoveshift.pipeline import _file_lock
 from gomoveshift.pipeline import longform_metadata as lm
@@ -232,7 +232,8 @@ def test_the_health_cli_command_runs_the_sync(tmp_path, monkeypatch, capsys):
 
     from gomoveshift.health import short_text_sync
 
-    plan, conn = _world(tmp_path, [_short(1)])
+    # The CLI reads the real clock, so the slot must too (NOW+72h went stale on 2026-11-22).
+    plan, conn = _world(tmp_path, [_short(1, schedule=_live_schedule())])
     conn.close()
     monkeypatch.setattr(short_text_sync, "_brand_location_cap", lambda: None)
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
