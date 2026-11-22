@@ -1,26 +1,23 @@
 """Relink a drive's queued first comments and sidecars to a replacement long-form upload.
 
-Replacing a still-scheduled long-form video uploads the re-render as a NEW video and deletes
-the old one, so the old id is dead. Four places still name it:
+The old video id is dead after a replace, yet four places name it: the queue's
+``first_comment_text``, ``related_video_worklist_state.json``, ``<project>_publish_plan.json``
+and ``pending_journal.json``. :func:`relink_replaced_lf` rewrites old -> new in those and
+nowhere else: never the journal site / API / KV / photos, never a live comment. File stores run
+first, the queue last, each in its own ``try`` (failures land in ``RelinkReport.errors``).
+See docs/social-publishing-queue.md for each store's rule.
 
-- the queue's ``deliveries.first_comment_text`` ("Watch the full drive: https://youtu.be/<id>");
-- the drive's ``related_video_worklist_state.json`` (operator lines);
-- the drive's ``<project>_publish_plan.json`` (``parent_lf_video_id`` and URLs in the text);
-- the drive's ``pending_journal.json`` (``youtube_id`` of an entry not flushed yet).
-
-:func:`relink_replaced_lf` rewrites exactly those, old id -> new id, and nothing else: it never
-touches the journal site, its API or KV, or any /journal-photo/ file. Queue rows whose first
-comment is already posted, or whose status is terminal / ``awaiting_manual_publish``, are left
-alone and listed with the reason. Every file write is atomic; a second run finds nothing to
-change and reports zero; ``dry_run`` reports without writing.
-
-``pending_journal.json`` records no "sent" flag: the replay flush REMOVES an entry once written
-to the site, so every entry still in the file has not been sent and is rewritten.
+Reported as ``operator_items``, never rewritten: a posted comment still linking the old id and
+journeys to check by hand.
+A rerun reports zero changes; ``dry_run`` reports without writing.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -28,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
-from gomoveshift.pipeline._atomic_write import atomic_write_text
+from gomoveshift.pipeline._atomic_write import atomic_write_json
 from gomoveshift.pipeline.pending_journal import (
     PENDING_FILENAME,
     load_pending,
@@ -36,8 +33,11 @@ from gomoveshift.pipeline.pending_journal import (
     save_pending,
 )
 from gomoveshift.publishing import queue as _queue
+from gomoveshift.publishing.plan_io import load_publish_plan
+from gomoveshift.publishing.queue_short_text import SidecarChangedError
 
 WORKLIST_STATE_FILENAME = "related_video_worklist_state.json"
+CHECKLIST_FILENAME = "operator_checklist.txt"
 _ID_CHAR = "A-Za-z0-9_-"
 
 
@@ -74,6 +74,11 @@ class RelinkReport:
     queue_rewritten: List[QueueRewrite] = field(default_factory=list)
     queue_skipped: List[QueueSkip] = field(default_factory=list)
     files: List[FileRewrite] = field(default_factory=list)
+    #: Things only a human can settle (a live comment that still links the old id, rows of
+    #: other projects, a Gate C/D to re-confirm, journey files to check).
+    operator_items: List[str] = field(default_factory=list)
+    #: One line per store that failed; the other stores' results above are still true.
+    errors: List[str] = field(default_factory=list)
 
     @property
     def changes(self) -> int:
@@ -94,78 +99,137 @@ def _validate(id_map: Mapping[str, str]) -> None:
         raise ValueError(f"id_map chains (a new id is also an old id): {chained}")
 
 
+def _alt(id_map: Mapping[str, str]) -> str:
+    return "|".join(re.escape(o) for o in sorted(id_map, key=len, reverse=True))
+
+
 def _pattern(id_map: Mapping[str, str]) -> "re.Pattern[str]":
-    alt = "|".join(re.escape(o) for o in sorted(id_map, key=len, reverse=True))
-    return re.compile(rf"(?<![{_ID_CHAR}])(?:{alt})(?![{_ID_CHAR}])")
+    return re.compile(rf"(?<![{_ID_CHAR}])(?:{_alt(id_map)})(?![{_ID_CHAR}])")
+
+
+def _url_pattern(id_map: Mapping[str, str]) -> "re.Pattern[str]":
+    """An old id only where a URL names it: ``youtu.be/<id>``, ``watch?v=<id>``, ``/shorts/<id>``."""
+    return re.compile(rf"(?P<ctx>youtu\.be/|[?&]v=|/shorts/)(?P<id>{_alt(id_map)})(?![{_ID_CHAR}])")
 
 
 def _sub(text: str, pat: "re.Pattern[str]", id_map: Mapping[str, str]) -> Tuple[str, int]:
     return pat.subn(lambda m: id_map[m.group(0)], text)
 
 
-def _walk(node: Any, pat, id_map) -> Tuple[Any, int]:
+def _walk_plan(node: Any, url_pat, id_map, key: str = "") -> Tuple[Any, int]:
+    """Rewrite ``parent_lf_video_id`` and URL-context ids; every other string is left alone."""
     if isinstance(node, str):
-        return _sub(node, pat, id_map)
+        if key == "parent_lf_video_id" and node in id_map:
+            return id_map[node], 1
+        return url_pat.subn(lambda m: m.group("ctx") + id_map[m.group("id")], node)
     if isinstance(node, list):
-        out, n = [], 0
-        for item in node:
-            new, k = _walk(item, pat, id_map)
-            out.append(new)
-            n += k
-        return out, n
+        got = [_walk_plan(item, url_pat, id_map) for item in node]
+        return [g[0] for g in got], sum(g[1] for g in got)
     if isinstance(node, dict):
-        out_d, n = {}, 0
-        for key, item in node.items():
-            new, k = _walk(item, pat, id_map)
-            out_d[key] = new
-            n += k
-        return out_d, n
+        got_d = {k: _walk_plan(v, url_pat, id_map, k) for k, v in node.items()}
+        return {k: g[0] for k, g in got_d.items()}, sum(g[1] for g in got_d.values())
     return node, 0
 
 
-def _relink_json_file(path: Path, pat, id_map, *, dry_run: bool, sort_keys: bool) -> FileRewrite:
+def _relink_plan(path: Path, id_map, *, dry_run: bool) -> FileRewrite:
     if not path.is_file():
         return FileRewrite(str(path), 0, False, "absent")
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    new, count = _walk(raw, pat, id_map)
+    data = path.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    new, count = _walk_plan(json.loads(data), _url_pattern(id_map), id_map)
     if count == 0:
         return FileRewrite(str(path), 0, False)
-    if not dry_run:
-        atomic_write_text(path, json.dumps(new, sort_keys=sort_keys, indent=2) + "\n")
-    return FileRewrite(str(path), count, not dry_run)
+    if dry_run:
+        return FileRewrite(str(path), count, False)
+    tmp = path.with_name(path.name + ".relink-tmp")
+    try:
+        tmp.write_text(json.dumps(new, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        load_publish_plan(tmp)  # parse + consistency gates, before anything replaces the plan
+        if hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+            raise SidecarChangedError(f"{path.name} changed while the relink ran")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return FileRewrite(str(path), count, True)
 
 
-def _relink_pending(path: Path, id_map, *, dry_run: bool) -> FileRewrite:
+def _relink_worklist(out: Path, pat, id_map, *, dry_run: bool) -> FileRewrite:
+    """Append the NEW ``RELATED VIDEO`` lines (and a ``SUPERSEDED`` line per replaced id) to the
+    operator checklist; the dedup state only gains the new lines, its old ones are kept."""
+    state_path = out / WORKLIST_STATE_FILENAME
+    if not state_path.is_file():
+        return FileRewrite(str(state_path), 0, False, "absent")
+    raw = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError(f"{state_path.name}: expected a JSON list, got {type(raw).__name__}")
+    emitted = {line for line in raw if isinstance(line, str)}
+    new_lines: List[str] = []
+    pairs: Dict[str, str] = {}
+    for line in sorted(emitted):
+        new_line, n = _sub(line, pat, id_map)
+        if n == 0 or new_line in emitted or new_line in new_lines:
+            continue
+        new_lines.append(new_line)
+        pairs.update({m.group(0): id_map[m.group(0)] for m in pat.finditer(line)})
+    if not new_lines:
+        return FileRewrite(str(state_path), 0, False)
+    if dry_run:
+        return FileRewrite(str(state_path), len(new_lines), False)
+    appended = new_lines + [f"SUPERSEDED: {old} replaced by {new}" for old, new in pairs.items()]
+    with (out / CHECKLIST_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.writelines(line + "\n" for line in appended)
+    atomic_write_json(state_path, sorted(emitted | set(new_lines)))
+    return FileRewrite(
+        str(state_path), len(new_lines), True, f"new lines appended to {CHECKLIST_FILENAME}"
+    )
+
+
+def _relink_pending(path: Path, id_map, report: RelinkReport, *, dry_run: bool) -> FileRewrite:
     if not path.is_file():
         return FileRewrite(str(path), 0, False, "absent")
-    if dry_run:  # a read only: the lock file would be the one thing a dry run left behind
-        count = sum(e.youtube_id in id_map for e in load_pending(path))
-    else:
-        with pending_lock(path):
-            entries = load_pending(path)
-            count = 0
-            for entry in entries:
-                if entry.youtube_id in id_map:
-                    entry.youtube_id = id_map[entry.youtube_id]
-                    count += 1
-            if count:
-                save_pending(path, entries)
-    note = "no sent flag is recorded; every entry still in the file is unsent" if count else ""
-    return FileRewrite(str(path), count, bool(count) and not dry_run, note)
+    with contextlib.nullcontext() if dry_run else pending_lock(path):
+        entries = load_pending(path)
+        hit = [e for e in entries if e.youtube_id in id_map]
+        if hit and not dry_run:
+            for entry in hit:
+                entry.youtube_id = id_map[entry.youtube_id]
+            # merge_pending semantics: the later entry wins, the first slot is kept
+            save_pending(path, {(e.journey_path, e.youtube_id): e for e in entries}.values())
+    for journey in sorted({e.journey_path for e in hit}):
+        report.operator_items.append(
+            f"pending journal entry for {journey} now names the replacement id; the journey "
+            "file was not read, so if it already lists the OLD id, remove that entry by hand"
+        )
+    note = "no sent flag is recorded; every entry still in the file is unsent" if hit else ""
+    return FileRewrite(str(path), len(hit), bool(hit) and not dry_run, note)
+
+
+def _row_label(row) -> str:
+    return f"delivery {row['id']} (short {row['short_index']}, {row['platform']})"
 
 
 def _relink_queue(conn, project, pat, id_map, now, report) -> None:
-    rows = _queue.first_comments_naming(conn, project, id_map)
-    for row in rows:
+    for row in _queue.first_comments_naming(conn, project, id_map):
         text = row["first_comment_text"]
         new_text, n = _sub(text, pat, id_map)
         if n == 0:  # the old id only inside a longer token
             continue
         base = (row["id"], row["short_index"], row["platform"], row["status"])
+        leased = (
+            row["lease_owner"] is not None and (row["lease_expires_at"] or "") > now.isoformat()
+        )
         if row["first_comment_posted_at"] is not None:
-            reason = "first comment already posted"
+            reason = "comment already live"
+            report.operator_items.append(
+                f"{_row_label(row)}: comment already live, links OLD id; a live comment is "
+                "never edited, fix it by hand"
+            )
         elif row["status"] in _queue.FIRST_COMMENT_FROZEN_STATUSES:
             reason = f"status {row['status']}"
+        elif row["first_comment_attempts"] >= _queue.FIRST_COMMENT_MAX_ATTEMPTS:
+            reason = f"attempts exhausted ({row['first_comment_attempts']} refusals)"
+        elif leased:
+            reason = f"lease held by {row['lease_owner']} until {row['lease_expires_at']}; rerun"
         else:
             written = False
             if not report.dry_run:
@@ -194,22 +258,29 @@ def relink_replaced_lf(
     """Rewrite every old long-form id in ``id_map`` to its replacement (see the module doc).
 
     Raises ``ValueError`` on an empty map, an empty id, an old id equal to its new id, or a new
-    id that is also an old id (a chain would break idempotence). Idempotent: once rewritten,
+    id that is also an old id (a chain would break idempotence). Past that, a failing store is
+    recorded in ``report.errors`` and the rest still run. Idempotent: once rewritten,
     the old ids are gone, so a rerun reports zero changes and writes nothing."""
     _validate(id_map)
     out = Path(output_dir)
     pat = _pattern(id_map)
     report = RelinkReport(project=project, dry_run=dry_run)
-    _relink_queue(conn, project, pat, id_map, now, report)
-    report.files.append(
-        _relink_json_file(
-            out / WORKLIST_STATE_FILENAME, pat, id_map, dry_run=dry_run, sort_keys=False
-        )
+    plan_path = out / f"{project}_publish_plan.json"
+    steps = (
+        (WORKLIST_STATE_FILENAME, lambda: _relink_worklist(out, pat, id_map, dry_run=dry_run)),
+        (plan_path.name, lambda: _relink_plan(plan_path, id_map, dry_run=dry_run)),
+        (
+            PENDING_FILENAME,
+            lambda: _relink_pending(out / PENDING_FILENAME, id_map, report, dry_run=dry_run),
+        ),
     )
-    report.files.append(
-        _relink_json_file(
-            out / f"{project}_publish_plan.json", pat, id_map, dry_run=dry_run, sort_keys=True
-        )
-    )
-    report.files.append(_relink_pending(out / PENDING_FILENAME, id_map, dry_run=dry_run))
+    for name, step in steps:  # file stores first, the queue last
+        try:
+            report.files.append(step())
+        except Exception as exc:  # noqa: BLE001 -- one store failing must not hide the others
+            report.errors.append(f"{name}: {type(exc).__name__}: {exc}")
+    try:
+        _relink_queue(conn, project, pat, id_map, now, report)
+    except Exception as exc:  # noqa: BLE001
+        report.errors.append(f"queue: {type(exc).__name__}: {exc}")
     return report

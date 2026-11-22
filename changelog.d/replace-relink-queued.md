@@ -1,5 +1,8 @@
 ### Added
 
-- `relink_replaced_lf` rewrites a replaced long-form upload's old video id to the new one in the
-  queue's unposted first comments and in the drive's related-video worklist state, publish plan
-  and pending journal sidecar; posted, terminal and manual-publish rows are skipped and reported.
+- `relink_replaced_lf` rewrites a replaced long-form upload's old id in unposted queue first
+  comments, the publish plan, the pending journal and the operator checklist.
+
+### Fixed
+
+- First-comment drains re-read the text before posting and mark it posted only if unchanged.

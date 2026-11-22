@@ -544,6 +544,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
                 "ALTER TABLE deliveries ADD COLUMN first_comment_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        if "first_comment_prior_text" not in cols:
+            # JSON list of texts a relink replaced (``rewrite_unposted_first_comment``);
+            # the YouTube drain's dedup accepts a live comment saying any of them.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_prior_text TEXT")
         for recovery_col, recovery_type in (
             # ``recover_terminal_delivery``: NULL on every row that is not a
             # recovery row -- an honest "not a recovery", never backfilled.
@@ -1423,44 +1427,85 @@ def find_delivery(
 def first_comments_naming(
     conn: sqlite3.Connection, project_name: str, needles: Iterable[str]
 ) -> list:
-    """Every delivery of ``project_name`` whose ``first_comment_text`` contains one of
-    ``needles`` (a plain substring; the caller applies any token boundary), in id order,
-    whatever its status -- the caller decides which are still safe to rewrite."""
+    """Deliveries of ``project_name`` whose ``first_comment_text`` contains a needle (plain
+    substring), in id order, whatever their state -- the caller decides which are safe."""
     needles = [n for n in needles if n]
     if not needles:
         return []
     clause = " OR ".join("instr(first_comment_text, ?) > 0" for _ in needles)
     return conn.execute(
-        "SELECT id, short_index, platform, status, first_comment_text, first_comment_posted_at "  # noqa: S608
+        "SELECT id, short_index, platform, status, first_comment_text, "  # noqa: S608
+        "first_comment_posted_at, first_comment_attempts, lease_owner, lease_expires_at "
         f"FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
         (project_name, *needles),
     ).fetchall()
 
 
-#: Statuses whose first comment is out of reach of a rewrite: terminal rows, and a row a human
-#: publishes by hand (its comment is posted, if at all, outside this queue's schedule).
-FIRST_COMMENT_FROZEN_STATUSES = (*TERMINAL_STATUSES, STATUS_AWAITING_MANUAL_PUBLISH)
+#: Statuses whose first comment can never post. ``published`` is NOT here: a scheduled
+#: YouTube Short is ``published`` from upload and its comment still posts later.
+FIRST_COMMENT_FROZEN_STATUSES = ("failed_permanent", "cancelled", STATUS_MISSING_REMOTE)
+
+
+def first_comment_prior_texts(row: Any) -> Tuple[str, ...]:
+    """The texts a relink replaced on this delivery row (``first_comment_prior_text``)."""
+    try:
+        raw = row["first_comment_prior_text"]
+        texts = json.loads(raw) if raw else []
+    except (KeyError, IndexError, TypeError, ValueError):
+        return ()
+    return tuple(t for t in texts if isinstance(t, str)) if isinstance(texts, list) else ()
 
 
 def rewrite_unposted_first_comment(
     conn: sqlite3.Connection, delivery_id: int, old_text: str, new_text: str, now: str
 ) -> bool:
-    """Compare-and-set ``first_comment_text`` ``old_text`` -> ``new_text`` on one delivery.
-
-    Only while the comment has not been posted (``first_comment_posted_at`` NULL) and the row
-    is not in ``FIRST_COMMENT_FROZEN_STATUSES``; ``False`` (nothing written) when the row moved
-    since it was read. Touches no other column, so a lease or retry in flight is undisturbed."""
+    """Compare-and-set ``first_comment_text`` ``old_text`` -> ``new_text`` on one delivery,
+    only while the comment can still post: unposted, under ``FIRST_COMMENT_MAX_ATTEMPTS``,
+    status not in ``FIRST_COMMENT_FROZEN_STATUSES``, no live lease. ``False`` (nothing written)
+    when the row moved since it was read. ``old_text`` joins ``first_comment_prior_text`` for
+    the drain's dedup; no other column changes."""
     frozen = ", ".join("?" for _ in FIRST_COMMENT_FROZEN_STATUSES)
     with conn:
+        row = conn.execute(
+            "SELECT first_comment_prior_text FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        prior = list(first_comment_prior_texts(row))
+        if old_text not in prior:
+            prior.append(old_text)
         return (
             conn.execute(
-                "UPDATE deliveries SET first_comment_text=?, updated_at=? "  # noqa: S608
-                "WHERE id=? AND first_comment_text=? AND first_comment_posted_at IS NULL "
-                f"AND status NOT IN ({frozen})",
-                (new_text, now, delivery_id, old_text, *FIRST_COMMENT_FROZEN_STATUSES),
+                "UPDATE deliveries SET first_comment_text=?, first_comment_prior_text=?, "  # noqa: S608
+                "updated_at=? WHERE id=? AND first_comment_text=? "
+                "AND first_comment_posted_at IS NULL AND first_comment_attempts < ? "
+                f"AND status NOT IN ({frozen}) "
+                "AND (lease_owner IS NULL OR lease_expires_at <= ?)",
+                (
+                    new_text,
+                    json.dumps(prior),
+                    now,
+                    delivery_id,
+                    old_text,
+                    FIRST_COMMENT_MAX_ATTEMPTS,
+                    *FIRST_COMMENT_FROZEN_STATUSES,
+                    now,
+                ),
             ).rowcount
             == 1
         )
+
+
+def first_comment_still_current(conn: sqlite3.Connection, delivery_id: int) -> Optional[Any]:
+    """The row's current text columns, or None once its comment is posted or gone: the drains
+    re-read this just before posting so a relink after selection is honoured."""
+    row = conn.execute(
+        "SELECT first_comment_text, first_comment_prior_text FROM deliveries "
+        "WHERE id=? AND first_comment_posted_at IS NULL "
+        "AND first_comment_text IS NOT NULL AND first_comment_text <> ''",
+        (delivery_id,),
+    ).fetchone()
+    return row
 
 
 class RecoveryRefusedError(Exception):
