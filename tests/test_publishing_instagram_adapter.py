@@ -960,3 +960,86 @@ def test_a_resumed_container_needs_no_transcode(queue_conn):
     transition(queue_conn, did, "submitting", "uploaded", platform_upload_id="c-old")
     adapter.publish(record, conn=queue_conn, delivery_id=did, video_bytes=b"SOURCE")
     assert reels.uploaded == [] and reels.created == []
+
+
+# --- diagnosable errors: raw body excerpt + op label --------------------------
+
+
+def _text_resp(status_code, text, json_exc=True):
+    resp = Mock(status_code=status_code, text=text)
+    resp.json = Mock(side_effect=ValueError("no json")) if json_exc else Mock(return_value={})
+    return resp
+
+
+def test_no_error_object_includes_bounded_whitespace_collapsed_body_excerpt():
+    raw = "Bad   gateway\n\n" + ("x" * 1000)
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(400, {}, raw_text=raw)
+    msg = str(exc_info.value)
+    assert "Bad gateway xxx" in msg
+    assert "x" * 400 not in msg
+    assert "\n" not in msg
+
+
+def test_error_object_present_does_not_append_raw_excerpt():
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(
+            400, {"error": {"code": 100, "message": "bad field"}}, raw_text="RAWBODYMARK"
+        )
+    assert "RAWBODYMARK" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        f"oops access_token={FAKE_TOKEN}&x=1",
+        f"oops Authorization: Bearer {FAKE_TOKEN}",
+        f'oops {{"access_token": "{FAKE_TOKEN}"}}',
+        f"oops OAuth {FAKE_TOKEN}",
+        f"plain {FAKE_TOKEN} in text",
+    ],
+)
+def test_token_in_raw_body_never_reaches_message(raw):
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        _raise_for_graph_error(400, {}, raw_text=raw, secrets=(FAKE_TOKEN,))
+    assert FAKE_TOKEN not in str(exc_info.value)
+
+
+def test_op_label_in_tag_from_each_call_site():
+    cases = {
+        "create_container": lambda a: a.create_container(InstagramPayload("hi")),
+        "check_publishing_limit": lambda a: a._check_publishing_limit(),
+    }
+    for op, call in cases.items():
+        session = Mock(
+            post=Mock(return_value=_text_resp(400, "nope")),
+            get=Mock(return_value=_text_resp(400, "nope")),
+        )
+        with pytest.raises(InstagramPermanentError) as exc_info:
+            call(InstagramReelsAdapter(CREDS, session=session))
+        assert f"op={op}" in str(exc_info.value)
+        assert "nope" in str(exc_info.value)
+
+
+def test_token_in_response_body_through_adapter_never_reaches_message():
+    session = Mock(post=Mock(return_value=_text_resp(400, f"denied access_token={FAKE_TOKEN}")))
+    with pytest.raises(InstagramPermanentError) as exc_info:
+        InstagramReelsAdapter(CREDS, session=session).create_container(InstagramPayload("hi"))
+    assert FAKE_TOKEN not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "status,body,exc",
+    [
+        (400, {"error": {"code": 190, "message": "x"}}, InstagramAuthBlockedError),
+        (400, {"error": {"code": 1, "error_subcode": 458}}, InstagramAuthBlockedError),
+        (400, {"error": {"code": 9007, "error_subcode": 2207027}}, InstagramRetryableError),
+        (400, {"error": {"code": 4, "message": "x"}}, InstagramRetryableError),
+        (503, {}, InstagramRetryableError),
+        (400, {}, InstagramPermanentError),
+        (400, {"error": {"code": 100, "message": "x"}}, InstagramPermanentError),
+    ],
+)
+def test_classification_unchanged_with_op_and_raw_text(status, body, exc):
+    with pytest.raises(exc):
+        _raise_for_graph_error(status, body, op="publish", raw_text="whatever")

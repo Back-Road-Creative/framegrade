@@ -123,6 +123,21 @@ the bounded `error_detail` always keeps it. Before this, five Instagram rows
 were stored only as "Media ID is not available" or "unknown Graph API error",
 and the cause could not be read back from the queue.
 
+The Instagram mapper goes further. The tag also carries `op=<request>`
+(`create_container`, `check_publishing_limit`, `publish_container`,
+`check_container_status`, `fetch_permalink`, `list_recent_media`), so a failure
+names which Graph call it was. When Graph answers with no `error` object (an
+empty or non-JSON 4xx body), the message carries a 300-character,
+whitespace-collapsed excerpt of the raw response body after
+`(response body: ...)`, with the access token, any `access_token=` value and
+any `Bearer`/`OAuth` string redacted. Classification (auth, retryable,
+permanent) is unchanged. The Facebook and photo mappers keep the tag without
+`op`.
+
+`deliveries.error_detail` is bounded at 2000 characters for every dispatch
+failure (it was 500, which cut a multi-reason `FinalTextReviewError` before its
+last reason code). The console notify text keeps its own shorter clip.
+
 ## A failure is recorded from the row's live status
 
 Adapters move their own row before they can fail (Instagram goes
