@@ -601,6 +601,18 @@ def measured_places(
     return out
 
 
+def _title_place_bodies(
+    measured: "Sequence[tuple[str, str]]", today: str
+) -> "list[tuple[str, str]]":
+    """``(kind, body)`` title candidates, most specific first: the measured towns,
+    then the counties, then ``today`` (the Short's own label) when it is neither."""
+    found = [m for m in measured if m[0] != KIND_ROAD]
+    found.sort(key=lambda m: KIND_ORDER.index(m[0]))
+    if today and _norm(today) not in {_norm(b) for _, b in found}:
+        found.append(("today", today))
+    return found
+
+
 def town_evidence(route_record: Optional[Mapping]) -> "dict[str, str]":
     """Town name -> evidence id for the towns the review accepts (``towns=`` of
     ``title_decision.short_place_facts``)."""
@@ -610,15 +622,21 @@ def town_evidence(route_record: Optional[Mapping]) -> "dict[str, str]":
     return {t["value"]: t["evidence_id"] for t in clip_towns(rec)}
 
 
-# ─── Stamped titles (drive path) ─────────────────────────────────────
-# A drive short's title is ``"{stamp}: {body}"``. The stamp -- ``"Sep 14, 3rd
-# stretch"`` -- is built from the short's own day key and its position in that
-# day's sidecar, and IS the whole first-3-word prefix, so titles are unique
-# by construction (see docs/pipeline/135-shorts-titles-and-interactive-family.md). Only the body rotates. The body may
-# name only the short's own ``location_short``, and only when its place is
-# clip-GPS verified; no preposition precedes ``{location}`` (a town label is the
-# nearest settlement, not proof of containment). ``TITLE_FRAME_TEMPLATES`` above
-# still serves callers with no facts (the single-video stage).
+# ─── Fact titles and stamped titles (drive path) ─────────────────────
+# A drive short's title is the place its own clip measured and nothing else: the
+# most specific place the final-text review accepts (a town held for every retained
+# second, else a county the clip voted -- ``_title_place_bodies``). The review backs
+# ONE cited place per title and no road, so no second place, road, date or count is
+# added. Titles stay unique against the published ledger and within a batch
+# (``_fact_title``); a Short with no unused measured place left, and a Short whose
+# place is not verified, take the STAMPED title instead: ``"{stamp}: {body}"``. The
+# stamp -- ``"Sep 14, 3rd stretch"`` -- is built from the short's own day key and its
+# position in that day's sidecar, and IS the whole first-3-word prefix, so those titles
+# are unique by construction (see docs/pipeline/135-shorts-titles-and-interactive-family.md).
+# Only the body rotates. The body may name only the short's own ``location_short``, and
+# only when its place is clip-GPS verified; no preposition precedes ``{location}`` (a town
+# label is the nearest settlement, not proof of containment). ``TITLE_FRAME_TEMPLATES``
+# above still serves callers with no facts (the single-video stage).
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -1162,6 +1180,9 @@ class SocialGenerator:
 
         # Track POI usage within this instance for description deduplication
         self._used_pois: dict[str, int] = {}
+        # Titles this batch already used, by title kind ("titles", "tiktok"), shared
+        # with every per-short variant: a fact title never repeats within a batch.
+        self._used_titles: "dict[str, set[str]]" = {}
 
     def _project_seed(self, suffix: str = "") -> int:
         """Get a deterministic seed for this project + series part."""
@@ -1258,15 +1279,29 @@ class SocialGenerator:
         max_len: int,
         place: Optional[str] = None,
         title_body_arm: Optional[str] = None,
+        candidates: "Sequence[str]" = (),
     ) -> str:
-        """``"{stamp}: {body}"``. The ledger walk rotates the BODY only; the
+        """The Short's title: its measured place (:meth:`_fact_title`), else
+        ``"{stamp}: {body}"``. The ledger walk rotates the BODY only; the
         stamp (<=22 chars, the whole first-3-word prefix) never changes or truncates.
 
+        ``candidates`` are the measured place bodies to try, most specific first;
+        a verified place with none left unused takes the stamped title (logged).
         ``title_body_arm`` (a ``yt_title_body`` arm id) narrows a place-named
-        title's bodies to that arm's; ``None`` or an unknown id keeps them all."""
+        stamped title's bodies to that arm's; ``None`` or an unknown id keeps them all."""
         stamp = title_stamp(facts.date, facts.ordinal)
         place = place or self.location_short
         named = facts.place_ok and bool(place)
+        if named:
+            fact_title = self._fact_title(seed_suffix, max_len, [place, *candidates])
+            if fact_title:
+                return fact_title
+            logger.info(
+                "no unused measured place for the %s title of %s #%s; stamped title",
+                seed_suffix,
+                facts.date,
+                facts.ordinal,
+            )
         slots = defaultdict(
             str,
             location=place if named else "",
@@ -1288,6 +1323,30 @@ class SocialGenerator:
             if candidate.strip().lower() not in published:
                 return candidate
         return f"{stamp}: {bodies[start].format_map(slots)}"[:max_len]
+
+    def _fact_title(self, seed_suffix: str, max_len: int, bodies: "Sequence[str]") -> str:
+        """The first of ``bodies`` (measured places, most specific first) that fits
+        ``max_len`` whole and is not a published title, not already used by this
+        batch's ``seed_suffix`` titles and shares no first-3-word prefix with one;
+        ``""`` when none is left."""
+        from ..publishing.anti_spam_gate import text_opener_key, title_prefix_key
+        from .longform_metadata import load_published_titles
+
+        published = {t.strip().lower() for t in load_published_titles()}
+        used = self._used_titles.get(seed_suffix, set())
+        used_prefixes = {k for k in map(title_prefix_key, used) if k}
+        # The queue gate refuses a title whose whole opener key a spooled text already holds.
+        spooled = set(self._spooled_opener_keys().get("youtube", []))
+        for body in dict.fromkeys(b.strip() for b in bodies if b and b.strip()):
+            key = body.lower()
+            if len(body) > max_len or key in published or key in used:
+                continue
+            if text_opener_key(body) in spooled:
+                continue
+            if title_prefix_key(body) in used_prefixes:
+                continue
+            return body
+        return ""
 
     def _arm_title_bodies(
         self, facts: TitleFacts, place: Optional[str], arm: Optional[str], max_len: int
@@ -1321,6 +1380,7 @@ class SocialGenerator:
         facts: Optional[TitleFacts] = None,
         place: Optional[str] = None,
         title_body_arm: Optional[str] = None,
+        candidates: "Sequence[str]" = (),
     ) -> str:
         """Compose a title from grounded fact slots.
 
@@ -1342,8 +1402,8 @@ class SocialGenerator:
         frame list — never a random re-pick — until an unpublished title is
         found, so the same inputs always resolve to the same alternative.
 
-        With ``facts`` (the drive path) the title is stamped instead --
-        :meth:`_compose_stamped_title` -- and never raises
+        With ``facts`` (the drive path) the title is the measured place --
+        :meth:`_compose_stamped_title` -- or its stamp, and never raises
         :class:`TitleCapacityExceeded`.
 
         Raises:
@@ -1355,7 +1415,9 @@ class SocialGenerator:
                 title for that index, or lower ``--shorts-target``.
         """
         if facts is not None:
-            return self._compose_stamped_title(facts, seed_suffix, max_len, place, title_body_arm)
+            return self._compose_stamped_title(
+                facts, seed_suffix, max_len, place, title_body_arm, candidates
+            )
         slots = self._title_slots(short_index)
         available = {name for name, value in slots.items() if value}
         applicable = [t for t in TITLE_FRAME_TEMPLATES if _frame_fields(t) <= available]
@@ -1404,6 +1466,7 @@ class SocialGenerator:
         facts: Optional[TitleFacts] = None,
         place: Optional[str] = None,
         title_body_arm: Optional[str] = None,
+        candidates: "Sequence[str]" = (),
     ) -> str:
         """Pick a unique composed title for this short.
 
@@ -1419,6 +1482,7 @@ class SocialGenerator:
             facts=facts,
             place=place,
             title_body_arm=title_body_arm,
+            candidates=candidates,
         )
 
     def _spooled_opener_keys(self) -> "dict[str, list[tuple[str, ...]]]":
@@ -2200,48 +2264,67 @@ class SocialGenerator:
         rng: random.Random,
         short_index: int,
         facts: Optional[TitleFacts] = None,
+        place: Optional[str] = None,
+        candidates: "Sequence[str]" = (),
     ) -> str:
         """Pick a TikTok-native title (folded into the same composition
         as ``_pick_title`` — no separate pool — with a distinct seed suffix
         so frame order differs from the YouTube title, truncated to
         TikTok's 90-char max).
         """
-        return self._compose_title(short_index, "tiktok", max_len=90, facts=facts)
+        return self._compose_title(
+            short_index, "tiktok", max_len=90, facts=facts, place=place, candidates=candidates
+        )
 
     def _choose_places(self, previous: "Mapping[str, str]", route_record: Optional[dict]):
         """The place bodies this Short's title and description name, varied from the
         previous Short's when the clip measured another place (``place_variety``).
 
-        Title candidates are today's label, then the clip's towns and counties, the
-        places its final-text review accepts; a road is a description-only candidate
-        (the review refuses one in a title). Returns ``(title_choice, description_choice,
-        description_kind, record)``; a choice that keeps today's text is returned as
-        ``None`` so the composer's existing text is byte-identical."""
+        Title candidates are the clip's towns, then its counties (the places its
+        final-text review accepts), then today's label; a road is a description-only
+        candidate (the review refuses one in a title). Returns ``(title_choice,
+        title_bodies, description_choice, description_kind, record)`` (``title_bodies``:
+        every title candidate, the chosen one first); the description choice that
+        keeps today's text is returned as ``None`` so its text is byte-identical."""
         measured = measured_places(self._own_regions or [], self._own_roads, route_record)
-        title = [("today", self.location_short)] + [m for m in measured if m[0] != KIND_ROAD]
+        title = _title_place_bodies(measured, self.location_short)
         desc = [("today", self.social_location_full)] + measured
-        t_choice = choose_place_body(
-            [b for _, b in title], [previous.get("title", "")], kinds=[k for k, _ in title]
+        t_choice = (
+            choose_place_body(
+                [b for _, b in title], [previous.get("title", "")], kinds=[k for k, _ in title]
+            )
+            if title
+            else None
         )
         d_choice = choose_place_body(
             [b for _, b in desc], [previous.get("description", "")], kinds=[k for k, _ in desc]
         )
-        record = {"title": t_choice.to_dict(), "description": d_choice.to_dict()}
+        record = {"description": d_choice.to_dict()}
+        title_bodies: "list[str]" = []
+        if t_choice is not None:
+            record = {"title": t_choice.to_dict(), **record}
+            # A fallback body may not be the previous Short's title place: the chosen one
+            # already weighed that repeat, and a queue-sync rewrite's ledger cannot see it.
+            prev = _norm(previous.get("title", ""))
+            title_bodies = [t_choice.body] + [
+                b for _, b in title if b != t_choice.body and _norm(b) != prev
+            ]
         return (
-            t_choice if t_choice.reason == REASON_VARIED else None,
+            t_choice,
+            title_bodies,
             d_choice if d_choice.reason == REASON_VARIED else None,
             d_choice.kind,
             record,
+            {b: k for k, b in title},
         )
 
     def _shorts_arm_factors(self, hand_idx: int, title_facts: Optional[TitleFacts]) -> "list[str]":
-        """The Shorts factors this Short's text can carry: the title body only on a
-        generated, place-verified stamped title, the hashtag set only off an
-        interactive Short (whose description withholds the place)."""
+        """The Shorts factors this Short's text can carry: the hashtag set only off
+        an interactive Short (whose description withholds the place). The title body
+        is never carried: a title is the measured place alone, with no body variants
+        (``SHORTS_TITLE_BODY_ARMS`` shapes only the stamped fallback, never assigned)."""
         hand = self._hand_titles.get(hand_idx)
         factors = []
-        if hand is None and title_facts is not None and title_facts.place_ok:
-            factors.append("yt_title_body")
         if not (hand.interactive if hand is not None else False):
             factors.append("yt_hashtag_set")
         return factors
@@ -2326,20 +2409,12 @@ class SocialGenerator:
             if f in eligible and a in SHORTS_ARMS.get(f, ())
         }
         arms.update(shorts_arms)
-        title_place, desc_place, desc_kind, variety = None, None, "", {}
+        title_place, title_bodies, desc_place, desc_kind, variety = None, [], None, "", {}
+        title_kinds: "dict[str, str]" = {}
         if hand is None and title_facts is not None and title_facts.place_ok:
-            title_place, desc_place, desc_kind, variety = self._choose_places(
-                previous_places or {}, route_record
+            title_place, title_bodies, desc_place, desc_kind, variety, title_kinds = (
+                self._choose_places(previous_places or {}, route_record)
             )
-        if "yt_title_body" in shorts_arms and not self._arm_title_bodies(
-            title_facts,
-            title_place.body if title_place else None,
-            shorts_arms["yt_title_body"],
-            100,
-        ):
-            # No body of the arm is a usable title (all published, or too long to
-            # fit whole): the arm is dropped, never a duplicate or a cut title.
-            del shorts_arms["yt_title_body"], arms["yt_title_body"]
         for attempt in range(max_attempts):
             # Vary the seed on retries so we pick different hooks/titles
             rng = self._get_rng(short_index + attempt * 1000)
@@ -2356,6 +2431,7 @@ class SocialGenerator:
                     title_facts,
                     place=title_place.body if title_place else None,
                     title_body_arm=shorts_arms.get("yt_title_body"),
+                    candidates=title_bodies,
                 )
             # One caption per platform — a hand caption becomes the
             # YouTube caption verbatim and seeds the other three.
@@ -2377,7 +2453,13 @@ class SocialGenerator:
             tiktok_title = (
                 hand.title[:90]
                 if hand is not None
-                else self._pick_tiktok_title(rng, short_index, title_facts)
+                else self._pick_tiktok_title(
+                    rng,
+                    short_index,
+                    title_facts,
+                    place=title_place.body if title_place else None,
+                    candidates=title_bodies,
+                )
             )
             pois_before = dict(self._used_pois)
             youtube_description = self._build_youtube_description(
@@ -2456,7 +2538,19 @@ class SocialGenerator:
                 # a bare "County, State".
                 sampled_regions=([_strip_series_suffix(self.location)] if self.location else []),
                 interactive=interactive,
-                place_variety=variety,
+                # The record names the place the title SAYS: a fact title that fell
+                # through to a later measured place records that one, so the next
+                # Short (and a queue-sync rewrite seeded from it) varies from it.
+                place_variety=(
+                    {
+                        **variety,
+                        "title": PlaceChoice(title, REASON_VARIED, title_kinds[title]).to_dict(),
+                    }
+                    if title_place is not None
+                    and title != title_place.body
+                    and title in title_kinds
+                    else variety
+                ),
             )
 
             try:
@@ -2545,6 +2639,7 @@ class SocialGenerator:
         # The clip's own GPS road names, never the parent LF's ``roads``.
         clone._own_roads = list(roads) if roads else []
         clone._used_pois = self._used_pois
+        clone._used_titles = self._used_titles
         parent_places = list(self._place_strings())
         dest = getattr(self.resolved_location, "destination", None)
         if dest:
@@ -2575,6 +2670,7 @@ class SocialGenerator:
         previous_places: "Optional[Mapping[str, str]]" = None,
         shorts_arms_enabled: bool = False,
         shorts_arm_history: "Optional[dict[tuple[str, str, str], list[str]]]" = None,
+        used_titles: "Optional[dict[str, set[str]]]" = None,
         per_short_shorts_arms: "Optional[Sequence[Optional[Mapping[str, str]]]]" = None,
         previous_places_at: "Optional[Mapping[int, Mapping[str, str]]]" = None,
     ) -> List[SocialPost]:
@@ -2625,6 +2721,11 @@ class SocialGenerator:
                 (the base project, with its ``_lfNN`` suffix stripped, and the
                 Short's position in its day) is balanced across the whole drive;
                 ``None`` starts a fresh one for this call only.
+
+            used_titles: The running record of the fact titles this batch used, by
+                kind (``"titles"``, ``"tiktok"``). Pass ONE dict to every
+                per-long-form call of a drive so a place is never the title of two
+                Shorts of the drive; ``None`` starts a fresh one for this call only.
 
             per_short_shorts_arms: Explicit ``{factor: arm}`` per Short (a stored
                 ``experiment_arms`` filtered to ``SHORTS_FACTORS``), rendered
@@ -2682,6 +2783,8 @@ class SocialGenerator:
                     f"expected num_shorts={num_shorts}"
                 )
         arm_history = {} if shorts_arm_history is None else shorts_arm_history
+        if used_titles is not None:
+            self._used_titles = used_titles
         # One stratum per base project: Phase D's title ordinals are unique across the
         # whole day, so a per-position stratum would hold one Short and balance nothing.
         arm_stratum = (re.sub(r"_lf\d+$", "", self.project_name), "")
@@ -2748,6 +2851,8 @@ class SocialGenerator:
                     arm_history,
                     {f: a for f, a in post.experiment_arms.items() if shorts_arms.get(f) == a},
                 )
+            self._used_titles.setdefault("titles", set()).add(post.youtube_title.strip().lower())
+            self._used_titles.setdefault("tiktok", set()).add(post.tiktok_title.strip().lower())
             if post.place_variety:
                 previous = {k: v["body"] for k, v in post.place_variety.items()}
             # An interactive short whose burned OST label is non-empty

@@ -172,4 +172,4 @@ class TestDrivePublishPathHandTitleOverride:
             require_verified_places=True,
         )
         assert out[1][0].youtube_title == "Guess this coastal road"
-        assert "stretch:" in out[1][1].youtube_title  # uncovered short composes
+        assert out[1][1].youtube_title == "County Cork"  # uncovered short composes

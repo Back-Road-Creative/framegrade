@@ -62,7 +62,7 @@ def _synced_text(scratch, project):
         "youtube row 3 is uploading",
         "youtube row 3 has no usable scheduled_at",
         "no clip place to compose a title from",
-        "old title has no verifiable 'Nth stretch' stamp",
+        "old title is not one this plan generated (no stamp, no measured place)",
         "its title place repeats the previous Short's",
         "still refused by the Short review: x",
         "payload limit: x",
@@ -268,7 +268,10 @@ def test_a_sanction_for_a_short_generated_with_its_predecessor_holds_where_the_p
 
 
 @pytest.mark.parametrize("a_first", [True, False])
-def test_an_unusable_sidecars_stored_text_is_seen_by_the_gates(tmp_path, a_first):
+def test_an_unusable_sidecars_stored_text_is_seen_by_the_gates(tmp_path, a_first, monkeypatch):
+    # Both places are already live titles, so each Short takes the stamped title, the one the
+    # 3-word shared-prefix rule can see (a bare place name is under its 3-word floor).
+    monkeypatch.setattr(lm, "load_published_titles", lambda: {"harrow", "ashby county"})
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     new_b = _synced_text(scratch, PROJECT2)

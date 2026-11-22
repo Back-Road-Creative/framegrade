@@ -48,13 +48,14 @@ def _facts(date: str, ordinals, secs: int = 41, place_ok: bool = True) -> list[T
     return [TitleFacts(date=date, ordinal=k, secs=secs, place_ok=place_ok) for k in ordinals]
 
 
-def _all(gen, facts, label: str = LABEL):
+def _all(gen, facts, label: str = LABEL, **kw):
     n = len(facts)
     return gen.generate_all(
         num_shorts=n,
         per_short_locations=[label] * n,
         per_short_regions=[REGIONS] * n,
         per_short_title_facts=facts,
+        **kw,
     )
 
 
@@ -130,10 +131,19 @@ def test_prefix_assert_names_every_colliding_key():
 
 
 def test_three_lfs_fourteen_each_no_shared_prefix():
-    lf1 = _all(_gen(1), _facts("2026-09-13", range(1, 15)))
-    lf2 = _all(_gen(2), _facts("2026-09-14", [1, 2, 3, 5, 6, 8, 9, 10, 12, 13, 15, 16, 17, 20]))
+    # One place for all 42 Shorts: the drive's shared record gives the place to one Short
+    # and every other takes its stamped title.
+    used: dict = {}
+    lf1 = _all(_gen(1), _facts("2026-09-13", range(1, 15)), used_titles=used)
+    lf2 = _all(
+        _gen(2),
+        _facts("2026-09-14", [1, 2, 3, 5, 6, 8, 9, 10, 12, 13, 15, 16, 17, 20]),
+        used_titles=used,
+    )
     lf3 = _all(
-        _gen(3), _facts("2026-09-14", [4, 7, 11, 14, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28])
+        _gen(3),
+        _facts("2026-09-14", [4, 7, 11, 14, 18, 19, 21, 22, 23, 24, 25, 26, 27, 28]),
+        used_titles=used,
     )
     posts = lf1 + lf2 + lf3
     assert len(posts) == 42
@@ -188,11 +198,14 @@ def test_ledger_walk_changes_body_not_stamp(monkeypatch):
     gen = _gen()
     fact = TitleFacts(date="2026-09-14", ordinal=4, secs=41, place_ok=True)
     first = gen.generate_post(1, title_facts=fact).youtube_title
+    assert first == "Wythe County"  # the measured place, no stamp
     monkeypatch.setattr(lm, "load_published_titles", lambda: {first})
     second = gen.generate_post(1, title_facts=fact).youtube_title
-    assert second != first
     stamp = title_stamp("2026-09-14", 4) + ": "
-    assert first.startswith(stamp) and second.startswith(stamp)
+    assert second != first and second.startswith(stamp)  # the place is taken: its stamped title
+    monkeypatch.setattr(lm, "load_published_titles", lambda: {first, second})
+    third = gen.generate_post(1, title_facts=fact).youtube_title
+    assert third not in {first, second} and third.startswith(stamp)  # the ledger walks the body
 
 
 def test_truncation_keeps_stamp():

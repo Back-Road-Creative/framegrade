@@ -119,8 +119,11 @@ def test_a_bracket_short_is_rewritten_and_passes_the_review(tmp_path):
         assert LABEL in rec.payloads.youtube.title
         assert rec.bracket_route == RECORD
         assert short_review_refusal(rec) is None
-        assert rec.payloads.youtube.title.startswith(
-            f"Mar 5, {ORDINALS[rec.short_index - 1]} stretch:"
+        # the first Short names the label alone; a repeat of it takes the stamped title
+        assert rec.payloads.youtube.title.split(" #", 1)[0] == LABEL or (
+            rec.payloads.youtube.title.startswith(
+                f"Mar 5, {ORDINALS[rec.short_index - 1]} stretch:"
+            )
         )
         # a platform caption that named only the destination now names the label
         assert LABEL in rec.payloads.instagram.caption

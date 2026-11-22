@@ -134,7 +134,9 @@ def test_a_changed_short_is_rewritten_and_passes_the_review(tmp_path):
     for c in changes:
         rec = _youtube(plan, c.short_index)
         assert rec.payloads.youtube.title == c.new_title != c.old_title
-        assert rec.payloads.youtube.title.startswith(
+        # the measured place (the town, then the county), else the stamped title
+        title = rec.payloads.youtube.title
+        assert title.split(" #", 1)[0] in {"Harrow", "Ashby County"} or title.startswith(
             f"Mar 5, {ORDINALS[c.short_index - 1]} stretch:"
         )
         assert short_review_refusal(rec) is None
@@ -172,7 +174,7 @@ def test_the_title_obeys_the_no_repeated_place_rule(tmp_path):
     plan, conn = _world(tmp_path, [_short(1), _short(2)])
     sync_short_text(conn, apply=True, now=NOW)
     t1, t2 = (_youtube(plan, n).payloads.youtube.title for n in (1, 2))
-    body = [t.split(": ", 1)[1] for t in (t1, t2)]
+    body = [t.split(" #", 1)[0].split(": ", 1)[-1] for t in (t1, t2)]
     assert body[0] != body[1]
 
 
@@ -230,7 +232,7 @@ def test_stamp_date_slot_and_arm_tags_are_preserved(tmp_path):
     assert new["schedule"] == old["schedule"]
     assert new["experiment_arms"] == old["experiment_arms"]
     assert new["media"] == old["media"]
-    assert new["payloads"]["youtube"]["title"].startswith("Mar 5, 1st stretch:")
+    assert new["payloads"]["youtube"]["title"].split(" #", 1)[0] == "Harrow"
     assert new["payloads"]["tiktok"] == old["payloads"]["tiktok"]
 
 
@@ -573,12 +575,24 @@ def test_the_queue_update_matches_the_rows_raw_sidecar_path(tmp_path):
     assert _converged(plan, conn)
 
 
-def test_a_stored_title_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
-    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
+def test_a_stored_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
+    # The title-body arms shape only the stamped fallback and are never assigned now, so the
+    # surviving stored arm is the hashtag set: it is rendered, not dropped.
+    plan, conn = _world(tmp_path, [_short(1, arms={"yt_hashtag_set": "road"})])
     [change] = sync_short_text(conn, apply=True, now=NOW)
     assert change.status == "changed"
-    assert _youtube(plan, 1).payloads.youtube.title.startswith("Mar 5, 1st stretch: 38 seconds, ")
-    assert _youtube(plan, 1).experiment_arms == {"yt_title_body": "clip_led"}
+    assert _youtube(plan, 1).payloads.youtube.title.split(" #", 1)[0] == "Harrow"
+    assert "#RoadTrip" in _youtube(plan, 1).payloads.youtube.description
+    assert _youtube(plan, 1).experiment_arms == {"yt_hashtag_set": "road"}
+
+
+def test_a_stored_title_body_arm_is_refused_not_dropped(tmp_path):
+    # A fact title carries no title-body variant, so a plan holding one is left as it was.
+    plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
+    before = plan.read_text()
+    [change] = sync_short_text(conn, apply=True, now=NOW)
+    assert change.status == "refused" and "can no longer be rendered" in change.reason
+    assert plan.read_text() == before
 
 
 def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
@@ -719,7 +733,10 @@ def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
     assert plan.read_text() == before
 
 
-def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path):
+def test_two_queued_projects_cannot_both_take_the_same_text(tmp_path, monkeypatch):
+    # Both places are already live titles, so each Short falls back to the stamped title
+    # ("<date>, Nth stretch: ..."), the only title the 3-word shared-prefix rule can see.
+    monkeypatch.setattr(lm, "load_published_titles", lambda: {"harrow", "ashby county"})
     plan, conn = _world(tmp_path, [_short(1)])
     _other(conn, tmp_path, day=5)  # same day and place, so the same text
     changes = sync_short_text(conn, apply=True, now=NOW)

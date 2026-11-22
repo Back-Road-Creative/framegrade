@@ -227,10 +227,50 @@ never a second copy of the literal;
 `tests/test_publishing_anti_spam_gate.py::test_fixture_pool_is_the_gate_pool_not_a_copy`
 pins the fixture to the gate's tuple.
 
+### Fact titles on the drive path (2026-11)
+
+A drive Short's title is the most specific place its own clip measured and nothing
+else: `Tryon`, or `Polk County` when no town is accepted. The final-text review
+(`seo_manager.analytics.final_text_review`) backs one cited place per title (a town
+held for every retained second, else the county the clip voted) and refuses a road in
+a title, so a "Town, County" title or a road title is not possible without loosening
+the review, and the review is unchanged. No "Nth stretch" stamp, no "{secs} seconds",
+no weekday, no filler.
+
+Candidates are ordered town, county, then the Short's `location_short`
+(`_title_place_bodies`). `_fact_title` takes the first one that fits, is not in the
+published ledger, is not already used by this batch (`used_titles`, shared across the
+LFs of one drive when the caller passes `generate_all(used_titles=...)`), shares no
+first-3-word prefix with a batch title, and does not open like a spooled YouTube text
+(the queue gate's `cross-batch-repeat`). On a collision the next measured place is
+used, never the previous Short's title place; when none is left that one Short takes
+its stamped title (below) and the generator logs `no unused measured place for the ...
+title`. `place_variety["title"]` records the place the title actually names, so the
+next Short, and a queue-sync rewrite seeded from it, varies from that place. A Short whose
+`place_ok` is false keeps the place-free stamped title. `yt_title_body` is no longer
+assigned (a fact title has no body to vary); `SHORTS_TITLE_BODY_ARMS` shapes only the
+stamped fallback.
+
+**One title ledger per drive.** Phase D hands every LF's `generate_all` the same
+`used_titles` dict, so a measured place titles one Short of the drive, not one per LF.
+
+**Queue and bracket sync re-derive fact titles.** `plan_bracket_sync.ordinal_basis` takes a
+Short's day ordinal from the plan itself: the day sidecar beside its media
+(`shorts_ost_audit_<DATE>.json`, start-time order, the same one Phase D reads), else the
+old title's verified stamp (a plan written before fact titles), else its position among the
+plan's Shorts of that recording date. It never parses "Nth stretch" out of a fact title.
+`generated_title` is the safety check that the old title is one this plan wrote: its stamp,
+or exactly one of the Short's measured places (or the LF location / bracket label); any
+other title is refused and left as it was. A discarded sibling (a stored Short the sync was
+not asked to rewrite) names no place, so it takes no measured place, and its stored title
+is seeded into `used_titles` so a rewritten Short cannot repeat it. Running sync over a plan
+the generator just wrote changes nothing.
+
 ### Stamped titles on the drive path
 
-The drive path passes each short a `TitleFacts` and `_compose_title` returns
-`"{stamp}: {body}"`. The legacy <=6 frames and `TitleCapacityExceeded` now serve only
+The stamped title now serves only the fallback above and `place_ok` false. The drive
+path passes each short a `TitleFacts` and `_compose_title` returns
+`"{stamp}: {body}"` there. The legacy <=6 frames and `TitleCapacityExceeded` now serve only
 callers with no facts (`stages/social.py`); audit runs no longer raise it at short 4.
 `titles.yaml` stays an optional override on every run, publish included.
 

@@ -979,6 +979,8 @@ def _build_social_posts_per_lf(
     # One arm history for the whole drive: each long-form gets its own generator
     # (``<base>_lfNN``), so a per-call history would balance nothing.
     shorts_arm_history: dict = {}
+    # One title ledger for the whole drive: a measured place titles one Short of the drive.
+    used_titles: dict = {}
     for lf in drive_plan.regular_lfs:
         lf_shorts = shorts_per_lf.get(lf.index, [])
         num_shorts = len(lf_shorts)
@@ -1088,6 +1090,7 @@ def _build_social_posts_per_lf(
             per_short_route_records=_per_short_sidecar_route_records(lf_shorts),
             shorts_arms_enabled=True,
             shorts_arm_history=shorts_arm_history,
+            used_titles=used_titles,
         )
         social_posts_per_lf[lf.index] = posts
         global_index_offset += len(posts)
