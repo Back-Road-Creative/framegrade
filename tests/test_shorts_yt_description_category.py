@@ -9,7 +9,11 @@ Tests written BEFORE implementation (red phase).
 import pytest
 
 from gomoveshift.models import ResolvedLocation
-from gomoveshift.pipeline.social_generator import SocialGenerator, SocialPost
+from gomoveshift.pipeline.social_generator import (
+    YOUTUBE_DESCRIPTION_LEADS,
+    SocialGenerator,
+    SocialPost,
+)
 
 
 # Brand per-location cap (publishing/brand_policy.py) — also the
@@ -413,26 +417,34 @@ class TestYouTubeDescriptionWordSafeTruncation:
 
     def test_final_truncation_lands_on_word_boundary(self):
         region = "Beaufort County"
-        prefix = "POV driving near "
         joiner = f", {region}"
+
+        def generate(poi: str) -> str:
+            gen = SocialGenerator(
+                location=region,
+                project_name="word_safe",
+                series_part=1,
+                nearest_poi=poi,
+            )
+            return gen.generate_post(short_index=1).youtube_description
+
+        # The stamped fallback opens "{lead} Pt.1: driving near {poi}, {region}";
+        # the lead is a rotated pick, so read it off a short-POI description.
+        lead = generate("Rivers Bridge").split(" Pt.1: ")[0]
+        assert lead in YOUTUBE_DESCRIPTION_LEADS, lead
+        prefix = f"{lead} Pt.1: driving near "
         # Synthetic over-long POI sized so the anchor text ("…, Beaufort
         # County") straddles the 200-char boundary: the naive slice lands
-        # inside "County", yielding "…, Beaufort Cou". 34 = prefix + joiner.
+        # inside "County", yielding "…, Beaufort Cou".
         poi = ("Rivers Bridge Historic Preserve Scenic Loop " * 5)[
             : 203 - len(prefix) - len(joiner)
         ]
-        gen = SocialGenerator(
-            location=region,
-            project_name="word_safe",
-            series_part=1,
-            nearest_poi=poi,
-        )
-        desc = gen.generate_post(short_index=1).youtube_description
+        desc = generate(poi)
 
         # Within the platform limit …
         assert len(desc) <= 200, f"{len(desc)} chars: {desc!r}"
         # … and cut on a whole-word boundary of the anchor, never mid-word.
-        anchor = f"{prefix}{poi}{joiner}"  # untruncated "POV driving near …, Beaufort County"
+        anchor = f"{prefix}{poi}{joiner}"  # untruncated "{lead} Pt.1: driving near …, Beaufort County"
         body = desc.rstrip("…").rstrip()  # drop the truncation ellipsis, if any
         assert anchor.startswith(body), f"unexpected body: {body!r}"
         assert body == anchor or anchor[len(body)] == " ", f"truncated mid-word: …{body[-20:]!r}"
