@@ -248,7 +248,7 @@ _PRIVATE_POSTED_NOTE = (
 )
 _PRIVATE_NOTE = (
     ": the replacement is not public by this short's slot ({slot}), so no comment links it "
-    "(backfill adds it once the plan allows)"
+    "(the drain posts it by itself once the plan gives it text)"
 )
 
 

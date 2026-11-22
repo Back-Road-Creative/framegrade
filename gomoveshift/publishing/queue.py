@@ -554,6 +554,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # NULL when unknown (older rows, or no id). A second own comment saying the same text
             # is told apart from it by this.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_live_id TEXT")
+        if "first_comment_removed_at" not in cols:
+            # Set when a delete of the row's live comment left it with no text to repost; only a
+            # new live id (the drain reposts, or adopts our own copy) clears it.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_removed_at TEXT")
         if "first_comment_correction" not in cols:
             # JSON list ``{live_id, live_text, action: edit|delete, to}`` for the drain to fix.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_correction TEXT")
@@ -1704,19 +1708,53 @@ def unposted_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str
     }
 
 
-def removed_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
-    """Ids of deliveries on ``platforms`` marked posted whose comment text is empty: their live
-    comment was deleted with nothing to replace it, and the drain never scans or refills them."""
+def removed_first_comment_rows(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
+    """Posted rows on ``platforms`` whose live comment was deleted with no text to replace it
+    (``mark_first_comment_removed``); the incident stays open until a NEW live id is recorded."""
     wanted = list(platforms)
     marks = ",".join("?" for _ in wanted)
-    return {
-        r[0]
-        for r in conn.execute(
-            "SELECT id FROM deliveries WHERE first_comment_posted_at IS NOT NULL "  # noqa: S608
-            f"AND (first_comment_text IS NULL OR first_comment_text='') AND platform IN ({marks})",
-            wanted,
+    return conn.execute(
+        "SELECT id, project_name, short_index, sidecar_path, scheduled_at, first_comment_text "  # noqa: S608
+        "FROM deliveries WHERE first_comment_posted_at IS NOT NULL "
+        f"AND first_comment_removed_at IS NOT NULL AND platform IN ({marks}) ORDER BY id",
+        wanted,
+    ).fetchall()
+
+
+def removed_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
+    """Ids of ``removed_first_comment_rows``."""
+    return {r["id"] for r in removed_first_comment_rows(conn, platforms)}
+
+
+def mark_first_comment_removed(conn: sqlite3.Connection, delivery_id: int, now: str) -> bool:
+    """A delete landed: when the posted row has no text, mark it removed. ``posted_at`` stays."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_removed_at=COALESCE(first_comment_removed_at, ?) "
+                "WHERE id=? AND first_comment_posted_at IS NOT NULL "
+                "AND (first_comment_text IS NULL OR first_comment_text='')",
+                (now, delivery_id),
+            ).rowcount
         )
-    }
+
+
+def unpost_removed_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, text: str, now: str
+) -> bool:
+    """A removed row has comment text again: unpost it with that text, the way a gone edit does
+    (``unpost_first_comment_for_repost``), so the drain reposts it or adopts our own copy."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
+                "first_comment_live_id=NULL, first_comment_error=NULL, "
+                "first_comment_removed_at=NULL, updated_at=? WHERE id=? "
+                "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
+                "AND first_comment_correction IS NULL",
+                (text, now, delivery_id),
+            ).rowcount
+        )
 
 
 def unpost_first_comment_for_repost(

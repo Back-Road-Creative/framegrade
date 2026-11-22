@@ -19,11 +19,14 @@ from .queue import (
     first_comment_correction_ids,
     first_comment_corrections,
     first_comment_intended_texts,
+    mark_first_comment_removed,
     pending_first_comment_corrections,
     registered_platform_id,
     removed_first_comment_ids,
+    removed_first_comment_rows,
     resolve_first_comment_correction,
     unpost_first_comment_for_repost,
+    unpost_removed_first_comment,
     unposted_first_comment_ids,
 )
 
@@ -156,8 +159,8 @@ def raise_repost_incident(
 ) -> None:
     """File (or refresh) the open incident for a row whose stale comment was deleted but whose
     replacement did not post: zero comments are live until the drain reposts. ``kind``
-    ``REMOVED_KIND``: the comment was deleted and nothing replaces it (a private relink left no
-    text), so only a hand re-add brings it back. Never fatal."""
+    ``REMOVED_KIND``: the comment was deleted and the row has no text to post (a private relink
+    left none); the drain restores it by itself once the row has text. Never fatal."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -177,7 +180,8 @@ def raise_repost_incident(
     if kind == REMOVED_KIND:
         detail = (
             f"{where}the comment was deleted and the row has no text to post ({cause}); no "
-            "comment is live: re-add it by hand once the video is public"
+            "comment is live. The drain posts it by itself (or adopts yours) as soon as the row "
+            "has text again; add it by hand only if no text will come"
         )[:_DETAIL_MAX]
     else:
         detail = (
@@ -212,17 +216,39 @@ def raise_repost_incident(
 def _note_removed(
     conn: sqlite3.Connection, delivery_id: int, result: Any, incidents_dir: Optional[Path]
 ) -> None:
-    """A delete landed: when the row now holds no comment text, zero comments are live, the
-    backfill never refills a posted row and no drain scans it, so say so and keep an incident
-    open until the row has its text again (closed by ``_resolve_all``)."""
-    if delivery_id not in removed_first_comment_ids(conn, ("youtube", "facebook", "instagram")):
+    """A delete landed: when the row now holds no comment text, zero comments are live and
+    nothing can be posted, so mark it removed and keep an incident open. It closes only once a
+    NEW live id is recorded (``restore_removed`` unposts the row once it has text; the drain then
+    reposts or adopts, and the repost incident closes on that)."""
+    if not mark_first_comment_removed(conn, delivery_id, _now_iso()):
         return
     cause = "its replacement is private at the short's slot, or the text was dropped"
     result.errors.append(
-        f"delivery {delivery_id}: the stale comment was deleted and no comment replaces it; "
-        "no comment is live, re-add it by hand once the video is public"
+        f"delivery {delivery_id}: the stale comment was deleted and the row has no text to post; "
+        "no comment is live. The drain restores it by itself once the row has text; add it by "
+        "hand only if no text will come"
     )
     raise_repost_incident(conn, delivery_id, cause, incidents_dir, kind=REMOVED_KIND)
+
+
+def restore_removed(
+    conn: sqlite3.Connection, platforms: Iterable[str], incidents_dir: Optional[Path]
+) -> None:
+    """Put a removed row back on the drain: with its own text, or the one the plan gives it now
+    (the backfill's source). The row is unposted, so the drain reposts it or adopts our own copy
+    (a hand re-add) through its scan; a repost incident stays open until a new live id is
+    recorded. No text: the row stays removed."""
+    from . import enqueue_from_plan  # lazy: it imports the queue
+
+    cache: dict = {}
+    for row in removed_first_comment_rows(conn, platforms):
+        text = (row["first_comment_text"] or "").strip() or enqueue_from_plan._backfill_text(
+            row, cache
+        )
+        if text and unpost_removed_first_comment(conn, row["id"], text, _now_iso()):
+            raise_repost_incident(
+                conn, row["id"], "the comment text is back; the drain posts it", incidents_dir
+            )
 
 
 def _resolve_incidents(
@@ -262,7 +288,7 @@ def run_corrections(
     gone: Optional[Callable[[Exception], bool]] = None,
 ) -> None:
     """Apply every pending correction through ``client_for(platform)`` (built lazily; has
-    ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id)``; ``object_id`` is the
+    ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id, object_id=None)``; ``object_id`` is the
     post the comment is on, for a platform that can only replace a comment). ``result`` gains
     ``corrected`` per fix and ``stale`` plus an error line per failure; ``refused(exc)`` counts
     toward the correction cap. After a row's first failure its other items wait for the next
@@ -271,6 +297,7 @@ def run_corrections(
     A delete of the row's intended text is never run. A capped row is counted in
     ``result.correction_capped`` and gets the capped incident every pass."""
     platforms = tuple(platforms)
+    restore_removed(conn, platforms, incidents_dir)
     _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
         keep = first_comment_intended_texts(row)

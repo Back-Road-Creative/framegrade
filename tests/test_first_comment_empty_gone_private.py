@@ -29,6 +29,7 @@ from tests.test_first_comment_stale import (
     _published,
     _row,
     _Service,
+    _thread,
 )
 
 SLOT = "2026-11-10T00:00:00+00:00"
@@ -202,10 +203,68 @@ def test_x4_a_private_relink_delete_leaves_an_open_incident_until_the_comment_is
     assert any("by hand" in e for e in result.errors)
     _drain(conn, _Service(), inc)  # another pass: still no comment, still open
     assert len(_open(inc, "first_comment_removed")) == 1
-    with conn:  # the row has its comment text again
+    with conn:  # the row has its comment text again: the text alone closes nothing
         conn.execute("UPDATE deliveries SET first_comment_text=? WHERE id=?", (OLD_TEXT, did))
+    back = _Service()
+    _drain(conn, back, inc)
+    assert back.inserted == [OLD_TEXT]  # the drain puts our comment back by itself
     _drain(conn, _Service(), inc)
-    assert not _open(inc, "first_comment_removed")
+    assert not _open(inc, "first_comment_removed") and not _open(inc, "first_comment_repost_failed")
+
+
+def _removed(conn, inc, restore=True):
+    did = _published(conn)
+    with conn:
+        conn.execute("UPDATE deliveries SET scheduled_at=? WHERE id=?", (SLOT, did))
+    private = _Service(
+        on_insert=lambda: rewrite_unposted_first_comment(conn, did, OLD_TEXT, None, _NOW)
+    )
+    _drain(conn, private, inc)
+    _drain(conn, _Service(), inc)  # the delete lands
+    if restore:
+        with conn:
+            conn.execute("UPDATE deliveries SET first_comment_text=? WHERE id=?", (OLD_TEXT, did))
+    return did
+
+
+def test_x4_a_hand_re_add_of_our_comment_is_adopted_and_closes_the_incident(conn, inc):
+    did = _removed(conn, inc)
+    svc = _Service(pages=[{"items": [_thread(OLD_TEXT, "hand")]}])
+    _drain(conn, svc, inc)
+    assert svc.inserted == []  # no second copy beside the hand one
+    assert _row(conn, did)["first_comment_live_id"] == "hand"
+    _drain(conn, _Service(), inc)
+    assert not _open(inc, "first_comment_removed") and not _open(inc, "first_comment_repost_failed")
+
+
+def test_x4_a_viewers_copy_of_the_text_is_never_adopted(conn, inc):
+    did = _removed(conn, inc)
+    svc = _Service(pages=[{"items": [_thread(OLD_TEXT, "viewer", author="UC-viewer")]}])
+    _drain(conn, svc, inc)
+    assert svc.inserted == [OLD_TEXT]  # ours is posted beside it
+    assert _row(conn, did)["first_comment_live_id"] != "viewer"
+
+
+def test_x4_a_removed_row_the_plan_can_text_again_is_reposted_by_the_pipeline(
+    conn, inc, monkeypatch
+):
+    from gomoveshift.publishing import enqueue_from_plan
+
+    did = _removed(conn, inc, restore=False)
+    assert not _row(conn, did)["first_comment_text"]
+    monkeypatch.setattr(enqueue_from_plan, "_backfill_text", lambda row, cache: OLD_TEXT)
+    svc = _Service()
+    _drain(conn, svc, inc)
+    assert svc.inserted == [OLD_TEXT] and _row(conn, did)["first_comment_text"] == OLD_TEXT
+
+
+def test_x4_a_removed_row_with_no_text_anywhere_stays_open_and_asks_for_a_hand_step(conn, inc):
+    did = _removed(conn, inc, restore=False)
+    svc = _Service()
+    res = _drain(conn, svc, inc)
+    assert svc.inserted == [] and len(_open(inc, "first_comment_removed")) == 1
+    assert _row(conn, did)["first_comment_posted_at"]  # posted_at kept
+    assert res.errors == [] or any("by hand" in e for e in res.errors)
 
 
 # --- F5 / F7: a private relink keeps its comment findable and tells the truth ------------------
@@ -385,3 +444,64 @@ def test_walk_plan_rewrites_parent_lf_publish_at_beside_the_id():
     assert count == 1
     assert out["shorts"][0] == {"parent_lf_video_id": "new", "parent_lf_publish_at": times["old"]}
     assert out["shorts"][1]["parent_lf_publish_at"] == "2020-01-01T00:00:00+00:00"
+
+
+# --- C2 gaps: each pins a mutant the first review left alive -------------------------------------
+
+
+class _DelGone(FakeGraph):
+    """DELETE always answers 100/33; ``lands``: the comment really goes (a race), else it stays."""
+
+    lands = False
+
+    def delete(self, url, **kw):
+        if self.lands:
+            self.comments.pop(url.rsplit("/", 1)[1], None)
+        return Resp({"error": {"code": 100, "error_subcode": 33, "message": "no"}}, 400)
+
+
+@pytest.mark.parametrize("platform", ["facebook", "instagram"])
+def test_n04_a_listing_cut_short_is_not_a_confirmed_gone(platform):
+    graph = _DelGone(platform, [(f"v{i}", "hi", "x") for i in range(25)], page=2)  # > 10 pages
+    with pytest.raises(Exception):  # noqa: B017 -- the comment may still be there
+        _adapter(platform, graph).delete_comment("c1", object_id="post")
+
+
+def test_n07_a_gone_answer_during_a_replace_is_confirmed_by_listing_and_posts():
+    graph = _DelGone("instagram", [("c1", OLD)])
+    graph.lands = True  # removed between the replace's read and its DELETE
+    assert _adapter("instagram", graph).edit_comment("c1", NEW, object_id="post") == "new1"
+    assert graph.comments == {"new1": NEW}
+
+
+def test_n12_a_refused_facebook_edit_replace_returns_the_new_comment_id():
+    graph = FakeGraph("facebook", [("c1", OLD)])
+    graph.fail_edit = "cannot edit"
+    assert _adapter("facebook", graph).edit_comment("c1", NEW, object_id="post") == "new1"
+
+
+@pytest.mark.parametrize("live", ["viewerless-other", None])
+def test_n10_a_new_live_id_never_overwrites_an_unrelated_recorded_id(conn, live):
+    did = _posted_with_edit(conn, None, SLOT)
+    with conn:
+        conn.execute("UPDATE deliveries SET first_comment_live_id=? WHERE id=?", (live, did))
+    item = first_comment_corrections(_row(conn, did))[0]
+    queue.resolve_first_comment_correction(conn, did, item, _NOW, new_live_id="n1")
+    assert _row(conn, did)["first_comment_live_id"] == ("n1" if live is None else live)
+
+
+def test_n17_a_private_relink_delete_answered_404_still_leaves_removed_open(conn, inc):
+    from tests.test_youtube_first_comment import _make_http_error
+
+    did = _published(conn)
+    with conn:
+        conn.execute("UPDATE deliveries SET scheduled_at=? WHERE id=?", (SLOT, did))
+    private = _Service(
+        on_insert=lambda: rewrite_unposted_first_comment(conn, did, OLD_TEXT, None, _NOW)
+    )
+    _drain(conn, private, inc)
+    gone = _Service(fail=[_make_http_error(404, "commentNotFound", "not found")])
+    res = _drain(conn, gone, inc)
+    assert gone.comments_api.deletes == ["new-thread"]
+    assert len(_open(inc, "first_comment_removed")) == 1
+    assert any("no comment is live" in e for e in res.errors)

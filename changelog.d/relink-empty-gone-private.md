@@ -8,8 +8,9 @@
 - `drop_private_edit` is a compare-and-set with a retry; a failing Meta/YouTube correction pass is
   printed by `dispatch-queue`; an Instagram delete-then-post failure counts toward the attempt cap
   and keeps a `first_comment_repost_failed` incident open.
-- A private-relink delete leaves a `first_comment_removed` incident and an error line open until
-  the row has comment text again (re-add by hand; the backfill never refills a posted row).
+- A private-relink delete marks the row removed and leaves a `first_comment_removed` incident and
+  an error line open until a new live id is recorded: once the row has text (its own, or the
+  plan's) the drain unposts it and reposts, or adopts our own copy; text alone closes nothing.
 - A Graph 100/33 "gone" answer is confirmed by listing the post's comments, not by `GET /{id}`;
   still listed, a failed listing or no post to list leaves the delete pending.
 - A replace (Instagram, or a refused Facebook edit) records the new comment as the row's live id,
