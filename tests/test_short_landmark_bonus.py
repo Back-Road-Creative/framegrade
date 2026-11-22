@@ -560,6 +560,26 @@ def test_a_landmark_plan_may_trade_at_most_the_bonus_never_a_stronger_set(monkey
     assert _spans(got) == _spans(plain)
 
 
+def test_landmark_clips_both_plans_pick_weigh_the_same_on_both_sides():
+    # Three landmark windows both plans pick must not lend the landmark plan slack:
+    # it swaps 0.9 + 0.85 for 0.8 (landmark) + 0.3. Weighted on both sides the plain
+    # set is 5.125 against 4.675, so it renders, and its landmark clips say so.
+    n = 2000
+    spans = [(0, 38, 0.9), (100, 138, 0.9), (200, 238, 0.9), (400, 438, 0.9)]
+    spans += [(500, 538, 0.85), (450, 488, 0.8), (1500, 1538, 0.3)]
+    arr = _moments(n, spans)
+    mask = np.zeros(n, dtype=bool)
+    for lo, hi in ((0, 38), (100, 138), (200, 238), (450, 488)):
+        mask[lo:hi] = True
+    kw = dict(target_count=5, min_gap_sec=60.0, stride_sec=5.0)
+    plain = plan_shorts(arr, **kw)
+    boosted = plan_shorts(arr, landmark_mask=mask, **kw)
+    assert len(plain) == len(boosted) == 5 and _spans(plain) != _spans(boosted)
+    got = dp._adopt_landmark_plan(boosted, arr, None, {**kw, "landmark_mask": mask}, [], [], None)
+    assert _spans(got) == _spans(plain)
+    assert sorted(r.start_sec for r in got if r.landmark) == [0.0, 100.0, 200.0]
+
+
 def test_a_landmark_plan_that_is_as_strong_is_adopted():
     # Two equal moments, the later one a landmark: the bonus breaks the tie, costs nothing.
     kw = dict(target_count=1)
@@ -573,26 +593,13 @@ def test_a_landmark_plan_that_is_as_strong_is_adopted():
 def test_run_day_pipeline_renders_the_plain_plan_when_the_landmark_plan_is_weaker(
     tmp_path, monkeypatch
 ):
+    def sr(start, rank, mean, **kw):
+        return ShortRange(start, start + 30.0, 1.0, rank, window_mean=mean, **kw)
+
     def plan(kw):
         if "landmark_mask" in kw:
-            return [
-                ShortRange(
-                    start_sec=300.0,
-                    end_sec=330.0,
-                    integrated_score=1.0,
-                    rank=1,
-                    window_mean=0.5,
-                    landmark=True,
-                )
-            ]
-        return [
-            ShortRange(
-                start_sec=100.0, end_sec=130.0, integrated_score=1.0, rank=1, window_mean=0.9
-            ),
-            ShortRange(
-                start_sec=200.0, end_sec=230.0, integrated_score=1.0, rank=2, window_mean=0.8
-            ),
-        ]
+            return [sr(300.0, 1, 0.5, landmark=True)]
+        return [sr(100.0, 1, 0.9), sr(200.0, 2, 0.8)]
 
     def fn(pts, sr):
         return "Beaufort County"

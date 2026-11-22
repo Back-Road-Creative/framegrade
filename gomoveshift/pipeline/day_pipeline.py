@@ -137,7 +137,9 @@ from .short_planner import (
     DEFAULT_MIN_GAP_SEC,
     DEFAULT_TARGET_DURATION_SEC,
     LANDMARK_BONUS,
+    LANDMARK_QUORUM,
     ShortRange,
+    _landmark_share,
     plan_shorts,
     timeline_quality_bar,
 )
@@ -452,10 +454,12 @@ def _adopt_landmark_plan(
     ``boosted`` is the plan after the per-LF cap and refill (what would render).
     The bonus is a tie-breaker, never a cost: the same plan is run WITHOUT the
     landmark mask through the same cap and refill, and the landmark plan is used
-    only if it renders at least as many Shorts and its total window mean, with
-    each landmark clip weighted by ``1 + LANDMARK_BONUS``, is at least the plain
-    total. So the bonus may trade at most 25% of a landmark window's score and
-    never a Short. A day with no landmark mask returns ``boosted`` unchanged.
+    only if it renders at least as many Shorts and its total window mean (each
+    clip's mean composite), with every landmark clip on BOTH sides weighted by
+    ``1 + LANDMARK_BONUS``, is at least the plain total. So the bonus may trade at
+    most 25% of the score of a landmark window only the landmark plan picks, and
+    never a Short. The plain clips carry the same final-clip ``landmark`` fact.
+    A day with no landmark mask returns ``boosted`` unchanged.
     """
     if day_scores is None or "landmark_mask" not in plan_kwargs:
         return boosted
@@ -467,20 +471,28 @@ def _adopt_landmark_plan(
     plain, _ = fill_shorts_to_per_lf_capacity(
         plain, lf_plans or [], file_boundaries, per_lf_capacity, day_scores, plan_mask, plain_kw
     )
+    lm = np.atleast_2d(np.asarray(plan_kwargs["landmark_mask"], dtype=bool))
+    times = np.asarray(day_scores)[:, 0]
+    if lm.shape[1] == len(times):
+        for sr in plain:
+            sr.landmark = _landmark_share(times, lm, sr.start_sec, sr.end_sec) >= LANDMARK_QUORUM
 
-    def _weighted(sr) -> float:
-        return float(sr.window_mean or 0.0) * (1.0 + LANDMARK_BONUS if sr.landmark else 1.0)
+    def _total(ranges) -> float:
+        return sum(
+            float(sr.window_mean or 0.0) * (1.0 + LANDMARK_BONUS if sr.landmark else 1.0)
+            for sr in ranges
+        )
 
-    if (
-        len(boosted) >= len(plain)
-        and sum(map(_weighted, boosted)) >= sum(float(sr.window_mean or 0.0) for sr in plain) - 1e-9
-    ):
+    boosted_total, plain_total = _total(boosted), _total(plain)
+    if len(boosted) >= len(plain) and boosted_total >= plain_total - 1e-9:
         return boosted
     logger.info(
-        "SHORTS-PLAN: landmark ranking would render %d Shorts against %d without it; "
-        "using the plain plan",
+        "SHORTS-PLAN: landmark ranking would render %d Shorts (weighted %.3f) against "
+        "%d (weighted %.3f) without it; using the plain plan",
         len(boosted),
+        boosted_total,
         len(plain),
+        plain_total,
     )
     return plain
 

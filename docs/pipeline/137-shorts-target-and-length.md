@@ -62,8 +62,9 @@ graze, or two parks that together reach half, earn nothing. The planner picks wi
 bonus and keeps the boosted picks only when they hold at least as many Shorts. What actually renders
 is decided after the per-LF cap and refill, so `day_pipeline._adopt_landmark_plan` runs the plain
 plan through the same cap and refill too and adopts the landmark plan only if it renders at least as
-many Shorts AND its total window mean, each landmark clip weighted by 1.25, is at least the plain
-total: the bonus may trade at most 25% of a landmark window's score and never costs a Short. The mask is one row per polygon, aligned to the score
+many Shorts AND its total window mean (each clip's mean composite, not the ranking score), every
+landmark clip on both sides weighted by 1.25, is at least the plain total: the bonus may trade at
+most 25% of the score of a landmark window only the landmark plan picks, and never costs a Short. The mask is one row per polygon, aligned to the score
 rows' own times, built once per day beside `_shorts_planning_mask` and reaching the per-LF refill
 through the same planner kwargs. It uses the resolver's destination tags, `out geom` rings and
 point-in-ring test; only CLOSED rings count (point POIs, bounds-only areas and open ways never do);
