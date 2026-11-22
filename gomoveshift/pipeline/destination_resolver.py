@@ -306,6 +306,72 @@ def resolve_destination(
     return _won(min(enclosing, key=lambda n: (-enclosing[n], meta[n][0], meta[n][1], n)))
 
 
+def landmark_seconds_mask(
+    n: int,
+    day_gps_points,
+    *,
+    poi_source: Optional[POISource] = None,
+    bbox_margin_deg: float = 0.02,
+    max_gap_s: float = 5.0,
+):
+    """Per-second bool mask (length ``n``): ``True`` where the GPS fix holding that
+    second lies inside a MEASURED destination polygon, else ``None``.
+
+    Reuses the resolver's own vocabulary and geometry: ``_classify`` (the same
+    destination tags), ``_rings_of`` (``out geom`` rings only — a point POI, a
+    bounds-only area or a name with no boundary never counts) and ``_encloses``
+    (true polygon containment). A second is held by the latest fix at or before
+    it, no more than ``max_gap_s`` back; a second with no such fix is False.
+    Used only to RANK Shorts, never to name one. A missing POI source result,
+    a raising source or a GPS-less day returns ``None`` with a WARNING; no
+    landmark is ever invented.
+    """
+    import numpy as np
+
+    from .gps_quality import _in_window_coords
+
+    def _off(why: str):
+        logger.warning("landmark bonus disabled: %s", why)
+        return None
+
+    if n <= 0:
+        return None
+    fixes = sorted(_in_window_coords(day_gps_points, float("-inf"), float("inf")))
+    if not fixes:
+        return _off("no usable GPS fixes")
+    source = poi_source or _default_poi_source
+    bbox = (
+        min(f[1] for f in fixes) - bbox_margin_deg,
+        min(f[2] for f in fixes) - bbox_margin_deg,
+        max(f[1] for f in fixes) + bbox_margin_deg,
+        max(f[2] for f in fixes) + bbox_margin_deg,
+    )
+    try:
+        elements = list(source(bbox))
+    except Exception as exc:  # noqa: BLE001 — a failed POI source means no bonus
+        return _off(f"POI source failed: {exc}")
+    polygons = []
+    for elem in elements:
+        tags = elem.get("tags") or {}
+        elem_bbox = _bbox_of(elem)
+        if not (tags.get("name") or "").strip() or _classify(tags) is None or elem_bbox is None:
+            continue
+        if _rings_of(elem)[0]:
+            polygons.append((elem, elem_bbox))
+    if not polygons:
+        return _off("no measured destination polygon near the day's route")
+    times = np.array([f[0] for f in fixes], dtype=np.float64)
+    inside = np.array(
+        [any(_encloses(e, b, lat, lon) for e, b in polygons) for _t, lat, lon in fixes],
+        dtype=bool,
+    )
+    seconds = np.arange(int(n), dtype=np.float64)
+    idx = np.searchsorted(times, seconds, side="right") - 1
+    held = idx >= 0
+    held &= (seconds - times[np.maximum(idx, 0)]) <= max_gap_s
+    return held & inside[np.maximum(idx, 0)]
+
+
 def _default_poi_source(bbox: tuple[float, float, float, float]) -> list[dict]:
     """Production POI source: the chapters Overpass query (allowlisted host).
 

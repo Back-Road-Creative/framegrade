@@ -53,3 +53,16 @@ only moves an end earlier, so it cannot reach a masked second; growth already st
 therefore ends anywhere in [min, max] following the moment, and `target_duration_sec` stays the
 search width. Each `ShortRange` now carries `window_mean`, `opening_mean` and `quality_bar`; they
 are written to the shorts audit sidecar with `moment_kind` and excluded from the audit hash.
+
+**Landmark bonus (`short_planner.py`, `destination_resolver.landmark_seconds_mask`).** A window
+that sits inside a measured destination polygon ranks higher: `plan_shorts(landmark_mask=...)`
+multiplies its pick-order score by `1 + LANDMARK_BONUS` (0.25) when at least `LANDMARK_QUORUM`
+(the resolver's `MIN_PEAK_MASS_SHARE`, 0.5) of the window's seconds are inside, so a polygon the
+fixes only graze earns nothing. The mask is built once per day beside `_shorts_planning_mask` and
+reaches the per-LF refill through the same planner kwargs. It uses the resolver's own tags,
+`out geom` rings and polygon containment; point POIs, bounds-only areas and names with no boundary
+never count. The bonus is soft and ranking-only: it never admits a window below the bar or with a
+weak opening, and never overrides the stop/GPS/county masks or the gap. A GPS-less day, a failing
+POI source or no polygon logs `landmark bonus disabled` and plans exactly as before. Titles and OST
+naming are unchanged. Each `ShortRange` carries `landmark`, written to the audit sidecar outside its
+hash.

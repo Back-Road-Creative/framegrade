@@ -32,3 +32,11 @@ moment: it grows while the footage keeps rising and is trimmed back to the last 
 (never under the minimum duration). The per-Short `window_mean`, `opening_mean`, `quality_bar` and
 `moment_kind` are recorded in `shorts_ost_audit_<date>.json` (not part of its hash). See
 `137-shorts-target-and-length.md`.
+
+### Landmark bonus
+
+A window inside a measured landmark polygon (at least half its seconds) ranks higher, never lower and
+never as a requirement; it cannot admit a window the quality bar or opening check refuses. With no GPS,
+no polygon or a failing POI source there is no bonus and the log says so. Whether a Short had it is
+recorded as `landmark` in `shorts_ost_audit_<date>.json` (outside the hash). See
+`137-shorts-target-and-length.md`.

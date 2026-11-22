@@ -75,6 +75,7 @@ from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
+from .destination_resolver import landmark_seconds_mask
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
 from .gps_quality import (
@@ -415,6 +416,7 @@ def fill_shorts_to_per_lf_capacity(
                 window_mean=pick.window_mean,
                 opening_mean=pick.opening_mean,
                 quality_bar=pick.quality_bar,
+                landmark=pick.landmark,
             )
             trial = shorts + accepted + [cand]
             where = assign_shorts_to_lfs_by_source_window(trial, lf_plans, file_boundaries)
@@ -762,6 +764,27 @@ def _shorts_planning_mask(
     if not veto.any():
         return stop_mask
     return veto if stop_mask is None else (np.asarray(stop_mask, dtype=bool) | veto)
+
+
+def _landmark_planning_mask(day_scores, day_gps_points, date: str, poi_source=None):
+    """Per-second mask of seconds inside a measured landmark polygon, for the
+    shorts planner's ranking bonus; ``None`` (no bonus, WARNING logged) when the
+    day has no GPS, no polygon, or the POI source fails. Never raises."""
+    if not isinstance(day_scores, np.ndarray) or day_scores.size == 0:
+        return None
+    try:
+        mask = landmark_seconds_mask(len(day_scores), day_gps_points, poi_source=poi_source)
+    except Exception as exc:  # noqa: BLE001 — the bonus is optional
+        logger.warning("Day %s: landmark bonus disabled: %s", date, exc)
+        return None
+    if mask is not None:
+        logger.info(
+            "Day %s: landmark bonus — %d/%d s inside a measured landmark polygon",
+            date,
+            int(np.count_nonzero(mask)),
+            int(mask.size),
+        )
+    return mask
 
 
 def slice_scores_for_day(
@@ -1403,6 +1426,7 @@ def _render_day_shorts(
                 "opening_mean": getattr(short_range, "opening_mean", None),
                 "quality_bar": getattr(short_range, "quality_bar", None),
                 "moment_kind": getattr(short_range, "moment_kind", None),
+                "landmark": getattr(short_range, "landmark", None),
                 "regions": list(_clip_regions or []),
                 "roads": list(getattr(_clip_regions, "roads", None) or []),
                 "route_record": _short_route_records.get(rank),
@@ -3097,6 +3121,19 @@ def run_day_pipeline(
         geocoder=getattr(short_ost_text_fn, "geocoder", None),
         half_window_s=_shorts_kw.get("target_duration_sec", DEFAULT_TARGET_DURATION_SEC),
     )
+    # Soft ranking bonus for windows inside a measured landmark polygon; computed
+    # once per day and shared with the per-LF refill through ``_shorts_kw``.
+    # Only when the shorts OST closure carries the POI source (never a bare
+    # network call from a path that did not opt in).
+    if getattr(short_ost_text_fn, "has_landmark_poi_source", False) is True and gps_points_by_date:
+        _landmark_mask = _landmark_planning_mask(
+            day_scores,
+            gps_points_by_date.get(date),
+            date,
+            poi_source=short_ost_text_fn.landmark_poi_source,
+        )
+        if _landmark_mask is not None:
+            _shorts_kw["landmark_mask"] = _landmark_mask
     # Cap the required target by the day's MOVING-seconds budget so a
     # parked-heavy (or GPS-gap-heavy) day doesn't pressure routine
     # --allow-short-count use.

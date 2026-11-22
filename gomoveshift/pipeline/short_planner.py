@@ -26,6 +26,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .destination_resolver import MIN_PEAK_MASS_SHARE
+
 logger = logging.getLogger(__name__)
 
 # Score-array column indices (mirror unified_scorer)
@@ -48,6 +50,12 @@ _BAR_EPSILON = 1e-9
 # A Short is judged on how it opens: the mean composite of a window's first
 # OPENING_SECONDS seconds must clear the quality bar, and ranking weights it.
 OPENING_SECONDS = 4
+# A window inside a measured landmark polygon ranks higher: its pick-order score
+# is multiplied by (1 + LANDMARK_BONUS). Soft and ranking-only. The window must
+# hold at least the resolver's Shorts quorum (MIN_PEAK_MASS_SHARE of its seconds
+# inside a polygon) so a polygon the fixes only graze earns nothing.
+LANDMARK_BONUS = 0.25
+LANDMARK_QUORUM = MIN_PEAK_MASS_SHARE
 
 
 @dataclass
@@ -76,6 +84,9 @@ class ShortRange:
     window_mean: "float | None" = None
     opening_mean: "float | None" = None
     quality_bar: "float | None" = None
+    # True when the final clip holds the landmark quorum (it sat inside a measured
+    # polygon). Observability only; ranking already used it. Outside the audit hash.
+    landmark: bool = False
 
     @property
     def duration_sec(self) -> float:
@@ -211,6 +222,17 @@ def _opening_mean(
     return _window_mean(timestamps, composites, start, min(start + OPENING_SECONDS, end))
 
 
+def _landmark_share(
+    timestamps: np.ndarray, landmark_mask: np.ndarray | None, start: float, end: float
+) -> float:
+    """Share of the timeline rows in ``[start, end)`` that sit inside a landmark."""
+    if landmark_mask is None:
+        return 0.0
+    in_window = (timestamps >= start) & (timestamps < end)
+    n = int(in_window.sum())
+    return float(landmark_mask[in_window].sum()) / n if n else 0.0
+
+
 def _ranking_score(window_sum: float, opening_mean: float) -> float:
     """Pick-order score: the window's integrated sum weighted by its opening.
 
@@ -232,6 +254,7 @@ def plan_shorts(
     stride_sec: float = DEFAULT_STRIDE_SEC,
     stop_mask: np.ndarray | None = None,
     quality_bar: float | None = None,
+    landmark_mask: np.ndarray | None = None,
 ) -> list[ShortRange]:
     """Plan 15-55s short-clip ranges from a scored timeline.
 
@@ -260,6 +283,12 @@ def plan_shorts(
             eligible (non-stopped) timeline in ``scores``. A caller planning
             over a sub-window of a day (the per-LF refill) passes the DAY's bar
             so a sub-window cannot lower it.
+        landmark_mask: optional bool array (one entry per timeline second) marking
+            seconds inside a measured destination polygon. A window holding at
+            least ``LANDMARK_QUORUM`` of its seconds there has its pick-order
+            score multiplied by ``1 + LANDMARK_BONUS``. Ranking only: it never
+            lets a window past the bar, the opening check, the masks or the gap.
+            ``None`` (or a mask not aligned to ``scores``) = no bonus.
 
     Returns:
         List of `ShortRange` objects sorted by rank (best score first,
@@ -313,6 +342,11 @@ def plan_shorts(
     bar = quality_bar if quality_bar is not None else timeline_quality_bar(scores, stop_mask)
     if bar is None:
         return []
+    lm_mask = None
+    if landmark_mask is not None:
+        lm = np.asarray(landmark_mask, dtype=bool)
+        if lm.shape[0] == len(timestamps) and lm.any():
+            lm_mask = lm
     # A window qualifies only when BOTH its whole-window mean and its opening
     # mean are strictly above the bar: a weak opening never ships. Pick order
     # uses the opening-weighted score; the plain sum is restored afterwards.
@@ -329,7 +363,10 @@ def plan_shorts(
             weak_opening += 1
             continue
         plain_sum[w_start] = w_sum
-        qualifying.append((w_start, w_end, _ranking_score(w_sum, opening)))
+        rank_score = _ranking_score(w_sum, opening)
+        if _landmark_share(timestamps, lm_mask, w_start, w_end) >= LANDMARK_QUORUM:
+            rank_score *= 1.0 + LANDMARK_BONUS
+        qualifying.append((w_start, w_end, rank_score))
     chosen = _greedy_pick_with_gap(qualifying, target_count, min_gap_sec)
     # What the gap alone cost: qualifying windows a gap of 0 would also have
     # fit (non-overlapping), up to the target. Measured, never used to pick.
@@ -383,6 +420,7 @@ def plan_shorts(
             window_mean=_window_mean(timestamps, composites, start, end),
             opening_mean=_opening_mean(timestamps, composites, start, end),
             quality_bar=bar,
+            landmark=_landmark_share(timestamps, lm_mask, start, end) >= LANDMARK_QUORUM,
         )
         for i, (start, end, score) in enumerate(chosen)
     ]
