@@ -94,13 +94,55 @@ def _clip_roads(record: ShortPublishRecord, segment_id: str) -> list[dict]:
     ]
 
 
+_PARENT_SURFACE = "description.short"
+_PARENT_TEMPLATE = "description.short.parent"
+_PARENT_SOURCE = "upload_record"
+
+
+def _parent_entry(record: ShortPublishRecord):
+    """``(entry, evidence item)`` linking the Short to its parent drive, or ``None``.
+
+    No link when the record has no usable parent id (empty, or a preview
+    placeholder that is not an 11-character YouTube id), or when the Short goes
+    public before its parent does. The label is always ``Full drive``: the
+    record carries no measured trim ratio for the parent, so "Highlights reel"
+    cannot be claimed."""
+    from seo_manager.analytics.final_text_params import valid_video_id
+    from seo_manager.analytics.final_text_surfaces import ParamBlock, build_visible
+
+    parent = (record.parent_lf_video_id or "").strip()
+    if not valid_video_id(parent):
+        return None
+    short_at, parent_at = record.schedule.scheduled_at_utc, record.parent_lf_publish_at
+    if short_at.tzinfo is None or parent_at.tzinfo is None:
+        return None  # an unzoned time cannot be ordered; never link a maybe-private video
+    if short_at < parent_at:
+        return None
+    evidence_id = f"parent-video-{parent}"
+    item = {
+        "evidence_id": evidence_id,
+        "kind": "parent_video",
+        "value": parent,
+        "source": _PARENT_SOURCE,
+    }
+    block = ParamBlock(
+        _PARENT_SURFACE,
+        _PARENT_TEMPLATE,
+        {"label": "Full drive", "url": evidence_id},
+        {evidence_id: parent},
+    )
+    return build_visible([block])[0], item
+
+
 def _short_text_entries(
     record: ShortPublishRecord, places: list, roads: list, named, segment_places: list
 ) -> list:
     """The Short's description (one place_line) and tag entries for the review.
 
     Waypost reviews a description only as filler words plus cited places, so
-    the Short sends this one line, not the generated prose (nor its parent link).
+    the Short sends this one line, not the generated prose. A Short whose parent
+    drive is public by the time the Short is (see ``_parent_entry``) ends it with
+    one ``Full drive: <link>`` block, appended last by ``build_short_final_text_review``.
 
     A tag is reviewable only as an exact Waypost tag template or as a name of
     one of the clip's own GPS places or GPS roads; any other tag refuses the Short
@@ -271,6 +313,12 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
             *_short_text_entries(record, places, roads, named, segment_places),
         ],
     }
+    parent = _parent_entry(record)
+    if parent is not None:
+        # Last description entry: Waypost refuses a parent link anywhere else.
+        visible = approved["visible"]
+        last = max(i for i, e in enumerate(visible) if e["surface"].startswith("description"))
+        visible.insert(last + 1, parent[0])
     # Road evidence backs a tag only: Waypost's route holds locations alone.
     evidence = (
         places
@@ -284,6 +332,8 @@ def build_short_final_text_review(record: ShortPublishRecord) -> dict:
             }
         ]
     )
+    if parent is not None:
+        evidence = evidence + [parent[1]]
     review = review_final_text(approved, decision, evidence, context["text_policy"])
     return review_to_dict(review)
 
