@@ -1420,6 +1420,49 @@ def find_delivery(
     return dict(row) if row is not None else None
 
 
+def first_comments_naming(
+    conn: sqlite3.Connection, project_name: str, needles: Iterable[str]
+) -> list:
+    """Every delivery of ``project_name`` whose ``first_comment_text`` contains one of
+    ``needles`` (a plain substring; the caller applies any token boundary), in id order,
+    whatever its status -- the caller decides which are still safe to rewrite."""
+    needles = [n for n in needles if n]
+    if not needles:
+        return []
+    clause = " OR ".join("instr(first_comment_text, ?) > 0" for _ in needles)
+    return conn.execute(
+        "SELECT id, short_index, platform, status, first_comment_text, first_comment_posted_at "  # noqa: S608
+        f"FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
+        (project_name, *needles),
+    ).fetchall()
+
+
+#: Statuses whose first comment is out of reach of a rewrite: terminal rows, and a row a human
+#: publishes by hand (its comment is posted, if at all, outside this queue's schedule).
+FIRST_COMMENT_FROZEN_STATUSES = (*TERMINAL_STATUSES, STATUS_AWAITING_MANUAL_PUBLISH)
+
+
+def rewrite_unposted_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, old_text: str, new_text: str, now: str
+) -> bool:
+    """Compare-and-set ``first_comment_text`` ``old_text`` -> ``new_text`` on one delivery.
+
+    Only while the comment has not been posted (``first_comment_posted_at`` NULL) and the row
+    is not in ``FIRST_COMMENT_FROZEN_STATUSES``; ``False`` (nothing written) when the row moved
+    since it was read. Touches no other column, so a lease or retry in flight is undisturbed."""
+    frozen = ", ".join("?" for _ in FIRST_COMMENT_FROZEN_STATUSES)
+    with conn:
+        return (
+            conn.execute(
+                "UPDATE deliveries SET first_comment_text=?, updated_at=? "  # noqa: S608
+                "WHERE id=? AND first_comment_text=? AND first_comment_posted_at IS NULL "
+                f"AND status NOT IN ({frozen})",
+                (new_text, now, delivery_id, old_text, *FIRST_COMMENT_FROZEN_STATUSES),
+            ).rowcount
+            == 1
+        )
+
+
 class RecoveryRefusedError(Exception):
     """A ``recover_terminal_delivery`` precondition did not hold; nothing was
     written. The message is the one-line reason the CLI prints."""

@@ -663,6 +663,30 @@ line per Short (`changed` / `unchanged` / `refused`, old -> new title). Local fi
 (no queue row, no platform call); the plan is re-parsed by `load_publish_plan` before it replaces
 the old file, and `reviewed_plan_hash` stays a stored field.
 
+## A replaced long-form upload (`relink_replaced_lf`)
+
+Replacing a still-scheduled long-form video uploads the re-render under a NEW video id and
+deletes the old one, so every place that names the old id now points at a dead video.
+`gomoveshift/publishing/replace_relink.py::relink_replaced_lf(project, output_dir, id_map, *,
+conn, now, dry_run=False)` rewrites old -> new (token-bounded, so an id inside a longer token is
+left alone) in exactly these places and returns a `RelinkReport`:
+
+- queue `deliveries.first_comment_text`, only while `first_comment_posted_at` is NULL and the
+  status is not terminal and not `awaiting_manual_publish`; every other row naming an old id is
+  listed in `queue_skipped` with its reason (`first comment already posted`, `status <s>`). The
+  SQL is `queue.first_comments_naming` and the compare-and-set
+  `queue.rewrite_unposted_first_comment`, which touch no other column;
+- the drive output dir's `related_video_worklist_state.json`, the publish plan's
+  `<project>_publish_plan.json` (`parent_lf_video_id` and any text naming the id; the stored
+  `reviewed_plan_hash`, which the queue keys on, is not recomputed) and `pending_journal.json`
+  (`youtube_id`). The pending sidecar records no "sent" flag, because the replay flush removes an
+  entry once written, so every entry still in the file is rewritten and the report says so.
+
+It never touches the journal site, its API or KV, or `/journal-photo/` files. File writes are
+atomic; a second run reports zero changes; `dry_run=True` reports without writing. An empty map,
+an empty id, an old id equal to its new id, or a new id that is also an old id raises
+`ValueError` before anything is read or written. There is no CLI command yet.
+
 ## Validate problems gate enqueue and dispatch
 
 A `publishing-status --validate` problem used to be a report nobody had to
