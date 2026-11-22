@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.136] - 2026-11-22
+
+### Fixed
+
+- A Short's YouTube description now states measured facts only. It opens with the same measured place its title names ("Tryon \u2014 POV drive."), with no "Pt.N" stamp, instead of a camera, vehicle or body lead ("Dashcam POV", "Hands on the wheel", "Windshield view"). A Short with no measured title place, and an interactive Short, open with a lead true of every drive ("POV", "First-person") and keep the part number inside the first six words so the anti-spam opener key still varies.
+
 ## [0.3.135] - 2026-11-22
 
 ### Changed
@@ -1545,7 +1551,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.135...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.136...HEAD
+[0.3.136]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.135...v0.3.136
 [0.3.135]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.134...v0.3.135
 [0.3.134]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...v0.3.134
 [0.3.133]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...v0.3.133
