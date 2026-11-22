@@ -396,10 +396,19 @@ the queue's deliveries point at. The generator is built not to trip that rule:
 `DEFAULT_SEO_STORAGE` (excluding its own project), and `_fresh_rotating_pick` walks the
 project's shuffled opener order past every entry that would open like it, falling back to
 the stale entries (which the gate then refuses) only when the fresh ones run out. The
-shorts YouTube description's lead ("POV", "Dashcam POV", …, `YOUTUBE_DESCRIPTION_LEADS`)
-rotates the same way, so "… driving through {place} Pt.N" no longer opens alike for every
-drive at a place. No lead opens with a bare preposition ("Through …"): the plan grammar gate
-(`find_grammar_issues`) refuses that shape and the whole publish plan with it.
+shorts YouTube description is built so its opener varies by construction, not by rotation:
+a Short whose fact title names a measured place opens with that same place in the channel
+voice ("{title place} \u2014 POV drive."), then the measured POI or road if the route has one,
+then the hashtags. The title place is unique within the batch and against the published
+ledger and the spooled queue, so the gate's 6-word key varies and no "Pt.N" stamp is needed.
+Interactive Shorts still withhold the place. A Short with no measured title place (stamped
+fallback title) and every interactive Short open "{lead} Pt.N: driving through {location}"
+over `YOUTUBE_DESCRIPTION_LEADS` ("POV", "First-person"): only leads true of every Short, none
+claiming a camera, a vehicle or the driver's body (no "Dashcam POV", "Hands on the wheel").
+The part number sits right after the lead, inside the 6-word key. A POI or road context that
+would not fit beside the longest hashtag block is dropped whole, never cut mid-place. No lead
+opens with a bare preposition ("Through \u2026"): the plan grammar gate (`find_grammar_issues`)
+refuses that shape and the whole publish plan with it.
 
 **Shape per platform:**
 - **YouTube** — description-style, 1–2 sentences naming place + terrain, a trailing
