@@ -466,6 +466,8 @@ superseded too: its run is set aside the same way and the row relaunches as the 
 it (for example a changed `lf_mode`), re-registering the same store row; the result names the
 failed job under `relaunch`. An audit that is still running, a `ready` row, or a failed audit when
 `--supersede` names another row is never replaced.
+
+**Replace scheduled uploads.** `--replace-scheduled` re-renders a drive whose uploads are still scheduled and swaps the new render in: see [185-replace-scheduled-uploads.md](185-replace-scheduled-uploads.md).
 A dead sibling (an earlier run of the same footage under another project name, found by
 overlapping recipe sources) is set aside the same way, under its own name, and listed in the same
 `moves`; a held sibling, one in the store or ledger, or one whose output holds upload records is
