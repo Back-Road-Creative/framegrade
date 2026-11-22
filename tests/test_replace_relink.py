@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -159,11 +159,17 @@ def test_unposted_rows_are_rewritten_whatever_their_live_status(conn, tmp_path, 
     "sets,reason",
     [
         (f"first_comment_attempts={FIRST_COMMENT_MAX_ATTEMPTS}", "attempts"),
-        ("lease_owner='w', lease_expires_at='2026-11-22T12:05:00+00:00'", "lease"),
-        ("lease_owner='w', lease_expires_at='2026-11-22T11:55:00+00:00'", None),  # expired
+        ("lease_owner='w', lease_expires_at='{+1h}'", "lease"),
+        ("lease_owner='w', lease_expires_at='{-1h}'", None),  # expired
     ],
 )
 def test_an_exhausted_or_live_leased_row_is_frozen(conn, tmp_path, sets, reason):
+    # A lease is live by this process's clock (not the caller's ``now``), so its times are
+    # relative to the wall clock.
+    wall = datetime.now(timezone.utc)
+    sets = sets.replace("{+1h}", (wall + timedelta(hours=1)).isoformat()).replace(
+        "{-1h}", (wall - timedelta(hours=1)).isoformat()
+    )
     did = _row(conn, 1)
     conn.execute(f"UPDATE deliveries SET {sets} WHERE id=?", (did,))  # noqa: S608
     conn.commit()
@@ -413,3 +419,31 @@ def test_rows_of_other_projects_naming_the_old_id_are_reported_not_rewritten(con
     assert len(items) == 1 and f"delivery {other}" in items[0]
     assert not any(f"delivery {longer}" in i for i in report.operator_items)
     assert not any(f"delivery {mine}" in i for i in report.operator_items)  # own project excluded
+
+
+def test_a_failing_other_project_report_is_recorded_not_raised(tmp_path, monkeypatch):
+    from gomoveshift.publishing import replace_relink
+
+    conn = open_queue_db(tmp_path / "q")
+
+    def boom(*a):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(replace_relink, "_report_other_projects", boom)
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert any("other projects" in e and "boom" in e for e in report.errors)
+
+
+def test_the_lease_precheck_uses_this_process_clock_not_the_callers_now(conn, tmp_path):
+    from datetime import datetime, timezone
+
+    did = _row(conn, 1)
+    conn.execute(
+        "UPDATE deliveries SET lease_owner='w', lease_expires_at='2099-01-01T00:00:00+00:00' "
+        "WHERE id=?",
+        (did,),
+    )
+    conn.commit()
+    future = datetime(2100, 1, 1, tzinfo=timezone.utc)
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=future)
+    assert any("lease held" in s.reason for s in report.queue_skipped)
