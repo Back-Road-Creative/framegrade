@@ -38,6 +38,9 @@ PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED = (
 
 logger = logging.getLogger(__name__)
 
+#: The ``health`` incident kind every replace refusal or partial failure opens (``gomoveshift
+#: status --json`` lists it under ``incidents.open``); nothing here resolves or deletes one.
+INCIDENT_KIND = "replace_scheduled_partial"
 REPLACE_PLAN_FILENAME = "replace_plan.json"
 REPLACE_PLAN_SCHEMA = "replace-scheduled/1"
 #: A scheduled upload is replaced only while its ``publishAt`` is at least this far ahead: the
@@ -46,6 +49,40 @@ REPLACE_MARGIN_H = 6
 #: ``{video_id: state}`` for the ids asked about; ``"scheduled"`` is a private video with a future
 #: ``publishAt`` (``playlist_reconciler.fetch_video_privacy``); an id absent is deleted.
 LiveStatus = Callable[[list], Mapping[str, str]]
+
+
+def record_incident(drive: str, code: str, detail: str, *, lf: Optional[int] = None, incidents_dir: Optional[Path] = None) -> None:  # fmt: skip
+    """Open one ``INCIDENT_KIND`` row per drive, ``code`` and LF (an unresolved one is left as it
+    is, as ``mask_frame_gate`` does). Never raises: a failed write is logged, the caller goes on."""
+    try:
+        from ..health.store import (  # fmt: skip
+            default_data_root,
+            default_incidents_dir,
+            new_incident,
+            safe_name,
+            utc_iso,
+            write_row,
+        )
+
+        inc = Path(incidents_dir) if incidents_dir else default_incidents_dir(default_data_root())
+        tail = "" if lf is None else f"_lf{lf}"
+        name = f"{INCIDENT_KIND}_{safe_name(drive)}_{code}{tail}.json"
+        try:
+            prior = json.loads((inc / name).read_text(encoding="utf-8"))
+            if isinstance(prior, dict) and not prior.get("resolved_at"):
+                return
+        except (OSError, ValueError):
+            pass
+        write_row(inc, new_incident(INCIDENT_KIND, f"{INCIDENT_KIND}:{safe_name(drive)}:{code}{tail}", name, utc_iso(), drive=drive, code=code, lf=lf, error=detail, detail=detail))  # fmt: skip
+    except Exception:  # noqa: BLE001
+        logger.exception("REPLACE-INCIDENT-NOT-WRITTEN %s %s: %s", drive, code, detail)
+
+
+def unfinished(plan: Mapping[str, Any]) -> Dict[int, str]:
+    """``{lf: state}`` of every replaced LF whose replacement is not ``done`` (an abandoned LF
+    kept its old video: the replace did not happen)."""
+    prog = progress_map(plan)
+    return {lf: prog.get(lf, {}).get("state", PENDING) for lf in replace_map(plan) if prog.get(lf, {}).get("state") != DONE}  # fmt: skip
 
 
 def _when(raw: Any) -> Optional[datetime]:
@@ -178,11 +215,11 @@ def check_old(yt: Any, old: Mapping[str, Any], now: datetime, margin_h: float = 
 
     ``ok`` private, scheduled, live publishAt more than ``margin_h`` ahead; ``gone`` YouTube no
     longer has it; ``refuse`` it is public, unscheduled or too close; ``error`` the lookup failed
-    (not decidable, so never replaceable)."""
+    (not decidable, so never replaceable; the old video is kept)."""
     try:
         live = yt.video_schedule(old["video_id"])
     except Exception as exc:  # noqa: BLE001
-        return "error", f"live check failed ({type(exc).__name__}: {exc})"
+        return "error", f"lookup failed ({type(exc).__name__}: {exc})"
     if live is None:
         return "gone", "not found on YouTube"
     when = live.get("publish_at")
@@ -230,7 +267,9 @@ def abandon(yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: 
             new_gone = True
         except Exception:  # noqa: BLE001
             logger.error("REPLACE-NEW-UNDELETED: private unscheduled %s remains; delete it", new_id, exc_info=True)  # fmt: skip
+            record_incident(Path(plan_dir).name, "new_undeleted", f"LF {lf}: private unscheduled {new_id} remains on YouTube; delete it by hand", lf=lf)  # fmt: skip
     logger.error("REPLACE-ABANDONED lf=%s: old %s kept, new %s removed=%s: %s", lf, old["video_id"], new_id, new_gone, why)  # fmt: skip
+    record_incident(Path(plan_dir).name, "abandoned", f"LF {lf} not replaced: old {old['video_id']} kept, new {new_id} removed={new_gone}: {why}", lf=lf)  # fmt: skip
     state.youtube_uploads[lf] = dict(old)
     save_state(state)
     note_kept_live(plan_dir, lf, why)
@@ -258,6 +297,7 @@ def advance(
                 yt.delete_video(old["video_id"])
             except Exception:  # noqa: BLE001
                 logger.error("REPLACE-OLD-UNDELETED lf=%s: %s still holds the slot; retried next entry", lf, old["video_id"], exc_info=True)  # fmt: skip
+                record_incident(Path(plan_dir).name, "old_undeleted", f"LF {lf}: old {old['video_id']} could not be deleted and still holds the slot; the replacement {new_id} stays private until it is", lf=lf)  # fmt: skip
                 return UPLOADED
         # "gone": an earlier run deleted it and died before writing the state; the slot is free
         set_progress(plan_dir, lf, state=OLD_DELETED)
@@ -266,6 +306,7 @@ def advance(
         pid = old.get("playlist_id")
         if when is None or (not pid and metadata is None):
             logger.error("REPLACE-UNSCHEDULED lf=%s: new %s needs a publish_at/playlist by hand", lf, new_id)  # fmt: skip
+            record_incident(Path(plan_dir).name, "unscheduled", f"LF {lf}: old deleted, new {new_id} needs a publish_at/playlist by hand", lf=lf)  # fmt: skip
             return OLD_DELETED
         try:
             if not st.get("publish_set"):
@@ -283,6 +324,7 @@ def advance(
                 set_progress(plan_dir, lf, ledger_swapped=True)
         except Exception:  # noqa: BLE001
             logger.error("REPLACE-SCHEDULE-FAILED lf=%s: new %s retried next entry", lf, new_id, exc_info=True)  # fmt: skip
+            record_incident(Path(plan_dir).name, "schedule_failed", f"LF {lf}: old deleted but new {new_id} is not scheduled yet (publish time, playlist or ledger swap failed); retried next entry", lf=lf)  # fmt: skip
             return OLD_DELETED
         set_progress(plan_dir, lf, state=SCHEDULED)
     cur = progress_map(load_plan(plan_dir)).get(lf, {})

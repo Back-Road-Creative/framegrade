@@ -198,7 +198,7 @@ def test_happy_path_order_private_insert_recheck_delete_schedule_swap_book(tmp_p
         rig.run()
     w = rig.world
     ins = [e for e in w.of("insert") if e[1] == "new2"][0]
-    assert ins[2] == "private" and ins[3] is None and ins[4] == "Old old2"
+    assert ins[2] == "private" and ins[3] is None and ins[4] == "New 2"  # the NEW gated title
     assert ins[5] is None  # no playlist at insert: the old record's playlist is forced later
     seq = [e[:2] for e in w.events if e[1:2] in (("new2",), ("old2",)) and e[0] != "save"]
     assert seq == [("insert", "new2"), ("delete", "old2"), ("update_privacy", "new2"),
@@ -288,6 +288,9 @@ def test_a_failed_or_errored_recheck_deletes_the_new_and_never_the_old(tmp_path,
     assert rig.prog(2)["state"] == "abandoned"
     assert rig.state.youtube_uploads[2]["video_id"] == "old2"
     assert not [e for e in w.of("update_privacy") if e[1] == "new2"]
+    assert _incidents("abandoned")  # the replace did not happen: an open incident says so
+    if change is _live_check_errors:
+        assert "lookup failed" in rig.prog(2)["why"]  # distinct from "no longer scheduled"
 
 
 def test_a_failed_delete_stays_uploaded_and_is_retried_next_entry(tmp_path):
@@ -297,6 +300,7 @@ def test_a_failed_delete_stays_uploaded_and_is_retried_next_entry(tmp_path):
     w = rig.world
     assert rig.prog(2)["state"] == "uploaded" and "old2" in w.videos
     assert not w.of("update_privacy")  # never schedules the new while the old holds the slot
+    assert _incidents("old_undeleted")
     w.fail.discard("delete")
     rig.run()
     _assert_replaced(rig, 2)
@@ -315,6 +319,7 @@ def test_a_swap_failure_is_retried_next_entry_with_no_second_delete(tmp_path):
     with patch.object(rs, "swap_ledger_video_id", side_effect=swap):
         rig.run()
         assert rig.prog(2)["state"] == "old_deleted"
+        assert _incidents("schedule_failed")
         boom["on"] = False
         rig.run()
     assert [e[1] for e in rig.world.of("delete")].count("old2") == 1
@@ -340,10 +345,25 @@ def test_the_playlist_falls_back_to_resolution_only_without_one_on_the_old_recor
     assert not [e for e in rig.world.of("playlist") if e[1] == "new2"]
 
 
+def _incidents(code=None):
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    rows = [r for r in rows if r.get("kind") == "replace_scheduled_partial" and not r.get("resolved_at")]  # fmt: skip
+    return [r for r in rows if code in (None, r.get("code"))]
+
+
 def test_title_gate_refusal_fails_safe_pending_old_untouched(tmp_path, caplog):
-    bare = _old("old2", AT2)
-    del bare["title_decision"]  # a legacy record: only the fresh decision ("New 2") is on hand
-    rig = Rig(tmp_path, old2=bare, old3=_old("old3", AT3))
+    rig = Rig(tmp_path)
+    good = rig.meta
+
+    def meta(i):  # a decision that does not match its own title: the real gate refuses it
+        out = good(i)
+        if i == 2:
+            out["title_decision"] = {"chosen_title": "Something else", "reason": "x"}
+        return out
+
+    rig.meta = meta
     with caplog.at_level("ERROR"):
         rig.run()
     w = rig.world
@@ -351,13 +371,23 @@ def test_title_gate_refusal_fails_safe_pending_old_untouched(tmp_path, caplog):
     assert "old2" in w.videos and ("delete", "old2") not in [e[:2] for e in w.events]
     assert rig.prog(2)["state"] == "pending"
     assert "REPLACE-TITLE-GATE" in caplog.text
+    assert _incidents("title_gate")
 
 
-def test_an_old_record_decision_is_passed_through_the_unmodified_gate(tmp_path):
-    rig = Rig(tmp_path)
+@pytest.mark.parametrize("legacy", [False, True])
+def test_the_replacement_goes_up_under_the_new_gated_title(tmp_path, legacy):
+    old = _old("old2", AT2)
+    if legacy:
+        del old["title_decision"]  # a legacy record carries no decision at all
+    rig = Rig(tmp_path, old2=old, titles={1: "New 1", 2: "A Different New Title", 3: "New 3"})
     rig.run()
-    assert rig.state.youtube_uploads[2]["title_decision"]["chosen_title"] == "Old old2"
     _assert_replaced(rig, 2)
+    (ins,) = [e for e in rig.world.of("insert") if e[1] == "new2"]
+    assert ins[4] == "A Different New Title"  # the title the NEW decision chose
+    rec = rig.state.youtube_uploads[2]
+    assert rec["title"] == "A Different New Title"
+    assert rec["title_decision"]["chosen_title"] == "A Different New Title"
+    assert (rig.prog(2)["old_title"], rig.prog(2)["new_title"]) == ("Old old2", "A Different New Title")  # fmt: skip
 
 
 def test_a_kept_lf_gets_no_insert_book_or_superlong(tmp_path):
@@ -442,3 +472,49 @@ def test_uploader_files_a_video_in_the_named_playlist_once(already_in):
     yt = _uploader(svc)
     yt.add_to_playlist("v", "PL9")
     assert yt._add_video_to_playlist.call_count == (0 if already_in else 1)
+
+
+def test_a_lookup_error_is_not_read_as_no_longer_scheduled():
+    class YT:
+        def video_schedule(self, vid):
+            raise RuntimeError("videos.list 500")
+
+    verdict, why = rs.check_old(YT(), {"video_id": "o"}, NOW)
+    assert verdict == "error" and why.startswith("lookup failed")
+
+
+def _claim_rig(tmp_path, plan_state):
+    """A claimed drive whose publish job ended, its output holding kept receipts and a plan."""
+    from gomoveshift.health import publish
+
+    out = tmp_path / "day-a"
+    out.mkdir()
+    (out / "youtube_uploads.json").write_text(json.dumps({"1": PUBLIC}))
+    if plan_state:
+        rs.write_plan(out, {"schema": rs.REPLACE_PLAN_SCHEMA, "kept": {"1": PUBLIC},
+                            "replace": {"2": _old("old2", AT2)},
+                            "progress": {"2": {"state": plan_state}}})  # fmt: skip
+    drive = SimpleNamespace(project="day-a", status="claimed", claim_id=7, output_dir=str(out),
+                            claimed_at=datetime.fromtimestamp(1, timezone.utc))  # fmt: skip
+    store = SimpleNamespace(all_drives=lambda: [drive], finish_claim=lambda cid, ok: "complete" if ok else "failed")  # fmt: skip
+    return publish, store
+
+
+@pytest.mark.parametrize("plan_state", ["pending", "uploaded", "old_deleted", "abandoned"])
+def test_a_partial_replace_is_not_reported_as_a_clean_finish(tmp_path, monkeypatch, plan_state):
+    publish, store = _claim_rig(tmp_path, plan_state)
+    monkeypatch.setattr(publish, "_job_records", lambda d: [{"name": "gms-publish-day-a", "created_at": 5, "result": {"state": "failed"}}])  # fmt: skip
+    monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
+    (row,) = publish.reconcile_publishes(store, tmp_path)
+    assert row["status"] == "complete" and "partial" in row  # the kept receipts still close it
+    (inc,) = _incidents("partial_finish")
+    assert inc["drive"] == "day-a" and plan_state in inc["error"]
+
+
+@pytest.mark.parametrize("plan_state", [None, "done"])
+def test_a_finished_or_plain_drive_closes_clean(tmp_path, monkeypatch, plan_state):
+    publish, store = _claim_rig(tmp_path, plan_state)
+    monkeypatch.setattr(publish, "_job_records", lambda d: [{"name": "gms-publish-day-a", "created_at": 5, "result": {"state": "succeeded"}}])  # fmt: skip
+    monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
+    assert publish.reconcile_publishes(store, tmp_path) == [{"project": "day-a", "status": "complete"}]  # fmt: skip
+    assert not _incidents()

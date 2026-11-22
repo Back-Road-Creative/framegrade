@@ -881,12 +881,13 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
         return
     if not meta or not meta.get("title"):
         raise ValueError(f"LF {lf.index}: no gated metadata in metadata_per_lf for the replacement")
+    # The NEW render's gated title and its own decision: ``require_title_decision`` runs unchanged
+    # (the old title is not the decided one, so it can never pass). Both titles go in the plan.
     metadata = dict(meta)
-    if old.get("title_decision"):  # the decision the old title shipped under
-        metadata["title_decision"] = old["title_decision"]
+    replace_scheduled.set_progress(plan_dir, lf.index, old_title=old.get("title"), new_title=meta["title"])  # fmt: skip
     try:
         record = _upload_lf_to_youtube(
-            yt=yt, state=state, lf=lf, lf_path=lf_path, title=old.get("title") or meta["title"],
+            yt=yt, state=state, lf=lf, lf_path=lf_path, title=meta["title"],
             description=meta.get("description", ""), tags=meta.get("tags", []), publish_at=None,
             metadata=metadata,
             config=None,  # no playlist now: it is filed later from the OLD record
@@ -894,9 +895,10 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
         )  # fmt: skip
     except (TitleDecisionMismatchError, TitleDecisionMissingError) as exc:
         logger.error(
-            "REPLACE-TITLE-GATE lf=%s: the title gate refused the old title %r (%s); the LF stays "
-            "pending and the old video %s is untouched", lf.index, old.get("title"), exc, old["video_id"],
+            "REPLACE-TITLE-GATE lf=%s: the title gate refused the new title %r (%s); the LF stays "
+            "pending and the old video %s is untouched", lf.index, meta["title"], exc, old["video_id"],
         )  # fmt: skip
+        replace_scheduled.record_incident(plan_dir.name, "title_gate", f"LF {lf.index}: the title gate refused the new title {meta['title']!r} ({exc}); old {old['video_id']} untouched, LF pending", lf=lf.index)  # fmt: skip
         return
     except YouTubeQuotaError:
         save_state(state)
@@ -905,6 +907,7 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
     new = record or (state.youtube_uploads or {}).get(lf.index) or {}
     if not new.get("video_id") or new["video_id"] == old["video_id"]:
         logger.error("REPLACE-NOT-UPLOADED lf=%s: nothing was inserted; old %s untouched", lf.index, old["video_id"])  # fmt: skip
+        replace_scheduled.record_incident(plan_dir.name, "not_uploaded", f"LF {lf.index}: nothing was inserted; old {old['video_id']} untouched, LF pending", lf=lf.index)  # fmt: skip
         return
     replace_scheduled.set_progress(plan_dir, lf.index, new_id=new["video_id"], state=replace_scheduled.UPLOADED)  # fmt: skip
     _replace_advance(
