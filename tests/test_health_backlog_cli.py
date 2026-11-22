@@ -271,3 +271,19 @@ def test_the_handler_hands_the_tick_each_rows_region_so_a_regionless_marker_reso
     launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # fmt: skip
     assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
     assert calls == [(None, False)]  # its manifest region is ireland: a usa tick leaves it alone
+
+
+def test_the_handler_hands_an_ireland_tick_its_claimed_marker(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls, rows=[SimpleNamespace(project="ire-a", region="ireland")])  # fmt: skip
+    monkeypatch.setattr(
+        launch, "load_inputs",
+        lambda config, region, ledger_path, now: ("ireland", [SimpleNamespace(project="ire-a", region="ireland")], [], [], set(), lambda **kw: None),
+    )  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "launched", "reason": "r", "skipped": [], "project": "ire-a", "supersede": {"moves": []}})  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # no region: the row's is ireland  # fmt: skip
+    assert health.cmd_health(_args(tmp_path, "--region", "ireland"), SimpleNamespace()) == 0
+    assert calls == [(("ire-a", "blur fix"), True)]  # claimed by the ireland tick, run once
+    assert not launch._retry_marker(tmp_path / "out", "ire-a").exists()

@@ -74,8 +74,19 @@ record) clears it and resolves the `replace_retry` incident with an
 way the same tick then runs the plain backlog, so one stuck marker never blocks the region's next row, its
 failed-drive relaunch or its failed-audit path. A crash between the renames and the plan write leaves no output dir and a set-aside run with the records:
 the retry plans from that run (`_superseded_uploads`), never reads it as "nothing to supersede"; a raise in
-`_supersede` itself puts the run back and retries. A marker with no region whose manifest row is gone is
-unclaimed: no tick stamps its own region on it, and the tick output lists it as `unclaimed_replace_retry`.
+`_supersede` itself puts the run back and retries. `_supersede` writes each `superseded.json` into the dir
+BEFORE renaming it, so a dir under `_superseded` always carries its record whenever the process dies; a record
+left behind by a death before the rename is harmless (nothing reads one outside `_superseded`, and the retry
+overwrites it). The set-aside fallback takes only `<project>-<YYYYMMDDTHHMMSSZ>` dirs whose record names that
+project, so `day-a` never reads `day-a-long`'s run. Before the launcher runs the marker is stamped
+`launching_at`; if the process dies after the launcher returned ok, the next tick finds the
+`gms-backlog-<project>` job created since the stamp, clears the marker and never replaces the fresh run a
+second time (no such job: the stamp is ignored and the replace retries). Any launch or publish in the marker
+tick is noted as it succeeds, so a raise after it returns that launch and never re-marks or falls through. A
+marker with no region whose manifest row is gone can never be claimed: the tick gives it up like a permanent
+refusal, recording the `replace_retry` incident (opened if none is) resolved with outcome
+`given up: no row in any region` before clearing it, and lists it as `given_up_replace_retry`. Audit lookups
+on the replace path (retiring a dropped row's failed audit, publishing a failed row) apply the plan's `since`.
 Audit lookups for a reopened row ignore jobs created before
 the plan's `created_at`, so the set-aside run's passed audit never publishes the fresh directory. An LF whose slot is inside the 6 h margin is kept (its old
 video publishes on its own; `margin_kept` incident) and the rest are replaced. A slot that passed is
