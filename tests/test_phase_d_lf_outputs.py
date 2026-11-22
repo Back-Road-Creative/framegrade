@@ -161,6 +161,12 @@ def _build_state(tmp_path, num_lfs=3, youtube_upload=False, skip_upload=True):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_catalog(monkeypatch):
+    """Never read the real live-catalog snapshot from a phase D test."""
+    monkeypatch.setattr("gomoveshift.pipeline.longform_metadata._live_catalog_videos", lambda: {})
+
+
 def _phase_d_patches():
     return [
         patch("gomoveshift.pipeline.drive_phases.phase_d.LongFormMetadataGenerator"),

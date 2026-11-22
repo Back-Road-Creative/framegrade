@@ -157,6 +157,12 @@ def phase_d_state(tmp_path):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_catalog(monkeypatch):
+    """Never read the real live-catalog snapshot from a phase D test."""
+    monkeypatch.setattr("gomoveshift.pipeline.longform_metadata._live_catalog_videos", lambda: {})
+
+
 def _phase_d_patches():
     """Context-manager list of orchestrator-level patches required by Phase D.
 

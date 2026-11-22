@@ -423,6 +423,7 @@ def _book_lf_upload_in_ledger(
     config: Config,
     project_base: str | None = None,
     lf_index: int | None = None,
+    strict: bool = False,
 ) -> None:
     """Book one CONFIRMED LF upload: called only after the upload
     returned a record; books the REAL ``publishAt`` slot (not the generic
@@ -490,6 +491,7 @@ def _book_lf_upload_in_ledger(
             region=getattr(state, "region", None),
             slot_at=dt,
             video_id=vid,
+            strict=strict,
         )
 
 
@@ -835,11 +837,27 @@ def _next_free_lf_slot(config, state):
 
         ledger = ContentLedger.load(Path(config.seo.storage_path) / ".content_ledger.json")
         return next_free_slot(
-            ledger, config, getattr(state, "region", None), after=now,
-            min_lead=timedelta(minutes=replace_scheduled.REPLACE_SLOT_PASSED_MARGIN_MIN),
+            ledger, config, getattr(state, "region", None), after=now, include_today=False,
+            min_lead=timedelta(hours=replace_scheduled.REPLACE_MARGIN_H),
         )  # fmt: skip
 
     return pick
+
+
+def _reserve_lf_slot(config, state, project_base, lf_index, old_id):
+    """``reserve(slot)`` for ``replace_scheduled.advance``: hold a rebooked slot for this LF in the
+    ledger and ``schedule.sqlite3`` before any YouTube call (``SlotTaken`` when another row has it)."""
+
+    def reserve(slot):
+        from ..seo_slots import reserve_lf_slot
+
+        reserve_lf_slot(
+            Path(config.seo.storage_path) / ".content_ledger.json", config,
+            project=project_base or "", lf_index=lf_index,
+            region=getattr(state, "region", None), slot_at=slot, video_id=old_id,
+        )  # fmt: skip
+
+    return reserve
 
 
 def _replace_advance(yt, *, lf, old, plan_dir, state, config, save_state, project_base, now, metadata=None):  # fmt: skip
@@ -847,9 +865,11 @@ def _replace_advance(yt, *, lf, old, plan_dir, state, config, save_state, projec
         yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, now=now,
         ledger_path=Path(config.seo.storage_path) / ".content_ledger.json",
         book=lambda rec: _book_lf_upload_in_ledger(
-            record=rec, state=state, config=config, project_base=project_base, lf_index=lf
+            record=rec, state=state, config=config, project_base=project_base, lf_index=lf,
+            strict=True,
         ),
         metadata=metadata, config=config, rebook=_next_free_lf_slot(config, state),
+        reserve=_reserve_lf_slot(config, state, project_base, lf, old["video_id"]),
     )  # fmt: skip
 
 

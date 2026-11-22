@@ -62,6 +62,9 @@ SUPERSEDE_RECORD = "superseded.json"
 #: Pauses between the attempts at Waypost's reopen (a locked store is transient; the audit job is
 #: already running, so the call is retried here rather than given up on).
 _REOPEN_RETRY_S = (1.0, 2.0)
+#: A refused or failed ``--replace-scheduled`` leaves a marker here (under the output root); the
+#: backlog tick retries it with the heal backoff until it launches, with an incident meanwhile.
+REPLACE_RETRY_DIR = ".replace-retry"
 #: The two ``no-auto-resume`` texts health backlog writes when it gives a drive up (``_hold_recipes``):
 #: that run is dead by record, so ``cleanup --abandoned`` reclaims it as it does a superseded one.
 RETIRED_HOLD_PREFIX = "retired by health backlog: "
@@ -229,6 +232,60 @@ def plan_lfs(plan: Dict[str, Any]) -> Tuple[Dict[int, str], Set[int]]:
 
     expected = {idx(k): rec["video_id"] for part in ("kept", "replace") for k, rec in (plan.get(part) or {}).items()}  # fmt: skip
     return expected, {idx(k) for k in (plan.get("replace") or {})}
+
+
+def _retry_marker(output_root: Path, project: str) -> Path:
+    return Path(output_root) / REPLACE_RETRY_DIR / f"{safe_name(project)}.json"
+
+
+def _read_retry_marker(path: Path) -> Dict[str, Any]:
+    try:
+        held = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return held if isinstance(held, dict) else {}
+
+
+def mark_replace_retry(output_root: Path, project: str, reason: str, now: datetime) -> int:
+    """Record a failed ``--replace-scheduled`` attempt so the next tick retries it: attempts so far
+    (the backoff input). Never raises: a failed write is logged and the incident still stands."""
+    path = _retry_marker(output_root, project)
+    try:
+        prior = _read_retry_marker(path)
+        n = int(prior.get("attempts") or 0) + 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"project": project, "reason": prior.get("reason") or reason, "attempts": n, "last_at": now.timestamp()}, indent=2) + "\n")  # fmt: skip
+        os.replace(tmp, path)
+        return n
+    except OSError:
+        logger.exception("REPLACE-RETRY-MARKER-FAILED %s", project)
+        return 0
+
+
+def clear_replace_retry(output_root: Path, project: str) -> None:
+    try:
+        _retry_marker(output_root, project).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.exception("REPLACE-RETRY-CLEAR-FAILED %s", project)
+
+
+def due_replace_retry(output_root: Path, now: datetime) -> Optional[Tuple[str, str]]:
+    """``(project, reason)`` of the oldest-waiting failed replace whose heal backoff has passed (the
+    tick runs it as ``--supersede <project> --replace-scheduled``), else ``None``."""
+    from .heal import _retry_wait_s
+
+    due = []
+    for path in sorted((Path(output_root) / REPLACE_RETRY_DIR).glob("*.json")):
+        m = _read_retry_marker(path)
+        if not m.get("project") or not str(m.get("reason") or "").strip():
+            continue
+        at = float(m.get("last_at") or 0) + _retry_wait_s(int(m.get("attempts") or 1))
+        if now.timestamp() >= at:
+            due.append((at, m["project"], str(m["reason"])))
+    return (due[0][1], due[0][2]) if due else None
 
 
 def plan_total_lfs(plan: Dict[str, Any]) -> int:
@@ -489,13 +546,24 @@ def replace_unfinished(output_dir: Optional[str]) -> Dict[int, str]:
     return replace_scheduled_mod.unfinished_lfs(read_replace_plan(Path(output_dir)))
 
 
-def _publish_backoff_s(jobs_dir: Path, project: str, now: datetime) -> int:
+def _plan_created(output_dir: Optional[str]) -> float:
+    """The unfinished plan's ``created_at`` (0.0 for a plan written before it was stamped)."""
+    try:
+        return (
+            float(read_replace_plan(Path(output_dir)).get("created_at") or 0) if output_dir else 0.0
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _publish_backoff_s(jobs_dir: Path, project: str, now: datetime, since: float = 0.0) -> int:
     """Seconds until a ``gms-publish-<project>`` job may be launched again: the heal retry backoff
-    (``heal._retry_wait_s``) after the newest of the project's publish jobs."""
+    (``heal._retry_wait_s``) after the newest of the project's publish jobs created at or after
+    ``since`` (the plan's ``created_at``: an earlier replace's failed publishes are not this one's)."""
     from .heal import _retry_wait_s
 
     name = PUBLISH_JOB_PREFIX + project
-    made = [float(r.get("created_at") or 0) for r in _job_records(Path(jobs_dir)) if r.get("name") == name]  # fmt: skip
+    made = [float(r.get("created_at") or 0) for r in _job_records(Path(jobs_dir)) if r.get("name") == name and float(r.get("created_at") or 0) >= since]  # fmt: skip
     if not made:
         return 0
     return max(0, int(max(made) + _retry_wait_s(len(made)) - now.timestamp()))
@@ -583,6 +651,7 @@ def _uploads_refusal(project, out: Path, replace: Optional[Dict[str, Any]] = Non
             )
             if plan is None:
                 return f"cannot supersede {project}: {uploads}: {why}"
+            plan["created_at"] = replace["now"].timestamp()  # publish backoff counts jobs after it
             replace["plan"] = plan
         elif held:
             return f"cannot supersede {project}: {uploads} holds upload records"
@@ -1125,8 +1194,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 res.setdefault("held", []).extend(held)
             auditing.remove(project)
             mine = [d for d in mine if d.project != project]
-    for project in sorted({d.project for d in mine if d.status == "failed"} - listed):
-        # a drive retired before holds existed, or set ``failed`` by hand, is never retired again
+    unfinished = {
+        d.project for d in mine if d.status == "failed" and replace_unfinished(d.output_dir)
+    }
+    for project in sorted({d.project for d in mine if d.status == "failed"} - listed - unfinished):
+        # a drive retired before holds existed, or set ``failed`` by hand, is never retired again;
+        # a replace that has not finished is never given up: its publish is retried below
         held = _hold_recipes(stages_root, project, GAVE_UP_HOLD, dry_run)
         if held:
             res.setdefault("held", []).extend(held)
@@ -1136,10 +1209,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     # a passed audit whose publish failed (``health check`` closed the claim ``failed``) is
     # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork)
-    for d in sorted((d for d in mine if d.status == "failed" and d.project in listed), key=lambda r: r.project):  # fmt: skip
+    for d in sorted((d for d in mine if d.status == "failed" and (d.project in listed or d.project in unfinished)), key=lambda r: r.project):  # fmt: skip
         proj = d.project
         if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
-            if replace_unfinished(d.output_dir) and (wait := _publish_backoff_s(jobs_dir, proj, now)):  # fmt: skip
+            if replace_unfinished(d.output_dir) and (wait := _publish_backoff_s(jobs_dir, proj, now, _plan_created(d.output_dir))):  # fmt: skip
                 # a replace that has not finished is retried with the heal backoff, never hot
                 res.setdefault("publish_backoff", []).append({"project": proj, "wait_s": wait})
                 continue
@@ -1311,6 +1384,13 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     }
     res.update(argv=argv, env=env, stages_dir=str(stages_dir))
     store, reopen_kw = None, {}
+
+    def retry_later(reason):
+        """A failed replace is retried by the next tick (marker + heal backoff), never left to a
+        human; an incident stays open until it launches."""
+        n = mark_replace_retry(output_root, row.project, supersede[1], now)
+        replace_scheduled_mod.record_incident(row.project, "replace_retry", f"replace not launched ({reason}); retried by the next backlog tick, attempt {n}")  # fmt: skip
+
     if (
         reopen
     ):  # before any rename (and in a dry run too): ask Waypost whether it would reopen the row
@@ -1325,7 +1405,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: installed seo_manager lacks reopen_for_replace; repin"}  # fmt: skip
         why = store.reopen_for_replace(row.project, plan_digest=plan_digest(plan), dry_run=True, **reopen_kw)  # fmt: skip
         if why:
-            return {**res, "action": "refused", "reason": f"cannot supersede {target}: Waypost will not reopen it: {why}"}  # fmt: skip
+            reason = f"cannot supersede {target}: Waypost will not reopen it: {why}"
+            if not dry_run:
+                retry_later(reason)
+            return {**res, "action": "refused", "reason": reason}
     if dry_run:
         return {**res, "action": "would_launch", "reason": f"{row.project} for {res['slot']}"}
     stale = stale_pin_reason(python, installed_version, latest_version)
@@ -1343,6 +1426,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             if failed:
                 replace_scheduled_mod.record_incident(row.project, "restore_failed", f"{reason}; the set-aside run could not be put back: {failed}")  # fmt: skip
                 reason = f"{reason}; could not restore the set-aside run (see the replace_scheduled_partial incident): {failed}"  # fmt: skip
+            else:
+                retry_later(reason)
         return {**res, "action": "refused", "reason": reason}
 
     try:
@@ -1354,15 +1439,11 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     except Exception as exc:  # noqa: BLE001 -- nothing launched: put the drive back, whatever raised
         logger.exception("BACKLOG-PREFLIGHT-RAISED %s", row.project)
         return refuse(f"preflight raised {type(exc).__name__}: {exc}")
-    try:
-        ok, detail = launcher(argv, str(Path(code_root) / SERVICE_DIR), env)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("BACKLOG-LAUNCHER-RAISED %s", row.project)
-        ok, detail = False, f"{type(exc).__name__}: {exc}"
-    if not ok:
-        return refuse(f"launch failed: {detail}")
-    if reopen:  # register_ready raises on a complete row: Waypost's own reopen replaces it
-        reopen_kw["now"] = datetime.now(timezone.utc)  # not the tick's start: the launch took time
+    reopened = False
+    if reopen:  # register_ready raises on a complete row: Waypost's own reopen replaces it. It runs
+        # BEFORE the launch: a refusal goes through ``refuse`` (the old run put back, a retry marker),
+        # never leaves an audit running on a row that stays ``complete``
+        reopen_kw["now"] = datetime.now(timezone.utc)
         why = ""
         for pause in (*_REOPEN_RETRY_S, None):
             try:
@@ -1375,13 +1456,27 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 logger.exception("REPLACE-REOPEN-RAISED %s", row.project)
                 if pause is not None:
                     time.sleep(pause)
-        if why:  # the audit is already running on the fresh dirs: they stay (undoing the renames
-            # would pull them from under it), and the incident names where the old run went
-            logger.error("REPLACE-REOPEN-REFUSED: %s: %s (stages already set aside, audit launched)", row.project, why)  # fmt: skip
-            msg = f"launched the audit but Waypost could not reopen {row.project}: {why}"
-            aside = next((m["to"] for m in res["supersede"]["moves"] if m["from"] == str(out_dir)), "")  # fmt: skip
-            replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"{msg}; the store row is still complete and the replace plan is in {out_dir}; the set-aside run holding the old uploads is {aside} ({SUPERSEDED_DIR}/<project>-<stamp>). Recovery: run `health backlog --supersede {row.project} --replace-scheduled` again, it plans from that run's uploads")  # fmt: skip
-            return {**res, "action": "refused", "reason": msg}
+        if why:
+            logger.error("REPLACE-REOPEN-REFUSED: %s: %s (nothing launched)", row.project, why)
+            replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"Waypost could not reopen {row.project}: {why}; nothing was launched and the old run is back in place; the next backlog tick retries")  # fmt: skip
+            return refuse(f"Waypost could not reopen {row.project}: {why}")
+        reopened = True
+    try:
+        ok, detail = launcher(argv, str(Path(code_root) / SERVICE_DIR), env)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("BACKLOG-LAUNCHER-RAISED %s", row.project)
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
+    if not ok:
+        if reopened:  # the row is ``auditing`` now: give it back with its old uploads, so the
+            # ordinary retirement (``retire_uploaded``, from the receipts) closes it ``complete``
+            # even if this call fails, and the retry finds it complete
+            _restore_reopened(store, row.project, out_dir, res, now)
+        return refuse(f"launch failed: {detail}")
+    if reopened:
+        clear_replace_retry(output_root, row.project)
+        replace_scheduled_mod.resolve_incidents(row.project, drive_level=True)
+        for lf in replace["plan"].get("margin_kept") or ():
+            replace_scheduled_mod.record_incident(row.project, "margin_kept", f"LF {lf} publishes inside the {replace_scheduled_mod.REPLACE_MARGIN_H} h margin: its old video is kept and publishes on its own; the rest are replaced", lf=int(lf))  # fmt: skip
     else:
         register(
             project=row.project, region=region, lf_count=1, status="auditing",
@@ -1391,6 +1486,18 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if auto:
         failed_relaunch.record_launch(row.project, res["relaunch"])
     return {**res, "action": "launched", "reason": f"{row.project} for {res['slot']}"}
+
+
+def _restore_reopened(store, project, out_dir, res, now) -> None:
+    """After a launch failure on a reopened row: the old run is put back first (``refuse`` does it
+    after this), so close the row ``complete`` from the receipts under the set-aside run."""
+    try:
+        move = next((m for m in res["supersede"]["moves"] if m["from"] == str(out_dir)), None)
+        held = upload_receipts(move["to"] if move else str(out_dir))
+        if held and hasattr(store, "retire_published"):
+            store.retire_published(project, held, now=now)
+    except Exception:  # noqa: BLE001 -- best effort: ``retire_uploaded`` closes it on the next tick
+        logger.exception("REPLACE-RESTORE-REOPENED-FAILED %s", project)
 
 
 def lease_script(code_root: Path) -> Path:

@@ -2127,7 +2127,10 @@ def test_a_refusal_after_the_renames_restores_the_drive_so_a_retry_can_plan(tmp_
     res = rig.run()
     assert res["action"] == "refused", res
     _untouched(rig)
-    assert rig.registered == [] and [c["dry_run"] for c in rig.replace_store.calls] == [True]
+    # the real reopen now runs after preflight and before the launch (a launcher failure follows it)
+    asked = [c["dry_run"] for c in rig.replace_store.calls]
+    assert rig.registered == [] and asked == ([True] if how == "preflight" else [True, False])
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2)) == ("day-a", "blur mask was wrong")  # fmt: skip
     rig.preflight_error, rig.launch_ok = None, True  # the blocker is fixed: the retry plans again
     res = rig.run()
     assert res["action"] == "launched", res
@@ -2163,14 +2166,76 @@ def test_replace_needs_the_drives_own_store_row_complete(tmp_path, status):
         assert res["action"] == "refused" and "complete" in res["reason"], res
 
 
-def test_a_refused_real_reopen_opens_an_incident_and_the_launched_run_is_left_alone(tmp_path):
+def test_a_refused_real_reopen_launches_nothing_restores_the_drive_and_is_retried(tmp_path):
+    # SPEC CHANGE (fixup 4): the real reopen runs BEFORE the launch, so a refusal no longer leaves
+    # an audit running on a row that is still complete: the old run goes back, a marker retries it.
     rig = _replace_rig(tmp_path, _three_lfs())
     rig.replace_store = ReopenStore(rig, refuse_real="drifted")
     res = rig.run()
     assert res["action"] == "refused" and "drifted" in res["reason"], res
-    assert len(rig.launches) == 1 and (rig.out / launch.SUPERSEDED_DIR).is_dir()  # audit running
-    (row,) = _replace_incidents()
-    assert row["drive"] == "day-a" and "drifted" in row["error"] and not row["resolved_at"]
+    assert rig.launches == [] and rig.registered == []
+    _untouched(rig)
+    rows = _replace_incidents()
+    assert {r["code"] for r in rows} == {"reopen_refused", "replace_retry"}
+    assert all(not r["resolved_at"] for r in rows)
+    assert launch.due_replace_retry(rig.out, NOW) is None  # backoff: not hot
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2)) == ("day-a", "blur mask was wrong")  # fmt: skip
+    rig.replace_store = ReopenStore(rig)  # Waypost accepts now: the retry launches and clears it
+    assert rig.run()["action"] == "launched"
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=9)) is None
+    assert not [r for r in _replace_incidents() if r["code"] in ("reopen_refused", "replace_retry") and not r["resolved_at"]]  # fmt: skip
+
+
+def test_the_backoff_grows_with_each_failed_attempt(tmp_path):
+    for _ in range(3):
+        launch.mark_replace_retry(tmp_path, "day-a", "why", NOW)
+    assert launch.due_replace_retry(tmp_path, NOW + timedelta(seconds=1)) is None
+    assert launch.due_replace_retry(tmp_path, NOW + timedelta(days=30)) == ("day-a", "why")
+
+
+def test_a_launch_failure_after_a_real_reopen_gives_the_row_back_complete(tmp_path):
+    from types import SimpleNamespace
+
+    from gomoveshift.health import publish
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rows = {"day-a": SimpleNamespace(project="day-a", status="complete", output_dir=str(rig.out / "day-a"))}  # fmt: skip
+
+    class Store(ReopenStore):
+        def reopen_for_replace(self, project, **kw):
+            if not kw["dry_run"]:
+                rows[project].status = "auditing"
+            return super().reopen_for_replace(project, **kw)
+
+        def all_drives(self):
+            return list(rows.values())
+
+        def retire_published(self, project, held, now=None):
+            rows[project].status = "complete"
+            return "complete"
+
+    rig.replace_store = Store(rig)
+    rig.launch_ok = False
+    res = rig.run()
+    assert res["action"] == "refused" and "launch failed" in res["reason"], res
+    assert rows["day-a"].status == "complete"  # given back at once, from the set-aside receipts
+    _untouched(rig)
+    # and when that call fails, the ordinary retirement closes it from the restored receipts
+    rows["day-a"].status = "auditing"
+    assert publish.retire_uploaded(rig.replace_store) == [{"project": "day-a", "status": "complete"}]  # fmt: skip
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2)) is not None
+
+
+def test_a_record_inside_the_margin_is_kept_and_the_rest_replaced(tmp_path):
+    uploads = {"1": _rec("a", PAST), "2": _rec("b", NOW + timedelta(hours=2)), "3": _rec("c", FAR)}
+    rig = _replace_rig(tmp_path, uploads)
+    assert rig.run()["action"] == "launched"
+    plan = json.loads((rig.out / "day-a" / "replace_plan.json").read_text())
+    assert set(plan["replace"]) == {"3"} and set(plan["kept"]) == {"1", "2"}
+    assert plan["margin_kept"] == ["2"]
+    (row,) = [r for r in _replace_incidents() if r["code"] == "margin_kept"]
+    assert row["drive"] == "day-a" and not row["resolved_at"]
+    assert rig.replace_store.calls[-1]["replace"] == {3}
 
 
 def test_the_real_reopen_gets_a_fresh_clock(tmp_path, monkeypatch):
@@ -2217,34 +2282,19 @@ class RaisingStore(ReopenStore):
         raise RuntimeError("database is locked")
 
 
-def test_a_reopen_that_raises_is_retried_then_names_the_set_aside_run(tmp_path, monkeypatch):
+def test_a_reopen_that_raises_is_retried_then_the_whole_attempt_is_retried_later(tmp_path, monkeypatch):  # fmt: skip
     pauses = []
     monkeypatch.setattr(launch.time, "sleep", pauses.append)
     rig = _replace_rig(tmp_path, _three_lfs())
     rig.replace_store = RaisingStore(rig)
     res = rig.run()
     assert res["action"] == "refused" and "database is locked" in res["reason"], res
-    assert len(rig.launches) == 1 and len(rig.replace_store.calls) == 3  # retried, not abandoned
-    assert pauses == list(launch._REOPEN_RETRY_S)
-    (row,) = _replace_incidents()
-    assert f"{launch.SUPERSEDED_DIR}/<project>-<stamp>" in row["error"]
-    assert str(rig.out / launch.SUPERSEDED_DIR / f"day-a-{STAMP}") in row["error"]
-    assert not row["resolved_at"]
-
-
-def test_a_retry_after_a_failed_reopen_plans_from_the_set_aside_uploads(tmp_path, monkeypatch):
-    monkeypatch.setattr(launch.time, "sleep", lambda s: None)
-    rig = _replace_rig(tmp_path, _three_lfs())
-    rig.replace_store = RaisingStore(rig)
-    rig.run()
-    out = rig.out / "day-a"
-    assert not (out / "youtube_uploads.json").exists() and (out / "replace_plan.json").exists()
-    replace = {"now": NOW, "live": rig.live}
-    assert launch._uploads_refusal("day-a", out, replace) == ""
-    assert set(replace["plan"]["replace"]) == {"2", "3"} and set(replace["plan"]["kept"]) == {"1"}
-    # without a half-done plan the fresh dir is still just an empty output: no guessing
-    (out / "replace_plan.json").unlink()
-    assert launch._uploads_refusal("day-a", out, {"now": NOW, "live": rig.live}) == ""
+    assert rig.launches == [] and len(rig.replace_store.calls) == 3  # retried, not abandoned
+    assert [p for p in pauses if p in launch._REOPEN_RETRY_S] == list(launch._REOPEN_RETRY_S)
+    _untouched(rig)  # the drive is back as it was: the next attempt plans again from it
+    assert {r["code"] for r in _replace_incidents()} == {"reopen_refused", "replace_retry"}
+    rig.replace_store = ReopenStore(rig)
+    assert rig.run()["action"] == "launched"
 
 
 def test_a_launcher_that_raises_puts_the_drive_back(tmp_path):
@@ -2282,6 +2332,29 @@ def test_an_unfinished_replace_is_republished_after_the_heal_backoff_not_before(
     _unfinished_publish(rig2, tmp_path / "b", age_s=heal._retry_wait_s(1) + 60)
     rig2.run()
     assert rig2.publishes == [("day-a", False)]  # due: re-enters Phase D with no human step
+
+
+def test_a_failed_replace_whose_manifest_row_was_removed_is_not_given_up(tmp_path):
+    rig = Rig(tmp_path)
+    _unfinished_publish(rig, tmp_path, age_s=heal._retry_wait_s(1) + 60)
+    rig.rows[:] = []  # the manifest row is gone: the drive is no longer listed
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)] and "held" not in res  # retried, no GAVE_UP_HOLD
+
+
+def test_the_publish_backoff_counts_only_jobs_after_this_plans_creation(tmp_path):
+    rig = Rig(tmp_path)
+    _unfinished_publish(rig, tmp_path, age_s=heal._retry_wait_s(1) + 60)
+    out = Path(rig.drives[0].output_dir)
+    plan = json.loads((out / "replace_plan.json").read_text())
+    for n in range(4):  # four failed publishes of an EARLIER replace of this project
+        job(
+            rig, f"old{n}", "day-a", "failed", NOW.timestamp() - 90000 - n, name="gms-publish-day-a"
+        )
+    plan["created_at"] = NOW.timestamp() - 86400
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    rig.run()
+    assert rig.publishes == [("day-a", False)]  # only this plan's one job counts: its wait is over
 
 
 def test_an_unfinished_replace_never_counts_as_uploaded(tmp_path):

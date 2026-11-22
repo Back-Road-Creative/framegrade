@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from seo_manager.scheduling.store import SlotTaken
+
 from gomoveshift.pipeline import replace_scheduled as rs
 from gomoveshift.pipeline.drive_phases import external_systems_coordinator as esc
 from gomoveshift.pipeline.title_decision import require_title_decision
@@ -98,6 +100,8 @@ class FakeYT:
         return rec
 
     def update_privacy(self, vid, *, privacy, publish_at=None):
+        if "update_privacy" in self.w.fail:
+            raise RuntimeError("videos.update 500")
         d = self.w.videos[vid]
         d["privacy"], d["publish_at"] = "private", publish_at
         self.w.log("update_privacy", vid, publish_at)
@@ -135,6 +139,29 @@ class Rig:
         self.config = MagicMock()
         self.config.seo.storage_path = tmp_path / "seo"
         self.rebook = lambda now: None  # Waypost's next free slot; None = nothing free
+        self.held: dict = {}  # slot date -> LF that holds it (the ledger + schedule.sqlite3, faked)
+        self.book_error: Exception | None = None
+
+    def reserve_factory(self, config, state, project_base, lf, old_id):
+        def reserve(slot):
+            if self.held.get(slot.date(), lf) != lf:
+                raise SlotTaken(f"{slot.date()} is held by {self.held[slot.date()]}")
+            self.held = {d: o for d, o in self.held.items() if o != lf}  # an LF holds one slot
+            self.held[slot.date()] = lf
+            self.world.log("reserve", lf, slot)
+
+        return reserve
+
+    def free_slot_after(self, start):
+        """Waypost's allocator: the first day from ``start`` that nothing holds."""
+
+        def pick(now):
+            day = start
+            while day.date() in self.held:
+                day += timedelta(days=1)
+            return day
+
+        return pick
 
     def write_plan(self, **extra):
         rs.write_plan(self.dir, {"schema": rs.REPLACE_PLAN_SCHEMA, "kept": {"1": PUBLIC},
@@ -150,6 +177,10 @@ class Rig:
         decision = {"chosen_title": self.titles[i], "reason": "fresh"}
         return {"title": self.titles[i], "description": "d", "tags": [], "title_decision": decision}
 
+    def _raise_book(self):
+        if self.book_error:
+            raise self.book_error
+
     def run(self, *, crash_after=None, now=NOW):
         self.world.crash_after = crash_after
         sched = SimpleNamespace(lf_slots=[SimpleNamespace(
@@ -157,8 +188,9 @@ class Rig:
         with (
             patch.object(esc, "_resolve_youtube_uploader_class", return_value=lambda: FakeYT(self.world)),
             patch.object(esc, "_book_lf_upload_in_ledger",
-                         side_effect=lambda **kw: (self.world.log("book", kw["record"]["video_id"]),
+                         side_effect=lambda **kw: (self._raise_book(), self.world.log("book", kw["record"]["video_id"]),
                                                    self.booked.append(kw["record"]))),
+            patch.object(esc, "_reserve_lf_slot", create=True, side_effect=self.reserve_factory),
             patch.object(esc, "_next_free_lf_slot", side_effect=lambda config, state: lambda now: self.rebook(now)),  # fmt: skip
             patch.object(esc, "_upload_superlong_parts_to_youtube") as superlong,
         ):  # fmt: skip
@@ -775,7 +807,7 @@ def test_the_unfinished_incident_carries_the_lf_and_clears_at_done(tmp_path):
     with pytest.raises(RuntimeError, match="REPLACE-UNFINISHED"):
         phase_d._assert_replace_finished(tmp_path)
     rows = _incidents("unfinished")
-    assert sorted(r["lf"] for r in rows) == [2, 3] or sorted(r["lf"] for r in rows) == [2]
+    assert sorted(r["lf"] for r in rows) == [2, 3]
     assert all(r["lf"] is not None for r in rows)
     rig.world.fail.discard("delete")
     rig.run()
@@ -904,3 +936,104 @@ def test_an_lf_not_yet_scheduled_gets_no_thumbnail(state_name):
     assert rs.thumbnail_targets(plan, uploads) == {}
     plan["progress"]["2"]["state"] = "scheduled"
     assert list(rs.thumbnail_targets(plan, uploads)) == [2]
+
+
+# --- a rebooked slot is RESERVED before any YouTube call: never two videos in one slot -----------
+
+
+def _delete_both_then(rig):
+    """Both old videos deleted, both news private and unscheduled: each LF now needs a rebook."""
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")  # LF 2's old is gone
+    rig.world.fail.add("update_privacy")  # so LF 2 cannot finish before LF 3's old is deleted too
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    rig.world.fail.clear()
+
+
+def test_two_slot_passed_lfs_whose_first_schedule_call_fails_end_on_different_dates(tmp_path):
+    rig = Rig(tmp_path)
+    _delete_both_then(rig)
+    rig.rebook = rig.free_slot_after(AT3 + timedelta(days=3))
+    late = AT3 + timedelta(days=1)
+    rig.world.fail.add("update_privacy")
+    rig.run(now=late)  # both rebook, both schedule calls fail
+    assert rig.prog(2)["state"] == "old_deleted" and rig.prog(3)["state"] == "old_deleted"
+    assert rig.prog(2)["slot"] != rig.prog(3)["slot"]  # reserved, so the second pick moved on
+    rig.world.fail.clear()
+    rig.run(now=late + timedelta(hours=1))
+    at = {v: rig.world.videos[v]["publish_at"] for v in ("new2", "new3")}
+    assert (
+        at["new2"] is not None and at["new3"] is not None and at["new2"].date() != at["new3"].date()
+    )
+    assert rig.prog(2)["state"] == rig.prog(3)["state"] == "done"
+
+
+def test_a_slot_another_drive_booked_during_the_backoff_forces_a_rebook(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    rig.rebook = rig.free_slot_after(AT3 + timedelta(days=3))
+    late = AT3 + timedelta(days=1)
+    rig.world.fail.add("update_privacy")
+    rig.run(now=late)
+    d1 = rig.prog(2)["slot"]
+    rig.world.fail.clear()
+    rig.held[datetime.fromisoformat(d1).date()] = "other-drive"  # taken while we backed off
+    rig.run(now=late + timedelta(hours=1))
+    got = rig.world.videos["new2"]["publish_at"]
+    assert got.isoformat() != d1 and got.date() not in {datetime.fromisoformat(d1).date()}
+    assert rig.prog(2)["state"] == "done" and rig.prog(2)["slot"] == got.isoformat()
+
+
+def test_a_taken_pick_is_searched_again_and_a_slot_is_never_sent_unreserved(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    first = AT3 + timedelta(days=3)
+    rig.held[first.date()] = "other-drive"
+    picks = iter([first, first, first + timedelta(days=1)])  # a stale allocator keeps offering D
+    rig.rebook = lambda now: next(picks)
+    rig.run(now=AT3 + timedelta(days=1))
+    assert rig.world.videos["new2"]["publish_at"] == first + timedelta(days=1)
+
+
+def test_a_final_book_refused_is_an_incident_and_the_lf_is_not_done(tmp_path):
+    rig = Rig(tmp_path)
+    rig.book_error = SlotTaken("2026-12-01 is held")
+    rig.run()
+    assert rig.prog(2)["state"] != "done" and _incidents("book_failed")
+    rig.book_error = None
+    rig.run()  # retried on the next entry, finishes
+    assert rig.prog(2)["state"] == "done" and not _incidents()
+
+
+def test_a_rebook_inside_the_passed_margin_is_never_sent(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    now = AT2 + timedelta(hours=1)
+    rig.rebook = lambda n: n + timedelta(minutes=1)  # would publish at once
+    rig.run(now=now)
+    assert rig.prog(2)["state"] == "slot_passed"
+    assert not [e for e in rig.world.of("update_privacy") if e[1] == "new2"]
+
+
+def test_an_auditing_drive_with_an_unfinished_plan_and_receipts_is_not_retired(tmp_path):
+    publish, _ = _claim_rig(tmp_path, "old_deleted")
+    drive = SimpleNamespace(project="day-a", status="auditing", output_dir=str(tmp_path / "day-a"))
+    retired = []
+    store = SimpleNamespace(all_drives=lambda: [drive],
+                            retire_published=lambda *a, **k: retired.append(a) or "complete")  # fmt: skip
+    assert publish.retire_uploaded(store) == [] and not retired
+    rs.set_progress(tmp_path / "day-a", 2, state="done")  # finished: now the receipts retire it
+    assert publish.retire_uploaded(store) == [{"project": "day-a", "status": "complete"}]
+
+
+def test_a_failed_claim_over_an_unfinished_replace_opens_the_incident_once(tmp_path, monkeypatch):
+    publish, store = _claim_rig(tmp_path, "uploaded")
+    store.all_drives()[0].project = "alias"  # the run dir (day-a) differs from the project name
+    monkeypatch.setattr(publish, "_job_records", lambda d: [{"name": "gms-publish-alias", "created_at": 5, "result": {"state": "failed"}}])  # fmt: skip
+    monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
+    publish.reconcile_publishes(store, tmp_path)
+    assert len(_incidents("partial_finish")) == 1

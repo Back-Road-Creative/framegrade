@@ -29,6 +29,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ...publishing.live_catalog import (  # noqa: F401
+    LIVE_CATALOG_SNAPSHOT,
+    live_catalog_snapshot_path,
+)
 from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
 from ...publishing.plan_title_sync import applied_retitles
 from ...publishing.queue import (
@@ -234,9 +238,8 @@ class GateProblem:
         )
 
 
-#: The latest ``catalog-fetch --known-ids-from-queue`` result, beside the queue
-#: DB. The gate reads it; only ``catalog-fetch`` writes it.
-LIVE_CATALOG_SNAPSHOT = "live_catalog.latest.json"
+# The latest ``catalog-fetch --known-ids-from-queue`` result (LIVE_CATALOG_SNAPSHOT, beside the
+# queue DB) lives in publishing/live_catalog.py; the gate reads it, only ``catalog-fetch`` writes it.
 
 #: A snapshot older than this is a warning, not evidence: a video deleted after
 #: the fetch would be missed, and one restored would still hold its pair.
@@ -247,10 +250,6 @@ _REFRESH_COMMAND = "gomoveshift catalog-fetch --known-ids-from-queue --out <path
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def live_catalog_snapshot_path(storage_path) -> Path:
-    return Path(storage_path) / LIVE_CATALOG_SNAPSHOT
 
 
 def _fresh_live_catalog(storage_path, now: datetime) -> "Optional[dict]":

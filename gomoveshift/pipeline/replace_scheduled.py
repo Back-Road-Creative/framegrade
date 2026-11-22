@@ -28,7 +28,9 @@ The one invariant: the NEW video is deleted only by a call that has just proved 
 
 Every Phase D entry resumes each plan LF from its state before any upload
 (``resume_replacements``); a failed delete or swap is retried, and ``slot_passed`` is retried too.
-A passed slot is rebooked through ``rebook`` (Waypost's allocator), never published at once. Kept (public) LFs get no insert, booking, shorts, Metricool
+A passed slot is rebooked through ``rebook`` (Waypost's allocator), never published at once, and the
+new slot is RESERVED (``reserve``: the ledger entry and ``schedule.sqlite3`` move to it atomically)
+before any YouTube call, so no other LF or drive can take it; a taken pick is searched again. Kept (public) LFs get no insert, booking, shorts, Metricool
 or superlong emission, and replaced LFs get no new shorts/Metricool/superlong either.
 """
 
@@ -41,6 +43,12 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+
+
+def _slot_taken(exc: BaseException) -> bool:
+    """True for Waypost's ``SlotTaken`` (matched by name: the media engine imports no Waypost code)."""
+    return any(c.__name__ == "SlotTaken" for c in type(exc).__mro__)
+
 
 PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED, SLOT_PASSED = (
     "pending", "uploaded", "old_deleted", "scheduled", "done", "abandoned", "slot_passed")  # fmt: skip
@@ -59,6 +67,9 @@ REPLACE_MARGIN_H = 6
 #: After the old video is deleted the slot counts as passed only this close to now (minutes): a
 #: slot even an hour ahead is scheduled, never rebooked or left private.
 REPLACE_SLOT_PASSED_MARGIN_MIN = 5
+#: How many free slots ``advance`` tries to reserve before it leaves the LF ``slot_passed``: a
+#: ``SlotTaken`` means another drive took the pick between the search and the booking.
+REPLACE_RESERVE_TRIES = 5
 #: Codes that stop being a problem when the LF finishes; ``abandoned`` (the replace did not
 #: happen) and ``new_undeleted`` (a private leftover to delete) stay open on an abandoned LF.
 _KEEP_OPEN_ON_ABANDON = ("abandoned", "new_undeleted")
@@ -178,12 +189,13 @@ def classify_uploads(
     """``(plan, refusal)`` for a drive's ``youtube_uploads.json`` content.
 
     Every record must be a dict with a video id and a parseable ``publish_at``: public (past) ->
-    kept, scheduled (at least ``margin_h`` ahead AND live-confirmed private-scheduled) ->
-    replaced. Anything else, including an unreadable record or a failed live lookup, refuses."""
+    kept, scheduled inside ``margin_h`` -> kept too (``margin_kept`` names them), scheduled at
+    least ``margin_h`` ahead AND live-confirmed private-scheduled -> replaced. Anything else, including an unreadable record or a failed live lookup, refuses."""
     if not isinstance(uploads, dict) or not uploads:
         return None, "no upload records to classify"
     kept: Dict[str, Any] = {}
     replace: Dict[str, Any] = {}
+    margin_kept: list = []
     for lf, rec in uploads.items():
         when = _when(rec.get("publish_at")) if isinstance(rec, dict) else None
         if not (isinstance(rec, dict) and rec.get("video_id") and when):
@@ -191,7 +203,10 @@ def classify_uploads(
         if when <= now:
             kept[str(lf)] = rec
         elif when < now + timedelta(hours=margin_h):
-            return None, f"record {lf!r} publishes {rec['publish_at']}, inside the {margin_h} h margin"  # fmt: skip
+            # too close to replace (Waypost refuses a slot inside the margin): the old video is
+            # kept and publishes on its own, never blocking the LFs that can still be replaced
+            kept[str(lf)] = rec
+            margin_kept.append(str(lf))
         else:
             replace[str(lf)] = rec
     if not replace:
@@ -206,7 +221,10 @@ def classify_uploads(
         state = live.get(rec["video_id"])
         if state != "scheduled":
             return None, f"record {lf!r} ({rec['video_id']}) is {state or 'not found'} on YouTube, not scheduled"  # fmt: skip
-    return {"schema": REPLACE_PLAN_SCHEMA, "kept": kept, "replace": replace}, ""
+    plan = {"schema": REPLACE_PLAN_SCHEMA, "kept": kept, "replace": replace}
+    if margin_kept:
+        plan["margin_kept"] = sorted(margin_kept)  # kept for the margin, each an incident
+    return plan, ""
 
 
 def write_plan(out_dir: Path, plan: Dict[str, Any]) -> Path:
@@ -366,12 +384,15 @@ def advance(
     yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable,
     now: datetime, ledger_path: Path, book: Callable[[dict], None], metadata: Optional[dict] = None,
     config: Any = None, rebook: Optional[Callable[[datetime], Optional[datetime]]] = None,
+    reserve: Optional[Callable[[datetime], None]] = None,
 ) -> str:  # fmt: skip
     """Move one LF from its recorded state as far as it will go; returns the state reached.
 
     ``rebook(now)`` returns the next free slot (Waypost's allocator) for an LF whose slot passed
     after its old video was deleted; without one the new video stays private (``slot_passed``,
-    retried each entry), never published at once.
+    retried each entry), never published at once. ``reserve(slot)`` books that slot for this LF
+    (idempotent) and raises ``SlotTaken`` when another row holds the date; it runs before any
+    YouTube call and again on re-entry while the rebooked slot is unsent.
 
     Safe to call on every entry: each branch checks the durable state first, and a failed delete or
     swap stays where it is (logged loudly) to be retried."""
@@ -404,24 +425,54 @@ def advance(
             logger.error("REPLACE-UNSCHEDULED lf=%s: new %s needs a publish_at/playlist by hand", lf, new_id)  # fmt: skip
             record_incident(Path(plan_dir).name, "unscheduled", f"LF {lf}: old deleted, new {new_id} needs a publish_at/playlist by hand", lf=lf)  # fmt: skip
             return OLD_DELETED
-        if not st.get("publish_set") and when <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN):  # fmt: skip
+        unsent = not st.get("publish_set")
+        passed = unsent and when <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN)
+        if unsent and not passed and st.get("rebooked_from") and reserve is not None:
+            try:  # a rebooked slot is only ours while the store still holds it for this LF
+                reserve(when)
+            except Exception as exc:  # noqa: BLE001
+                if _slot_taken(exc):
+                    logger.error("REPLACE-RESERVE-LOST lf=%s: slot %s was taken during the backoff; rebooking", lf, when.isoformat())  # fmt: skip
+                    passed = True
+                else:
+                    logger.exception("REPLACE-RESERVE-FAILED lf=%s", lf)
+                    record_incident(Path(plan_dir).name, "schedule_failed", f"LF {lf}: the rebooked slot {when.isoformat()} could not be re-reserved; new {new_id} stays private, retried next entry", lf=lf)  # fmt: skip
+                    return OLD_DELETED
+        if passed:
             # A past publishAt would go public at once (or be rejected): never send one. The old
-            # video is gone, so the LF takes the next free slot, booked as any other LF.
+            # video is gone, so the LF takes the next free slot, RESERVED before any YouTube call.
             nxt = None
-            try:
-                nxt = rebook(now) if rebook is not None else None
-            except Exception:  # noqa: BLE001
-                logger.exception("REPLACE-REBOOK-FAILED lf=%s", lf)
-            if nxt is not None and nxt.tzinfo is None:
-                nxt = nxt.replace(tzinfo=timezone.utc)
-            if nxt is None or nxt <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN):
+            for _ in range(REPLACE_RESERVE_TRIES):
+                cand = None
+                try:
+                    cand = rebook(now) if rebook is not None else None
+                except Exception:  # noqa: BLE001
+                    logger.exception("REPLACE-REBOOK-FAILED lf=%s", lf)
+                if cand is not None and cand.tzinfo is None:
+                    cand = cand.replace(tzinfo=timezone.utc)
+                if cand is None or cand <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN):
+                    break
+                if reserve is None:
+                    nxt = cand
+                    break
+                try:
+                    reserve(cand)
+                    nxt = cand
+                    break
+                except Exception as exc:  # noqa: BLE001 -- never send a slot that is not reserved
+                    if _slot_taken(exc):
+                        logger.error("REPLACE-RESERVE-TAKEN lf=%s: %s was taken; searching again", lf, cand.isoformat())  # fmt: skip
+                        continue
+                    logger.exception("REPLACE-RESERVE-FAILED lf=%s", lf)
+                    break
+            if nxt is None:
                 logger.error("REPLACE-SLOT-PASSED lf=%s: slot %s passed, no free slot yet; new %s stays private, retried next entry", lf, when.isoformat(), new_id)  # fmt: skip
                 record_incident(Path(plan_dir).name, "slot_passed", f"LF {lf}: slot passed mid-replace ({when.isoformat()}), old deleted, new {new_id} stays private until the next free slot is found; retried next entry", lf=lf)  # fmt: skip
                 set_progress(plan_dir, lf, state=SLOT_PASSED)
                 return SLOT_PASSED
             record_incident(Path(plan_dir).name, "slot_rebooked", f"LF {lf}: slot {when.isoformat()} passed mid-replace; new {new_id} rebooked at the next free slot {nxt.isoformat()}", lf=lf)  # fmt: skip
             set_progress(plan_dir, lf, slot=nxt.isoformat(), rebooked_from=when.isoformat(), state=OLD_DELETED)  # fmt: skip
-            when, st = nxt, {**st, "slot": nxt.isoformat()}
+            when, st = nxt, {**st, "slot": nxt.isoformat(), "rebooked_from": when.isoformat()}
         try:
             if not st.get("publish_set"):
                 yt.update_privacy(new_id, privacy="private", publish_at=when)
@@ -450,7 +501,12 @@ def advance(
                    playlist_id=cur.get("playlist_id") or old.get("playlist_id"))  # fmt: skip
         state.youtube_uploads[lf] = rec
         save_state(state)
-        book(rec)
+        try:
+            book(rec)
+        except Exception as exc:  # noqa: BLE001 -- a SlotTaken here is never swallowed: not DONE
+            logger.error("REPLACE-BOOK-FAILED lf=%s: new %s is scheduled but not booked: %s", lf, new_id, exc, exc_info=True)  # fmt: skip
+            record_incident(Path(plan_dir).name, "book_failed", f"LF {lf}: new {new_id} is scheduled but its booking failed ({type(exc).__name__}: {exc}); retried next entry", lf=lf)  # fmt: skip
+            return SCHEDULED
         set_progress(plan_dir, lf, state=DONE)
         resolve_incidents(Path(plan_dir).name, lf=lf)  # every code this LF opened is over
         return DONE

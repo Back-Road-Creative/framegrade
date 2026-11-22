@@ -171,6 +171,13 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         config, args.region, args.ledger_path, now
     )
     acquire, release = launch.lease_fns(code_root)
+    supersede = (args.supersede, args.reason) if args.supersede else None
+    replace = bool(getattr(args, "replace_scheduled", False))
+    if supersede is None and not args.dry_run:
+        # a replace the last tick could not launch is retried here, with the heal backoff
+        due = launch.due_replace_retry(args.output_root, now)
+        if due:
+            supersede, replace = due, True
     result = launch.run_backlog(
         region=region, rows=rows, drives=drives, free_slots=slots, known_projects=known,
         stages_root=args.stages_root, output_root=args.output_root,
@@ -180,9 +187,8 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         drive_running=lambda: default_drive_running(jobs_dir),
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
-        supersede=(args.supersede, args.reason) if args.supersede else None,
-        replace_scheduled=bool(getattr(args, "replace_scheduled", False)),
-        live_status=launch.default_live_status() if getattr(args, "replace_scheduled", False) else None,  # fmt: skip
+        supersede=supersede, replace_scheduled=replace,
+        live_status=launch.default_live_status() if replace else None,
         replace_store=launch.default_replace_store(config),
         horizon_h=launch.render_horizon_h(config),
         latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
