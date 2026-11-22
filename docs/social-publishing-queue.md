@@ -756,10 +756,22 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   comment the drain recorded as posted. Another of our comments saying the same text queues a
   `delete` marked `extra` and `ours`; the recorded one is never touched. On Meta the drain's
   scan reports our second and later copies of the current text the same way (`report_duplicates`),
-  so two own copies end as one. The delete is re-read like any other (`_extra_is_deletable`): it
+  so two own copies end as one. The delete is re-read like any other (`_extra_check`): it
   runs only on an item marked `ours`, not the recorded comment, whose fresh read still says the
-  copied text; otherwise it is dropped. A row with no recorded id (older rows) deletes nothing and
-  reports the second copy once in `first_comment_error` and the drain's errors.
+  copied text and names our own account as its author (`read_comment(...).author` against the
+  client's `own_id()`: Graph `from.id`, YouTube `authorChannelId`). An unmarked item or the
+  recorded comment is dropped quietly. A Graph "gone" answer for the read is confirmed by listing
+  the post's comments (still listed, or a cut-short listing, keeps the delete pending); a copy
+  that now says other text, or whose author is missing or not ours, is dropped with an error line
+  in the drain's errors, never silently. A row with no recorded id (older rows) deletes nothing
+  and reports the second copy once in `first_comment_error` and the drain's errors.
+- **A mismatched own id is reported.** Our own id is `page_id` (Facebook) or `ig_user_id`
+  (Instagram). A Meta comment the drain just posted is read back once; when Graph names another
+  author, or none, the drain adds an error line and keeps a `first_comment_own_id_mismatch`
+  incident open (one per delivery). The comment stays ours and is never deleted. UNVERIFIED:
+  whether Graph's `from.id` equals `page_id` / `ig_user_id` for these tokens (no URL was fetched);
+  until it is checked, an incident here means the id or the assumption is wrong, and a lost answer
+  can post a second copy because our own comment is read as a viewer's.
 - **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
   unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
   the row's text NULL (`first_comment_posted_at` stays set). When that delete lands the row has no

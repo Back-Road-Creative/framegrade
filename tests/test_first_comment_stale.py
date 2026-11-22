@@ -107,10 +107,11 @@ class _Comments:
             return _Req(exc=self.read_fail)
         if id not in self.texts and id != "gone":
             self.texts[id] = "some stale text"
-        items = (
-            [{"id": id, "snippet": {"textOriginal": self.texts[id]}}] if id in self.texts else []
-        )
+        items = [{"id": id, "snippet": self._snippet(id)}] if id in self.texts else []
         return _Req({"items": items})
+
+    def _snippet(self, id):  # noqa: A002 -- a comment of ours: its author is our own channel
+        return {"textOriginal": self.texts[id], "authorChannelId": {"value": OWN}}
 
     def _go(self):
         return _Req(exc=self.fail.pop(0) if self.fail else None)

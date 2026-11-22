@@ -18,8 +18,13 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from .facebook_adapter import FacebookPermanentError
-from .first_comment import CommentPermissionError, ForeignCommentId, PriorCommentLiveError
-from .first_comment_stale import run_corrections
+from .first_comment import (
+    CommentPermissionError,
+    ForeignCommentId,
+    PostedId,
+    PriorCommentLiveError,
+)
+from .first_comment_stale import OWN_ID_KIND, raise_repost_incident, run_corrections
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
     first_comment_prior_texts,
@@ -40,6 +45,22 @@ logger = logging.getLogger(__name__)
 #: (``*RetryableError``), a lapsed token (``*AuthBlockedError``), a missing
 #: permission or a network failure says nothing about the post.
 _REFUSED_FOR_THE_POST = (FacebookPermanentError, InstagramPermanentError)
+
+
+def _author_mismatch(adapter: object, posted_id: object) -> Optional[str]:
+    """For a comment this drain just posted: ``None`` when it reads back with our own account id
+    as its author (or the read does not answer: the comment is live and is never touched), else
+    who Graph says wrote it (``"no author"`` when it names none)."""
+    if type(posted_id) is not PostedId:
+        return None  # found already there, so listed with its author: not a fresh post
+    try:
+        said = adapter.read_comment(str(posted_id))
+        own = adapter.own_id()
+    except Exception as exc:  # noqa: BLE001 -- best effort: the post already landed
+        logger.warning("first comment: could not read back comment %s: %s", posted_id, exc)
+        return None
+    author = getattr(said, "author", None)
+    return None if said is None or author == own else (author or "no author")
 
 
 def drain_meta_first_comments(
@@ -127,6 +148,14 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
+        mismatch = _author_mismatch(adapter_for(platform), posted_id)
+        if mismatch:
+            result.errors.append(
+                f"delivery {row['id']}: comment {posted_id} posted, but it reads back with "
+                f"author {mismatch}, not our own id; check the platform's own id config"
+            )
+            logger.warning("first comment: delivery %s: own id mismatch: %s", row["id"], mismatch)
+            raise_repost_incident(conn, row["id"], str(mismatch), incidents_dir, kind=OWN_ID_KIND)
         record_found_comments(
             conn,
             row["id"],

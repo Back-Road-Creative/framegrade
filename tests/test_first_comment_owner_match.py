@@ -21,6 +21,7 @@ from tests.test_first_comment_meta_correction import _row as _meta_row
 from tests.test_first_comment_stale import (
     NEW_TEXT,
     OLD_TEXT,
+    OWN,
     _drain,
     _published,
     _rewrite,
@@ -65,14 +66,17 @@ class NoFromGraph(FakeGraph):
 class FaithfulComments:
     """A YouTube comments API whose ``list(id=...)`` answers each comment's real text."""
 
-    def __init__(self, texts):
+    def __init__(self, texts, authors=None):
         self.texts, self.reads, self.deletes = dict(texts), [], []
+        self.authors = authors or {}  # id -> author channel id (None: none given); default ours
 
     def list(self, part, id, **kw):  # noqa: A002 -- the API's own name
         self.reads.append(id)
-        items = (
-            [{"id": id, "snippet": {"textOriginal": self.texts[id]}}] if id in self.texts else []
-        )
+        snippet = {"textOriginal": self.texts.get(id)}
+        author = self.authors.get(id, OWN)
+        if author:
+            snippet["authorChannelId"] = {"value": author}
+        items = [{"id": id, "snippet": snippet}] if id in self.texts else []
         return type("R", (), {"execute": lambda self_: {"items": items}})()
 
     def delete(self, id):  # noqa: A002 -- the API's own name
@@ -81,9 +85,9 @@ class FaithfulComments:
         return type("R", (), {"execute": lambda self_: None})()
 
 
-def _faithful_service(texts):
+def _faithful_service(texts, authors=None):
     svc = _Service()
-    svc.comments_api = FaithfulComments(texts)
+    svc.comments_api = FaithfulComments(texts, authors)
     return svc
 
 
