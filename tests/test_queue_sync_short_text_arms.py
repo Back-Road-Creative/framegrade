@@ -31,7 +31,11 @@ def test_a_short_whose_stored_arm_can_no_longer_render_is_refused(tmp_path, monk
         return posts
 
     monkeypatch.setattr(qst, "_generate_lf", drops_the_arm)
-    plan, conn = _world(tmp_path, [_short(1, arms={"yt_hashtag_set": "road"}), _short(2)])
+    refused = _short(1, arms={"yt_hashtag_set": "road"})
+    # place-free stored description: the refused Short's stored text names no place, so the
+    # neighbour's new description (its own title place) cannot repeat one
+    refused["payloads"]["youtube"]["description"] = "Old words about the drive. #Shorts"
+    plan, conn = _world(tmp_path, [refused, _short(2)])
     before = json.loads(plan.read_text())["shorts"][0]
     changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["refused", "changed"]
