@@ -11,6 +11,17 @@ import sys
 from ...publishing.facebook_caption_edit import CaptionEditRefusedError, edit_facebook_caption
 
 
+def _experiments():
+    """The brand's caption experiments, so an edit keeps the Short's arm treatment."""
+    try:
+        from ...console.settings import current_brand
+        from ...publishing.brand_policy import load_brand_policy
+
+        return load_brand_policy(current_brand()).experiments
+    except Exception:  # noqa: BLE001 - no policy readable: the edit keeps its untagged form
+        return ()
+
+
 def cmd_edit_facebook_caption(args, config) -> int:
     try:
         lines = edit_facebook_caption(
@@ -19,6 +30,7 @@ def cmd_edit_facebook_caption(args, config) -> int:
             args.id,
             args.text,
             apply=args.apply,
+            experiments=_experiments(),
         )
     except CaptionEditRefusedError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
