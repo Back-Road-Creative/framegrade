@@ -321,7 +321,11 @@ class TestConfigFlowToShorts:
         dc = DriveConfig(shorts_target_count=5, min_shorts_per_lf=7)
         with caplog.at_level(logging.WARNING):
             dc.check_shorts_consistency()
-        assert any("shorts_target_count" in msg for msg in caplog.messages)
+        msgs = [m for m in caplog.messages if "shorts_target_count" in m]
+        assert msgs
+        # The count is a maximum: no validation gate requires min_shorts_per_lf.
+        assert all("validation gate" not in m and "requires" not in m for m in msgs)
+        assert any("will cap at 5" in m for m in msgs)
 
     def test_no_warning_when_target_gte_min(self, caplog):
         """No warning when shorts_target_count >= min_shorts_per_lf."""
