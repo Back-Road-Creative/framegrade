@@ -464,7 +464,9 @@ def test_make_short_ost_text_fn_exposes_the_landmark_poi_source():
 
 
 # Hash of this payload computed at cd03920 (before the `landmark` key existed).
-_CD03920_SHORTS_AUDIT_HASH = "26816a99bc8b3c61ce0000ac3a82fcbadbcd0c988db3d4bb0b12b0bed30feff8"
+_CD03920_SHORTS_AUDIT_HASH = (
+    "26816a99bc8b3c61ce0000ac3a82fcbadbcd0c988db3d4bb0b12b0bed30feff8"  # pragma: allowlist secret
+)
 
 
 def test_shortrange_landmark_defaults_false_and_is_not_in_the_audit_hash():
