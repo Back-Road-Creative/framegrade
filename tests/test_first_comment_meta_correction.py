@@ -57,6 +57,7 @@ class FakeGraph:
         self.comments = {c[0]: c[1] for c in comments}
         self.authors = {c[0]: (c[2] if len(c) > 2 else self.own) for c in comments}
         self.page, self.log, self.n = page, [], 0
+        self.read_raises = False  # a GET of one comment never answers
         self.fail_post = None
         self.fail_edit = None
         self.post_refusal = False  # a permanent refusal (Graph code 100, HTTP 400), not a 500
@@ -68,6 +69,14 @@ class FakeGraph:
         self.lose_post_response = False  # the post lands, its answer is lost once
 
     def get(self, url, params=None, **kw):
+        if not url.endswith("/comments"):  # GET /{comment-id}: one comment, or 100/33 if absent
+            cid = url.rsplit("/", 1)[1]
+            self.log.append(f"read:{cid}")
+            if self.read_raises:
+                raise ConnectionError("connection reset")
+            if cid not in self.comments:
+                return Resp({"error": {"code": 100, "error_subcode": 33, "message": "no"}}, 400)
+            return Resp({"id": cid, self.field: self.comments[cid]})
         assert url.endswith("/comments"), url
         after = int((params or {}).get("after") or 0)
         items = list(self.comments.items())

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from .facebook_adapter import FacebookPermanentError
-from .first_comment import CommentPermissionError, PriorCommentLiveError
+from .first_comment import CommentPermissionError, ForeignCommentId, PriorCommentLiveError
 from .first_comment_stale import run_corrections
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
@@ -128,6 +128,13 @@ def drain_meta_first_comments(
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
         record_found_comments(
-            conn, row["id"], text, str(posted_id or ""), text, (), result, incidents_dir
+            conn,
+            row["id"],
+            text,
+            posted_id if isinstance(posted_id, ForeignCommentId) else str(posted_id or ""),
+            text,
+            (),
+            result,
+            incidents_dir,
         )
     return result

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
-from .first_comment import PriorCommentLiveError
+from .first_comment import ForeignCommentId, PriorCommentLiveError
 from .first_comment_stale import raise_stale_incident, run_corrections
 from .queue import (
     first_comment_prior_texts,
@@ -83,11 +83,13 @@ def _scan_first_comments(
     comment YouTube created whose answer was lost (googleapiclient reads with a 60 s timeout)
     is found on the next pass, not posted again. ``text`` counts whoever wrote it; only OUR comment
     saying a replaced text is ``prior`` (``authorChannelId`` must be the channel's, read lazily on
-    such a match: ``OwnChannelUnknownError`` when unreadable). Without ``also_accept`` the scan stops at the first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
+    such a match: ``OwnChannelUnknownError`` when unreadable). A viewer's copy of ``text`` comes
+    back AFTER ours, its id a ``ForeignCommentId``; a comment with no author is taken as ours. Without ``also_accept`` the scan stops at the first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
     text live beside the new one is seen. Any error raises, so the caller posts nothing."""
     want = {text.strip(): True, **{t.strip(): False for t in also_accept}}
     current: List[Tuple[str, str]] = []
     prior: List[Tuple[str, str]] = []
+    foreign: List[Tuple[str, str]] = []
     own: List[str] = []
     request = {
         "part": "snippet",
@@ -104,28 +106,38 @@ def _scan_first_comments(
                 heard = str(said.get(field_name) or "").strip()
                 if heard in want:
                     found = (str(top.get("id") or thread.get("id") or ""), heard)
-                    if want[heard]:
-                        current.append(found)
-                        break
                     author = str(((said.get("authorChannelId") or {}).get("value")) or "")
+                    if want[heard] and not author:
+                        current.append(found)  # no author to compare: as before
+                        break
                     own = own or [_own_channel_id(service)]
+                    if want[heard]:
+                        if author == own[0]:
+                            current.append(found)
+                        else:  # a viewer's copy: it never stands in for ours
+                            foreign.append((ForeignCommentId(found[0]), heard))
+                        break
                     if author and author == own[0]:
                         prior.append(found)
                     break
         token = response.get("nextPageToken")
         if (current and not also_accept) or not token:
-            return current, prior
+            return current + foreign, prior
         request = {**request, "pageToken": token}
     logger.warning(
         "first comment: video %s has over %d pages of comments; posting without reading the rest",
         video_id,
         COMMENT_CHECK_MAX_PAGES,
     )
-    return current, prior
+    return current + foreign, prior
 
 
 def post_first_comment_reporting(
-    service, video_id: str, text: str, also_accept: Iterable[str] = ()
+    service,
+    video_id: str,
+    text: str,
+    also_accept: Iterable[str] = (),
+    post_beside_foreign: bool = False,
 ) -> Tuple[str, str, Tuple[Tuple[str, str], ...]]:
     """``(comment id, the text that is live, duplicates)``: POSTs one top-level comment on
     ``video_id`` -- or, when the video already carries exactly ``text`` or one of ``also_accept``
@@ -133,15 +145,24 @@ def post_first_comment_reporting(
     ``text`` only when only a replaced (prior) text was found live. ``duplicates`` are the
     replaced-text comments found live beside the one returned (id, said): the drain deletes them."""
     current, prior = _scan_first_comments(service, video_id, text, also_accept)
+    ours = [c for c in current if not isinstance(c[0], ForeignCommentId)]
+    if post_beside_foreign:
+        current = ours  # a viewer's copy never stands in for ours: post ours beside it
     if current or prior:
-        first = current[0] if current else prior[0]
-        dupes = tuple(prior if current else prior[1:])
+        # OUR comment saying the text is the one kept; none: the first replaced one stands in for
+        # it; a stranger's copy answers only when nothing of ours is live and nothing is posted.
+        if ours:
+            first, said, dupes = ours[0], text, (*ours[1:], *prior)
+        elif prior:
+            first, said, dupes = prior[0], prior[0][1], tuple(prior[1:])
+        else:
+            first, said, dupes = current[0], text, ()
         logger.info(
             "first comment: video %s already carries it (comment %s); not posting it again",
             video_id,
             first[0],
         )
-        return first[0], (text if current else first[1]), dupes
+        return first[0], said, tuple(dupes)
     body = {
         "snippet": {
             "videoId": video_id,
@@ -173,6 +194,18 @@ class YouTubeCommentEditor:
 
     def __init__(self, service):
         self._service = service
+
+    def read_comment(self, comment_id: str) -> Optional[str]:
+        """The text comment ``comment_id`` says now (``comments.list(id=...)``), or ``None`` when
+        it is gone. A failed read raises: a caller never acts on a read that did not answer."""
+        response = self._service.comments().list(part="snippet", id=comment_id).execute()
+        items = response.get("items") or []
+        if not items:
+            return None
+        said = (items[0].get("snippet") or {}).get("textOriginal")
+        if said is None:
+            raise ValueError(f"comment {comment_id}: the read answered no text")
+        return str(said).strip()
 
     def edit_comment(self, comment_id: str, text: str, object_id: Optional[str] = None) -> None:
         body = {"id": comment_id, "snippet": {"textOriginal": text}}
@@ -316,6 +349,7 @@ def drain_first_comments(
                 row["comment_target_id"],
                 text,
                 also_accept=first_comment_prior_texts(fresh),
+                post_beside_foreign=True,
             )
         except Exception as exc:  # noqa: BLE001 -- graded per-row below
             detail = str(exc).strip() or exc.__class__.__name__
@@ -356,8 +390,14 @@ def record_found_comments(
     """What the drain found live for a row whose text is ``text``: the comment ``live_id``
     saying ``live_text`` (``text`` itself, or a replaced text) plus replaced-text
     ``duplicates`` (id, said) beside it. A replaced text is recorded and reported
-    (:func:`record_live_comment`); duplicates get a delete correction. Never silent."""
-    if live_text.strip() != text.strip():
+    (:func:`record_live_comment`); duplicates get a delete correction. Never silent. A
+    ``ForeignCommentId`` (a viewer's comment) is never ours: nothing is marked or queued for it
+    and the row stays for the next scan, which posts ours."""
+    if isinstance(live_id, ForeignCommentId):
+        logger.info(
+            "first comment: delivery %s: comment %s is a viewer's; left", delivery_id, live_id
+        )
+    elif live_text.strip() != text.strip():
         record_live_comment(conn, delivery_id, live_text, live_id, result, incidents_dir)
     else:
         mark_posted(conn, delivery_id, text, result, live_id, incidents_dir)
@@ -380,7 +420,10 @@ def record_live_comment(
     """A comment (``live_id``) saying ``live_text`` is live but the row holds other text (a
     relink rewrote it): ``queue.record_stale_live_comment`` stores it and queues the fix, then
     this adds it to ``result`` (``stale``, ``errors``; ``posted`` when it is the row's own
-    comment) and files the ``first_comment_stale`` incident. Never silent."""
+    comment) and files the ``first_comment_stale`` incident. Never silent. A viewer's comment
+    (``ForeignCommentId``) is never recorded: it is not ours to edit or delete."""
+    if isinstance(live_id, ForeignCommentId):
+        return
     error = record_stale_live_comment(conn, delivery_id, live_text, _now_iso(), live_id)
     if error is None:
         logger.warning("first comment: delivery %s changed under the drain; next pass", delivery_id)
@@ -403,12 +446,18 @@ def mark_posted(
     """Mark ``delivery_id`` posted iff its text is still ``posted_text`` and it is not already
     posted (a second comment found for a posted row is recorded, never absorbed). When a relink
     rewrote it during the post, the comment that went live (``live_id``) is the OLD text:
-    :func:`record_live_comment` records and reports that instead."""
+    :func:`record_live_comment` records and reports that instead. When the row is already posted
+    and ``live_id`` is another comment of ours saying the same text, :func:`record_live_comment`
+    queues a delete of that second copy (the row keeps the comment it first recorded). A viewer's
+    comment (``ForeignCommentId``) never marks a row posted."""
+    if isinstance(live_id, ForeignCommentId):
+        return
     with conn:
         marked = conn.execute(
-            "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL "
-            "WHERE id=? AND first_comment_text=? AND first_comment_posted_at IS NULL",
-            (_now_iso(), delivery_id, posted_text),
+            "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL, "
+            "first_comment_live_id=? WHERE id=? AND first_comment_text=? "
+            "AND first_comment_posted_at IS NULL",
+            (_now_iso(), live_id or None, delivery_id, posted_text),
         ).rowcount
     if marked:
         result.posted += 1

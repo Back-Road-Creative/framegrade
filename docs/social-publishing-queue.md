@@ -739,6 +739,21 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   UNVERIFIED against Meta's docs here) counts as success. A failing correction pass is recorded in
   `errors` and Meta posting continues. A capped correction's incident says "stopped trying", never
   "the drain will".
+- **A viewer's comment is never ours.** A comment saying our text whose author is another
+  account comes back from the scans (`_scan_first_comments`, `_existing_graph_comment`) with a
+  `first_comment.ForeignCommentId` id, after ours. It never marks a row posted and is never an
+  edit or delete target (`mark_posted`, `record_live_comment`, `record_found_comments` leave it);
+  the drain posts ours beside it (`post_beside_foreign`). A comment with no author field is taken
+  as ours, as before.
+- **A queued delete re-reads its comment first.** `run_corrections` reads the one comment
+  (YouTube `comments.list(id=...)`, Graph `GET /{id}`, `read_comment` on the clients); one that now
+  says an intended text is a stale observation: the delete is dropped. A failed read leaves the
+  item pending and visible, never a blind delete (Graph's gone answer for the read is the same
+  UNVERIFIED code 100 / subcode 33 as above).
+- **A second copy of the current text is deleted.** `deliveries.first_comment_live_id` holds the
+  comment the drain recorded as posted. Another of our comments saying the same text queues a
+  `delete` marked `extra` (exempt from the "never delete an intended text" and re-read checks);
+  the recorded one is never touched. A row with no recorded id (older rows) queues nothing.
 - **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
   pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
   on the JSON) and reports the row.

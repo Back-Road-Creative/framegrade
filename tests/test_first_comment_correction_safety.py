@@ -88,10 +88,13 @@ def test_a_second_mark_of_the_same_text_never_queues_a_delete_of_the_intended_co
     did = _published(conn)
     r = youtube_comments.FirstCommentResult()
     youtube_comments.mark_posted(conn, did, OLD_TEXT, r, "Y", inc)
-    youtube_comments.mark_posted(conn, did, OLD_TEXT, r, "Y2", inc)  # the same text, again
-    youtube_comments.record_live_comment(conn, did, OLD_TEXT, "Y3", r, inc)
+    youtube_comments.mark_posted(conn, did, OLD_TEXT, r, "Y", inc)  # the same comment, again
+    youtube_comments.record_live_comment(conn, did, OLD_TEXT, "Y", r, inc)
     assert not first_comment_corrections(_row(conn, did)) and not _incidents(inc)
-    assert record_stale_live_comment(conn, did, OLD_TEXT, _NOW, "Y4") is None
+    assert record_stale_live_comment(conn, did, OLD_TEXT, _NOW, "Y") is None
+    # a second copy beside the recorded one gets the delete; the recorded one never does
+    youtube_comments.mark_posted(conn, did, OLD_TEXT, r, "Y2", inc)
+    assert _rows(_row(conn, did)) == [("Y2", "delete")]
 
 
 def test_a_failed_item_stops_the_rows_other_items_this_pass(conn, inc):
@@ -508,6 +511,9 @@ def test_run_corrections_resolves_nothing_for_a_platform_it_was_not_given(conn, 
 class _Recorder:
     def __init__(self):
         self.calls = []
+
+    def read_comment(self, comment_id):
+        return "some stale text"
 
     def edit_comment(self, comment_id, text, object_id=None):
         self.calls.append(("edit", comment_id, text))
