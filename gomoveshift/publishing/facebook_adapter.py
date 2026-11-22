@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import urlsplit
 
 import requests
@@ -149,10 +149,11 @@ class FacebookReelsAdapter:
     def _get(self, url: str, **kwargs) -> dict:
         return graph_get(self._session, url, _raise_for_graph_error, **kwargs)
 
-    def post_comment(self, object_id: str, text: str) -> str:
+    def post_comment(self, object_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).
         A permission-class error raises ``CommentPermissionError`` naming
-        ``pages_manage_engagement``."""
+        ``pages_manage_engagement``. ``also_accept`` is the texts a relink replaced: one already
+        live raises ``first_comment.PriorCommentLiveError`` and nothing is posted."""
         return post_graph_comment(
             self._session,
             self._base,
@@ -162,6 +163,7 @@ class FacebookReelsAdapter:
             text_field="message",
             permission="pages_manage_engagement",
             raise_for_error=_raise_for_graph_error,
+            also_accept=also_accept,
         )
 
     def start_upload(self) -> UploadHandle:
