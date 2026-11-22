@@ -162,12 +162,22 @@ def _per_platform_schedule(
 
 
 def build_short_payloads(
-    post, *, recording_date: str, parent_id: str, tiktok_privacy_level: str
+    post,
+    *,
+    recording_date: str,
+    parent_id: str,
+    tiktok_privacy_level: str,
+    short_at,
+    parent_at,
 ) -> PlatformPayloads:
     """The four platform payloads of one Short from its generated ``post``.
 
     One place for the plan's text assembly (filmed suffix, parent link, title
-    hashtags), shared by :func:`build_publish_plan` and the queued-Short text sync."""
+    hashtags), shared by :func:`build_publish_plan` and the queued-Short text sync.
+    The YouTube description ends with the parent link only when the parent is
+    public by the Short's slot ``short_at`` (``parent_is_public_at``)."""
+    from .first_comment import parent_is_public_at
+
     # Same recording-date suffix as the CSV path, MINUS Twitter-length
     # truncation (only needed for the retired X/Twitter shared column).
     filmed = f"Filmed {format_recording_date_pretty(recording_date)}."
@@ -182,12 +192,14 @@ def build_short_payloads(
         text = (post_captions.get(platform) or legacy_caption or "").rstrip()
         return _with_filmed(text, filmed)
 
-    parent_link = f"https://youtu.be/{parent_id}"
+    parent_link = (
+        f"https://youtu.be/{parent_id}" if parent_is_public_at(short_at, parent_at) else ""
+    )
     yt_description = (getattr(post, "youtube_description", "") or "").strip()
     tags = tuple(
         t.strip() for t in (getattr(post, "youtube_tags", "") or "").split(",") if t.strip()
     )
-    yt_desc = f"{yt_description}\n\n{parent_link}" if yt_description else parent_link
+    yt_desc = "\n\n".join(part for part in (yt_description, parent_link) if part)
     return PlatformPayloads(
         youtube=YouTubePayload(
             title=_title_with_hashtags(getattr(post, "youtube_title", "") or "", yt_description),
@@ -257,18 +269,20 @@ def build_publish_plan(
             parent_publish_iso = parent_publish_at_by_short_index.get(short_idx)
             if not parent_id or not parent_publish_iso:
                 raise ValueError(f"PUBLISH-PLAN-NO-PARENT-ID: short_index {short_idx} has none")
+            parent_publish_at = datetime.fromisoformat(parent_publish_iso).astimezone(timezone.utc)
             payloads = build_short_payloads(
                 post,
                 recording_date=recording_date,
                 parent_id=parent_id,
                 tiktok_privacy_level=tiktok_privacy_level,
+                short_at=_slot_datetime_utc(slot),
+                parent_at=parent_publish_at,
             )
             payloads = _repair_short_tags(
                 payloads,
                 tuple(getattr(post, "sampled_regions", None) or ()),
                 tuple(getattr(post, "sampled_roads", None) or ()),
             )
-            parent_publish_at = datetime.fromisoformat(parent_publish_iso).astimezone(timezone.utc)
             records.append(
                 ShortPublishRecord(
                     project_name=project_name,

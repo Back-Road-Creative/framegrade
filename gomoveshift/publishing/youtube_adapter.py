@@ -110,13 +110,12 @@ def _parent_entry(record: ShortPublishRecord):
     from seo_manager.analytics.final_text_params import valid_video_id
     from seo_manager.analytics.final_text_surfaces import ParamBlock, build_visible
 
+    from .first_comment import parent_is_public_at
+
     parent = (record.parent_lf_video_id or "").strip()
     if not valid_video_id(parent):
         return None
-    short_at, parent_at = record.schedule.scheduled_at_utc, record.parent_lf_publish_at
-    if short_at.tzinfo is None or parent_at.tzinfo is None:
-        return None  # an unzoned time cannot be ordered; never link a maybe-private video
-    if short_at < parent_at:
+    if not parent_is_public_at(record.schedule.scheduled_at_utc, record.parent_lf_publish_at):
         return None
     evidence_id = f"parent-video-{parent}"
     item = {
