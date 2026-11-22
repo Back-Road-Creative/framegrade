@@ -739,12 +739,14 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   UNVERIFIED against Meta's docs here) counts as success. A failing correction pass is recorded in
   `errors` and Meta posting continues. A capped correction's incident says "stopped trying", never
   "the drain will".
-- **A viewer's comment is never ours.** A comment saying our text whose author is another
-  account comes back from the scans (`_scan_first_comments`, `_existing_graph_comment`) with a
+- **Only a comment positively ours is ever deleted, edited or adopted.** A comment is ours only
+  when its author is our channel id (YouTube `authorChannelId`) or Page / IG user id (Graph
+  `from.id`). Every other one, another account's or one with no author at all, comes back from
+  the scans (`_scan_first_comments`, `_existing_graph_comment`) with a
   `first_comment.ForeignCommentId` id, after ours. It never marks a row posted and is never an
   edit or delete target (`mark_posted`, `record_live_comment`, `record_found_comments` leave it);
-  the drain posts ours beside it (`post_beside_foreign`). A comment with no author field is taken
-  as ours, as before.
+  the drain posts ours beside it (`post_beside_foreign`). A no-author copy of our text is logged
+  once per scan ("no author"). When Graph or YouTube omit the author is UNVERIFIED here.
 - **A queued delete re-reads its comment first.** `run_corrections` reads the one comment
   (YouTube `comments.list(id=...)`, Graph `GET /{id}`, `read_comment` on the clients); one that now
   says an intended text is a stale observation: the delete is dropped. A failed read leaves the
@@ -752,8 +754,12 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   UNVERIFIED code 100 / subcode 33 as above).
 - **A second copy of the current text is deleted.** `deliveries.first_comment_live_id` holds the
   comment the drain recorded as posted. Another of our comments saying the same text queues a
-  `delete` marked `extra` (exempt from the "never delete an intended text" and re-read checks);
-  the recorded one is never touched. A row with no recorded id (older rows) queues nothing.
+  `delete` marked `extra` and `ours`; the recorded one is never touched. On Meta the drain's
+  scan reports our second and later copies of the current text the same way (`report_duplicates`),
+  so two own copies end as one. The delete is re-read like any other (`_extra_is_deletable`): it
+  runs only on an item marked `ours`, not the recorded comment, whose fresh read still says the
+  copied text; otherwise it is dropped. A row with no recorded id (older rows) deletes nothing and
+  reports the second copy once in `first_comment_error` and the drain's errors.
 - **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
   pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
   on the JSON) and reports the row.

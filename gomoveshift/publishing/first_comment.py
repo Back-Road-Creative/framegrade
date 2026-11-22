@@ -82,9 +82,11 @@ class PriorCommentLiveError(Exception):
 
 
 class ForeignCommentId(str):
-    """A comment id whose author is NOT us (a viewer's comment saying our text). It may satisfy a
-    "is it already there" scan but is never ours: never marked as the row's posted comment, never
-    an edit or delete target."""
+    """A comment id that is NOT positively ours (its author is another account, or unknown): a
+    viewer's comment saying our text. It may satisfy a "is it already there" scan but is never
+    ours: never marked as the row's posted comment, never an edit, delete or adoption target. ``unknown_author`` is set when it had no author."""
+
+    unknown_author = False
 
 
 class CommentCorrectionError(RuntimeError):
@@ -150,9 +152,9 @@ def _read_graph_comments(
     stop: Optional[Callable[[List[Tuple[str, str, bool]]], bool]] = None,
 ) -> Tuple[List[Tuple[str, str, bool]], bool]:
     """``(comments, complete)``: ``(id, text, ours)`` of the comments on ``object_id`` (text
-    stripped); ``ours`` only when ``from.id`` is ``own_id``, the Page or IG user (a comment with
-    no ``from``, or no ``own_id``, is never ours; the id of a comment whose ``from`` is someone
-    else is a ``ForeignCommentId``). Reads up to ``COMMENT_CHECK_MAX_PAGES``
+    stripped); ``ours`` only when ``from.id`` is ``own_id``, the Page or IG user. Every other
+    comment (someone else's, no ``from``, or no ``own_id``) is a viewer's: its id is a
+    ``ForeignCommentId``. Reads up to ``COMMENT_CHECK_MAX_PAGES``
     pages, or fewer once ``stop(comments)`` holds.
     ``complete`` is ``True`` only when the last page was reached. A failed read raises like a
     failed post: the caller must never post on a check that did not finish."""
@@ -180,8 +182,9 @@ def _read_graph_comments(
                 author = _author_id(comment)
                 ours = bool(own_id) and author == own_id
                 cid = str(comment.get("id") or "")
-                if author and not ours:
-                    cid = ForeignCommentId(cid)  # a known other author: never ours to touch
+                if not ours:
+                    cid = ForeignCommentId(cid)  # not positively ours: never ours to touch
+                    cid.unknown_author = not author
                 found.append((cid, said, ours))
         paging = body.get("paging") or {}
         after = (paging.get("cursors") or {}).get("after")
@@ -239,12 +242,14 @@ def _existing_graph_comment(
     if not own_id and any(said in prior_texts and said not in wanted for _, said, _ in comments):
         raise _own_id_unknown(object_id)
     hits = [(c, wanted[s], o) for c, s, o in comments if s in wanted]
+    if any(getattr(c, "unknown_author", False) for c, _, _ in hits):
+        logger.warning(
+            "first comment: %s has a comment with no author saying our text; treated as a "
+            "viewer's, never edited or deleted (unverified when Graph omits `from`)",
+            object_id,
+        )
     # Ours first; a stranger's id is flagged and never stands in for ours.
-    current = (
-        [(c, s) for c, s, o in hits if o]
-        + [(c, s) for c, s, o in hits if not o and not isinstance(c, ForeignCommentId)]
-        + [(c, s) for c, s, o in hits if isinstance(c, ForeignCommentId)]
-    )
+    current = [(c, s) for c, s, o in hits if o] + [(c, s) for c, s, o in hits if not o]
     prior = [
         (cid, prior_texts[said])
         for cid, said, ours in comments
@@ -266,6 +271,7 @@ def post_graph_comment(
     also_accept: Iterable[str] = (),
     own_id: str = "",
     post_beside_foreign: bool = False,
+    report_duplicates: bool = False,
 ) -> str:
     """POST ``{base}/{object_id}/comments``; returns the new comment id.
 
@@ -277,7 +283,9 @@ def post_graph_comment(
     is found on the next try, not posted again. A check that fails raises
     and posts nothing. When a comment found is one of ``also_accept`` (a text a relink
     replaced) it raises ``PriorCommentLiveError`` (naming the new text's comment when that is
-    live too, else the replaced one, plus any further replaced ones) and posts nothing.
+    live too, else the replaced one, plus any further replaced ones) and posts nothing. With
+    ``report_duplicates`` (the drain) the same error reports our second and later copies of
+    ``text`` as ``duplicates``, so each gets a delete and one stays.
 
     A permission-class Graph error raises ``CommentPermissionError`` naming
     ``permission``; any other error goes through the adapter's own
@@ -297,7 +305,7 @@ def post_graph_comment(
     ours = [c for c in current if not isinstance(c[0], ForeignCommentId)]
     if post_beside_foreign:
         current = ours  # a viewer's copy never stands in for ours: post ours beside it
-    if prior:
+    if prior or (report_duplicates and len(ours) > 1):
         # OUR comment saying the new text is the one to keep; with none, the first replaced one
         # stands in for it. Our further copies and replaced ones are duplicates.
         first = ours[0] if ours else prior[0]

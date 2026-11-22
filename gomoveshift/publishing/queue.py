@@ -1551,6 +1551,20 @@ def record_stale_live_comment(
             intended = first_comment_intended_texts(row)
             if said == current.strip() and said in intended:
                 known = row["first_comment_live_id"]
+                if live_id and not known:
+                    # An old row: the comment it recorded as posted is unknown, so which copy is
+                    # ours to keep cannot be told. Nothing is deleted; the operator is told once.
+                    error = (
+                        f"a second copy of the comment may be live (comment {live_id}); this "
+                        "row has no recorded comment id, so check and delete one by hand"
+                    )
+                    done = conn.execute(
+                        "UPDATE deliveries SET first_comment_error=?, updated_at=? WHERE id=? "
+                        "AND first_comment_posted_at IS NOT NULL AND first_comment_live_id IS NULL "
+                        "AND (first_comment_error IS NULL OR first_comment_error!=?)",
+                        (error, now, delivery_id, error),
+                    ).rowcount
+                    return error if done == 1 else None
                 if not (live_id and known and live_id != known):
                     return None
                 # A second comment of ours saying the intended text beside the recorded one:
@@ -1562,7 +1576,9 @@ def record_stale_live_comment(
                     "AND first_comment_live_id=?",
                     (
                         error,
-                        json.dumps([*items, {**item, "action": "delete", "extra": True}]),
+                        json.dumps(
+                            [*items, {**item, "action": "delete", "extra": True, "ours": True}]
+                        ),
                         now,
                         delivery_id,
                         known,
@@ -1639,7 +1655,8 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
     marks = ",".join("?" for _ in wanted)
     rows = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_text, platform_upload_id, "  # noqa: S608
-        "platform_post_id, first_comment_error, first_comment_correction, scheduled_at "
+        "platform_post_id, first_comment_error, first_comment_correction, scheduled_at, "
+        "first_comment_live_id "
         f"FROM deliveries WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
         "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts < ? "
         "ORDER BY id",

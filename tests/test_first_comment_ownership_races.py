@@ -241,6 +241,7 @@ def test_p3_a_second_copy_of_the_current_text_gets_a_delete_and_the_posted_id_st
     row = _row(conn, did)
     assert _ids(row) == [("Y2", "delete")] and _incidents(inc) and r.errors
     svc = _Service()
+    svc.comments_api.texts["Y2"] = NEW_TEXT  # the re-read sees the copy still there
     _drain(conn, svc, inc)
     assert svc.comments_api.deletes == ["Y2"]  # Y is never touched
     assert not first_comment_corrections(_row(conn, did))

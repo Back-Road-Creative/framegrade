@@ -172,6 +172,7 @@ class FacebookReelsAdapter:
             also_accept=also_accept,
             own_id=self._page_id,
             post_beside_foreign=True,
+            report_duplicates=True,
         )
 
     def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:

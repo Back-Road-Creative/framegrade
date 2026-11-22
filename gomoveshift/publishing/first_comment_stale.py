@@ -229,7 +229,13 @@ def run_corrections(
                 if item["action"] == "edit":
                     call(item["live_id"], item["to"], object_id=_target(row))
                 else:
-                    if not item.get("extra") and _already_intended(client, item, keep):
+                    if item.get("extra"):
+                        # A second copy: re-read it. Only our own, still saying the copied text and
+                        # not the row's recorded comment, is ever deleted.
+                        if not _extra_is_deletable(client, item, row):
+                            resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                            continue
+                    elif _already_intended(client, item, keep):
                         # A stale observation: the comment has since been corrected.
                         resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                         continue
@@ -285,6 +291,20 @@ def _already_intended(client: object, item: dict, keep: set) -> bool:
         raise CorrectionUnavailableError("cannot confirm what the comment says before deleting it")
     said = read(item["live_id"])
     return said is not None and said.strip() in keep
+
+
+def _extra_is_deletable(client: object, item: dict, row: Any) -> bool:
+    """True when a queued second-copy delete may run: the item is marked ours (a viewer's comment
+    is never queued, and a hand-edited or old item without the mark is dropped), its id is not the
+    comment the row recorded, and a fresh read still shows the text it copied. A read that fails
+    raises, so the delete stays pending and is never made blind."""
+    if not item.get("ours") or item.get("live_id") == row["first_comment_live_id"]:
+        return False
+    read = getattr(client, "read_comment", None)
+    if read is None:
+        raise CorrectionUnavailableError("cannot confirm what the comment says before deleting it")
+    said = read(item["live_id"])
+    return said is not None and said.strip() == (item.get("live_text") or "").strip()
 
 
 def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:

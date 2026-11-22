@@ -84,7 +84,8 @@ def _scan_first_comments(
     is found on the next pass, not posted again. ``text`` counts whoever wrote it; only OUR comment
     saying a replaced text is ``prior`` (``authorChannelId`` must be the channel's, read lazily on
     such a match: ``OwnChannelUnknownError`` when unreadable). A viewer's copy of ``text`` comes
-    back AFTER ours, its id a ``ForeignCommentId``; a comment with no author is taken as ours. Without ``also_accept`` the scan stops at the first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
+    back AFTER ours, its id a ``ForeignCommentId``; a comment with no author is a viewer's too (only
+    a positive match to the channel's id is ours: ``OwnChannelUnknownError`` when unreadable). Without ``also_accept`` the scan stops at the first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
     text live beside the new one is seen. Any error raises, so the caller posts nothing."""
     want = {text.strip(): True, **{t.strip(): False for t in also_accept}}
     current: List[Tuple[str, str]] = []
@@ -107,15 +108,21 @@ def _scan_first_comments(
                 if heard in want:
                     found = (str(top.get("id") or thread.get("id") or ""), heard)
                     author = str(((said.get("authorChannelId") or {}).get("value")) or "")
-                    if want[heard] and not author:
-                        current.append(found)  # no author to compare: as before
-                        break
                     own = own or [_own_channel_id(service)]
                     if want[heard]:
-                        if author == own[0]:
+                        if author and author == own[0]:
                             current.append(found)
-                        else:  # a viewer's copy: it never stands in for ours
-                            foreign.append((ForeignCommentId(found[0]), heard))
+                        else:  # a viewer's copy (or no author): it never stands in for ours
+                            viewer = ForeignCommentId(found[0])
+                            viewer.unknown_author = not author
+                            if not author:
+                                logger.warning(
+                                    "first comment: video %s has a comment with no author saying "
+                                    "our text; treated as a viewer's, never edited or deleted "
+                                    "(unverified when YouTube omits authorChannelId)",
+                                    video_id,
+                                )
+                            foreign.append((viewer, heard))
                         break
                     if author and author == own[0]:
                         prior.append(found)
