@@ -23,7 +23,7 @@ from gomoveshift.pipeline.drive_phases import youtube_uploader as youtube_upload
 from gomoveshift.publishing.youtube_adapter import build_short_final_text_review
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN = "fe920eb23f1678648591892de27270d9df357e68"
+PIN = "fe920eb23f1678648591892de27270d9df357e68"  # pragma: allowlist secret
 VID = "aB3_dE-fG1h"
 TITLE = "County Kerry drive"
 
@@ -93,6 +93,15 @@ def test_a_short_scheduled_before_its_parent_adds_no_link(mock_service, queue_co
         review = build_short_final_text_review(record)
         assert review["verdict"] == "agree", review["reasons"]
         assert ("https://youtu.be/" in _description(review)) is expect_link
+
+
+def test_a_parent_time_without_a_timezone_adds_no_link(mock_service, queue_conn, tmp_path):
+    # A naive time cannot be ordered against the Short's UTC slot; no link, no crash.
+    _, base, _, _ = _record(mock_service, queue_conn, tmp_path)
+    naive = base.schedule.scheduled_at_utc.replace(tzinfo=None) - timedelta(days=1)
+    review = build_short_final_text_review(replace(base, parent_lf_publish_at=naive))
+    assert review["verdict"] == "agree", review["reasons"]
+    assert "https://youtu.be/" not in _description(review)
 
 
 def test_publish_sends_the_linked_description(mock_service, queue_conn, tmp_path):

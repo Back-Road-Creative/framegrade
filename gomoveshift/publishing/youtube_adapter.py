@@ -113,7 +113,10 @@ def _parent_entry(record: ShortPublishRecord):
     parent = (record.parent_lf_video_id or "").strip()
     if not valid_video_id(parent):
         return None
-    if record.schedule.scheduled_at_utc < record.parent_lf_publish_at:
+    short_at, parent_at = record.schedule.scheduled_at_utc, record.parent_lf_publish_at
+    if short_at.tzinfo is None or parent_at.tzinfo is None:
+        return None  # an unzoned time cannot be ordered; never link a maybe-private video
+    if short_at < parent_at:
         return None
     evidence_id = f"parent-video-{parent}"
     item = {

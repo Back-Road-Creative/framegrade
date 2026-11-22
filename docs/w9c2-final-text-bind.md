@@ -23,7 +23,8 @@ set for text the review does not cover (insert count 0). Tests:
   places, so a Short sends one place line, `Drive through <clip place>`, and
   the generated prose is not sent. When the record's `parent_lf_video_id` is an
   11-character YouTube id and the Short is scheduled at or after
-  `parent_lf_publish_at`, the description ends with one more block,
+  `parent_lf_publish_at` (both times must carry a timezone; an unzoned one
+  sends no link), the description ends with one more block,
   `Full drive: https://youtu.be/<id>` (Waypost template
   `description.short.parent`; the id is `parent_video` evidence, never URL
   text). Otherwise no link is sent. The label is always `Full drive`: the record
