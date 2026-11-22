@@ -988,22 +988,30 @@ def restore_set_aside(output_root: Path, project: str, now: datetime, stages_roo
     going), over a finished run in the output dir, or over a dir that holds real files (named,
     kept as it is). Returns what could not be restored (``""`` when nothing needed it, or all was
     put back); a restore put off returns ``DEFERRED`` plus the reason, which no caller may read as
-    restored. Never raises."""
+    restored. A restore is put off only when a run is really set aside: with none (a same-run
+    ``_unsupersede`` keeps the marker's ``at``) it returns ``""`` before either put-off check.
+    Never raises."""
     try:
         ats = _marker_ats(_read_retry_marker(_retry_marker(output_root, project)))
         if not ats:
             return ""
+        out, failed = Path(output_root) / project, []
+        roots = [out.parent, *([stages_root] if stages_root else [])]
+        set_aside = []  # (at, moved pairs) of each attempt whose set-aside run is still there
+        for at in ats:
+            record = _set_aside_record(project, at, roots)
+            moves = [m for m in (record or {}).get("moves") or [] if isinstance(m, dict) and m.get("from") and m.get("to")]  # fmt: skip
+            if moved := [m for m in moves if _moved_by(m, at, project)]:
+                set_aside.append((at, moved))
+        if not set_aside:
+            return ""  # nothing is set aside, so nothing is put off (a same-run unsupersede keeps ``at``)
         if "a drive is running" in why:
             return f"{DEFERRED}a drive is running"
         if blocker := _job_running_since(jobs_dir, project, min(datetime.fromisoformat(a).timestamp() for a in ats)):  # fmt: skip
             return f"{DEFERRED}job {blocker.get('run_id')} is running"
-        out, failed = Path(output_root) / project, []
-        for at in ats:
-            record = _set_aside_record(project, at, [out.parent, *([stages_root] if stages_root else [])])  # fmt: skip
-            moves = [m for m in (record or {}).get("moves") or [] if isinstance(m, dict) and m.get("from") and m.get("to")]  # fmt: skip
-            moved = [m for m in moves if _moved_by(m, at, project)]
-            if not moved or ((out / "youtube_uploads.json").exists() and any(m["from"] == str(out) for m in moved)):  # fmt: skip
-                continue  # nothing set aside, or a finished run already holds the name
+        for at, moved in set_aside:
+            if (out / "youtube_uploads.json").exists() and any(m["from"] == str(out) for m in moved):  # fmt: skip
+                continue  # a finished run already holds the name
             busy = [m["from"] for m in moved if _holds_a_run(Path(m["from"]))]
             failed.append(f"{', '.join(busy)} already holds a run; the set-aside run is left where it is" if busy else _unsupersede(moved, out, now, at=at, project=project))  # fmt: skip
         return "; ".join(f for f in failed if f)

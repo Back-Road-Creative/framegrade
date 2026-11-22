@@ -404,7 +404,8 @@ def test_a_restore_over_a_malformed_record_is_a_failure_the_tick_survives(tmp_pa
     held = json.loads(rec.read_text())
     held["moves"] = [{"from": ["x"], "to": 5}, *held["moves"]]
     rec.write_text(json.dumps(held))
-    assert launch.restore_set_aside(rig.out, "day-a", NOW, rig.stages)
+    got = launch.restore_set_aside(rig.out, "day-a", NOW, rig.stages)
+    assert got and not got.startswith(launch.DEFERRED), got
     rig.slots = [(NOW + timedelta(days=41), "fri")]
     res = _tick(rig, NOW + timedelta(days=40))
     assert res["replace_retry"]["outcome"] == "bumped" and _marker_file(rig).exists()
