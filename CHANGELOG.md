@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.132] - 2026-11-21
+
+### Changed
+
+- Drive Short titles name the most specific place the clip measured, such as `Tryon` or
+  `Polk County`, instead of a "Sep 14, 3rd stretch: 41 seconds on a Monday" stamp. The final-text
+  review is unchanged, so no road appears in a title. A title already published or used in the
+  batch takes the next measured place, never the previous Short's; only a Short with none
+  left keeps its stamped title.
+  The `yt_title_body` arm is no longer assigned to a fact title.
+- Queue and bracket sync now re-derive fact titles: the ordinal comes from the day sidecar
+  (then a verified stamp, then plan position), not from the old title, so a plan the
+  generator wrote syncs to no change. Discarded siblings take no measured place, and Phase D
+  shares one title ledger across a drive's LFs so a place titles one Short of the drive.
+
 ## [0.3.131] - 2026-11-21
 
 ### Changed
@@ -1490,7 +1505,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.131...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...HEAD
+[0.3.132]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.131...v0.3.132
 [0.3.131]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.130...v0.3.131
 [0.3.130]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.129...v0.3.130
 [0.3.129]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.128...v0.3.129
