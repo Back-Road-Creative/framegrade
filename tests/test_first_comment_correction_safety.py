@@ -263,6 +263,10 @@ def test_a_meta_replace_fails_closed_without_our_own_id():
     assert graph.log == []
 
 
+_PARENT_AT = "2026-11-01T00:00:00+00:00"
+_SLOT = "2026-11-10T00:00:00+00:00"
+
+
 def _comment(vid):
     return f"\U0001f3ac Watch the full drive: https://youtu.be/{vid}"
 
@@ -270,16 +274,18 @@ def _comment(vid):
 def test_a_second_replace_rewrites_the_pending_edit_and_reports_the_row(conn, inc, tmp_path):
     a, b, c = "aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"
     did = _published(conn)
-    _upd(conn, "first_comment_text=? WHERE id=?", _comment(a), did)
+    _upd(conn, "first_comment_text=?, scheduled_at=? WHERE id=?", _comment(a), _SLOT, did)
     now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
-    relink_replaced_lf("proj", tmp_path, {a: b}, conn=conn, now=now)
+    relink_replaced_lf("proj", tmp_path, {a: (b, _PARENT_AT)}, conn=conn, now=now)
     page = {"items": [_thread(_comment(a), "X")]}
     _drain(conn, _Service(pages=[page]), inc)
     assert first_comment_corrections(_row(conn, did))[0]["to"] == _comment(b)
-    dry = relink_replaced_lf("proj", tmp_path, {b: c}, conn=conn, now=now, dry_run=True)
+    dry = relink_replaced_lf(
+        "proj", tmp_path, {b: (c, _PARENT_AT)}, conn=conn, now=now, dry_run=True
+    )
     assert [r.delivery_id for r in dry.queue_rewritten] == [did]
     assert first_comment_corrections(_row(conn, did))[0]["to"] == _comment(b)  # dry run: no write
-    report = relink_replaced_lf("proj", tmp_path, {b: c}, conn=conn, now=now)
+    report = relink_replaced_lf("proj", tmp_path, {b: (c, _PARENT_AT)}, conn=conn, now=now)
     assert [(r.delivery_id, r.written) for r in report.queue_rewritten] == [(did, True)]
     svc = _Service()
     _drain(conn, svc, inc)
@@ -386,8 +392,10 @@ def test_the_summary_last_line_keeps_the_capped_count(tmp_path, capsys):
 
 def _relink_text(conn, tmp_path, did):
     now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    with conn:  # every row's slot is after the replacement's publish time: the gate passes
+        conn.execute("UPDATE deliveries SET scheduled_at=? WHERE scheduled_at IS NULL", (_SLOT,))
     report = relink_replaced_lf(
-        "proj", tmp_path, {"oldvideo_01": "newvideo_02"}, conn=conn, now=now
+        "proj", tmp_path, {"oldvideo_01": ("newvideo_02", _PARENT_AT)}, conn=conn, now=now
     )
     return [i for i in report.operator_items if f"delivery {did} " in i], report
 
@@ -492,3 +500,76 @@ def test_run_corrections_resolves_nothing_for_a_platform_it_was_not_given(conn, 
         result=youtube_comments.FirstCommentResult(), incidents_dir=inc,
     )  # fmt: skip
     assert not _incidents(inc)[0].get("resolved_at")
+
+
+# --- the parent-public gate holds at correction time; the incident never promises a stopped fix
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def edit_comment(self, comment_id, text, object_id=None):
+        self.calls.append(("edit", comment_id, text))
+
+    def delete_comment(self, comment_id):
+        self.calls.append(("delete", comment_id))
+
+
+def _posted_with_edit(conn, parent_at, slot):
+    did = _published(conn)
+    _rewrite(conn, did)
+    item = {"live_id": "c1", "live_text": OLD_TEXT, "action": "edit", "to": NEW_TEXT}
+    if parent_at:
+        item["parent_at"] = parent_at
+    with conn:
+        conn.execute(
+            "UPDATE deliveries SET first_comment_posted_at=?, first_comment_text=?, "
+            "first_comment_correction=?, first_comment_error='stale comment live: links old', "
+            "scheduled_at=? WHERE id=?",
+            (_NOW, OLD_TEXT, json.dumps([item]), slot, did),
+        )
+    return did
+
+
+def _run(conn, inc, client):
+    result = youtube_comments.FirstCommentResult()
+    run_corrections(
+        conn, platforms=("youtube",), client_for=lambda p: client, refused=lambda e: False,
+        result=result, incidents_dir=inc,
+    )  # fmt: skip
+    return result
+
+
+def test_an_edit_whose_parent_is_still_private_is_never_run_it_becomes_a_delete(conn, inc):
+    did = _posted_with_edit(conn, "2026-08-24T00:00:00+00:00", "2026-08-23T00:00:00+00:00")
+    client = _Recorder()
+    result = _run(conn, inc, client)
+    assert not [c for c in client.calls if c[0] == "edit"]  # never links the private video
+    assert any("not public" in e for e in result.errors)
+    row = _row(conn, did)
+    (fix,) = first_comment_corrections(row)
+    assert fix["action"] == "delete" and fix["live_id"] == "c1" and not row["first_comment_text"]
+    again = _run(conn, inc, client)  # the next pass runs the delete
+    assert client.calls == [("delete", "c1")] and again.corrected == 1
+    assert not first_comment_corrections(_row(conn, did))
+
+
+def test_an_edit_whose_parent_is_public_by_the_slot_still_runs(conn, inc):
+    did = _posted_with_edit(conn, "2026-08-23T00:00:00+00:00", "2026-08-23T00:00:00+00:00")
+    client = _Recorder()
+    assert _run(conn, inc, client).corrected == 1
+    assert client.calls == [("edit", "c1", NEW_TEXT)]
+    assert not first_comment_corrections(_row(conn, did))
+
+
+def test_a_capped_incident_never_says_the_drain_will_edit(conn, inc):
+    did = _posted_with_edit(conn, None, "2026-08-23T00:00:00+00:00")
+    with conn:
+        conn.execute(
+            "UPDATE deliveries SET first_comment_correction_attempts=? WHERE id=?", (CAP, did)
+        )
+    raise_stale_incident(conn, did, inc)  # the pass whose refusal reached the cap
+    (incident,) = _incidents(inc)
+    assert "the drain will" not in incident["detail"]
+    assert "stopped trying" in incident["detail"] and "edit comment c1" in incident["detail"]

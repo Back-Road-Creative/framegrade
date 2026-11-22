@@ -85,6 +85,18 @@ class CommentCorrectionError(RuntimeError):
     """Graph answered a comment edit/delete with a 2xx that is not ``{"success": true}``."""
 
 
+class ReplacePostFailedError(Exception):
+    """The stale comment is gone (its DELETE was confirmed, or a read showed it already gone) and
+    posting the replacement failed with ``cause``. The caller must record the delete before
+    anything else: the row goes back to unposted with the new text, so the normal posting path
+    (its attempts, its alerts) owns the post and the row never claims a comment that is not
+    there."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(f"stale comment deleted, replacement not posted: {cause}")
+        self.cause = cause
+
+
 def full_drive_comment_text(parent_lf_video_id: str) -> str:
     """The first-comment text linking a short to its parent long-form video."""
     parent = (parent_lf_video_id or "").strip()
@@ -284,12 +296,34 @@ def post_graph_comment(
     return str(body["id"])
 
 
+#: Graph's answer to a DELETE of a comment that no longer exists: code 100, subcode 33 ("Object
+#: does not exist"). UNVERIFIED against Meta's docs here (no code or doc in this repo names it);
+#: it is the pair the reviewer's scenario reports. A wrong pair only means the old behaviour: the
+#: 400 is an ordinary refusal, counted and capped.
+_GRAPH_GONE = (100, 33)
+
+
+def _is_gone(response) -> bool:
+    try:
+        error = (response.json() or {}).get("error")
+    except ValueError:
+        return False
+    return (
+        response.status_code >= 400
+        and isinstance(error, dict)
+        and (error.get("code"), error.get("error_subcode")) == _GRAPH_GONE
+    )
+
+
 def _graph_call(
     session, method: str, url: str, access_token: str, permission: str, raise_for_error, **kwargs
 ) -> dict:
     response = getattr(session, method)(
         url, headers={"Authorization": f"OAuth {access_token}"}, timeout=30, **kwargs
     )
+    if method == "delete" and _is_gone(response):
+        # Already deleted (an earlier DELETE landed and its answer was lost): the goal holds.
+        return {"success": True}
     body = _graph_body(response, permission, raise_for_error)
     if body.get("success") is not True:
         raise CommentCorrectionError(f"Graph {method.upper()} {url.rsplit('/', 1)[-1]}: not ok")
@@ -339,7 +373,8 @@ def replace_graph_comment(
     Reads every bounded page first. ``stale_id`` listed: delete it (a 2xx without
     ``success`` raises). Not listed: it is gone (an earlier pass deleted it and the post
     failed), but only when the read was complete, else ``CommentCheckError``. Then post ``text``
-    unless a comment already says it. Returns the id of the comment that says ``text``."""
+    unless a comment already says it. Returns the id of the comment that says ``text``. Once the
+    stale comment is gone, a failed post raises ``ReplacePostFailedError`` (see there)."""
     if not own_id:
         raise _own_id_unknown(object_id)
     comments, complete = _read_graph_comments(
@@ -362,8 +397,11 @@ def replace_graph_comment(
             f"cannot confirm comment {stale_id} on {object_id} is gone (too many comments); "
             "nothing posted"
         )
-    return post_graph_comment(
-        session, base, object_id, text, access_token,
-        text_field=text_field, permission=permission, raise_for_error=raise_for_error,
-        own_id=own_id,
-    )  # fmt: skip
+    try:
+        return post_graph_comment(
+            session, base, object_id, text, access_token,
+            text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+            own_id=own_id,
+        )  # fmt: skip
+    except Exception as exc:  # noqa: BLE001 -- the stale comment is gone: the caller must know
+        raise ReplacePostFailedError(exc) from exc

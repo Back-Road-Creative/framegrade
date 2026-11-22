@@ -1449,7 +1449,7 @@ def first_comments_naming(
     return conn.execute(
         "SELECT id, short_index, platform, status, first_comment_text, "  # noqa: S608
         "first_comment_posted_at, first_comment_attempts, first_comment_error, lease_owner, "
-        "lease_expires_at, first_comment_correction, first_comment_correction_attempts, "
+        "lease_expires_at, scheduled_at, first_comment_correction, first_comment_correction_attempts, "
         "platform_upload_id, platform_post_id, upload_kind "
         f"FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
         (project_name, *[n for n in needles for _ in (0, 1)]),
@@ -1607,8 +1607,8 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
     marks = ",".join("?" for _ in wanted)
     rows = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_text, platform_upload_id, "  # noqa: S608
-        "platform_post_id, first_comment_error, first_comment_correction FROM deliveries "
-        f"WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
+        "platform_post_id, first_comment_error, first_comment_correction, scheduled_at "
+        f"FROM deliveries WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
         "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts < ? "
         "ORDER BY id",
         (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
@@ -1668,9 +1668,14 @@ def rewrite_first_comment_corrections(
     delivery_id: int,
     rewrite: Callable[[str], str],
     now: str,
+    gate: Optional[Callable[[str], Tuple[Optional[str], bool]]] = None,
 ) -> Optional[bool]:
-    """Compare-and-set ``to`` -> ``rewrite(to)`` on every pending ``edit``. ``None`` when none
-    changes, ``True`` when written, ``False`` when the JSON moved since it was read."""
+    """Compare-and-set ``to`` -> ``rewrite(to)`` on every pending ``edit`` (a second replace: the
+    edit must write the newest link). With ``gate`` (``to`` -> ``(parent_publish_at, public)``)
+    an edit whose replacement is public keeps ``parent_at`` for the drain's own re-check, and one
+    that is not becomes a ``delete`` of the live comment and the row's intended text is dropped
+    (a delete of the intended text never runs). ``None`` when no edit changes, ``True`` when
+    written, ``False`` when the JSON moved since it was read (rerun)."""
     with conn:
         row = conn.execute(
             "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
@@ -1679,20 +1684,60 @@ def rewrite_first_comment_corrections(
             return None
         raw = row["first_comment_correction"]
         items = first_comment_corrections(row)
-        out = [
-            {**i, "to": rewrite(i["to"])}
-            if i.get("action") == "edit" and isinstance(i.get("to"), str)
-            else i
-            for i in items
-        ]
+        dropped = False
+
+        def fix(i: dict) -> dict:
+            nonlocal dropped
+            if i.get("action") != "edit" or not isinstance(i.get("to"), str):
+                return i
+            new_to = rewrite(i["to"])
+            if gate is None:
+                return {**i, "to": new_to}
+            if new_to == i["to"]:
+                return i
+            at, public = gate(i["to"])
+            if public:
+                return {**i, "to": new_to, "parent_at": at}
+            dropped = True
+            return {
+                "live_id": i.get("live_id"),
+                "live_text": i.get("live_text"),
+                "action": "delete",
+            }
+
+        out = [fix(i) for i in items]
         if out == items:
             return None
         done = conn.execute(
-            "UPDATE deliveries SET first_comment_correction=?, updated_at=? "
-            "WHERE id=? AND first_comment_correction=?",
+            "UPDATE deliveries SET first_comment_correction=?, updated_at=?"  # noqa: S608
+            + (", first_comment_text=NULL" if dropped else "")
+            + " WHERE id=? AND first_comment_correction=?",
             (json.dumps(out), now, delivery_id, raw),
         ).rowcount
         return done == 1
+
+
+def drop_private_edit(conn: sqlite3.Connection, delivery_id: int, item: dict, now: str) -> None:
+    """``item`` (an ``edit``) would link a video that is still private at the row's slot: it
+    becomes a ``delete`` of the live comment and the row's intended text goes, so the delete
+    (never run against the intended text) can run."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None:
+            return
+        out = [
+            {"live_id": i.get("live_id"), "live_text": i.get("live_text"), "action": "delete"}
+            if _same_correction(i, item) and i.get("action") == "edit"
+            else i
+            for i in first_comment_corrections(row)
+        ]
+        conn.execute(
+            "UPDATE deliveries SET first_comment_correction=?, first_comment_text=NULL, "
+            "updated_at=? WHERE id=?",
+            (json.dumps(out), now, delivery_id),
+        )
 
 
 def resolve_first_comment_correction(
@@ -1759,9 +1804,10 @@ def first_comment_prior_texts(row: Any) -> Tuple[str, ...]:
 
 
 def rewrite_unposted_first_comment(
-    conn: sqlite3.Connection, delivery_id: int, old_text: str, new_text: str, now: str
+    conn: sqlite3.Connection, delivery_id: int, old_text: str, new_text: Optional[str], now: str
 ) -> bool:
-    """Compare-and-set ``first_comment_text`` ``old_text`` -> ``new_text`` on one delivery,
+    """Compare-and-set ``first_comment_text`` ``old_text`` -> ``new_text`` (``None`` drops the
+    link: the parent is private at the row's slot) on one delivery,
     only while the comment can still post: unposted, under ``FIRST_COMMENT_MAX_ATTEMPTS``,
     status not in ``FIRST_COMMENT_FROZEN_STATUSES``, no live lease. ``False`` (nothing written)
     when the row moved since it was read. ``old_text`` joins ``first_comment_prior_text`` for

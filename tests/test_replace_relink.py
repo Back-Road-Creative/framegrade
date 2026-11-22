@@ -31,7 +31,9 @@ PROJECT = "nctopa-2026-03-05-rec0063"
 OLD, NEW = "oLdVideo_01", "nEwVideo-02"
 OTHER = "otherVid_99"
 NOW = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
-MAP = {OLD: NEW}
+NEW_AT = "2026-11-22T12:00:00+00:00"  # the replacement goes public at NOW
+SLOT = "2026-11-22T13:00:00+00:00"  # a short's slot after it: the parent is public by then
+MAP = {OLD: (NEW, NEW_AT)}
 
 
 def _comment(vid):
@@ -45,9 +47,17 @@ def conn(tmp_path):
     c.close()
 
 
-def _row(conn, idx, vid=OLD, status="queued", posted=None, platform="youtube", project=PROJECT):
+def _row(
+    conn, idx, vid=OLD, status="queued", posted=None, platform="youtube", project=PROJECT, slot=SLOT
+):
     did = enqueue(
-        conn, project, idx, platform, f"h{idx}{platform}", first_comment_text=_comment(vid)
+        conn,
+        project,
+        idx,
+        platform,
+        f"h{idx}{platform}",
+        scheduled_at=slot,
+        first_comment_text=_comment(vid),
     )
     conn.execute(
         "UPDATE deliveries SET status=?, first_comment_posted_at=? WHERE id=?",
@@ -341,8 +351,17 @@ def test_dry_run_reports_but_writes_nothing(conn, tmp_path):
 
 @pytest.mark.parametrize(
     "bad",
-    [{}, {OLD: OLD}, {"": NEW}, {OLD: ""}, {OLD: NEW, NEW: "zzz"}],
-    ids=["empty", "same", "empty-old", "empty-new", "chain"],
+    [
+        {},
+        {OLD: (OLD, NEW_AT)},
+        {"": (NEW, NEW_AT)},
+        {OLD: ("", NEW_AT)},
+        {OLD: (NEW, NEW_AT), NEW: ("zzz", NEW_AT)},
+        {OLD: (NEW, "")},
+        {OLD: (NEW, "not a time")},
+        {OLD: (NEW, "2026-11-22T12:00:00")},
+    ],
+    ids=["empty", "same", "empty-old", "empty-new", "chain", "no-time", "bad-time", "unzoned"],
 )
 def test_refusals_write_nothing(conn, tmp_path, bad):
     out = _drive(tmp_path)
@@ -356,7 +375,9 @@ def test_refusals_write_nothing(conn, tmp_path, bad):
 
 def test_two_ids_swap_independently(conn, tmp_path):
     a, b = _row(conn, 1), _row(conn, 2, vid=OTHER)
-    relink_replaced_lf(PROJECT, tmp_path, {OLD: NEW, OTHER: "thirdVid_03"}, conn=conn, now=NOW)
+    relink_replaced_lf(
+        PROJECT, tmp_path, {OLD: (NEW, NEW_AT), OTHER: ("thirdVid_03", NEW_AT)}, conn=conn, now=NOW
+    )
     assert _text(conn, a) == _comment(NEW) and _text(conn, b) == _comment("thirdVid_03")
 
 
@@ -454,3 +475,102 @@ def test_the_lease_precheck_uses_this_process_clock_not_the_callers_now(conn, tm
     future = datetime(2100, 1, 1, tzinfo=timezone.utc)
     report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=future)
     assert any("lease held" in s.reason for s in report.queue_skipped)
+
+
+# --- #517 parent-public gate: a relink never links a video that is still private -------------
+
+EARLY = "2026-11-22T11:00:00+00:00"  # a slot before the replacement goes public (NEW_AT)
+PLATFORMS = ["youtube", "facebook", "instagram"]
+
+
+def _row_state(conn, did):
+    return conn.execute("SELECT * FROM deliveries WHERE id=?", (did,)).fetchone()
+
+
+def test_a_bare_string_id_map_value_is_a_type_error(conn, tmp_path):
+    did = _row(conn, 1)
+    with pytest.raises(TypeError):
+        relink_replaced_lf(PROJECT, tmp_path, {OLD: NEW}, conn=conn, now=NOW)
+    assert _text(conn, did) == _comment(OLD)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_an_unposted_row_is_not_relinked_to_a_private_video(conn, tmp_path, platform):
+    did = _row(conn, 1, platform=platform, slot=EARLY)
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    row = _row_state(conn, did)
+    assert row["first_comment_text"] is None  # dropped, the way enqueue drops a private link
+    assert row["first_comment_posted_at"] is None
+    assert [r.delivery_id for r in report.queue_rewritten] == [did]
+    (item,) = [i for i in report.operator_items if f"delivery {did}" in i]
+    assert "not public" in item and EARLY in item
+
+
+def test_the_gate_is_per_row_slot(conn, tmp_path):
+    early = _row(conn, 1, slot=EARLY)
+    late = _row(conn, 2, slot=SLOT)
+    unknown = _row(conn, 3, slot=None)
+    relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert _text(conn, early) is None
+    assert _text(conn, late) == _comment(NEW)
+    assert _text(conn, unknown) is None  # an unknown slot cannot be ordered: never links
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_a_passing_gate_still_relinks(conn, tmp_path, platform):
+    did = _row(conn, 1, platform=platform, slot=NEW_AT)  # public exactly at the slot
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert _text(conn, did) == _comment(NEW)
+    assert not any("not public" in i for i in report.operator_items)
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_a_live_comment_with_a_pending_edit_gets_a_delete_not_an_edit(conn, tmp_path, platform):
+    did = _row(conn, 1, platform=platform, posted="2026-11-22T10:00:00+00:00", slot=EARLY)
+    conn.execute(
+        "UPDATE deliveries SET first_comment_error=?, first_comment_correction=? WHERE id=?",
+        (
+            "stale comment live: links zeroVid_00",
+            json.dumps([{"live_id": "c1", "live_text": _comment("zeroVid_00"), "action": "edit",
+                         "to": _comment(OLD)}]),
+            did,
+        ),
+    )  # fmt: skip
+    conn.commit()
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    row = _row_state(conn, did)
+    (fix,) = json.loads(row["first_comment_correction"])
+    assert fix == {"live_id": "c1", "live_text": _comment("zeroVid_00"), "action": "delete"}
+    assert row["first_comment_text"] is None  # no intended text: the delete is allowed to run
+    assert any("not public" in i and f"delivery {did}" in i for i in report.operator_items)
+
+
+def test_a_pending_edit_is_rewritten_with_the_new_parent_time_when_the_gate_passes(conn, tmp_path):
+    did = _row(conn, 1, posted="2026-11-22T10:00:00+00:00")
+    conn.execute(
+        "UPDATE deliveries SET first_comment_correction=? WHERE id=?",
+        (
+            json.dumps([{"live_id": "c1", "live_text": _comment("zeroVid_00"), "action": "edit",
+                         "to": _comment(OLD)}]),
+            did,
+        ),
+    )  # fmt: skip
+    conn.commit()
+    relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    (fix,) = json.loads(_row_state(conn, did)["first_comment_correction"])
+    assert fix["action"] == "edit" and fix["to"] == _comment(NEW) and fix["parent_at"] == NEW_AT
+
+
+def test_the_plan_gets_the_new_parent_publish_time(conn, tmp_path):
+    out = _drive(tmp_path)
+    relink_replaced_lf(PROJECT, out, MAP, conn=conn, now=NOW)
+    plan = json.loads(_plan_path(out).read_text())
+    assert plan["shorts"][0]["parent_lf_video_id"] == NEW
+    assert plan["shorts"][0]["parent_lf_publish_at"] == NEW_AT
+    assert plan["shorts"][1]["parent_lf_video_id"] == OTHER  # untouched
+    assert (
+        plan["shorts"][1]["parent_lf_publish_at"]
+        == json.loads(_serialize_publish_plan(PublishPlan(shorts=(_short(2, OTHER, "x"),))))[
+            "shorts"
+        ][0]["parent_lf_publish_at"]
+    )

@@ -13,6 +13,12 @@ check by hand. A stale comment a drain found live is raised by the drain itself 
 ``first_comment_stale`` health incident, corrected in place on the next pass), never only by a
 relink rerun; a rewritten row of a published short lands in ``drain_will_verify``. A rerun
 reports zero changes; ``dry_run`` reports without writing.
+
+The #517 parent-public gate holds for a relink too. ``id_map`` is ``{old_id: (new_id,
+new_publish_at_iso_utc)}``: the replacement goes public at that time (a scheduled upload is
+private until then), and ``parent_is_public_at(<the row's slot>, new_publish_at)`` must hold
+before a row links it. A row that fails drops its link (an unposted row's text becomes NULL, as
+``enqueue`` does) and is reported; a live comment with a pending edit gets a ``delete`` instead.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from gomoveshift.pipeline.pending_journal import (
     save_pending,
 )
 from gomoveshift.publishing import queue as _queue
+from gomoveshift.publishing.first_comment import _aware, parent_is_public_at
 from gomoveshift.publishing.plan_io import load_publish_plan
 from gomoveshift.publishing.queue_short_text import SidecarChangedError
 
@@ -93,17 +100,32 @@ class RelinkReport:
         return len(self.queue_rewritten) + sum(f.replacements for f in self.files)
 
 
-def _validate(id_map: Mapping[str, str]) -> None:
+def _split(id_map: Mapping[str, Tuple[str, str]]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """``({old: new}, {old: new_publish_at})`` after validating ``id_map``. Raises ``TypeError``
+    for a value that is not an ``(new_id, publish_at)`` pair (a bare string included) and
+    ``ValueError`` for an empty map or id, a no-op or chained relink, or a missing, unparseable
+    or unzoned publish time (an unknown time cannot be ordered, so it never links)."""
     if not id_map:
         raise ValueError("id_map is empty: nothing to relink")
-    for old, new in id_map.items():
+    ids: Dict[str, str] = {}
+    times: Dict[str, str] = {}
+    for old, value in id_map.items():
+        if isinstance(value, str) or not isinstance(value, tuple) or len(value) != 2:
+            raise TypeError(
+                f"id_map[{old!r}] must be (new_video_id, new_publish_at_iso_utc), got {value!r}"
+            )
+        new, at = value
         if not old or not new:
             raise ValueError(f"id_map holds an empty id ({old!r} -> {new!r})")
         if old == new:
             raise ValueError(f"old id equals new id ({old!r}): refusing a no-op relink")
-    chained = sorted(set(id_map) & set(id_map.values()))
+        if _aware(at) is None:
+            raise ValueError(f"id_map[{old!r}] has no usable publish time ({at!r}): refusing")
+        ids[old], times[old] = new, at
+    chained = sorted(set(ids) & set(ids.values()))
     if chained:
         raise ValueError(f"id_map chains (a new id is also an old id): {chained}")
+    return ids, times
 
 
 def _alt(id_map: Mapping[str, str]) -> str:
@@ -123,27 +145,32 @@ def _sub(text: str, pat: "re.Pattern[str]", id_map: Mapping[str, str]) -> Tuple[
     return pat.subn(lambda m: id_map[m.group(0)], text)
 
 
-def _walk_plan(node: Any, url_pat, id_map, key: str = "") -> Tuple[Any, int]:
-    """Rewrite ``parent_lf_video_id`` and URL-context ids; every other string is left alone."""
+def _walk_plan(node: Any, url_pat, id_map, key: str = "", times=None) -> Tuple[Any, int]:
+    """Rewrite ``parent_lf_video_id`` (and, beside it, ``parent_lf_publish_at``) and URL-context
+    ids; every other string is left alone."""
     if isinstance(node, str):
         if key == "parent_lf_video_id" and node in id_map:
             return id_map[node], 1
         return url_pat.subn(lambda m: m.group("ctx") + id_map[m.group("id")], node)
     if isinstance(node, list):
-        got = [_walk_plan(item, url_pat, id_map) for item in node]
+        got = [_walk_plan(item, url_pat, id_map, "", times) for item in node]
         return [g[0] for g in got], sum(g[1] for g in got)
     if isinstance(node, dict):
-        got_d = {k: _walk_plan(v, url_pat, id_map, k) for k, v in node.items()}
-        return {k: g[0] for k, g in got_d.items()}, sum(g[1] for g in got_d.values())
+        got_d = {k: _walk_plan(v, url_pat, id_map, k, times) for k, v in node.items()}
+        out = {k: g[0] for k, g in got_d.items()}
+        parent = node.get("parent_lf_video_id")
+        if times and isinstance(parent, str) and parent in times:
+            out["parent_lf_publish_at"] = times[parent]
+        return out, sum(g[1] for g in got_d.values())
     return node, 0
 
 
-def _relink_plan(path: Path, id_map, *, dry_run: bool) -> FileRewrite:
+def _relink_plan(path: Path, id_map, times, *, dry_run: bool) -> FileRewrite:
     if not path.is_file():
         return FileRewrite(str(path), 0, False, "absent")
     data = path.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
-    new, count = _walk_plan(json.loads(data), _url_pattern(id_map), id_map)
+    new, count = _walk_plan(json.loads(data), _url_pattern(id_map), id_map, "", times)
     if count == 0:
         return FileRewrite(str(path), 0, False)
     if dry_run:
@@ -211,6 +238,12 @@ def _relink_pending(path: Path, id_map, report: RelinkReport, *, dry_run: bool) 
     return FileRewrite(str(path), len(hit), bool(hit) and not dry_run, note)
 
 
+_PRIVATE_NOTE = (
+    ": the replacement is not public by this short's slot ({slot}), so no comment links it "
+    "(backfill adds it once the plan allows)"
+)
+
+
 def _row_label(row) -> str:
     return f"delivery {row['id']} (short {row['short_index']}, {row['platform']})"
 
@@ -241,28 +274,54 @@ def _drain_checks(row) -> bool:
     return bool(target) and row["upload_kind"] != _queue.FACEBOOK_PHOTO_KIND
 
 
-def _relink_pending_corrections(conn, row, pat, id_map, now, report) -> None:
-    """A pending ``edit``'s ``to`` naming an old id is rewritten too (a second replace)."""
+def _gate(row, pat, times, text) -> Tuple[Any, bool]:
+    """``(new_publish_at, public)`` for the old id ``text`` names: whether the replacement is
+    public by this row's own slot (``parent_is_public_at``; an unknown slot is never public)."""
+    found = pat.search(text or "")
+    at = times[found.group(0)] if found else None
+    return at, parent_is_public_at(row["scheduled_at"], at)
+
+
+def _relink_pending_corrections(conn, row, pat, id_map, times, now, report) -> None:
+    """A pending ``edit``'s ``to`` text naming an old id is rewritten too (a second replace), so
+    the drain never writes a dead link; it records the replacement's publish time (``parent_at``)
+    for the drain's own gate re-check. An edit whose replacement is not yet public becomes a
+    ``delete`` of the live comment (and the row's intended text goes), never a link to a private
+    video."""
     base = (row["id"], row["short_index"], row["platform"], row["status"])
     rewrite = lambda t: _sub(t, pat, id_map)[0]  # noqa: E731
-    items = _queue.first_comment_corrections(row)
-    if not any(
-        i.get("action") == "edit" and _sub(i.get("to") or "", pat, id_map)[1] for i in items
-    ):
+    gate = lambda t: _gate(row, pat, times, t)  # noqa: E731
+    items = [
+        i
+        for i in _queue.first_comment_corrections(row)
+        if i.get("action") == "edit" and _sub(i.get("to") or "", pat, id_map)[1]
+    ]
+    if not items:
         return
-    written = not report.dry_run
-    if written and not _queue.rewrite_first_comment_corrections(
-        conn, row["id"], rewrite, now.isoformat()
-    ):
-        report.queue_skipped.append(QueueSkip(*base, "row changed while relinking; rerun"))
-        return
+    written = False
+    if not report.dry_run:
+        outcome = _queue.rewrite_first_comment_corrections(
+            conn, row["id"], rewrite, now.isoformat(), gate=gate
+        )
+        if not outcome:
+            report.queue_skipped.append(QueueSkip(*base, "row changed while relinking; rerun"))
+            return
+        written = True
+    for item in items:
+        if not gate(item["to"])[1]:
+            report.operator_items.append(
+                f"{_row_label(row)}: the replacement is not public by this short's slot "
+                f"({row['scheduled_at']}); the edit of live comment {item.get('live_id') or '?'} "
+                "became a delete, so it links no private video"
+            )
     report.queue_rewritten.append(QueueRewrite(*base, written))
 
 
-def _relink_queue(conn, project, pat, id_map, now, report) -> None:
+def _relink_queue(conn, project, pat, id_map, times, now, report) -> None:
     for row in _queue.first_comments_naming(conn, project, id_map):
-        _relink_pending_corrections(conn, row, pat, id_map, now, report)
-        text = row["first_comment_text"]
+        _relink_pending_corrections(conn, row, pat, id_map, times, now, report)
+        text = row["first_comment_text"] or ""
+        _, public = _gate(row, pat, times, text)
         new_text, n = _sub(text, pat, id_map)
         if n == 0:  # the old id only inside a longer token, or only in a pending correction
             continue
@@ -282,6 +341,7 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
                     if _drain_corrects(row)
                     else ", fix it by hand"
                 )
+                + ("" if public else _PRIVATE_NOTE.format(slot=row["scheduled_at"]))
             )
         elif row["status"] in _queue.FIRST_COMMENT_FROZEN_STATUSES:
             reason = f"status {row['status']}"
@@ -289,6 +349,23 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
             reason = f"attempts exhausted ({row['first_comment_attempts']} refusals)"
         elif leased:
             reason = f"lease held by {row['lease_owner']} until {row['lease_expires_at']}; rerun"
+        elif not public:  # the replacement is private at this slot: no link at all
+            written = False
+            if not report.dry_run:
+                written = _queue.rewrite_unposted_first_comment(
+                    conn, row["id"], text, None, now.isoformat()
+                )
+                if not written:
+                    report.queue_skipped.append(
+                        QueueSkip(*base, "row changed while relinking; rerun")
+                    )
+                    continue
+            report.queue_rewritten.append(QueueRewrite(*base, written))
+            report.operator_items.append(
+                f"{_row_label(row)}: comment link dropped"
+                + _PRIVATE_NOTE.format(slot=row["scheduled_at"])
+            )
+            continue
         else:
             written = False
             if not report.dry_run:
@@ -329,7 +406,7 @@ def _report_other_projects(conn, project, pat, id_map, report: RelinkReport) -> 
 def relink_replaced_lf(
     project: str,
     output_dir: Path,
-    id_map: Dict[str, str],
+    id_map: Mapping[str, Tuple[str, str]],
     *,
     conn: sqlite3.Connection,
     now: datetime,
@@ -337,18 +414,20 @@ def relink_replaced_lf(
 ) -> RelinkReport:
     """Rewrite every old long-form id in ``id_map`` to its replacement (see the module doc).
 
-    Raises ``ValueError`` on an empty map, an empty id, an old id equal to its new id, or a new
-    id that is also an old id (a chain would break idempotence). Past that, a failing store is
+    ``id_map`` is ``{old_video_id: (new_video_id, new_publish_at_iso_utc)}``; a bare-string value
+    raises ``TypeError``. Raises ``ValueError`` on an empty map, an empty id, an old id equal to
+    its new id, a new id that is also an old id (a chain would break idempotence) or a missing
+    or unzoned publish time. Past that, a failing store is
     recorded in ``report.errors`` and the rest still run. Idempotent: once rewritten,
     the old ids are gone, so a rerun reports zero changes and writes nothing."""
-    _validate(id_map)
+    id_map, times = _split(id_map)
     out = Path(output_dir)
     pat = _pattern(id_map)
     report = RelinkReport(project=project, dry_run=dry_run)
     plan_path = out / f"{project}_publish_plan.json"
     steps = (
         (WORKLIST_STATE_FILENAME, lambda: _relink_worklist(out, pat, id_map, dry_run=dry_run)),
-        (plan_path.name, lambda: _relink_plan(plan_path, id_map, dry_run=dry_run)),
+        (plan_path.name, lambda: _relink_plan(plan_path, id_map, times, dry_run=dry_run)),
         (
             PENDING_FILENAME,
             lambda: _relink_pending(out / PENDING_FILENAME, id_map, report, dry_run=dry_run),
@@ -367,7 +446,7 @@ def relink_replaced_lf(
                 "(enqueue-plan refuses a plan whose reviewed content changed since it was approved)"
             )
     try:
-        _relink_queue(conn, project, pat, id_map, now, report)
+        _relink_queue(conn, project, pat, id_map, times, now, report)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"queue: {type(exc).__name__}: {exc}")
     try:

@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from .first_comment import ReplacePostFailedError, parent_is_public_at
 from .queue import (
     FIRST_COMMENT_MAX_ATTEMPTS,
     capped_first_comment_corrections,
+    drop_private_edit,
     fail_first_comment_correction,
     first_comment_correction_ids,
     first_comment_corrections,
@@ -56,9 +58,14 @@ def _describe(row: Any) -> str:
             steps.append(f"edit comment {item.get('live_id') or '?'} to {item.get('to')!r}")
         else:
             steps.append(f"delete duplicate comment {item.get('live_id') or '?'}")
+    if row["first_comment_correction_attempts"] >= FIRST_COMMENT_MAX_ATTEMPTS:
+        # Never promise a fix the drain has stopped making (the capped incident names the hand step).
+        tail = f"the drain stopped trying after {FIRST_COMMENT_MAX_ATTEMPTS} refusals; pending: "
+    else:
+        tail = "the drain will "
     return (
         f"{row['platform']}#{row['id']} {row['project_name']} short {row['short_index']}: "
-        f"{row['first_comment_error']}; the drain will {'; '.join(steps)}"
+        f"{row['first_comment_error']}; {tail}{'; '.join(steps)}"
     )[:_DETAIL_MAX]
 
 
@@ -95,7 +102,8 @@ def raise_stale_incident(
 
     row = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_error, "
-        "first_comment_text, first_comment_correction FROM deliveries WHERE id=?",
+        "first_comment_text, first_comment_correction, first_comment_correction_attempts "
+        "FROM deliveries WHERE id=?",
         (delivery_id,),
     ).fetchone()
     if row is None or not first_comment_corrections(row):
@@ -191,6 +199,21 @@ def run_corrections(
             if item.get("action") == "delete" and (item.get("live_text") or "").strip() in keep:
                 resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                 continue
+            if (
+                item.get("action") == "edit"
+                and item.get("parent_at")
+                and not parent_is_public_at(row["scheduled_at"], item["parent_at"])
+            ):
+                # The replacement is still private at this slot: an edit would link it. Delete.
+                drop_private_edit(conn, row["id"], item, _now_iso())
+                note = (
+                    f"delivery {row['id']}: the replacement is not public by this short's slot; "
+                    f"the edit of comment {item.get('live_id') or '?'} became a delete"
+                )
+                result.stale += 1
+                result.errors.append(note)
+                raise_stale_incident(conn, row["id"], incidents_dir)
+                break
             try:
                 client = client_for(row["platform"])
                 call = getattr(client, f"{item.get('action')}_comment", None)
@@ -204,6 +227,16 @@ def run_corrections(
                 else:
                     call(item["live_id"])
             except Exception as exc:  # noqa: BLE001 -- graded per correction
+                if isinstance(exc, ReplacePostFailedError):
+                    # The delete is confirmed; the row goes back to unposted with the new text
+                    # and the normal posting path (attempts, alerts) owns the post.
+                    unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())
+                    result.errors.append(
+                        f"delivery {row['id']}: stale comment deleted, the replacement post "
+                        f"failed ({exc.cause}); the row is unposted and the drain posts it again"
+                    )
+                    logger.warning("first comment: delivery %s: %s", row["id"], exc)
+                    break
                 if gone is not None and gone(exc):
                     if item.get("action") == "edit":
                         unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())

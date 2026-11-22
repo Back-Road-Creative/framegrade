@@ -667,7 +667,8 @@ the old file, and `reviewed_plan_hash` stays a stored field.
 
 Replacing a still-scheduled long-form video uploads the re-render under a NEW id and deletes the
 old one. `replace_relink.py::relink_replaced_lf(project, output_dir, id_map, *, conn, now,
-dry_run=False)` rewrites old -> new (token-bounded) and returns a `RelinkReport`. File stores
+dry_run=False)` takes `id_map = {old_id: (new_id, new_publish_at_iso_utc)}` (a bare-string value
+raises `TypeError`; a missing or unzoned time is refused) and rewrites old -> new (token-bounded) and returns a `RelinkReport`. File stores
 run first, the queue last, each in its own `try` (failures land in `report.errors`).
 
 - **Queue** `first_comment_text` freezes on POSTING state, not status (a scheduled Short is
@@ -722,6 +723,25 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   `first_comment_correction_capped=N` and an incident names the hand step. A 404 on a delete is
   resolved; on an edit it unposts the row (text = the edit's `to`) so the drain posts it. A second
   replace rewrites pending edits' `to` (a compare-and-set on the JSON).
+- **A relinked comment never links a private video (#517).** The relink rewrites
+  `parent_lf_publish_at` with `parent_lf_video_id`, and checks every queue row with the one rule
+  (`first_comment.parent_is_public_at(row slot, new_publish_at)`; an unknown or unzoned time never
+  links). An unposted row that fails drops its link (text NULL, as enqueue does) with an operator
+  item; a pending `edit` correction that fails becomes a `delete` of the live comment (and the row
+  text goes, so the delete of the intended text guard lets it run); one that passes keeps
+  `parent_at`, and `run_corrections` re-checks it before editing, so a later slot move never links
+  a private video. A posted row with no correction stays an operator item (no comment id is stored).
+  The signature is documented here because a later unit wires the caller in.
+- **Meta replace is delete-then-post, and durable.** Once the DELETE is confirmed, a refused post
+  raises `ReplacePostFailedError`; `run_corrections` returns the row to unposted with the NEW text
+  and the normal posting path (its attempts and alerts) owns the post, so a row is never left
+  posted with the OLD text. A DELETE answered "does not exist" (Graph code 100, subcode 33;
+  UNVERIFIED against Meta's docs here) counts as success. A failing correction pass is recorded in
+  `errors` and Meta posting continues. A capped correction's incident says "stopped trying", never
+  "the drain will".
+- **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
+  pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
+  on the JSON) and reports the row.
   **Listing lag**: Graph's comment list can trail a write, so a comment created whose answer was
   lost may not be listed on the very next pass; that pass can post a second copy. The next
   pass sees both and queues a delete for the replaced one, never the new one. The Graph scan
