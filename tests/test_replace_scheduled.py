@@ -73,7 +73,7 @@ def test_a_failing_live_lookup_refuses():
 
 
 def test_unreadable_records_refuse():
-    for bad in ("abcDEF12345", {"video_id": "a"}, {"video_id": "a", "publish_at": "soon"}):
+    for bad in ("bareVideoId", {"video_id": "a"}, {"video_id": "a", "publish_at": "soon"}):
         plan, why = rs.classify_uploads({"1": bad}, NOW, _live({"a": "scheduled"}))
         assert plan is None and "not decidable" in why
 

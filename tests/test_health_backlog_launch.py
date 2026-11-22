@@ -1976,7 +1976,7 @@ def test_replace_refuses_and_moves_nothing(tmp_path, why):
     elif why == "public":
         live = lambda ids: {i: "public" for i in ids}  # noqa: E731
     elif why == "unreadable":
-        uploads = {"2": "abcDEF12345"}
+        uploads = {"2": "bareVideoId"}
     rig = _replace_rig(tmp_path, uploads, live)
     if why == "no_live":
         rig.live = None
