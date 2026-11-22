@@ -309,3 +309,14 @@ def test_incidents_name_recently_resolved_rows_with_project_kind_and_outcome(env
     assert section["resolved"] == 2 and [r["key"] for r in section["open"]] == ["open"]
     (recent,) = section["recently_resolved"]
     assert recent == {"project": "ghost-a", "kind": "replace_scheduled_partial", "code": "replace_retry", "outcome": "given up: no row in any region", "resolved_at": "2026-11-12T18:00:00+00:00"}  # fmt: skip
+
+
+def test_recently_resolved_is_newest_first():
+    rows = [
+        {"drive": "a", "kind": "k", "resolved_at": "2026-11-10T00:00:00+00:00"},
+        {"drive": "c", "kind": "k", "resolved_at": "2026-11-12T00:00:00+00:00"},
+        {"drive": "b", "kind": "k", "resolved_at": "2026-11-11T00:00:00+00:00"},
+        {"drive": "old", "kind": "k", "resolved_at": "2026-10-01T00:00:00+00:00"},
+    ]
+    out = snapshot._recently_resolved(rows, "2026-11-13T00:00:00+00:00")
+    assert [r["project"] for r in out] == ["c", "b", "a"]
