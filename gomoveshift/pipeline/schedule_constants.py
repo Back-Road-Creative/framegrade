@@ -345,7 +345,9 @@ def required_shorts_per_lf(
     lf_day: Optional[str] = None,
     shorts_per_day: Optional[int] = None,
 ) -> int:
-    """Derive the required shorts count per LF from the publish plan.
+    """Derive the per-LF Shorts slot capacity from the publish plan.
+
+    Capacity, not a floor: fewer Shorts leave later slots unused.
 
     ``len(shorts windows per day) × LF_PUBLISH_INTERVAL_DAYS`` — the same
     numbers ``scheduler.generate_drive_schedule`` fills slots from (its

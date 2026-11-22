@@ -262,6 +262,13 @@ def format_shorts_ost_audit(date: str, entries: Iterable[dict]) -> dict:
                 # at the pre-burn gate (nothing exists yet); back-filled by the
                 # render loop so the post-burn check has a file to open.
                 "path": str(e.get("path", "") or ""),
+                # The Short's measured score (mean composite of the whole
+                # window / its opening seconds, the day's quality bar, and
+                # whether it grew). Observability only: excluded from the hash.
+                "window_mean": _num_or_none(e.get("window_mean")),
+                "opening_mean": _num_or_none(e.get("opening_mean")),
+                "quality_bar": _num_or_none(e.get("quality_bar")),
+                "moment_kind": e.get("moment_kind") or None,
             }
             for e in entries
         ),
@@ -308,6 +315,10 @@ _HASH_EXCLUDED_ENTRY_KEYS = (
     "place_source",
     "roads",
     "route_record",
+    "window_mean",
+    "opening_mean",
+    "quality_bar",
+    "moment_kind",
 )
 
 

@@ -321,7 +321,11 @@ class TestConfigFlowToShorts:
         dc = DriveConfig(shorts_target_count=5, min_shorts_per_lf=7)
         with caplog.at_level(logging.WARNING):
             dc.check_shorts_consistency()
-        assert any("shorts_target_count" in msg for msg in caplog.messages)
+        msgs = [m for m in caplog.messages if "shorts_target_count" in m]
+        assert msgs
+        # The count is a maximum: no validation gate requires min_shorts_per_lf.
+        assert all("validation gate" not in m and "requires" not in m for m in msgs)
+        assert any("will cap at 5" in m for m in msgs)
 
     def test_no_warning_when_target_gte_min(self, caplog):
         """No warning when shorts_target_count >= min_shorts_per_lf."""
@@ -402,8 +406,9 @@ class TestQualityBar:
         )
         assert line.startswith(f"SHORTS-PLAN: {len(result)} of target 3 clear the quality bar (")
         assert "candidates below the timeline mean" in line
+        assert "with a weak opening" in line
         assert "lost to the 60s gap)" in line
-        lost = int(line.split("mean, ")[1].split(" lost")[0])
+        lost = int(line.split("opening, ")[1].split(" lost")[0])
         assert lost >= 1
 
     def test_stride_is_never_halved(self, monkeypatch):
@@ -617,3 +622,113 @@ class TestMomentLengthVariesPerMoment:
         result = plan_shorts(scores, target_count=1, min_gap_sec=60, stop_mask=stop_mask)
         assert len(result) == 1
         assert result[0].end_sec <= 380
+
+
+class TestOpeningSecondsAndVariableLength:
+    """Windows are ranked by their opening seconds and the clip length follows
+    the moment: a weak opening never ships, a tail below the bar is trimmed."""
+
+    def test_weak_opening_refused_even_when_window_mean_clears(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # One 38s window: silent first 4s, then 0.9. Its whole-window mean (0.81)
+        # clears the explicit bar of 0.5, but its opening mean (0.0) does not.
+        scores = _make_scores(38, lambda t: 0.0 if t < 4 else 0.9)
+        assert plan_shorts(scores, target_count=1, quality_bar=0.5) == []
+        strong = _make_scores(38, lambda t: 0.9)
+        assert len(plan_shorts(strong, target_count=1, quality_bar=0.5)) == 1
+
+    def test_opening_weighted_rank_order(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # Two moments of 40s. A has the larger sum but a low-ish opening;
+        # B has a slightly smaller sum and a strong opening.
+        def fn(t):
+            if 100 <= t < 140:
+                return 0.6 if t < 104 else 0.8  # sum 31.2 + ..., opening 0.6
+            if 400 <= t < 440:
+                return 0.9 if t < 404 else 0.7  # opening 0.9, smaller body
+            return 0.05
+
+        scores = _make_scores(700, fn)
+        result = plan_shorts(
+            scores, target_count=2, min_gap_sec=60, stride_sec=1, target_duration_sec=40
+        )
+        assert len(result) == 2
+        by_start = sorted(result, key=lambda r: r.start_sec)
+        a, b = by_start
+        # sums: A = 4*0.6+36*0.8 = 31.2, B = 4*0.9+36*0.7 = 28.8 -> sum alone ranks A first.
+        # weighted: A = 31.2*1.6 = 49.9, B = 28.8*1.9 = 54.7 -> B first.
+        assert b.rank == 1 and a.rank == 2
+
+    def test_opening_never_reads_past_a_window_shorter_than_the_opening(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # A 3s window (min=target=max=3) over a strong 3s moment followed by
+        # silence: the opening is the window itself, never the silent second
+        # after it.
+        scores = _make_scores(30, lambda t: 0.9 if 10 <= t < 13 else 0.05)
+        result = plan_shorts(
+            scores,
+            target_count=1,
+            stride_sec=1,
+            target_duration_sec=3,
+            min_duration_sec=3,
+            max_duration_sec=3,
+        )
+        assert len(result) == 1
+        assert result[0].opening_mean == pytest.approx(0.9)
+
+    def test_trim_shortens_tail_below_bar_but_never_below_min(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # Strong 0-30s of the moment, then tail 0.2 (below the bar) inside the
+        # 38s search width.
+        def fn(t):
+            if 200 <= t < 230:
+                return 0.95
+            if 230 <= t < 300:
+                return 0.05
+            return 0.1
+
+        scores = _make_scores(600, fn)
+        result = plan_shorts(scores, target_count=1, min_gap_sec=60, stride_sec=1)
+        assert len(result) == 1
+        r = result[0]
+        assert r.end_sec <= 230 + 1e-9
+        assert r.duration_sec < 38
+        assert r.duration_sec >= 15
+
+    def test_trim_never_goes_below_min_duration(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # Only 8 strong seconds; tail below the bar. Must stay >= min.
+        scores = _make_scores(600, lambda t: 0.99 if 200 <= t < 208 else 0.1)
+        result = plan_shorts(scores, target_count=1, min_gap_sec=60, stride_sec=1)
+        for r in result:
+            assert r.duration_sec >= 15
+
+    def test_grow_and_trim_never_cross_a_masked_second(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        def fn(t):
+            if 300 <= t < 396:
+                return 0.5 + (t - 300) * (0.4 / 96.0)
+            return 0.05
+
+        scores = _make_scores(700, fn)
+        mask = np.zeros(len(scores), dtype=bool)
+        mask[350:355] = True
+        for r in plan_shorts(scores, target_count=2, min_gap_sec=60, stop_mask=mask):
+            assert not mask[int(r.start_sec) : int(np.ceil(r.end_sec))].any()
+
+    def test_ranges_carry_score_fields_and_are_deterministic(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        scores = _make_scores(900, lambda t: 0.9 if (t // 100) % 3 == 1 else 0.3)
+        first = plan_shorts(scores, target_count=3, min_gap_sec=60)
+        second = plan_shorts(scores.copy(), target_count=3, min_gap_sec=60)
+        assert first == second and first
+        for r in first:
+            assert r.window_mean is not None and r.window_mean > r.quality_bar
+            assert r.opening_mean is not None and r.opening_mean > r.quality_bar

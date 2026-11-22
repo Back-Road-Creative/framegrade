@@ -42,3 +42,14 @@ start minus `min_gap_sec`, a stop-masked second, or the timeline end — so it c
 non-overlap/min-gap/stop-mask invariants the rest of the planner already enforces. `SHORTS_MAX_DURATION`
 (60, `video_types.py`, YouTube's hard ceiling) is untouched and still strictly above the new default
 max (55).
+
+**Opening seconds and trimmed length (`short_planner.py`).** A window now qualifies only when both
+its whole-window mean composite and the mean of its first `OPENING_SECONDS` (4) seconds are strictly
+above the quality bar, so a weak opening never ships. Pick order uses `sum * (1 + opening_mean)`
+(`_ranking_score`), ties to the earlier start; the hard gap, stride, stop/GPS/county masks, the bar
+and rank-to-publish order are unchanged. After the grow step, `_trim_to_moment_length` pulls each
+pick's end back to the last second above the bar, never shorter than `min_duration_sec`. Trimming
+only moves an end earlier, so it cannot reach a masked second; growth already stops at one. Length
+therefore ends anywhere in [min, max] following the moment, and `target_duration_sec` stays the
+search width. Each `ShortRange` now carries `window_mean`, `opening_mean` and `quality_bar`; they
+are written to the shorts audit sidecar with `moment_kind` and excluded from the audit hash.

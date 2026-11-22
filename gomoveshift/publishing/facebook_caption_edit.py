@@ -16,6 +16,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Optional
 
 from ..pipeline.validation.content_gates import (
     _county_names,
@@ -23,6 +24,7 @@ from ..pipeline.validation.content_gates import (
     placeless_label_claims_nothing,
     placeless_label_problem,
 )
+from .experiments import hashtag_mode_for
 from .plan_io import load_publish_plan
 from .queue import open_queue_db
 
@@ -50,15 +52,27 @@ def measured_counties(short: dict) -> list:
     ]
 
 
-def measured_caption(region: str, recording_date: str) -> str:
-    """The caption for a Short whose record measured ``region``: the place, the month, tags."""
+def measured_caption(region: str, recording_date: str, hashtag_mode: Optional[str] = None) -> str:
+    """The caption for a Short whose record measured ``region``: the place, the month, tags.
+
+    ``hashtag_mode`` is the Short's caption-experiment arm (``publishing.experiments``):
+    ``none`` adds no hashtags (the arm's treatment), ``location`` the region's tags,
+    ``june`` ``JUNE_STYLE_HASHTAGS`` then those tags, exactly as the generator renders
+    them. ``None`` (not in an experiment) keeps the region's tags."""
     text = MEASURED_TEMPLATE.format(location=region)
     try:
         text += f" Filmed {dt.date.fromisoformat(recording_date or ''):%B %Y}."
     except ValueError:
         pass  # no parseable date on the record: say nothing about when
+    if hashtag_mode == "none":
+        return text
+    from ..pipeline.social_generator import JUNE_STYLE_HASHTAGS
+
     tags = [re.sub(r"[^A-Za-z0-9]", "", part) for part in region.split(",")]
-    return text + "\n\n" + " ".join(f"#{t}" for t in tags if t)
+    hashtags = [f"#{t}" for t in tags if t][:2]
+    if hashtag_mode == "june":
+        hashtags = [*JUNE_STYLE_HASHTAGS, *hashtags]
+    return text + "\n\n" + " ".join(hashtags)
 
 
 def _placeless_problem(text: str):
@@ -68,8 +82,11 @@ def _placeless_problem(text: str):
     return "; ".join(x for x in (placeless_label_problem(text), f"claim words: {words}") if x)
 
 
-def resolve_caption(short: dict, text) -> tuple:
-    """``(caption, basis)`` for ``short``, or raise :class:`CaptionEditRefusedError`."""
+def resolve_caption(short: dict, text, experiments=()) -> tuple:
+    """``(caption, basis)`` for ``short``, or raise :class:`CaptionEditRefusedError`.
+
+    A built caption keeps the Short's own caption-experiment treatment (its
+    ``experiment_arms`` against ``experiments``), so an edit never overwrites it."""
     counties = measured_counties(short)
     if len(counties) > 1:
         raise CaptionEditRefusedError(
@@ -82,7 +99,9 @@ def resolve_caption(short: dict, text) -> tuple:
                 f"the Short's record measured {counties[0]!r}; the caption is built from it, "
                 "so drop --text (a typed caption is only for a Short with no measured county)"
             )
-        return measured_caption(counties[0], short.get("recording_date") or ""), "measured county"
+        mode = hashtag_mode_for(experiments, short.get("experiment_arms") or {}, "facebook")
+        built = measured_caption(counties[0], short.get("recording_date") or "", mode)
+        return built, "measured county"
     if not text:
         raise CaptionEditRefusedError(
             "the Short's record holds no measured county; pass --text with claim-free words"
@@ -104,7 +123,9 @@ def _write_sidecar(sidecar: Path, raw: dict) -> None:
     os.replace(tmp, sidecar)
 
 
-def edit_facebook_caption(storage_path, credentials_dir, delivery_id, text, *, apply) -> list:
+def edit_facebook_caption(
+    storage_path, credentials_dir, delivery_id, text, *, apply, experiments=()
+) -> list:
     """Dry-run or apply the edit; returns the lines to print. Raises ``CaptionEditRefusedError``."""
     conn = open_queue_db(storage_path)
     try:
@@ -139,7 +160,7 @@ def edit_facebook_caption(storage_path, credentials_dir, delivery_id, text, *, a
     if not fb:
         raise CaptionEditRefusedError(f"{sidecar}: no facebook payload for the short")
     try:
-        new, basis = resolve_caption(short, text)
+        new, basis = resolve_caption(short, text, experiments)
     except CaptionEditRefusedError as exc:
         raise CaptionEditRefusedError(f"delivery {delivery_id}: {exc}") from None
     lines = [
