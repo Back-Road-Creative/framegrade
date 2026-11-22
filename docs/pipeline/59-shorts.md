@@ -23,3 +23,12 @@ the path the caller was promised a finished film at, and the receipt's `outputs[
 of what was delivered. `--preflight-only` returns before either step. Writing `chapters.vtt` and
 `publish.json` from the CLI is not wired yet: both need a route-time → film-time map of the assembled
 timeline, which no module exposes today.
+
+### Opening seconds and clip length
+
+Shorts are picked on how they open: the first 4 seconds must be above the day's quality bar as well
+as the whole clip, and pick order weights the window sum by that opening. A clip's end follows its
+moment: it grows while the footage keeps rising and is trimmed back to the last second above the bar
+(never under the minimum duration). The per-Short `window_mean`, `opening_mean`, `quality_bar` and
+`moment_kind` are recorded in `shorts_ost_audit_<date>.json` (not part of its hash). See
+`137-shorts-target-and-length.md`.

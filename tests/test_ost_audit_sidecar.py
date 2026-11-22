@@ -185,3 +185,30 @@ def test_the_postburn_proof_reads_frames_at_native_shorts_width(tmp_path, monkey
     assert f"scale={SHORTS_WIDTH}:-2,format=gray" in cmds[0]
     # Flat mid-grey carries neither near-white glyphs nor their black border.
     assert present is False and "no burned text" in why
+
+
+def test_shorts_audit_carries_score_fields_and_hash_ignores_them():
+    from gomoveshift.pipeline.ost_audit_sidecar import (
+        compute_shorts_ost_audit_hash,
+        format_shorts_ost_audit,
+    )
+
+    base = {
+        "rank": 1,
+        "parent_lf_index": 1,
+        "ost_text": "Somewhere",
+        "start_sec": 10.0,
+        "end_sec": 40.0,
+        "regions": [],
+    }
+    scored = dict(base, window_mean=0.6, opening_mean=0.7, quality_bar=0.4, moment_kind="peak")
+    plain = format_shorts_ost_audit("2025-09-14", [base])
+    rich = format_shorts_ost_audit("2025-09-14", [scored])
+    entry = rich["shorts"][0]
+    assert entry["window_mean"] == 0.6
+    assert entry["opening_mean"] == 0.7
+    assert entry["quality_bar"] == 0.4
+    assert entry["moment_kind"] == "peak"
+    legacy = plain["shorts"][0]
+    assert legacy["window_mean"] is None and legacy["moment_kind"] is None
+    assert compute_shorts_ost_audit_hash(rich) == compute_shorts_ost_audit_hash(plain)
