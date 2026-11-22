@@ -105,9 +105,10 @@ def record_incident(drive: str, code: str, detail: str, *, lf: Optional[int] = N
         logger.exception("REPLACE-INCIDENT-NOT-WRITTEN %s %s: %s", drive, code, detail)
 
 
-def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, ...] = (), drive_level: bool = False, incidents_dir: Optional[Path] = None) -> int:  # fmt: skip
-    """Resolve this drive's open ``INCIDENT_KIND`` rows for ``lf`` (all its codes but ``keep``), or
-    with ``drive_level`` the rows that carry no LF. Returns how many it closed; never raises."""
+def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, ...] = (), drive_level: bool = False, incidents_dir: Optional[Path] = None, codes: Tuple[str, ...] = (), outcome: str = "") -> int:  # fmt: skip
+    """Resolve this drive's open ``INCIDENT_KIND`` rows for ``lf`` (all its codes but ``keep``, or
+    only ``codes`` when given), or with ``drive_level`` the rows that carry no LF; ``outcome`` is
+    stamped on each as the terminal reason. Returns how many it closed; never raises."""
     closed = 0
     try:
         from ..health.store import (  # fmt: skip
@@ -126,11 +127,13 @@ def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, 
                 continue
             if not isinstance(row, dict) or row.get("resolved_at") or row.get("drive") != drive:
                 continue
-            if row.get("code") in keep or (row.get("lf") is None) != drive_level:
+            if row.get("code") in keep or (codes and row.get("code") not in codes) or (row.get("lf") is None) != drive_level:  # fmt: skip
                 continue
             if not drive_level and row.get("lf") != lf:
                 continue
             row["resolved_at"] = utc_iso()
+            if outcome:
+                row["outcome"] = outcome
             write_row(inc, row)
             closed += 1
     except Exception:  # noqa: BLE001
@@ -210,6 +213,10 @@ def classify_uploads(
         else:
             replace[str(lf)] = rec
     if not replace:
+        if margin_kept and len(margin_kept) == len(kept):
+            return None, f"every record is scheduled inside the {margin_h} h margin (kept by design, each publishes on its own): nothing to replace"  # fmt: skip
+        if margin_kept:
+            return None, f"every record is public or inside the {margin_h} h margin (kept by design): nothing to replace"  # fmt: skip
         return None, "every record is already public: nothing to replace"
     if live_status is None:
         return None, "no live YouTube check available"

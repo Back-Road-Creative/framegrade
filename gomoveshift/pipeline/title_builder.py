@@ -2019,7 +2019,7 @@ def ensure_unique_titles(
                 # No in-batch/superlong suffix at all — bare form
                 # already, exactly, live on the channel. Refuse rather than
                 # rename a genuine duplicate before the OST burn.
-                from ..cli.handlers.pub_status import LIVE_CATALOG_SNAPSHOT
+                from ..publishing.live_catalog import LIVE_CATALOG_SNAPSHOT
                 from .exceptions import PhaseBCExitContractError
                 from .longform_metadata import live_catalog_title_ids
 

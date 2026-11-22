@@ -246,16 +246,20 @@ def _read_retry_marker(path: Path) -> Dict[str, Any]:
     return held if isinstance(held, dict) else {}
 
 
-def mark_replace_retry(output_root: Path, project: str, reason: str, now: datetime) -> int:
+def mark_replace_retry(output_root: Path, project: str, reason: str, now: datetime, region: Optional[str] = None) -> int:  # fmt: skip
     """Record a failed ``--replace-scheduled`` attempt so the next tick retries it: attempts so far
-    (the backoff input). Never raises: a failed write is logged and the incident still stands."""
+    (the backoff input) and the region the tick must be for. Never raises: a failed write is
+    logged and the incident still stands."""
     path = _retry_marker(output_root, project)
     try:
         prior = _read_retry_marker(path)
         n = int(prior.get("attempts") or 0) + 1
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps({"project": project, "reason": prior.get("reason") or reason, "attempts": n, "last_at": now.timestamp()}, indent=2) + "\n")  # fmt: skip
+        held = {"project": project, "reason": prior.get("reason") or reason, "attempts": n, "last_at": now.timestamp()}  # fmt: skip
+        if region or prior.get("region"):
+            held["region"] = region or prior["region"]
+        tmp.write_text(json.dumps(held, indent=2) + "\n")
         os.replace(tmp, path)
         return n
     except OSError:
@@ -272,9 +276,12 @@ def clear_replace_retry(output_root: Path, project: str) -> None:
         logger.exception("REPLACE-RETRY-CLEAR-FAILED %s", project)
 
 
-def due_replace_retry(output_root: Path, now: datetime) -> Optional[Tuple[str, str]]:
+def due_replace_retry(output_root: Path, now: datetime, region: Optional[str] = None, regions: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:  # fmt: skip
     """``(project, reason)`` of the oldest-waiting failed replace whose heal backoff has passed (the
-    tick runs it as ``--supersede <project> --replace-scheduled``), else ``None``."""
+    tick runs it as ``--supersede <project> --replace-scheduled``), else ``None``.
+
+    With ``region`` only that region's markers count: a marker's own region, else (written by older
+    code) its project's manifest region from ``regions``, else it is still returned."""
     from .heal import _retry_wait_s
 
     due = []
@@ -282,10 +289,68 @@ def due_replace_retry(output_root: Path, now: datetime) -> Optional[Tuple[str, s
         m = _read_retry_marker(path)
         if not m.get("project") or not str(m.get("reason") or "").strip():
             continue
+        own = m.get("region") or (regions or {}).get(m["project"])
+        if region and own and str(own).strip().lower() != str(region).strip().lower():
+            continue
         at = float(m.get("last_at") or 0) + _retry_wait_s(int(m.get("attempts") or 1))
         if now.timestamp() >= at:
             due.append((at, m["project"], str(m["reason"])))
+    due.sort()
     return (due[0][1], due[0][2]) if due else None
+
+
+#: Refusals of a replace that can never succeed: its marker is cleared, not retried. Anything else
+#: (a pin, a lock, "the next eligible row is ...") is transient and bumps the marker's backoff.
+_PERMANENT_REFUSALS = (
+    re.compile(r"nothing to replace"),  # every record public, or kept inside the margin by design
+    re.compile(r"nothing to supersede: no "),
+    re.compile(r"\bno \S+ row \S+ in the backlog"),  # the manifest dropped the project
+    re.compile(r"no upload record gives a replace plan"),
+)
+
+
+def refusal_is_permanent(reason: str) -> bool:
+    return any(p.search(str(reason)) for p in _PERMANENT_REFUSALS)
+
+
+def run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run) -> Dict[str, Any]:  # fmt: skip
+    """One ``health backlog`` tick. ``run(supersede, replace)`` is one ``run_backlog`` call.
+
+    A due replace marker runs first as ``--supersede --replace-scheduled``; THIS function (so no
+    refusal site can forget) then decides: launched -> done; a permanent refusal -> clear the
+    marker and resolve its incident with the reason; anything else -> bump the marker (the heal
+    backoff advances). A marker tick that did not launch falls through to the plain tick in the
+    same call, so the region still launches its next row and runs its failed-drive/audit paths."""
+    if supersede is not None or dry_run:
+        return run(supersede, replace)
+    due = due_replace_retry(output_root, now, region, regions)
+    if due is None:
+        return run(None, False)
+    project, reason = due
+    path = _retry_marker(output_root, project)
+    before = _read_retry_marker(path)
+    try:
+        first = run(due, True)
+    except Exception as exc:  # noqa: BLE001 -- a raising marker tick must not repeat forever
+        logger.exception("REPLACE-RETRY-TICK-RAISED %s", project)
+        first = {"action": "refused", "reason": f"{type(exc).__name__}: {exc}"}
+    if first.get("action") == "launched":
+        clear_replace_retry(output_root, project)
+        return first
+    why = str(first.get("reason") or first.get("action"))
+    if refusal_is_permanent(why):
+        clear_replace_retry(output_root, project)
+        replace_scheduled_mod.resolve_incidents(project, drive_level=True, codes=("replace_retry", "reopen_refused"), outcome=f"given up: {why}")  # fmt: skip
+        verdict = "cleared"
+    else:
+        after = _read_retry_marker(path)
+        if not after or after.get("attempts") == before.get("attempts"):  # no site bumped it
+            n = mark_replace_retry(output_root, project, reason, now, before.get("region") or (regions or {}).get(project) or region)  # fmt: skip
+            replace_scheduled_mod.record_incident(project, "replace_retry", f"replace not launched ({why}); retried by the next backlog tick, attempt {n}")  # fmt: skip
+        verdict = "bumped"
+    out = dict(run(None, False))
+    out["replace_retry"] = {"project": project, "outcome": verdict, "reason": why}
+    return out
 
 
 def plan_total_lfs(plan: Dict[str, Any]) -> int:
@@ -879,8 +944,10 @@ def _is_audit_job(name: Any, project: str) -> bool:
     return name == base or (healed and name == project)
 
 
-def _newest_audit(jobs_dir: Path, project: str) -> Optional[Dict[str, Any]]:
-    recs = [r for r in _job_records(Path(jobs_dir)) if _is_audit_job(r.get("name"), project)]
+def _newest_audit(jobs_dir: Path, project: str, since: float = 0.0) -> Optional[Dict[str, Any]]:
+    """The newest audit job of ``project`` created at or after ``since`` (a replace plan's
+    ``created_at``: the run it set aside left audits that are not this run's)."""
+    recs = [r for r in _job_records(Path(jobs_dir)) if _is_audit_job(r.get("name"), project) and (since <= 0 or float(r.get("created_at") or 0) >= since)]  # fmt: skip
     return max(recs, key=lambda r: float(r.get("created_at") or 0)) if recs else None
 
 
@@ -892,18 +959,18 @@ def _gate_wait(jobs_dir: Path, rec: Dict[str, Any]) -> Optional[str]:
     return drive_jobs.gate_wait(code, drive_jobs._tail(Path(jobs_dir) / str(rec.get("run_id")) / "output.log"))  # fmt: skip
 
 
-def _audit_running(jobs_dir: Path, project: str) -> bool:
-    rec = _newest_audit(jobs_dir, project)
+def _audit_running(jobs_dir: Path, project: str, since: float = 0.0) -> bool:
+    rec = _newest_audit(jobs_dir, project, since)
     return bool(rec) and (rec.get("result") or {}).get("state") == "running"
 
 
-def _failed_audit(jobs_dir: Path, project: str, hint: bool = True) -> Optional[str]:
+def _failed_audit(jobs_dir: Path, project: str, hint: bool = True, since: float = 0.0) -> Optional[str]:  # fmt: skip
     """Refusal text when the newest ``gms-backlog-<project>`` job (or heal resume of it) ended in anything but success
     or a stop at a human gate (``_ost_gate``).
 
     A failed audit still holds its slot, so without this every later call is a silent noop;
     the operator relaunches (the drive resumes from its stages) or supersedes it."""
-    rec = _newest_audit(jobs_dir, project)
+    rec = _newest_audit(jobs_dir, project, since)
     if rec is None:
         return None
     result = rec.get("result") or {}
@@ -919,14 +986,14 @@ def _failed_audit(jobs_dir: Path, project: str, hint: bool = True) -> Optional[s
     )
 
 
-def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple[str, bool]]:
+def _ost_gate(jobs_dir: Path, stages_root: Path, project: str, since: float = 0.0) -> Optional[Tuple[str, bool]]:  # fmt: skip
     """``(reason, confirmed)`` when the newest audit of ``project`` stopped at the OST audit gate
     (every placeless drive does: no GPS, no system review), else None.
 
     Confirmed: each ``ost_audit_<date>.json`` sidecar has its ``.confirmed`` marker and one was
     made after the run stopped. Markers all older than the stop did not pass the gate (the audit
     changed since), so resuming would only stop at the same gate again, every tick."""
-    rec = _newest_audit(jobs_dir, project)
+    rec = _newest_audit(jobs_dir, project, since)
     if rec is None or not _gate_wait(jobs_dir, rec):
         return None
     ended = float((rec.get("result") or {}).get("ended_at") or 0)
@@ -967,8 +1034,8 @@ def _failed_publish(jobs_dir: Path, project: str) -> bool:
     return state not in (None, "running", "succeeded")
 
 
-def _audit_passed(jobs_dir: Path, project: str) -> bool:
-    rec = _newest_audit(jobs_dir, project)
+def _audit_passed(jobs_dir: Path, project: str, since: float = 0.0) -> bool:
+    rec = _newest_audit(jobs_dir, project, since)
     return rec is not None and (rec.get("result") or {}).get("state") == "succeeded"
 
 
@@ -1178,6 +1245,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         res["published"] = published
     mine = [d for d in drives if d.region == region and d.project not in published]
     auditing = [d.project for d in mine if d.status == "auditing"]
+    # a reopened replace row: audits created before its plan are the set-aside run's, never this one's
+    since_of = {d.project: _plan_created(d.output_dir) for d in mine}
     target = supersede[0] if supersede else None
     listed = {r.project for r in rows if r.region == region}
     for project in [p for p in auditing if p not in listed and p != target]:
@@ -1219,8 +1288,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             return _publish_audited(res, proj, publish, dry_run)
     relaunch, auto = None, False
     for proj in auditing:
-        failed = _failed_audit(jobs_dir, proj)
-        gate = None if failed else _ost_gate(jobs_dir, stages_root, proj)
+        since = since_of.get(proj, 0.0)
+        failed = _failed_audit(jobs_dir, proj, since=since)
+        gate = None if failed else _ost_gate(jobs_dir, stages_root, proj, since)
         if gate and proj == target:
             failed = gate[0]  # superseding an audit waiting at its gate sets it aside the same way
         elif gate:
@@ -1230,10 +1300,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             return _resume_confirmed(res, proj, stages_root, output_root, code_root,
                                      jobs_dir, dry_run, launcher, installed_version,
                                      latest_version)  # fmt: skip
-        if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
+        if not failed and publish and proj != target and _audit_passed(jobs_dir, proj, since):
             return _publish_audited(res, proj, publish, dry_run)
         if (
-            failed_relaunch is not None and not supersede and not _audit_running(jobs_dir, proj)
+            failed_relaunch is not None and not supersede and not _audit_running(jobs_dir, proj, since)
             and (why := failed_relaunch.due(proj))
         ):  # fmt: skip
             # the failure's inputs changed (or it was never fingerprinted): relaunch from source
@@ -1255,7 +1325,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         # resume from its stages (a later passed audit publishes), and the next row launches
         res.setdefault("failed_audits", []).append({
             "project": proj,
-            "reason": _failed_audit(jobs_dir, proj, hint=False) + "; health heal keeps retrying it from its stages",
+            "reason": _failed_audit(jobs_dir, proj, hint=False, since=since) + "; health heal keeps retrying it from its stages",
         })  # fmt: skip
     if relaunch is None and failed_relaunch is not None and not supersede:
         # a failed store row heal cannot resume (no readable resume.json) is set aside and
@@ -1385,10 +1455,18 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     res.update(argv=argv, env=env, stages_dir=str(stages_dir))
     store, reopen_kw = None, {}
 
+    attempt = []
+
+    def mark():
+        """The retry marker, bumped once per call whichever site asks first."""
+        if not attempt:
+            attempt.append(mark_replace_retry(output_root, row.project, supersede[1], now, region))
+        return attempt[0]
+
     def retry_later(reason):
         """A failed replace is retried by the next tick (marker + heal backoff), never left to a
         human; an incident stays open until it launches."""
-        n = mark_replace_retry(output_root, row.project, supersede[1], now)
+        n = mark()
         replace_scheduled_mod.record_incident(row.project, "replace_retry", f"replace not launched ({reason}); retried by the next backlog tick, attempt {n}")  # fmt: skip
 
     if (
@@ -1403,7 +1481,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: no schedule store to reopen the complete row"}  # fmt: skip
         if not hasattr(store, "reopen_for_replace"):
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: installed seo_manager lacks reopen_for_replace; repin"}  # fmt: skip
-        why = store.reopen_for_replace(row.project, plan_digest=plan_digest(plan), dry_run=True, **reopen_kw)  # fmt: skip
+        why = _reopen(store, row.project, plan_digest(plan), True, reopen_kw)
         if why:
             reason = f"cannot supersede {target}: Waypost will not reopen it: {why}"
             if not dry_run:
@@ -1415,6 +1493,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if stale:
         return {**res, "action": "refused", "reason": stale}
     planned = (replace or {}).get("plan")
+    if planned:
+        mark()  # BEFORE the renames: a crash from here on still leaves a marker a later tick retries
     if supersede:
         _supersede(row.project, supersede[1], res["supersede"]["moves"], now, planned, out_dir)
 
@@ -1424,6 +1504,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         if planned:
             failed = _unsupersede(res["supersede"]["moves"], out_dir, now)
             if failed:
+                mark()  # the marker stays (bumped): the next tick retries the restore and the replace
                 replace_scheduled_mod.record_incident(row.project, "restore_failed", f"{reason}; the set-aside run could not be put back: {failed}")  # fmt: skip
                 reason = f"{reason}; could not restore the set-aside run (see the replace_scheduled_partial incident): {failed}"  # fmt: skip
             else:
@@ -1444,18 +1525,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         # BEFORE the launch: a refusal goes through ``refuse`` (the old run put back, a retry marker),
         # never leaves an audit running on a row that stays ``complete``
         reopen_kw["now"] = datetime.now(timezone.utc)
-        why = ""
-        for pause in (*_REOPEN_RETRY_S, None):
-            try:
-                why = store.reopen_for_replace(
-                    row.project, plan_digest=plan_digest(replace["plan"], out_dir), dry_run=False, **reopen_kw
-                )  # fmt: skip
-                break
-            except Exception as exc:  # noqa: BLE001 -- a locked store, anything: never an uncaught crash
-                why = f"{type(exc).__name__}: {exc}"
-                logger.exception("REPLACE-REOPEN-RAISED %s", row.project)
-                if pause is not None:
-                    time.sleep(pause)
+        why = _reopen(store, row.project, plan_digest(replace["plan"], out_dir), False, reopen_kw)
         if why:
             logger.error("REPLACE-REOPEN-REFUSED: %s: %s (nothing launched)", row.project, why)
             replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"Waypost could not reopen {row.project}: {why}; nothing was launched and the old run is back in place; the next backlog tick retries")  # fmt: skip
@@ -1486,6 +1556,21 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if auto:
         failed_relaunch.record_launch(row.project, res["relaunch"])
     return {**res, "action": "launched", "reason": f"{row.project} for {res['slot']}"}
+
+
+def _reopen(store, project, digest, dry_run, kw) -> str:
+    """Waypost's ``reopen_for_replace`` (``""``/``None`` = accepted), retried on a raise; a store
+    that still raises is a refusal text, never an uncaught crash of the tick."""
+    why = ""
+    for pause in (*_REOPEN_RETRY_S, None):
+        try:
+            return store.reopen_for_replace(project, plan_digest=digest, dry_run=dry_run, **kw)
+        except Exception as exc:  # noqa: BLE001 -- a locked store, anything
+            why = f"{type(exc).__name__}: {exc}"
+            logger.exception("REPLACE-REOPEN-RAISED %s", project)
+            if pause is not None:
+                time.sleep(pause)
+    return why
 
 
 def _restore_reopened(store, project, out_dir, res, now) -> None:

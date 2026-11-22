@@ -222,3 +222,41 @@ def test_replace_scheduled_reaches_run_backlog(tmp_path, wired):
 def test_replace_scheduled_needs_supersede(tmp_path):
     with pytest.raises(SystemExit):
         health.cmd_health(_args(tmp_path, "--replace-scheduled"), SimpleNamespace())
+
+
+def _marker_wired(monkeypatch, tmp_path, calls, rows=()):
+    monkeypatch.setattr(
+        launch, "load_inputs",
+        lambda config, region, ledger_path, now: ("usa", list(rows), [], [], set(), lambda **kw: None),
+    )  # fmt: skip
+    monkeypatch.setattr(launch, "lease_fns", lambda code_root: (lambda: True, lambda: None))
+    monkeypatch.setattr(launch, "render_horizon_h", lambda config: 1680)
+    answers = iter([{"action": "refused", "reason": "cannot supersede ire-a: pinned", "skipped": []},
+                    {"action": "launched", "reason": "day-b for slot", "skipped": []}])  # fmt: skip
+
+    def fake(**kw):
+        calls.append((kw["supersede"], kw["replace_scheduled"]))
+        return next(answers)
+
+    monkeypatch.setattr(launch, "run_backlog", fake)
+
+
+def test_a_marker_tick_that_does_not_launch_falls_through_to_the_plain_tick(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls)
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="usa")  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(("ire-a", "blur fix"), True), (None, False)]  # the region still launches
+
+
+def test_the_handler_gives_the_marker_lookup_the_ticks_region(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls)
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="ireland")  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "noop", "reason": "covered", "skipped": []})  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(None, False)]  # an ireland marker never hijacks a usa tick

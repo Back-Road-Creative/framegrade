@@ -1008,6 +1008,35 @@ def test_a_final_book_refused_is_an_incident_and_the_lf_is_not_done(tmp_path):
     assert rig.prog(2)["state"] == "done" and not _incidents()
 
 
+def test_a_store_that_refuses_the_final_strict_book_leaves_the_lf_unfinished(tmp_path):
+    """The REAL store refuses the strict book (another drive holds the slot): the LF is not DONE
+    and a ``book_failed`` incident stands (O7/O8)."""
+    from seo_manager.scheduling.store import ScheduleStore
+
+    from gomoveshift.config import Config
+    from gomoveshift.pipeline import seo_slots
+    from gomoveshift.pipeline.schedule_constants import EST
+
+    config = Config()
+    config.seo.storage_path = tmp_path / "seo"
+    config.seo.storage_path.mkdir()
+    ledger = config.seo.storage_path / ".content_ledger.json"
+    store = ScheduleStore(ledger.parent / seo_slots.STORE_FILENAME, EST, seo_slots.cadence_for(config, "usa").regions)  # fmt: skip
+    slot = AT3 + timedelta(days=5)
+    store.book("theirs", 1, "usa", slot, "other")
+    with pytest.raises(SlotTaken):
+        seo_slots.book_in_store(ledger, config, project="mine", lf_index=2, region="usa", slot_at=slot, video_id="new2", strict=True)  # fmt: skip
+    seo_slots.book_in_store(ledger, config, project="mine", lf_index=2, region="usa", slot_at=slot, video_id="new2")  # not strict: logged, never raised  # fmt: skip
+    rig = Rig(tmp_path)
+    try:
+        seo_slots.book_in_store(ledger, config, project="mine", lf_index=2, region="usa", slot_at=slot, video_id="new2", strict=True)  # fmt: skip
+    except SlotTaken as exc:
+        rig.book_error = exc
+    assert rig.book_error is not None
+    rig.run()
+    assert rig.prog(2)["state"] != "done" and _incidents("book_failed")
+
+
 def test_a_rebook_inside_the_passed_margin_is_never_sent(tmp_path):
     rig = Rig(tmp_path)
     with pytest.raises(Crash):
