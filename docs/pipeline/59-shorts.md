@@ -35,8 +35,8 @@ moment: it grows while the footage keeps rising and is trimmed back to the last 
 
 ### Landmark bonus
 
-A window inside a measured landmark polygon (at least half its seconds) ranks higher, never lower and
-never as a requirement; it cannot admit a window the quality bar or opening check refuses. With no GPS,
+A window inside one measured landmark polygon (at least half its seconds) ranks higher, never lower and
+never as a requirement; it cannot admit a window the quality bar or opening check refuses, and it never lowers the Short count. With no GPS,
 no polygon or a failing POI source there is no bonus and the log says so. Whether a Short had it is
 recorded as `landmark` in `shorts_ost_audit_<date>.json` (outside the hash). See
 `137-shorts-target-and-length.md`.

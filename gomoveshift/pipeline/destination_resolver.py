@@ -306,70 +306,130 @@ def resolve_destination(
     return _won(min(enclosing, key=lambda n: (-enclosing[n], meta[n][0], meta[n][1], n)))
 
 
+# The widest day extent (degrees, per axis, before the margin) the landmark lookup
+# will query. ~2 degrees is ~220 km north-south; a bigger box is a long relocation
+# day whose one broad query would not finish inside the fast Overpass budget
+# (``OVERPASS_FAST_TIMEOUT``), so it gets no bonus rather than a blocked day.
+# A chosen bound, not a measured one.
+LANDMARK_MAX_BBOX_SPAN_DEG = 2.0
+
+
+def _landmark_poi_source(bbox: tuple[float, float, float, float]) -> list[dict]:
+    """POI source for the OPTIONAL landmark bonus: the chapters Overpass query on
+    its fast budget (one endpoint, one attempt, partial replies never cached)."""
+    from .chapters.overpass_source import _query_overpass
+
+    data = _query_overpass(bbox, fast=True)
+    if not data or "elements" not in data:
+        return []
+    return list(data["elements"])
+
+
+def _closed_rings(rings: list[list[tuple[float, float]]]) -> list[list[tuple[float, float]]]:
+    """Rings that really close (first vertex == last): an open line is a road or a
+    boundary fragment, not an area, and is never a polygon."""
+    return [r for r in rings if len(r) >= 4 and r[0] == r[-1]]
+
+
 def landmark_seconds_mask(
-    n: int,
+    timestamps,
     day_gps_points,
     *,
     poi_source: Optional[POISource] = None,
     bbox_margin_deg: float = 0.02,
-    max_gap_s: float = 5.0,
+    max_gap_s: Optional[float] = None,
 ):
-    """Per-second bool mask (length ``n``): ``True`` where the GPS fix holding that
-    second lies inside a MEASURED destination polygon, else ``None``.
+    """Per-polygon, per-second bool mask ``(polygons, len(timestamps))``: ``True``
+    where the GPS fix holding that second lies inside that MEASURED destination
+    polygon; ``None`` (with a WARNING) when there is nothing to credit.
 
-    Reuses the resolver's own vocabulary and geometry: ``_classify`` (the same
-    destination tags), ``_rings_of`` (``out geom`` rings only — a point POI, a
-    bounds-only area or a name with no boundary never counts) and ``_encloses``
-    (true polygon containment). A second is held by the latest fix at or before
-    it, no more than ``max_gap_s`` back; a second with no such fix is False.
-    Used only to RANK Shorts, never to name one. A missing POI source result,
-    a raising source or a GPS-less day returns ``None`` with a WARNING; no
-    landmark is ever invented.
+    Reuses the resolver's vocabulary and geometry: ``_classify`` (destination
+    tags), ``_rings_of`` (``out geom`` rings only) and ``_point_in_ring``. Only
+    CLOSED outer rings count (a point POI, a bounds-only area or an open way never
+    does) and an inner ring excludes the point, as in ``_encloses``. One row per
+    polygon, so the caller can apply the resolver's quorum to ONE polygon.
+
+    ``timestamps`` are the score rows' own times. A fix holds the seconds up to
+    the next fix, and only where that fix-to-fix gap is within ``max_gap_s`` (the
+    Shorts GPS-gap veto, ``stop_mask.GPS_MAX_FIX_GAP_S``): never credited across
+    a real GPS gap. Fixes failing the route-claim valid-fix rule are dropped
+    before the bbox is built. Used only to RANK Shorts, never to name one: a
+    GPS-less day, an over-wide day, a raising POI source or no polygon returns
+    ``None``; no landmark is ever invented.
     """
     import numpy as np
 
-    from .gps_quality import _in_window_coords
+    from .gps_quality import _in_window_coords, _valid_fix
+    from .stop_mask import GPS_MAX_FIX_GAP_S
 
     def _off(why: str):
         logger.warning("landmark bonus disabled: %s", why)
         return None
 
-    if n <= 0:
+    ts = np.asarray(timestamps, dtype=np.float64)
+    if ts.size == 0:
         return None
-    fixes = sorted(_in_window_coords(day_gps_points, float("-inf"), float("inf")))
+    gap = GPS_MAX_FIX_GAP_S if max_gap_s is None else max_gap_s
+    fixes = sorted(
+        f
+        for f in _in_window_coords(day_gps_points, float("-inf"), float("inf"))
+        if _valid_fix(f[1], f[2])
+    )
     if not fixes:
         return _off("no usable GPS fixes")
-    source = poi_source or _default_poi_source
+    lat_lo, lat_hi = min(f[1] for f in fixes), max(f[1] for f in fixes)
+    lon_lo, lon_hi = min(f[2] for f in fixes), max(f[2] for f in fixes)
+    if (lat_hi - lat_lo) > LANDMARK_MAX_BBOX_SPAN_DEG or (
+        lon_hi - lon_lo
+    ) > LANDMARK_MAX_BBOX_SPAN_DEG:
+        return _off(
+            f"the day's route spans more than {LANDMARK_MAX_BBOX_SPAN_DEG:g} degrees "
+            "(too wide for one landmark query)"
+        )
     bbox = (
-        min(f[1] for f in fixes) - bbox_margin_deg,
-        min(f[2] for f in fixes) - bbox_margin_deg,
-        max(f[1] for f in fixes) + bbox_margin_deg,
-        max(f[2] for f in fixes) + bbox_margin_deg,
+        lat_lo - bbox_margin_deg,
+        lon_lo - bbox_margin_deg,
+        lat_hi + bbox_margin_deg,
+        lon_hi + bbox_margin_deg,
     )
+    source = poi_source or _landmark_poi_source
     try:
         elements = list(source(bbox))
     except Exception as exc:  # noqa: BLE001 — a failed POI source means no bonus
         return _off(f"POI source failed: {exc}")
-    polygons = []
+    polygons = []  # (elem_bbox, outers, inners)
     for elem in elements:
         tags = elem.get("tags") or {}
         elem_bbox = _bbox_of(elem)
         if not (tags.get("name") or "").strip() or _classify(tags) is None or elem_bbox is None:
             continue
-        if _rings_of(elem)[0]:
-            polygons.append((elem, elem_bbox))
+        outers, inners = _rings_of(elem)
+        outers = _closed_rings(outers)
+        if outers:
+            polygons.append((elem_bbox, outers, _closed_rings(inners)))
     if not polygons:
         return _off("no measured destination polygon near the day's route")
+
+    def _in(poly, lat: float, lon: float) -> bool:
+        (s, w, n, e), outers, inners = poly
+        if not (s <= lat <= n and w <= lon <= e):
+            return False
+        if any(_point_in_ring(lat, lon, r) for r in inners):
+            return False
+        return any(_point_in_ring(lat, lon, r) for r in outers)
+
     times = np.array([f[0] for f in fixes], dtype=np.float64)
-    inside = np.array(
-        [any(_encloses(e, b, lat, lon) for e, b in polygons) for _t, lat, lon in fixes],
-        dtype=bool,
-    )
-    seconds = np.arange(int(n), dtype=np.float64)
-    idx = np.searchsorted(times, seconds, side="right") - 1
-    held = idx >= 0
-    held &= (seconds - times[np.maximum(idx, 0)]) <= max_gap_s
-    return held & inside[np.maximum(idx, 0)]
+    idx = np.searchsorted(times, ts, side="right") - 1
+    prev = np.maximum(idx, 0)
+    nxt = np.minimum(idx + 1, times.size - 1)
+    has_next = (idx + 1) < times.size
+    span = np.where(has_next, times[nxt] - times[prev], ts - times[prev])
+    held = (idx >= 0) & (span <= gap)
+    out = np.zeros((len(polygons), ts.size), dtype=bool)
+    for k, poly in enumerate(polygons):
+        inside = np.array([_in(poly, lat, lon) for _t, lat, lon in fixes], dtype=bool)
+        out[k] = held & inside[prev]
+    return out if out.any() else _off("no fix inside a measured destination polygon")
 
 
 def _default_poi_source(bbox: tuple[float, float, float, float]) -> list[dict]:

@@ -773,16 +773,17 @@ def _landmark_planning_mask(day_scores, day_gps_points, date: str, poi_source=No
     if not isinstance(day_scores, np.ndarray) or day_scores.size == 0:
         return None
     try:
-        mask = landmark_seconds_mask(len(day_scores), day_gps_points, poi_source=poi_source)
+        mask = landmark_seconds_mask(day_scores[:, 0], day_gps_points, poi_source=poi_source)
     except Exception as exc:  # noqa: BLE001 — the bonus is optional
         logger.warning("Day %s: landmark bonus disabled: %s", date, exc)
         return None
     if mask is not None:
         logger.info(
-            "Day %s: landmark bonus — %d/%d s inside a measured landmark polygon",
+            "Day %s: landmark bonus — %d/%d s inside a measured landmark polygon (%d polygons)",
             date,
-            int(np.count_nonzero(mask)),
-            int(mask.size),
+            int(np.count_nonzero(mask.any(axis=0))),
+            int(mask.shape[-1]),
+            int(mask.shape[0]),
         )
     return mask
 

@@ -55,14 +55,23 @@ search width. Each `ShortRange` now carries `window_mean`, `opening_mean` and `q
 are written to the shorts audit sidecar with `moment_kind` and excluded from the audit hash.
 
 **Landmark bonus (`short_planner.py`, `destination_resolver.landmark_seconds_mask`).** A window
-that sits inside a measured destination polygon ranks higher: `plan_shorts(landmark_mask=...)`
-multiplies its pick-order score by `1 + LANDMARK_BONUS` (0.25) when at least `LANDMARK_QUORUM`
-(the resolver's `MIN_PEAK_MASS_SHARE`, 0.5) of the window's seconds are inside, so a polygon the
-fixes only graze earns nothing. The mask is built once per day beside `_shorts_planning_mask` and
-reaches the per-LF refill through the same planner kwargs. It uses the resolver's own tags,
-`out geom` rings and polygon containment; point POIs, bounds-only areas and names with no boundary
-never count. The bonus is soft and ranking-only: it never admits a window below the bar or with a
-weak opening, and never overrides the stop/GPS/county masks or the gap. A GPS-less day, a failing
-POI source or no polygon logs `landmark bonus disabled` and plans exactly as before. Titles and OST
-naming are unchanged. Each `ShortRange` carries `landmark`, written to the audit sidecar outside its
-hash.
+inside a measured destination polygon ranks higher: `plan_shorts(landmark_mask=...)` multiplies its
+pick-order score by `1 + LANDMARK_BONUS` (0.25) when ONE polygon holds at least `LANDMARK_QUORUM`
+(the resolver's `MIN_PEAK_MASS_SHARE`, 0.5) of the window's seconds, so a polygon the fixes only
+graze, or two parks that together reach half, earn nothing. The planner picks with and without the
+bonus and keeps the boosted picks only when they hold at least as many Shorts, so the bonus can
+re-order the day but never cost it a Short. The mask is one row per polygon, aligned to the score
+rows' own times, built once per day beside `_shorts_planning_mask` and reaching the per-LF refill
+through the same planner kwargs. It uses the resolver's destination tags, `out geom` rings and
+point-in-ring test; only CLOSED rings count (point POIs, bounds-only areas and open ways never do);
+fixes failing the route-claim valid-fix rule are dropped first; a fix holds its seconds only across a
+fix-to-fix gap within the Shorts GPS-gap bound (`stop_mask.GPS_MAX_FIX_GAP_S`).
+
+The POI lookup is optional and budgeted: one Overpass endpoint, one attempt, a 15 s server and 20 s
+client timeout, no cache write for a partial (remark-bearing) reply, and no query at all when the
+day's route spans more than 2 degrees on an axis. A GPS-less day, an over-wide day, a failing source
+or no polygon logs `landmark bonus disabled` and plans exactly as before. Because the bonus depends
+on whether Overpass answered, a day's picks can differ between a run that got an answer and one that
+did not; a successful answer is cached, so reruns of the same day are stable. Titles and OST naming
+are unchanged. `ShortRange.landmark` records whether the bonus ranked that Short and is written to
+the audit sidecar outside its hash.

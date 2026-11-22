@@ -36,6 +36,10 @@ OVERPASS_CLIENT_TIMEOUT = 90  # seconds; > OVERPASS_TIMEOUT + a queue wait
 OVERPASS_RETRY_DELAY = 5  # seconds — the fallback wait when a 429 omits Retry-After
 OVERPASS_RETRY_MAX_SLEEP = 60  # seconds; a mirror asking for an hour is ignored
 OVERPASS_ATTEMPTS_PER_ENDPOINT = 2
+# Budget for an OPTIONAL lookup (the Shorts landmark bonus): one endpoint, one
+# attempt, a short server and client timeout, and no caching of a partial reply.
+OVERPASS_FAST_TIMEOUT = 15  # seconds, server-side [timeout:N]
+OVERPASS_FAST_CLIENT_TIMEOUT = 20  # seconds
 
 # Shared-cache lifetime. OSM POI/route data moves on edit timescales, not run
 # timescales, so a long TTL is safe and is what makes re-processing one drive
@@ -229,6 +233,8 @@ def _endpoint_is_unusable(exc: BaseException) -> bool:
 def _query_overpass(
     bbox: tuple[float, float, float, float],
     named_road_patterns: Optional[list[str]] = None,
+    *,
+    fast: bool = False,
 ) -> Optional[dict]:
     """
     Query Overpass for towns, POIs, and named roads in bbox.
@@ -240,6 +246,10 @@ def _query_overpass(
     Returns raw JSON response. Raises ``RuntimeError`` (from
     ``post_overpass_query``) when every endpoint failed — callers that can
     degrade (``discover_area_pois``, ``destination_resolver``) catch it.
+
+    ``fast=True`` is the budget for an optional lookup: one endpoint, one
+    attempt, ``OVERPASS_FAST_TIMEOUT``; a reply carrying a server ``remark``
+    (a timed-out, partial answer) raises and is never cached.
     """
     s, w, n, e = bbox
     bbox_str = f"{s},{w},{n},{e}"
@@ -252,7 +262,7 @@ def _query_overpass(
             f'way["name"~"{pattern}"]({bbox_str});\n  relation["name"~"{pattern}"]({bbox_str});'
         )
 
-    query = f"""[out:json][timeout:{OVERPASS_TIMEOUT}];
+    query = f"""[out:json][timeout:{OVERPASS_FAST_TIMEOUT if fast else OVERPASS_TIMEOUT}];
 (
   node["place"~"city|town|village"]({bbox_str});
   node["tourism"~"viewpoint|attraction"]({bbox_str});
@@ -276,12 +286,14 @@ out geom;"""
         logger.info("Overpass shared-cache hit: %s", cache_entry.name)
         return cached
 
-    payload = post_overpass_query(query)
+    payload = post_overpass_query(query, fast=True) if fast else post_overpass_query(query)
+    if fast and isinstance(payload, dict) and payload.get("remark"):
+        raise RuntimeError(f"Overpass partial reply, not cached: {payload['remark']}")
     _store_shared_cache(cache_entry, payload)
     return payload
 
 
-def post_overpass_query(query: str) -> dict:
+def post_overpass_query(query: str, *, fast: bool = False) -> dict:
     """POST ``query`` to each Overpass endpoint in turn; return the first answer.
 
     The failover loop lives here rather than inline in ``_query_overpass`` so
@@ -302,9 +314,13 @@ def post_overpass_query(query: str) -> dict:
     data = f"data={urllib.request.quote(query)}"
     failures: list[str] = []
 
-    for url in _endpoints_to_try():
-        for attempt in range(OVERPASS_ATTEMPTS_PER_ENDPOINT):
-            last = attempt == OVERPASS_ATTEMPTS_PER_ENDPOINT - 1
+    endpoints = _endpoints_to_try()[:1] if fast else _endpoints_to_try()
+    attempts = 1 if fast else OVERPASS_ATTEMPTS_PER_ENDPOINT
+    client_timeout = OVERPASS_FAST_CLIENT_TIMEOUT if fast else OVERPASS_CLIENT_TIMEOUT
+
+    for url in endpoints:
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
             try:
                 req = urllib.request.Request(
                     url,
@@ -314,7 +330,7 @@ def post_overpass_query(query: str) -> dict:
                         "User-Agent": overpass_user_agent(),
                     },
                 )
-                with urllib.request.urlopen(req, timeout=OVERPASS_CLIENT_TIMEOUT) as resp:
+                with urllib.request.urlopen(req, timeout=client_timeout) as resp:
                     if resp.status != 200:
                         raise OSError(f"Overpass returned HTTP {resp.status}")
                     result = json.loads(resp.read().decode("utf-8"))
