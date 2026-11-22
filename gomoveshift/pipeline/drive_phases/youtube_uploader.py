@@ -851,6 +851,10 @@ class YouTubeUploader:
             },
         ).execute()
 
+    def resolve_playlist_id(self, *, metadata: dict, config: Any) -> str:
+        """The id of the playlist ``metadata`` resolves to (created if missing); files nothing."""
+        return self._get_or_create_playlist(resolve_playlist(metadata, config))
+
     def assign_video_to_resolved_playlist(
         self,
         video_id: str,

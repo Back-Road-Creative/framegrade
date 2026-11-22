@@ -10,13 +10,21 @@ Two failures must never happen on the live channel: two scheduled videos in one 
 a video that is already public. So each replaced LF walks ONE durable sequence, its state kept in
 the plan under ``progress`` (written atomically BEFORE each external call and after each step)::
 
-    pending     insert the replacement PRIVATE, no publishAt, old title (the title-decision gate
-                runs unchanged: a refusal leaves the LF pending and the old video untouched)
+    pending     insert the replacement PRIVATE, no publishAt, new gated title (the title-decision
+                gate runs unchanged: a refusal leaves the LF pending and the old video untouched);
+                the new id is written to the plan the moment ``videos.insert`` returns (the
+                uploader's ``persist`` callback), so a crash cannot orphan a private copy
     uploaded    recheck LIVE: old is private, scheduled, publishAt more than REPLACE_MARGIN_H away.
-                Failed or errored -> delete the NEW video, ``abandoned``; the old is never deleted
-    old_deleted delete the old; set its publishAt (tz-aware) on the NEW video, file it in the old
-                record's playlist, swap the ledger id, book the store
+                Only a ``refuse`` (the old provably exists and is public/too close) deletes the NEW
+                video, ``abandoned``. An ``error`` DEFERS (stays uploaded, incident, retried next
+                entry); ``gone`` (the old is already deleted) moves on to ``old_deleted``
+    old_deleted delete the old (a 404 counts as deleted); set its publishAt (tz-aware) on the NEW
+                video unless that slot is now within REPLACE_MARGIN_H (then ``slot_passed``: the
+                new stays private, incident), file it in the old record's playlist, swap the
+                ledger id, book the store
     scheduled   -> ``done`` once everything is recorded
+
+The one invariant: the NEW video is deleted only by a call that has just proved the OLD one exists.
 
 Every Phase D entry resumes each plan LF from its state before any upload
 (``resume_replacements``); a failed delete or swap is retried. A passed slot is never rescheduled
@@ -29,12 +37,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
-PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED = (
-    "pending", "uploaded", "old_deleted", "scheduled", "done", "abandoned")  # fmt: skip
+PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED, SLOT_PASSED = (
+    "pending", "uploaded", "old_deleted", "scheduled", "done", "abandoned", "slot_passed")  # fmt: skip
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +102,29 @@ def _when(raw: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """A 404 from ``videos.delete``: the video is already gone, which is what was asked for."""
+    status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)  # fmt: skip
+    return status == 404 or re.search(r"\b404\b|notFound", str(exc)) is not None
+
+
+def unfinished_lfs(plan: Mapping[str, Any]) -> Dict[int, str]:
+    """``unfinished`` minus the abandoned LFs: what Phase D must not report as a clean finish."""
+    return {lf: st for lf, st in unfinished(plan).items() if st != ABANDONED}
+
+
+def thumbnail_targets(plan: Mapping[str, Any], uploads: Mapping[Any, Any]) -> Dict[Any, Any]:
+    """The upload records a thumbnail may go on under a plan: a replaced LF whose new video is
+    scheduled or done and not yet thumbnailed; never an old, abandoned or kept video."""
+    prog = progress_map(plan)
+    out: Dict[Any, Any] = {}
+    for key, rec in uploads.items():
+        st = prog.get(key if isinstance(key, int) else _lf(key), {})
+        if st.get("state") in (SCHEDULED, DONE) and rec.get("video_id") == st.get("new_id") and not rec.get("thumbnail_path"):  # fmt: skip
+            out[key] = rec
+    return out
 
 
 def classify_uploads(
@@ -215,7 +247,7 @@ def check_old(yt: Any, old: Mapping[str, Any], now: datetime, margin_h: float = 
 
     ``ok`` private, scheduled, live publishAt more than ``margin_h`` ahead; ``gone`` YouTube no
     longer has it; ``refuse`` it is public, unscheduled or too close; ``error`` the lookup failed
-    (not decidable, so never replaceable; the old video is kept)."""
+    (not decidable: the caller defers and never deletes anything on it)."""
     try:
         live = yt.video_schedule(old["video_id"])
     except Exception as exc:  # noqa: BLE001
@@ -255,13 +287,16 @@ def note_kept_live(plan_dir: Path, lf: int, why: str) -> None:
     write_plan(plan_dir, plan)
 
 
-def abandon(yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable, why: str) -> None:  # fmt: skip
+def abandon(yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable, why: str, old_proven: bool = False) -> None:  # fmt: skip
     """The replacement cannot take the slot: delete the NEW video (private, unscheduled, so safe),
-    keep the old record on state, never touch the old video."""
+    keep the old record on state, never touch the old video. The new is deleted only when the
+    caller's own live check just proved the old exists (``old_proven``); otherwise it is left."""
     prog = progress_map(load_plan(plan_dir)).get(lf, {})
     new_id = prog.get("new_id")
     new_gone = new_id is None
-    if new_id:
+    if new_id and not old_proven:
+        logger.error("REPLACE-NEW-KEPT lf=%s: old %s not proven to exist; private %s left", lf, old["video_id"], new_id)  # fmt: skip
+    elif new_id:
         try:
             yt.delete_video(new_id)
             new_gone = True
@@ -289,16 +324,21 @@ def advance(
     new_id = st.get("new_id")
     if st.get("state") == UPLOADED:
         verdict, why = check_old(yt, old, now)
-        if verdict in ("refuse", "error"):
-            abandon(yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, why=f"recheck: {why}")  # fmt: skip
+        if verdict == "refuse":  # the old provably exists and is public or too close
+            abandon(yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, why=f"recheck: {why}", old_proven=True)  # fmt: skip
             return ABANDONED
+        if verdict == "error":  # not decidable: the old may already be deleted, so keep the new
+            logger.error("REPLACE-RECHECK-DEFERRED lf=%s: %s; new %s kept, retried next entry", lf, why, new_id)  # fmt: skip
+            record_incident(Path(plan_dir).name, "recheck_failed", f"LF {lf}: recheck of old {old['video_id']} {why}; the replacement {new_id} stays private and is retried next entry", lf=lf)  # fmt: skip
+            return UPLOADED
         if verdict == "ok":
             try:
                 yt.delete_video(old["video_id"])
-            except Exception:  # noqa: BLE001
-                logger.error("REPLACE-OLD-UNDELETED lf=%s: %s still holds the slot; retried next entry", lf, old["video_id"], exc_info=True)  # fmt: skip
-                record_incident(Path(plan_dir).name, "old_undeleted", f"LF {lf}: old {old['video_id']} could not be deleted and still holds the slot; the replacement {new_id} stays private until it is", lf=lf)  # fmt: skip
-                return UPLOADED
+            except Exception as exc:  # noqa: BLE001
+                if not _is_not_found(exc):
+                    logger.error("REPLACE-OLD-UNDELETED lf=%s: %s still holds the slot; retried next entry", lf, old["video_id"], exc_info=True)  # fmt: skip
+                    record_incident(Path(plan_dir).name, "old_undeleted", f"LF {lf}: old {old['video_id']} could not be deleted and still holds the slot; the replacement {new_id} stays private until it is", lf=lf)  # fmt: skip
+                    return UPLOADED
         # "gone": an earlier run deleted it and died before writing the state; the slot is free
         set_progress(plan_dir, lf, state=OLD_DELETED)
     if progress_map(load_plan(plan_dir)).get(lf, {}).get("state") == OLD_DELETED:
@@ -308,6 +348,12 @@ def advance(
             logger.error("REPLACE-UNSCHEDULED lf=%s: new %s needs a publish_at/playlist by hand", lf, new_id)  # fmt: skip
             record_incident(Path(plan_dir).name, "unscheduled", f"LF {lf}: old deleted, new {new_id} needs a publish_at/playlist by hand", lf=lf)  # fmt: skip
             return OLD_DELETED
+        if not st.get("publish_set") and when <= now + timedelta(hours=REPLACE_MARGIN_H):
+            # A past or near publishAt would go public at once (or be rejected): never send one.
+            logger.error("REPLACE-SLOT-PASSED lf=%s: slot %s is within %s h; new %s stays private", lf, when.isoformat(), REPLACE_MARGIN_H, new_id)  # fmt: skip
+            record_incident(Path(plan_dir).name, "slot_passed", f"LF {lf}: slot passed mid-replace ({when.isoformat()}), old deleted, new {new_id} stays private and needs a new slot", lf=lf)  # fmt: skip
+            set_progress(plan_dir, lf, state=SLOT_PASSED)
+            return SLOT_PASSED
         try:
             if not st.get("publish_set"):
                 yt.update_privacy(new_id, privacy="private", publish_at=when)
@@ -317,7 +363,8 @@ def advance(
                     yt.add_to_playlist(new_id, pid)
                 else:
                     logger.warning("replace lf=%s: old record has no playlist_id; resolving fresh", lf)  # fmt: skip
-                    pid = yt.assign_video_to_resolved_playlist(new_id, metadata=metadata, config=config)  # fmt: skip
+                    pid = yt.resolve_playlist_id(metadata=metadata, config=config)
+                    yt.add_to_playlist(new_id, pid)  # lists first: a replay never files it twice
                 set_progress(plan_dir, lf, playlist_set=True, playlist_id=pid)
             if not st.get("ledger_swapped"):
                 swap_ledger_video_id(ledger_path, old["video_id"], new_id)

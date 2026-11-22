@@ -544,8 +544,13 @@ def assert_phase_d_quality(
     state: Any,
     drive_plan: Any,
     csv_path: Optional[Path] = None,
+    *,
+    replace_plan: bool = False,
 ) -> None:
     """Run every Phase D quality gate and raise once with all violations.
+
+    ``replace_plan`` (a ``--replace-scheduled`` run) exempts Rule 9: a plan run queues no new
+    shorts, and its fresh state holds no Drive manifests to complete.
 
     Args:
         state: Phase D's state dict / PipelineState (after per-LF loops).
@@ -580,7 +585,8 @@ def assert_phase_d_quality(
     errors.extend(check_csv_first_comment_text(csv_path, expect_csv=expect_csv))
     errors.extend(check_schedule_lf_slot_count(state, drive_plan))
     errors.extend(check_schedule_dates_in_long_form_days(state))
-    errors.extend(check_shorts_upload_complete(state, drive_plan))
+    if not replace_plan:
+        errors.extend(check_shorts_upload_complete(state, drive_plan))
     errors.extend(check_youtube_uploads_complete(state, drive_plan))
 
     if errors:

@@ -31,7 +31,17 @@ is uploaded private under the NEW render's gated title (`require_title_decision`
 old and new titles are recorded in `replace_plan.json`) and later given the old `publish_at`, and only after the upload succeeds and is booked
 are the ledger entry re-pointed at the new id and the old id deleted (`videos.delete`). If the old
 video went public meanwhile it is kept, nothing is uploaded, and `replace_plan.json` records
-`kept_live`. A delete that fails is logged as `REPLACE-OLD-UNDELETED`. Every replace refusal or partial
+`kept_live`. A delete that fails is logged as `REPLACE-OLD-UNDELETED`; a 404 on it counts as deleted. The new
+id is written to the plan the moment `videos.insert` returns. The recheck before the delete decides
+three ways: the old is provably public or too close, so the new is deleted and the LF abandoned;
+the lookup errored (including a quota error), so nothing is deleted, an incident opens and the next
+entry retries; the old is already gone, so the replace continues. The new video is deleted only by a
+call that has just proven the old one exists. If the slot is within 6 h by the time the old is
+deleted, no past `publishAt` is sent: the new stays private in state `slot_passed` with an incident
+and needs a new slot. Thumbnails go only on a new video that is scheduled or done, once. A plan run
+is exempt from the Drive-manifests rule (it queues no shorts), its quota projection counts only the
+plan LFs still to insert, and Phase D fails with `REPLACE-UNFINISHED` plus a `replace_scheduled_partial`
+incident while any plan LF is neither `done` nor `abandoned`. Every replace refusal or partial
 failure (`REPLACE-REOPEN-REFUSED`, `REPLACE-OLD-UNDELETED`, an abandoned LF, a failed schedule, a
 title-gate refusal, a restore that failed, a lookup error on the old video, and a publish claim
 that closed `complete` on the kept receipts while a replaced LF is not `done`) opens a

@@ -110,9 +110,8 @@ class FakeYT:
         self.w.videos[vid]["playlists"].append(playlist_id)
         self.w.log("playlist", vid, playlist_id)
 
-    def assign_video_to_resolved_playlist(self, vid, *, metadata, config):
-        self.w.videos[vid]["playlists"].append("PL-RESOLVED")
-        self.w.log("resolved", vid)
+    def resolve_playlist_id(self, *, metadata, config):
+        self.w.log("resolved", "PL-RESOLVED")
         return "PL-RESOLVED"
 
     def delete_video(self, vid):
@@ -268,16 +267,12 @@ def _went_public(w):
     w.videos["old2"].update(privacy="public", publish_at=None)
 
 
-def _live_check_errors(w):
-    w.fail.add("schedule")
-
-
 def _inside_margin(w):
     w.videos["old2"].update(publish_at=NOW + timedelta(hours=rs.REPLACE_MARGIN_H - 1))
 
 
-@pytest.mark.parametrize("change", [_went_public, _live_check_errors, _inside_margin])
-def test_a_failed_or_errored_recheck_deletes_the_new_and_never_the_old(tmp_path, change):
+@pytest.mark.parametrize("change", [_went_public, _inside_margin])
+def test_a_refused_recheck_deletes_the_new_and_never_the_old(tmp_path, change):
     rig = Rig(tmp_path)
     rig.world.on_insert = change
     rig.run()
@@ -289,8 +284,6 @@ def test_a_failed_or_errored_recheck_deletes_the_new_and_never_the_old(tmp_path,
     assert rig.state.youtube_uploads[2]["video_id"] == "old2"
     assert not [e for e in w.of("update_privacy") if e[1] == "new2"]
     assert _incidents("abandoned")  # the replace did not happen: an open incident says so
-    if change is _live_check_errors:
-        assert "lookup failed" in rig.prog(2)["why"]  # distinct from "no longer scheduled"
 
 
 def test_a_failed_delete_stays_uploaded_and_is_retried_next_entry(tmp_path):
@@ -341,8 +334,8 @@ def test_the_playlist_falls_back_to_resolution_only_without_one_on_the_old_recor
     del old["playlist_id"]
     rig = Rig(tmp_path, old2=old)
     rig.run()
-    assert [e[1] for e in rig.world.of("resolved")] == ["new2"]
-    assert not [e for e in rig.world.of("playlist") if e[1] == "new2"]
+    assert [e[1] for e in rig.world.of("resolved")] == ["PL-RESOLVED"]
+    assert [e[2] for e in rig.world.of("playlist") if e[1] == "new2"] == ["PL-RESOLVED"]  # once
 
 
 def _incidents(code=None):
@@ -423,7 +416,14 @@ def test_a_transient_live_check_failure_before_the_upload_leaves_the_lf_pending(
 def test_plan_state_is_on_disk_before_the_insert_and_written_atomically(tmp_path):
     rig = Rig(tmp_path)
     at_insert = []
-    rig.world.on_insert = lambda w: at_insert.append(rig.prog(2)["state"])
+    real_log = rig.world.log
+
+    def log(*ev):  # the plan state as ``videos.insert`` is called, before the new id exists
+        if ev[0] == "insert" and ev[1] == "new2":
+            at_insert.append(rig.prog(2)["state"])
+        real_log(*ev)
+
+    rig.world.log = log
     rig.run()
     assert at_insert[0] == "pending"  # recorded BEFORE the external call
     assert rig.prog(2)["state"] == "done" and not list(tmp_path.glob("*.tmp"))
@@ -518,3 +518,132 @@ def test_a_finished_or_plain_drive_closes_clean(tmp_path, monkeypatch, plan_stat
     monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
     assert publish.reconcile_publishes(store, tmp_path) == [{"project": "day-a", "status": "complete"}]  # fmt: skip
     assert not _incidents()
+
+
+def _deleted_then_recheck_fails(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")  # old2 deleted on YouTube, state still 'uploaded'
+    assert "old2" not in rig.world.videos and rig.prog(2)["state"] == "uploaded"
+    rig.world.fail.add("schedule")  # resume: videos.list errors
+    return rig
+
+
+def test_a_recheck_error_defers_and_never_deletes_the_only_copy(tmp_path):
+    rig = _deleted_then_recheck_fails(tmp_path)
+    rig.run()
+    w = rig.world
+    assert "new2" in w.videos and ("delete", "new2") not in [e[:2] for e in w.events]
+    assert rig.prog(2)["state"] == "uploaded" and _incidents("recheck_failed")
+    w.fail.discard("schedule")  # the lookup recovers: gone -> old_deleted -> scheduled -> done
+    rig.run()
+    _assert_replaced(rig, 2)
+
+
+def test_a_delete_that_committed_but_errored_never_costs_the_new(tmp_path):
+    from unittest.mock import patch as _p
+
+    rig = Rig(tmp_path)
+    w = rig.world
+    n = {"n": 0}
+
+    def flaky(self, vid):
+        n["n"] += 1
+        self.w.videos.pop(vid, None)
+        if vid == "old2" and n["n"] == 1:
+            raise RuntimeError("504 after commit")
+        self.w.log("delete", vid)
+
+    with _p.object(FakeYT, "delete_video", flaky):
+        rig.run()
+        assert rig.prog(2)["state"] == "uploaded" and "old2" not in w.videos
+        w.fail.add("schedule")
+        rig.run()
+        assert "new2" in w.videos and rig.prog(2)["state"] == "uploaded"
+        w.fail.discard("schedule")
+        rig.run()
+    _assert_replaced(rig, 2)
+    assert ("delete", "new2") not in [e[:2] for e in w.events]
+
+
+def test_a_404_on_deleting_the_old_is_success(tmp_path):
+    rig = Rig(tmp_path)
+    orig = FakeYT.delete_video
+
+    def gone(self, vid):
+        if vid == "old2":
+            self.w.videos.pop(vid, None)
+            raise RuntimeError("HttpError 404 notFound")
+        orig(self, vid)
+
+    with patch.object(FakeYT, "delete_video", gone):
+        rig.run()
+    _assert_replaced(rig, 2)
+
+
+def test_a_quota_error_on_the_recheck_defers_never_abandons(tmp_path):
+    from gomoveshift.pipeline.exceptions import YouTubeQuotaError
+
+    rig = Rig(tmp_path)
+    rig.world.on_insert = lambda w: w.fail.add("quota")
+    orig = FakeYT.video_schedule
+
+    def sched(self, vid):
+        if "quota" in self.w.fail:
+            raise YouTubeQuotaError("quotaExceeded")
+        return orig(self, vid)
+
+    with patch.object(FakeYT, "video_schedule", sched):
+        rig.run()
+    assert rig.prog(2)["state"] == "uploaded" and "new2" in rig.world.videos
+    assert ("delete", "new2") not in [e[:2] for e in rig.world.events]
+
+
+def test_the_new_id_reaches_the_plan_the_moment_the_insert_returns(tmp_path):
+    rig = Rig(tmp_path)
+    rig.world.on_insert = lambda w: (_ for _ in ()).throw(Crash("after persist"))
+    with pytest.raises(Crash):
+        rig.run()
+    assert rig.prog(2)["new_id"] == "new2" and rig.prog(2)["state"] == "uploaded"
+    rig.world.on_insert = None
+    rig.run()
+    _assert_replaced(rig, 2)
+    assert len(rig.world.of("insert")) == 2
+
+
+@pytest.mark.parametrize("delta", [timedelta(hours=1), timedelta(hours=-1)])
+def test_a_slot_that_passed_mid_replace_is_never_sent_as_a_past_publish_at(tmp_path, delta):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")  # old deleted; the render took long
+    rig.run(now=AT2 + delta)
+    w = rig.world
+    assert w.videos["new2"]["publish_at"] is None and w.videos["new2"]["privacy"] == "private"
+    assert not [e for e in w.of("update_privacy") if e[1] == "new2"]
+    assert rig.prog(2)["state"] == "slot_passed" and _incidents("slot_passed")
+    assert "new2" in w.videos
+
+
+def test_the_new_is_deleted_only_when_the_old_was_just_proven_to_exist(tmp_path):
+    rig = Rig(tmp_path)
+    rig.world.on_insert = _went_public
+    rig.run()
+    deletes = [e[1] for e in rig.world.of("delete")]
+    assert "new2" in deletes and "old2" not in deletes  # proven public by the same call
+    (tmp_path / "b").mkdir()
+    rig2 = Rig(tmp_path / "b")  # abandon() called with nothing proven leaves the new alone
+    rig2.write_plan(progress={"2": {"old_id": "old2", "new_id": "new2", "state": "uploaded"}})
+    rig2.state.youtube_uploads = {}
+    rig2.world.videos["new2"] = {"privacy": "private", "publish_at": None, "playlists": []}
+    rs.abandon(FakeYT(rig2.world), lf=2, old=rig2.old2, plan_dir=rig2.dir, state=rig2.state,
+               save_state=lambda s: None, why="x")  # fmt: skip
+    assert "new2" in rig2.world.videos
+
+
+def test_the_uploader_resolves_a_playlist_id_without_filing_anything():
+    svc = MagicMock()
+    yt = _uploader(svc)
+    yt._get_or_create_playlist = MagicMock(return_value="PL7")
+    with patch("gomoveshift.pipeline.drive_phases.youtube_uploader.resolve_playlist", return_value="Name"):  # fmt: skip
+        assert yt.resolve_playlist_id(metadata={}, config=None) == "PL7"
+    yt._add_video_to_playlist.assert_not_called()
