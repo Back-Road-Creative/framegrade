@@ -117,7 +117,7 @@ def test_p4_a_failed_job_after_the_stamp_is_not_counted_as_launched(tmp_path):
     def launcher(argv, cwd, env):
         rig.launches.append((argv, cwd, env))
         n.append(1)
-        job(rig, f"r{len(n)}", "day-a", "failed", NOW.timestamp() + 3)
+        job(rig, f"r{len(n)}", "day-a", "failed", NOW.timestamp() + 3, worker_pid=None)
         return False, "jobrun: could not launch: ENOENT"
 
     rig.launcher = launcher
@@ -146,16 +146,21 @@ def test_p5_a_stale_job_is_not_the_launch_whose_run_id_the_marker_pinned(tmp_pat
     assert res["replace_retry"]["outcome"] == "cleared", res["replace_retry"]
 
 
-@pytest.mark.parametrize("state", ["failed", "failed-no-output", "stalled", "killed", None])
-def test_only_a_running_or_succeeded_job_counts_as_started(tmp_path, state):
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("state", ["running", "succeeded", "failed", "failed-no-output"])
+def test_a_started_job_counts_in_any_state_jobrun_writes(tmp_path, state, pinned):
+    """A launched drive that has since ended (exit 5 at the OST gate is ``failed``) was launched."""
     rig = _replace_rig(tmp_path, _three_lfs())
-    job(rig, "r1", "day-a", state or "x", 1000.0)
-    marker = {"launching_at": 999.0}
-    assert not launch._replace_launch_started(marker, rig.tmp / "jobs", "day-a")
-    for ok in ("running", "succeeded"):
-        job(rig, f"ok-{ok}", "day-a", ok, 1000.0, exit_code=0)
-        assert launch._replace_launch_started(marker, rig.tmp / "jobs", "day-a")
-        (rig.tmp / "jobs" / f"ok-{ok}" / "job.json").unlink()
+    job(rig, "r1", "day-a", state, 1000.0, exit_code=0)
+    marker = {"launching_at": 999.0, **({"launch_run_id": "r1"} if pinned else {})}
+    assert launch._replace_launch_started(marker, rig.tmp / "jobs", "day-a")
+
+
+def test_a_launch_failure_job_does_not_count_as_started(tmp_path):
+    """jobrun's own ``could not launch`` record: ``failed`` and the worker pid never set."""
+    rig = _replace_rig(tmp_path, _three_lfs())
+    job(rig, "r1", "day-a", "failed", 1000.0, worker_pid=None)
+    assert not launch._replace_launch_started({"launching_at": 999.0}, rig.tmp / "jobs", "day-a")
 
 
 def test_the_launchers_run_id_is_pinned_into_the_marker_as_soon_as_it_returns(

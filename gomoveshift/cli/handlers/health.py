@@ -208,6 +208,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         output_root=args.output_root, now=now, region=region,
         regions={r.project: r.region for r in rows}, dry_run=args.dry_run,
         supersede=supersede, replace=replace, run=run, jobs_dir=jobs_dir,
+        stages_root=args.stages_root,
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

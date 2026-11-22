@@ -247,10 +247,12 @@ def _read_retry_marker(path: Path) -> Dict[str, Any]:
     return held if isinstance(held, dict) else {}
 
 
-def mark_replace_retry(output_root: Path, project: str, reason: str, now: datetime, region: Optional[str] = None) -> int:  # fmt: skip
+def mark_replace_retry(output_root: Path, project: str, reason: str, now: datetime, region: Optional[str] = None, at: Optional[str] = None) -> int:  # fmt: skip
     """Record a failed ``--replace-scheduled`` attempt so the next tick retries it: attempts so far
-    (the backoff input) and the region the tick must be for. Never raises: a failed write is
-    logged and the incident still stands."""
+    (the backoff input) and the region the tick must be for. ``at`` is the attempt that is about to
+    set a run aside (its ``SUPERSEDE_RECORD`` carries the same ``at``): ``restore_set_aside`` puts
+    back only the runs the marker names (``at``, and ``earlier_at`` for the attempts before it),
+    never another replace's. Never raises: a failed write is logged and the incident still stands."""
     path = _retry_marker(output_root, project)
     try:
         prior = _read_retry_marker(path)
@@ -260,6 +262,13 @@ def mark_replace_retry(output_root: Path, project: str, reason: str, now: dateti
         held = {"project": project, "reason": prior.get("reason") or reason, "attempts": n, "last_at": now.timestamp()}  # fmt: skip
         if region or prior.get("region"):
             held["region"] = region or prior["region"]
+        earlier = list(prior.get("earlier_at") or [])
+        if at and prior.get("at") and prior["at"] != at:
+            earlier.append(prior["at"])
+        if at or prior.get("at"):
+            held["at"] = at or prior["at"]
+        if earlier:
+            held["earlier_at"] = earlier
         tmp.write_text(json.dumps(held, indent=2) + "\n")
         os.replace(tmp, path)
         return n
@@ -292,7 +301,9 @@ def stamp_replace_launch(output_root: Path, project: str, at: Optional[float]) -
 
 
 #: ``jobrun: detached <msg> run_id <id> record <path>``: the job the launcher just started.
-_LAUNCH_RUN_ID = re.compile(r"\brun_id ([0-9A-Za-z][0-9A-Za-z-]{5,})")
+_LAUNCH_RUN_ID = re.compile(
+    r"\brun_id ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b"
+)
 
 
 def pin_replace_launch_run_id(output_root: Path, project: str, run_id: str) -> None:
@@ -319,22 +330,26 @@ def _record_margin_kept(project: str, plan: Dict[str, Any]) -> None:
         replace_scheduled_mod.record_incident(project, "margin_kept", f"LF {lf} publishes inside the {replace_scheduled_mod.REPLACE_MARGIN_H} h margin: its old video is kept and publishes on its own; the rest are replaced", lf=int(lf))  # fmt: skip
 
 
-#: ``job/1`` states of a drive that is going (or went): anything else ended without a run.
-_STARTED_STATES = ("running", "succeeded")
+def _launch_failed(rec: Dict[str, Any]) -> bool:
+    """jobrun's own ``could not launch`` record (``bin/jobrun.py``): ``failed`` with the worker pid
+    never set. Every other job, in any state, is a drive that was launched (it may have ended since:
+    exit 5 at the OST gate, a nonzero exit, ``failed-no-output``)."""
+    return (rec.get("result") or {}).get("state") == "failed" and (rec.get("worker") or {}).get("pid") is None  # fmt: skip
 
 
 def _replace_launch_started(marker: Dict[str, Any], jobs_dir: Optional[Path], project: str) -> bool:
-    """True when the launcher ran for the launch the marker was stamped for: a running or
-    succeeded ``gms-backlog-<project>`` job created at or after ``launching_at`` (a failed one is
-    no run going), and, when the marker pinned the launcher's ``run_id``, that very job."""
+    """True when the launcher ran for the launch the marker was stamped for, whatever became of the
+    run: with the pinned ``launch_run_id``, that job in any state; without one, a
+    ``gms-backlog-<project>`` job created at or after ``launching_at`` that is not a launch failure.
+    (Unpinned, an older failed attempt's job created after the stamp could be taken for this one;
+    that errs toward never replacing a run twice.)"""
     at = float(marker.get("launching_at") or 0)
     if at <= 0 or jobs_dir is None:
         return False
     name, want = f"gms-backlog-{project}", marker.get("launch_run_id")
     return any(
         r.get("name") == name and float(r.get("created_at") or 0) >= at
-        and (r.get("result") or {}).get("state") in _STARTED_STATES
-        and (not want or r.get("run_id") == want)
+        and (r.get("run_id") == want if want else not _launch_failed(r))
         for r in _job_records(Path(jobs_dir))
     )  # fmt: skip
 
@@ -388,16 +403,22 @@ def refusal_is_permanent(reason: str) -> bool:
     return any(p.search(str(reason)) for p in _PERMANENT_REFUSALS)
 
 
-def give_up_unclaimed_replace_retries(output_root: Path, region: Optional[str], regions: Optional[Dict[str, str]]) -> List[str]:  # fmt: skip
+def give_up_unclaimed_replace_retries(output_root: Path, region: Optional[str], regions: Optional[Dict[str, str]], now: Optional[datetime] = None, stages_root: Optional[Path] = None, jobs_dir: Optional[Path] = None) -> List[str]:  # fmt: skip
     """Markers that name no region and whose manifest row is gone: no region's tick can ever claim
     them (older code wrote no region), so each is given up like any permanent refusal. The outcome
     is recorded on the project's ``replace_retry`` incident (opened here when none is, so it is
-    durable and ``status`` reads it) BEFORE the marker is cleared; returns the projects."""
+    durable and ``status`` reads it) BEFORE the marker is cleared; returns the projects. A run the
+    marker's attempt set aside is put back first (``restore_set_aside``); if that fails the marker
+    and the incident stay and the project is not returned."""
     gone = []
     for path in sorted((Path(output_root) / REPLACE_RETRY_DIR).glob("*.json")):
         m = _read_retry_marker(path)
         project = m.get("project")
         if not (region and project and not m.get("region") and not (regions or {}).get(project)):
+            continue
+        failed = restore_set_aside(output_root, project, now or datetime.now(timezone.utc), stages_root, jobs_dir)  # fmt: skip
+        if failed:
+            replace_scheduled_mod.record_incident(project, "restore_failed", f"{UNCLAIMED_OUTCOME}; the set-aside run could not be put back: {failed}")  # fmt: skip
             continue
         replace_scheduled_mod.record_incident(project, "replace_retry", f"replace retry given up: {UNCLAIMED_OUTCOME}")  # fmt: skip
         replace_scheduled_mod.resolve_incidents(project, drive_level=True, codes=("replace_retry", "reopen_refused"), outcome=f"given up: {UNCLAIMED_OUTCOME}")  # fmt: skip
@@ -407,11 +428,11 @@ def give_up_unclaimed_replace_retries(output_root: Path, region: Optional[str], 
     return gone
 
 
-def run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run, jobs_dir=None) -> Dict[str, Any]:  # fmt: skip
+def run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run, jobs_dir=None, stages_root=None) -> Dict[str, Any]:  # fmt: skip
     """``_run_tick`` plus ``given_up_replace_retry``: the markers no region can claim, given up
     once (never in a dry run or an explicit ``--supersede`` tick)."""
-    gone = [] if dry_run or supersede is not None else give_up_unclaimed_replace_retries(output_root, region, regions)  # fmt: skip
-    out = _run_tick(output_root=output_root, now=now, region=region, regions=regions, dry_run=dry_run, supersede=supersede, replace=replace, run=run, jobs_dir=jobs_dir)  # fmt: skip
+    gone = [] if dry_run or supersede is not None else give_up_unclaimed_replace_retries(output_root, region, regions, now, stages_root, jobs_dir)  # fmt: skip
+    out = _run_tick(output_root=output_root, now=now, region=region, regions=regions, dry_run=dry_run, supersede=supersede, replace=replace, run=run, jobs_dir=jobs_dir, stages_root=stages_root)  # fmt: skip
     return {**out, "given_up_replace_retry": gone} if gone else out
 
 
@@ -437,7 +458,7 @@ def _note_launches(launcher, publish, sink):
     return launched, (published if publish is not None else None)
 
 
-def _run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run, jobs_dir=None) -> Dict[str, Any]:  # fmt: skip
+def _run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run, jobs_dir=None, stages_root=None) -> Dict[str, Any]:  # fmt: skip
     """One ``health backlog`` tick. ``run(supersede, replace)`` is one ``run_backlog`` call.
 
     A due replace marker runs first as ``--supersede --replace-scheduled``; THIS function (so no
@@ -485,7 +506,7 @@ def _run_tick(*, output_root, now, region, regions, dry_run, supersede, replace,
         return first
     why = str(first.get("reason") or first.get("action"))
     # a run set aside by a crash is put back whatever the refusal, BEFORE the marker can clear
-    failed = restore_set_aside(output_root, project, now)
+    failed = restore_set_aside(output_root, project, now, stages_root, jobs_dir, why)
     if failed:
         replace_scheduled_mod.record_incident(project, "restore_failed", f"{why}; the set-aside run could not be put back: {failed}")  # fmt: skip
     if refusal_is_permanent(why) and not failed:
@@ -860,22 +881,63 @@ def _holds_a_run(path: Path) -> bool:
     return path.exists() and any(p.is_file() and p.name not in skip for p in path.rglob("*")) or path.is_file()  # fmt: skip
 
 
-def restore_set_aside(output_root: Path, project: str, now: datetime) -> str:
-    """Put back the run a crashed replace set aside, when no live run holds its place. The newest
-    ``_superseded/<project>-<stamp>`` that ``_superseded_uploads`` would plan from is the one; its
-    record's ``moves`` are undone. Never over a live run: a dir that holds real files is left
-    alone and named. Returns what could not be restored (``""`` when nothing needed it, or all
-    was put back)."""
-    out = Path(output_root) / project
-    found = _superseded_run(project, out)
-    if found is None or (out / "youtube_uploads.json").exists():
-        return ""  # nothing set aside, or a finished run already holds the name
-    _dst, record = found
-    moves = [m for m in record.get("moves") or [] if isinstance(m, dict) and m.get("from") and m.get("to")]  # fmt: skip
-    busy = [m["from"] for m in moves if _holds_a_run(Path(m["from"]))]
-    if busy:
-        return f"{', '.join(busy)} already holds a run; the set-aside run is left where it is"
-    return _unsupersede(moves, out, now, at=record.get("at"), project=project)
+def _marker_ats(marker: Dict[str, Any]) -> List[str]:
+    """The attempts a marker names as having set a run aside, newest first."""
+    return [a for a in [marker.get("at"), *reversed(marker.get("earlier_at") or [])] if isinstance(a, str) and a]  # fmt: skip
+
+
+def _set_aside_record(project: str, at: str, roots: Sequence[Path]) -> Optional[Dict[str, Any]]:
+    """The ``backlog-supersede/2`` record of the attempt ``at`` among ``project``'s set-aside dirs
+    (named exactly ``<project>-<stamp>``) under each root's ``SUPERSEDED_DIR``, the stage side too:
+    a death between the two renames leaves only the stage dir's."""
+    own = re.compile(rf"{re.escape(str(project))}-\d{{8}}T\d{{6}}Z")
+    for root in roots:
+        for dst in sorted((p for p in (Path(root) / SUPERSEDED_DIR).glob(f"{project}-*") if own.fullmatch(p.name)), reverse=True):  # fmt: skip
+            try:
+                record = json.loads((dst / SUPERSEDE_RECORD).read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and record.get("schema") == "backlog-supersede/2" and record.get("project") == project and record.get("at") == at:  # fmt: skip
+                return record
+    return None
+
+
+def _job_running_since(jobs_dir: Optional[Path], project: str, since: float) -> bool:
+    return jobs_dir is not None and any(
+        r.get("name") == f"gms-backlog-{project}" and float(r.get("created_at") or 0) >= since
+        and (r.get("result") or {}).get("state") == "running"
+        for r in _job_records(Path(jobs_dir))
+    )  # fmt: skip
+
+
+def restore_set_aside(output_root: Path, project: str, now: datetime, stages_root: Optional[Path] = None, jobs_dir: Optional[Path] = None, why: str = "") -> str:  # fmt: skip
+    """Put back the runs the marker's own attempts set aside (its ``at`` and ``earlier_at``: the
+    record in ``_superseded`` carries the same ``at``), the stage pair and the output pair each by
+    itself. Nothing is restored for a marker that names no attempt (another replace's set-aside is
+    not this one's), while a ``gms-backlog-<project>`` job created since the first attempt is
+    running, or when the refusal is "a drive is running" (a fresh run exists or is going), over a
+    finished run in the output dir, or over a dir that holds real files (named, kept as it is).
+    Returns what could not be restored (``""`` when nothing needed it, or all was put back);
+    never raises."""
+    try:
+        ats = _marker_ats(_read_retry_marker(_retry_marker(output_root, project)))
+        if not ats or "a drive is running" in why:
+            return ""
+        if _job_running_since(jobs_dir, project, min(datetime.fromisoformat(a).timestamp() for a in ats)):  # fmt: skip
+            return ""
+        out, failed = Path(output_root) / project, []
+        for at in ats:
+            record = _set_aside_record(project, at, [out.parent, *([stages_root] if stages_root else [])])  # fmt: skip
+            moves = [m for m in (record or {}).get("moves") or [] if isinstance(m, dict) and m.get("from") and m.get("to")]  # fmt: skip
+            moved = [m for m in moves if _moved_by(m, at, project)]
+            if not moved or ((out / "youtube_uploads.json").exists() and any(m["from"] == str(out) for m in moved)):  # fmt: skip
+                continue  # nothing set aside, or a finished run already holds the name
+            busy = [m["from"] for m in moved if _holds_a_run(Path(m["from"]))]
+            failed.append(f"{', '.join(busy)} already holds a run; the set-aside run is left where it is" if busy else _unsupersede(moved, out, now, at=at, project=project))  # fmt: skip
+        return "; ".join(f for f in failed if f)
+    except Exception as exc:  # noqa: BLE001 -- a restore must never raise out of the tick
+        logger.exception("REPLACE-RESTORE-RAISED %s", project)
+        return f"restore raised {type(exc).__name__}: {exc}"
 
 
 def drop_stray_supersede_records(output_root: Path, project: str) -> None:
@@ -1703,10 +1765,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
 
     attempt = []
 
-    def mark():
+    def mark(at=None):
         """The retry marker, bumped once per call whichever site asks first."""
         if not attempt:
-            attempt.append(mark_replace_retry(output_root, row.project, supersede[1], now, region))
+            attempt.append(
+                mark_replace_retry(output_root, row.project, supersede[1], now, region, at)
+            )
         return attempt[0]
 
     def retry_later(reason):
@@ -1740,7 +1804,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         return {**res, "action": "refused", "reason": stale}
     planned = (replace or {}).get("plan")
     if planned:
-        mark()  # BEFORE the renames: a crash from here on still leaves a marker a later tick retries
+        # BEFORE the renames: a crash from here on still leaves a marker a later tick retries, and
+        # the marker names this attempt when it will set something aside (a plan-only retry keeps
+        # the earlier attempt's ``at``)
+        mark(now.isoformat() if res["supersede"]["moves"] else None)
 
     def refuse(reason):
         """A refusal after the renames: put the drive back so a retry starts from the same state
@@ -1789,7 +1856,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         logger.exception("BACKLOG-LAUNCHER-RAISED %s", row.project)
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     run_id = _LAUNCH_RUN_ID.search(str(detail or ""))
-    if planned and run_id:  # the job this launch started: a later tick matches it, no other
+    if ok and planned and run_id:  # the job this launch started: a later tick matches it, no other
         pin_replace_launch_run_id(output_root, row.project, run_id.group(1))
     if not ok and planned and _replace_launch_started(_read_retry_marker(_retry_marker(output_root, row.project)), jobs_dir, row.project):  # fmt: skip
         # the runner wrote the job and detached the drive before the launcher reported a failure
@@ -1879,7 +1946,13 @@ def default_launcher(argv: List[str], cwd: str, env: Dict[str, str]) -> Tuple[bo
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"{type(exc).__name__}: {exc}"
-    return done.returncode == 0, (done.stderr or done.stdout).strip()[-200:]
+    detail = (done.stderr or done.stdout).strip()[-200:]
+    # jobrun prints its ``run_id`` line on stdout: text on stderr, or a long record path cutting
+    # the tail, must never drop it (``_run`` pins it into the marker)
+    found = _LAUNCH_RUN_ID.search(done.stdout or "")
+    if found and not _LAUNCH_RUN_ID.search(detail):
+        detail = f"{detail} run_id {found.group(1)}".strip()
+    return done.returncode == 0, detail
 
 
 _PREFLIGHT_CHILD = """

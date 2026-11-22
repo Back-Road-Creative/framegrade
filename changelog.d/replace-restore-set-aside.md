@@ -1,5 +1,6 @@
 ### Fixed
 
 - A replace's old run set aside by a crash is always put back: when the retry tick ends without launching (refused, transient or permanent), the newest set-aside run is restored before the marker can clear, never over a live run (a `restore_failed` incident and the marker are kept instead).
-- Only a running or succeeded job of this launch counts as launched: the launcher's `run_id` is pinned into the marker and matched, and a failed or stale job is ignored.
+- A job of this launch counts as launched in any state, so a drive that has since ended (`failed`, exit 5 at the OST gate) is never replaced again; only jobrun's own launch failure (`failed`, no worker pid) is ignored. The launcher's `run_id` (read from stdout, whatever stderr holds) is pinned into the marker when it returned ok and matched.
+- A restore is bound to its attempt: the marker records the `at` of the attempt that set a run aside and only that record is restored (a marker with none restores nothing; not while a job since it is running or a drive is running), the stage dir included, and an unclaimed give-up restores first. A restore never raises out of the tick.
 - `_unsupersede` counts a pair as moved only when its set-aside dir carries this attempt's record, so an unrelated dir there never lets the live run be renamed away; a stray `superseded.json` is removed when a replace is given up or permanently refused.
