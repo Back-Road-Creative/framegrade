@@ -287,3 +287,17 @@ def test_the_handler_hands_an_ireland_tick_its_claimed_marker(tmp_path, monkeypa
     assert health.cmd_health(_args(tmp_path, "--region", "ireland"), SimpleNamespace()) == 0
     assert calls == [(("ire-a", "blur fix"), True)]  # claimed by the ireland tick, run once
     assert not launch._retry_marker(tmp_path / "out", "ire-a").exists()
+
+
+def test_the_handler_hands_the_marker_tick_its_jobs_dir(tmp_path, wired, monkeypatch):
+    """``run_tick`` finds a launched replace's job in ``jobs_dir``: without it (``None``) a crash
+    after the launcher replaces the fresh run a second time."""
+    got = {}
+
+    def fake_tick(**kw):
+        got.update(kw)
+        return {"action": "would_launch", "reason": "r", "skipped": []}
+
+    monkeypatch.setattr(launch, "run_tick", fake_tick)
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    assert got["jobs_dir"] == tmp_path / "logs" / "jobs"

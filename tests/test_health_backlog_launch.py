@@ -2962,3 +2962,178 @@ def test_a_dropped_rows_old_failed_audit_never_retires_the_replaced_run(tmp_path
     job(rig, "old", "day-x", "failed", NOW.timestamp() - 9000)  # the set-aside run's
     rig.run()
     assert rig.retired == []
+
+
+# Fixup 8: a supersede that fails before its move never buries the live run, and a launched or
+# kept-margin replace leaves its record whatever dies.
+
+
+def _named(rig, project="day-a"):
+    return [a for a, _c, _e in rig.launches if f"gms-backlog-{project}" in a]
+
+
+def _launcher_writing_jobs(rig, created_at):
+    """The real job runner writes ``job.json`` (``gms-backlog-<project>``) before it returns."""
+    made = []
+
+    def launcher(argv, cwd, env):
+        rig.launches.append((argv, cwd, env))
+        made.append(1)
+        d = rig.tmp / "jobs" / f"run{len(made)}"
+        d.mkdir(parents=True)
+        rec = {"schema": "job/1", "run_id": f"run{len(made)}", "name": argv[argv.index("--name") + 1], "created_at": created_at(), "result": {"state": "running", "exit_code": None}}  # fmt: skip
+        (d / "job.json").write_text(json.dumps(rec))
+        return rig.launch_ok, "" if rig.launch_ok else "runner: TimeoutExpired"
+
+    rig.launcher = launcher
+
+
+def _first_record_write_fails(monkeypatch):
+    import errno
+
+    real, fired = Path.write_text, []
+
+    def full(self, *a, **k):
+        if self.name == launch.SUPERSEDE_RECORD and not fired:
+            fired.append(self)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", full)
+    return lambda: monkeypatch.setattr(Path, "write_text", real)
+
+
+@pytest.mark.parametrize("prior_aside", [True, False])
+def test_a_record_write_failure_before_any_move_leaves_the_old_run_and_retries(tmp_path, monkeypatch, prior_aside):  # fmt: skip
+    from gomoveshift.pipeline.cleanup import _superseded_by_record
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    if prior_aside:  # an earlier supersede left set-aside runs: ``_superseded`` already exists
+        (rig.out / launch.SUPERSEDED_DIR / "older-20260101T000000Z").mkdir(parents=True)
+        (rig.stages / launch.SUPERSEDED_DIR / "older-20260101T000000Z").mkdir(parents=True)
+    _marker(rig)
+    restore = _first_record_write_fails(monkeypatch)
+    _retry_tick(rig)
+    restore()
+    live = rig.out / "day-a"
+    assert (live / "youtube_uploads.json").exists() and (live / "shorts" / "s01.mp4").exists()
+    assert (rig.stages / "day-a").is_dir() and not list((rig.out / launch.SUPERSEDED_DIR).glob("day-a-*"))  # fmt: skip
+    assert not (live / launch.SUPERSEDE_RECORD).exists() and not _superseded_by_record(live)
+    assert launch._retry_marker(rig.out, "day-a").exists()
+    for days in (2, 4):  # never "nothing to supersede", never given up
+        if not launch._retry_marker(rig.out, "day-a").exists():
+            break
+        res = _tick_at(rig, NOW + timedelta(days=days))
+        if res["action"] == "launched" and res["project"] == "day-a":
+            break
+    assert len(_named(rig)) == 1 and not launch._retry_marker(rig.out, "day-a").exists()
+
+
+def test_a_failed_supersede_after_the_first_move_still_puts_back_and_cleans_records(tmp_path, monkeypatch):  # fmt: skip
+    from gomoveshift.pipeline.cleanup import _superseded_by_record
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    real = Path.rename
+    hit = []
+
+    def die_on_out(self, target):
+        if self == rig.out / "day-a" and not hit:
+            hit.append(1)
+            raise OSError("EXDEV")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", die_on_out)
+    _retry_tick(rig)
+    monkeypatch.setattr(Path, "rename", real)
+    live = rig.out / "day-a"
+    assert (live / "youtube_uploads.json").exists() and (rig.stages / "day-a").is_dir()
+    assert not (live / launch.SUPERSEDE_RECORD).exists() and not _superseded_by_record(live)
+
+
+def test_a_crash_after_the_launch_before_the_clear_still_records_the_kept_margin(tmp_path, monkeypatch):  # fmt: skip
+    near = NOW + timedelta(hours=3)
+    rig = _replace_rig(tmp_path, {"1": _rec("a", near), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))})  # fmt: skip
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))  # fmt: skip
+    with pytest.raises(KeyboardInterrupt):
+        _retry_tick(rig)
+    kept = _kept_rows()
+    assert len(kept) == 1 and kept[0]["lf"] == 1, kept  # recorded BEFORE the clear that died
+
+
+def _kept_rows():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    return [r for r in rows if r.get("drive") == "day-a" and r.get("code") == "margin_kept"]
+
+
+def test_the_launch_stamp_branch_records_the_kept_margin_once(tmp_path, monkeypatch):
+    near = NOW + timedelta(hours=3)
+    rig = _replace_rig(tmp_path, {"1": _rec("a", near), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))})  # fmt: skip
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    real = launch.clear_replace_retry
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))  # fmt: skip
+    with pytest.raises(KeyboardInterrupt):
+        _retry_tick(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", real)
+    # the first path's record is lost with the crash: only the stamp branch is left
+    for f in _kept_files():
+        f.unlink()
+    assert not _kept_rows()
+    res = _tick_at(rig, NOW + timedelta(days=1), jobs_dir=rig.tmp / "jobs")
+    assert res["replace_retry"]["outcome"] == "cleared" and len(_named(rig)) == 1
+    assert len(_kept_rows()) == 1
+    _tick_at(rig, NOW + timedelta(days=2), jobs_dir=rig.tmp / "jobs")
+    assert len(_kept_rows()) == 1  # idempotent: never a duplicate
+
+
+def _kept_files():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir
+
+    return list(default_incidents_dir(default_data_root()).glob("*margin_kept*.json"))
+
+
+def test_a_launcher_timeout_after_its_job_was_written_never_replaces_twice(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False  # default_launcher: (False, TimeoutExpired) after the runner detached
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+    # the fresh dir is in use, not put back
+    assert (rig.out / "day-a" / "replace_plan.json").exists()
+    assert not list((rig.out / "day-a").glob("youtube_uploads.json"))
+    rig.launch_ok = True
+    _tick_at(rig, NOW + timedelta(days=2), jobs_dir=rig.tmp / "jobs")
+    assert len(_named(rig)) == 1, [a[a.index("--name") + 1] for a, _c, _e in rig.launches]
+
+
+def test_a_raise_after_the_launcher_ok_with_the_marker_left_never_falls_through(tmp_path, monkeypatch):  # fmt: skip
+    """The launch sink alone must tell "launched" from "no launch": the marker is still there."""
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: None)
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        rig.run()
+        raise OSError("post-launch hiccup")
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    assert res["action"] == "launched" and res["project"] == "day-a" and "replace_retry" not in res
+    assert len(rig.launches) == 1  # no plain tick behind the drive just launched
+
+
+def test_a_stamp_plus_another_projects_job_after_it_is_retried_not_cleared(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    launch.stamp_replace_launch(rig.out, "day-a", NOW.timestamp())  # died before the launcher ran
+    job(rig, "other", "day-b", "running", NOW.timestamp() + 5)  # ANOTHER project's job, later
+    res = _tick_at(rig, NOW + timedelta(days=5), jobs_dir=rig.tmp / "jobs")
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert res.get("replace_retry", {}).get("outcome") != "cleared" and len(_named(rig)) == 1

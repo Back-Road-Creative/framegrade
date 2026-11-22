@@ -15,7 +15,7 @@ import re
 import shutil
 import sqlite3
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -102,7 +102,36 @@ def _jobs() -> Dict[str, Any]:
 # ── incidents ───────────────────────────────────────────────────────────
 
 
-def _incidents() -> Dict[str, Any]:
+RESOLVED_WINDOW_DAYS = 7
+
+
+def _utc(stamp: Any) -> Optional[datetime]:
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _recently_resolved(rows: List[Dict[str, Any]], now: Optional[str]) -> List[Dict[str, Any]]:
+    """Rows resolved in the last ``RESOLVED_WINDOW_DAYS`` days, newest first, so a given-up
+    replace names its project and outcome instead of only raising the ``resolved`` count."""
+    edge = (_utc(now or utc_iso()) or datetime.now(timezone.utc)) - timedelta(days=RESOLVED_WINDOW_DAYS)  # fmt: skip
+    recent = [(when, r) for r in rows if (when := _utc(r.get("resolved_at"))) and when >= edge]
+    recent.sort(key=lambda pair: pair[0], reverse=True)
+    return [
+        {
+            "project": r.get("drive"),
+            "kind": r.get("kind"),
+            "code": r.get("code"),
+            "outcome": r.get("outcome"),
+            "resolved_at": r.get("resolved_at"),
+        }  # fmt: skip
+        for _when, r in recent
+    ]
+
+
+def _incidents(now: Optional[str] = None) -> Dict[str, Any]:
     path = default_incidents_dir(default_data_root())
     _need_dir(path)
     rows, unreadable = load_all(path)
@@ -111,6 +140,7 @@ def _incidents() -> Dict[str, Any]:
         "source": str(path),
         "open": open_rows,
         "resolved": len(rows) - len(open_rows),
+        "recently_resolved": _recently_resolved(rows, now),
         "unreadable": unreadable,
     }
 
@@ -334,7 +364,7 @@ def build_snapshot(config: Any, *, now: Optional[str] = None) -> Dict[str, Any]:
         "schema": SCHEMA,
         "as_of": at,
         "jobs": _section(at, "job-runner records", _jobs),
-        "incidents": _section(at, "health incidents", _incidents),
+        "incidents": _section(at, "health incidents", lambda: _incidents(at)),
         "queue": _section(at, "publishing queue", lambda: _queue(config, at)),
         "runway": _section(at, RUNWAY_SOURCE, lambda: _runway(config)),
         "backlog": _section(at, "drive backlog", _backlog),

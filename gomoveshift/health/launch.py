@@ -289,6 +289,13 @@ def stamp_replace_launch(output_root: Path, project: str, at: Optional[float]) -
         logger.exception("REPLACE-RETRY-STAMP-FAILED %s", project)
 
 
+def _record_margin_kept(project: str, plan: Dict[str, Any]) -> None:
+    """One ``margin_kept`` incident per LF the replace kept inside the margin (idempotent: an open
+    row is left as it is, so the launch path and the stamp branch never duplicate)."""
+    for lf in plan.get("margin_kept") or ():
+        replace_scheduled_mod.record_incident(project, "margin_kept", f"LF {lf} publishes inside the {replace_scheduled_mod.REPLACE_MARGIN_H} h margin: its old video is kept and publishes on its own; the rest are replaced", lf=int(lf))  # fmt: skip
+
+
 def _replace_launch_started(marker: Dict[str, Any], jobs_dir: Optional[Path], project: str) -> bool:
     """True when the launcher ran for the launch the marker was stamped for: a
     ``gms-backlog-<project>`` job (any state) created at or after ``launching_at``."""
@@ -415,6 +422,7 @@ def _run_tick(*, output_root, now, region, regions, dry_run, supersede, replace,
     if _replace_launch_started(before, jobs_dir, project):
         # the launcher ran and the process died before the clear: the fresh run is already
         # going, so it is never replaced a second time
+        _record_margin_kept(project, read_replace_plan(Path(output_root) / project))
         clear_replace_retry(output_root, project)
         replace_scheduled_mod.resolve_incidents(project, drive_level=True)
         out = dict(run(None, False))
@@ -984,8 +992,9 @@ def _supersede(project, reason, moves, now, plan=None, out_dir=None) -> None:
         src, dst = Path(move["from"]), Path(move["to"])
         dst.parent.mkdir(parents=True, exist_ok=True)
         # the record goes in BEFORE the rename: a dir under ``SUPERSEDED_DIR`` always carries it,
-        # whenever the process dies. One left in ``src`` by a death before the rename is harmless:
-        # nothing reads a record outside ``SUPERSEDED_DIR``, and the retry overwrites it
+        # whenever the process dies. One left in ``src`` by a raise is removed by ``_unsupersede``;
+        # one left by a death is overwritten by the retry. ``cleanup`` reads a record in the project
+        # dir itself (``_superseded_by_record``), so it must not outlive the attempt
         (src / SUPERSEDE_RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         src.rename(dst)
     if plan and out_dir is not None:
@@ -1002,6 +1011,10 @@ def _unsupersede(moves, out_dir, now) -> str:
     for move in reversed(moves):
         src, dst = Path(move["from"]), Path(move["to"])
         try:
+            if not dst.exists():  # the move never happened: ``src`` is the untouched old run
+                (src / SUPERSEDE_RECORD).unlink(missing_ok=True)
+                _rmdir_quiet(dst.parent)  # ``SUPERSEDED_DIR`` itself, when this attempt made it
+                continue
             if src.exists():
                 plan_file = src / replace_scheduled_mod.REPLACE_PLAN_FILENAME
                 plan_file.unlink(missing_ok=True)
@@ -1014,13 +1027,17 @@ def _unsupersede(moves, out_dir, now) -> str:
                     src.rename(aside)
             dst.rename(src)
             (src / SUPERSEDE_RECORD).unlink(missing_ok=True)
-            try:
-                dst.parent.rmdir()  # ``SUPERSEDED_DIR`` itself, once empty
-            except OSError:
-                pass
+            _rmdir_quiet(dst.parent)  # ``SUPERSEDED_DIR`` itself, once empty
         except OSError as exc:
             failed.append(f"{src}: {exc}")
     return "; ".join(failed)
+
+
+def _rmdir_quiet(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
 
 
 def _hold_recipes(stages_root: Path, project: str, reason: str, dry_run: bool) -> List[str]:
@@ -1662,6 +1679,11 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     except Exception as exc:  # noqa: BLE001
         logger.exception("BACKLOG-LAUNCHER-RAISED %s", row.project)
         ok, detail = False, f"{type(exc).__name__}: {exc}"
+    if not ok and planned and _replace_launch_started(_read_retry_marker(_retry_marker(output_root, row.project)), jobs_dir, row.project):  # fmt: skip
+        # the runner wrote the job and detached the drive before the launcher reported a failure
+        # (a timeout): the fresh run is going, so it is launched, never put back and replaced again
+        logger.warning("BACKLOG-LAUNCHER-FAILED-AFTER-JOB %s: %s", row.project, detail)
+        ok = True
     if not ok:
         if planned:
             stamp_replace_launch(output_root, row.project, None)  # nothing launched: retry as is
@@ -1671,10 +1693,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             _restore_reopened(store, row.project, out_dir, res, now)
         return refuse(f"launch failed: {detail}")
     if reopened:
+        _record_margin_kept(row.project, replace["plan"])  # BEFORE the clear: a death keeps them
         clear_replace_retry(output_root, row.project)
         replace_scheduled_mod.resolve_incidents(row.project, drive_level=True)
-        for lf in replace["plan"].get("margin_kept") or ():
-            replace_scheduled_mod.record_incident(row.project, "margin_kept", f"LF {lf} publishes inside the {replace_scheduled_mod.REPLACE_MARGIN_H} h margin: its old video is kept and publishes on its own; the rest are replaced", lf=int(lf))  # fmt: skip
     else:
         register(
             project=row.project, region=region, lf_count=1, status="auditing",
