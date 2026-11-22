@@ -28,11 +28,18 @@ from seo_manager.scheduling.claim import Claim, claim_or_reason
 from seo_manager.scheduling.store import SlotTaken, StaleDrive
 
 from .. import run_origin
-from ..pipeline.replace_scheduled import record_incident, unfinished
+from ..pipeline.replace_scheduled import record_incident, resolve_incidents
 from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
-from .launch import _uploaded, default_launcher, plan_total_lfs, read_replace_plan, upload_receipts
+from .launch import (
+    _uploaded,
+    default_launcher,
+    plan_total_lfs,
+    read_replace_plan,
+    replace_unfinished,
+    upload_receipts,
+)
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -221,7 +228,8 @@ def retire_uploaded(store: Any, *, now: Optional[datetime] = None) -> List[Dict[
     done: List[Dict[str, str]] = []
     for d in store.all_drives():
         held = upload_receipts(d.output_dir) if d.status in ("ready", "auditing") else {}
-        if not held:
+        if not held or replace_unfinished(d.output_dir):  # fmt: skip
+            # (a replace still to finish is not published)
             continue
         try:
             done.append({"project": d.project, "status": store.retire_published(d.project, held, now=now)})  # fmt: skip
@@ -250,15 +258,20 @@ def reconcile_publishes(
         state = ((max(runs, key=lambda r: float(r.get("created_at") or 0))).get("result") or {}).get("state")  # fmt: skip
         if state in (None, "running"):
             continue
-        ok = uploaded(d.output_dir)
-        row = {"project": d.project, "status": store.finish_claim(d.claim_id, ok=ok)}
-        left = unfinished(read_replace_plan(Path(d.output_dir))) if ok and d.output_dir else {}
-        if (
-            left
-        ):  # kept receipts close the claim, but a replace that did not finish is not a clean one
+        left = replace_unfinished(d.output_dir)
+        held = uploaded(d.output_dir)
+        # a replace with an unfinished LF closes ``failed`` even over kept receipts: ``health
+        # backlog`` republishes a failed drive, which resumes the LF; only done/abandoned is clean
+        row = {"project": d.project, "status": store.finish_claim(d.claim_id, ok=held and not left)}  # fmt: skip
+        names = {d.project, Path(d.output_dir).name} if d.output_dir else {d.project}
+        if left:
             why = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
             row["partial"] = f"replace not finished: {why}"
-            record_incident(d.project, "partial_finish", f"claim closed {row['status']} on kept receipts but {row['partial']}")  # fmt: skip
+            for name in names:
+                record_incident(name, "partial_finish", f"claim closed {row['status']} but {row['partial']}; the publish is retried automatically")  # fmt: skip
+        elif not left:
+            for name in names:
+                resolve_incidents(name, drive_level=True)
         done.append(row)
     return done + retire_uploaded(store)
 

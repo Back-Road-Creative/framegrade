@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -825,6 +825,23 @@ def _lf_publish_times(drive_schedule) -> list:
     ]
 
 
+def _next_free_lf_slot(config, state):
+    """``rebook(now)`` for ``replace_scheduled.advance``: Waypost's next free long-form slot over the
+    SEO-storage ledger and ``schedule.sqlite3`` (the allocator every normal LF uses)."""
+
+    def pick(now):
+        from ..content_ledger import ContentLedger
+        from ..seo_slots import next_free_slot
+
+        ledger = ContentLedger.load(Path(config.seo.storage_path) / ".content_ledger.json")
+        return next_free_slot(
+            ledger, config, getattr(state, "region", None), after=now,
+            min_lead=timedelta(minutes=replace_scheduled.REPLACE_SLOT_PASSED_MARGIN_MIN),
+        )  # fmt: skip
+
+    return pick
+
+
 def _replace_advance(yt, *, lf, old, plan_dir, state, config, save_state, project_base, now, metadata=None):  # fmt: skip
     return replace_scheduled.advance(
         yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, now=now,
@@ -832,7 +849,7 @@ def _replace_advance(yt, *, lf, old, plan_dir, state, config, save_state, projec
         book=lambda rec: _book_lf_upload_in_ledger(
             record=rec, state=state, config=config, project_base=project_base, lf_index=lf
         ),
-        metadata=metadata, config=config,
+        metadata=metadata, config=config, rebook=_next_free_lf_slot(config, state),
     )  # fmt: skip
 
 
@@ -844,7 +861,7 @@ def resume_replacements(yt, *, plan_dir, state, config, save_state, project_base
     old_by_lf = replace_scheduled.replace_map(plan)
     for lf, prog in sorted(replace_scheduled.progress_map(plan).items()):
         st, old = prog.get("state"), old_by_lf.get(lf)
-        if old is None or st in (replace_scheduled.DONE, replace_scheduled.ABANDONED, replace_scheduled.SLOT_PASSED):  # fmt: skip
+        if old is None or st in (replace_scheduled.DONE, replace_scheduled.ABANDONED):  # fmt: skip
             continue
         if st == replace_scheduled.PENDING:
             rec = (state.youtube_uploads or {}).get(lf) or {}
@@ -878,6 +895,7 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
         return
     if verdict == "error":  # not decidable: upload nothing, stay pending for the next entry
         logger.error("REPLACE-DEFERRED lf=%s: %s; nothing uploaded", lf.index, why)
+        replace_scheduled.record_incident(plan_dir.name, "deferred", f"LF {lf.index}: the old video {old['video_id']} could not be checked ({why}); nothing uploaded, retried next entry", lf=lf.index)  # fmt: skip
         return
     if not meta or not meta.get("title"):
         raise ValueError(f"LF {lf.index}: no gated metadata in metadata_per_lf for the replacement")

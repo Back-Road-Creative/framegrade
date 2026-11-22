@@ -77,6 +77,9 @@ def _install_fake_youtube_uploader(monkeypatch, video_id_prefix="vid"):
 
     fake_mod.YouTubeUploader = YouTubeUploader
     fake_mod._instance = uploader_instance
+    # lazy import chain (gomoveshift.cli -> publishing/youtube_comments) reads these names
+    fake_mod.QUOTA_REASONS = frozenset({"quotaExceeded", "dailyLimitExceeded", "userRateLimitExceeded"})  # fmt: skip
+    fake_mod.RETRIABLE_STATUS_CODES = {429, 500, 502, 503, 504}
     monkeypatch.setitem(sys.modules, "gomoveshift.pipeline.drive_phases.youtube_uploader", fake_mod)
     return uploader_instance
 

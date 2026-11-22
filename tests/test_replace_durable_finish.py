@@ -134,6 +134,7 @@ class Rig:
         self.titles = titles or {i: f"New {i}" for i in (1, 2, 3)}
         self.config = MagicMock()
         self.config.seo.storage_path = tmp_path / "seo"
+        self.rebook = lambda now: None  # Waypost's next free slot; None = nothing free
 
     def write_plan(self, **extra):
         rs.write_plan(self.dir, {"schema": rs.REPLACE_PLAN_SCHEMA, "kept": {"1": PUBLIC},
@@ -158,6 +159,7 @@ class Rig:
             patch.object(esc, "_book_lf_upload_in_ledger",
                          side_effect=lambda **kw: (self.world.log("book", kw["record"]["video_id"]),
                                                    self.booked.append(kw["record"]))),
+            patch.object(esc, "_next_free_lf_slot", side_effect=lambda config, state: lambda now: self.rebook(now)),  # fmt: skip
             patch.object(esc, "_upload_superlong_parts_to_youtube") as superlong,
         ):  # fmt: skip
             self.superlong = superlong
@@ -500,15 +502,41 @@ def _claim_rig(tmp_path, plan_state):
     return publish, store
 
 
-@pytest.mark.parametrize("plan_state", ["pending", "uploaded", "old_deleted", "abandoned"])
-def test_a_partial_replace_is_not_reported_as_a_clean_finish(tmp_path, monkeypatch, plan_state):
+@pytest.mark.parametrize("plan_state", ["pending", "uploaded", "old_deleted", "slot_passed"])
+def test_an_unfinished_replace_closes_the_claim_failed_so_the_publish_is_retried(tmp_path, monkeypatch, plan_state):  # fmt: skip
+    # SPEC CHANGE (fixup 3): this used to assert ``complete`` on the kept receipts, which left no
+    # automatic path back into Phase D. ``failed`` lets ``health backlog`` republish the drive.
     publish, store = _claim_rig(tmp_path, plan_state)
     monkeypatch.setattr(publish, "_job_records", lambda d: [{"name": "gms-publish-day-a", "created_at": 5, "result": {"state": "failed"}}])  # fmt: skip
     monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
     (row,) = publish.reconcile_publishes(store, tmp_path)
-    assert row["status"] == "complete" and "partial" in row  # the kept receipts still close it
-    (inc,) = _incidents("partial_finish")
-    assert inc["drive"] == "day-a" and plan_state in inc["error"]
+    assert row["status"] == "failed" and "partial" in row
+    (inc,) = [i for i in _incidents("partial_finish") if i["drive"] == "day-a"]
+    assert plan_state in inc["error"]
+    assert not _incidents("partial_finish")[0].get("resolved_at")
+
+
+def test_an_abandoned_replace_is_terminal_and_closes_complete(tmp_path, monkeypatch):
+    # SPEC CHANGE (fixup 3): abandoned keeps the old video, nothing is left to retry.
+    publish, store = _claim_rig(tmp_path, "abandoned")
+    monkeypatch.setattr(publish, "_job_records", lambda d: [{"name": "gms-publish-day-a", "created_at": 5, "result": {"state": "failed"}}])  # fmt: skip
+    monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
+    (row,) = publish.reconcile_publishes(store, tmp_path)
+    assert row["status"] == "complete" and "partial" not in row
+
+
+def test_the_partial_incident_resolves_itself_once_the_replace_is_done(tmp_path, monkeypatch):
+    publish, store = _claim_rig(tmp_path, "uploaded")
+    jobs = [{"name": "gms-publish-day-a", "created_at": 5, "result": {"state": "failed"}}]
+    monkeypatch.setattr(publish, "_job_records", lambda d: jobs)
+    monkeypatch.setattr(publish, "retire_uploaded", lambda s: [])
+    publish.reconcile_publishes(store, tmp_path)
+    assert _incidents("partial_finish")
+    out = tmp_path / "day-a"
+    rs.set_progress(out, 2, state="done")
+    store.all_drives()[0].status = "claimed"
+    assert publish.reconcile_publishes(store, tmp_path)[0]["status"] == "complete"
+    assert not _incidents()
 
 
 @pytest.mark.parametrize("plan_state", [None, "done"])
@@ -611,17 +639,72 @@ def test_the_new_id_reaches_the_plan_the_moment_the_insert_returns(tmp_path):
     assert len(rig.world.of("insert")) == 2
 
 
-@pytest.mark.parametrize("delta", [timedelta(hours=1), timedelta(hours=-1)])
-def test_a_slot_that_passed_mid_replace_is_never_sent_as_a_past_publish_at(tmp_path, delta):
+def test_a_slot_one_hour_ahead_after_the_old_is_deleted_is_scheduled_not_passed(tmp_path):
     rig = Rig(tmp_path)
     with pytest.raises(Crash):
         rig.run(crash_after="delete")  # old deleted; the render took long
-    rig.run(now=AT2 + delta)
+    rig.run(now=AT2 - timedelta(hours=1))  # still ahead of now: the slot is not lost
+    _assert_replaced(rig, 2)
+    assert not _incidents()
+
+
+def test_a_slot_inside_the_small_margin_counts_as_passed(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    rig.run(now=AT2 - timedelta(minutes=rs.REPLACE_SLOT_PASSED_MARGIN_MIN - 1))
+    assert rig.prog(2)["state"] == "slot_passed" and rig.world.videos["new2"]["publish_at"] is None
+
+
+def test_a_passed_slot_stays_private_and_is_retried_while_nothing_is_free(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    rig.run(now=AT2 + timedelta(hours=1))  # truly passed and the allocator has nothing
     w = rig.world
     assert w.videos["new2"]["publish_at"] is None and w.videos["new2"]["privacy"] == "private"
     assert not [e for e in w.of("update_privacy") if e[1] == "new2"]
     assert rig.prog(2)["state"] == "slot_passed" and _incidents("slot_passed")
     assert "new2" in w.videos
+    rig.rebook = lambda now: AT3 + timedelta(days=1)  # a slot frees: the next entry finishes it
+    rig.run(now=AT2 + timedelta(hours=2))
+    assert rig.prog(2)["state"] == "done" and not _incidents()
+
+
+def test_a_truly_passed_slot_is_rebooked_at_the_next_free_slot_then_done(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+    nxt = AT2 + timedelta(days=9)
+    asked = []
+    rig.rebook = lambda now: (asked.append(now), nxt)[1]
+    now = AT2 + timedelta(hours=1)
+    rig.run(now=now)
+    w = rig.world
+    assert asked == [now] and w.videos["new2"]["publish_at"] == nxt
+    assert nxt > now and [e[2] for e in w.of("update_privacy") if e[1] == "new2"] == [nxt]
+    assert w.scheduled().count("new2") == 1 and "old2" not in w.videos
+    assert rig.prog(2)["state"] == "done" and rig.prog(2)["slot"] == nxt.isoformat()
+    assert [r for r in rig.booked if r["video_id"] == "new2"]  # booked through the normal path
+    assert not _incidents()  # slot_rebooked was opened, then resolved at DONE
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _ = load_all(default_incidents_dir(default_data_root()))
+    assert [r for r in rows if r.get("code") == "slot_rebooked" and r.get("resolved_at")]
+
+
+def test_a_rebook_that_raises_leaves_the_new_private_and_retried(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="delete")
+
+    def boom(now):
+        raise RuntimeError("schedule.sqlite3 locked")
+
+    rig.rebook = boom
+    rig.run(now=AT2 + timedelta(hours=1))
+    assert rig.prog(2)["state"] == "slot_passed" and _incidents("slot_passed")
+    assert rig.world.videos["new2"]["publish_at"] is None
 
 
 def test_the_new_is_deleted_only_when_the_old_was_just_proven_to_exist(tmp_path):
@@ -647,3 +730,177 @@ def test_the_uploader_resolves_a_playlist_id_without_filing_anything():
     with patch("gomoveshift.pipeline.drive_phases.youtube_uploader.resolve_playlist", return_value="Name"):  # fmt: skip
         assert yt.resolve_playlist_id(metadata={}, config=None) == "PL7"
     yt._add_video_to_playlist.assert_not_called()
+
+
+# ---- fixup 3: automatic re-entry, incidents, not-found, persist, quota, thumbnails
+
+
+def test_a_recheck_error_then_success_finishes_with_no_human_step(tmp_path):
+    rig = _deleted_then_recheck_fails(tmp_path)
+    rig.run()  # entry 1: the lookup errors, deferred (incident), nothing deleted
+    assert rig.prog(2)["state"] == "uploaded" and _incidents("recheck_failed")
+    rig.world.fail.discard("schedule")
+    rig.run()  # entry 2: the same code path the publish retry re-enters; no operator input
+    _assert_replaced(rig, 2)
+    assert not _incidents()  # every replace incident cleared itself at DONE
+
+
+def test_old_deleted_plus_a_schedule_failure_is_scheduled_by_the_retry(tmp_path):
+    rig = Rig(tmp_path)
+    orig = FakeYT.update_privacy
+
+    def flaky(self, vid, *, privacy, publish_at=None):
+        if "schedule_write" in self.w.fail:
+            raise RuntimeError("videos.update 500")
+        orig(self, vid, privacy=privacy, publish_at=publish_at)
+
+    rig.world.fail.add("schedule_write")
+    with patch.object(FakeYT, "update_privacy", flaky):
+        rig.run()
+        assert rig.prog(2)["state"] == "old_deleted" and "old2" not in rig.world.videos
+        assert _incidents("schedule_failed") and rig.world.videos["new2"]["publish_at"] is None
+        rig.world.fail.discard("schedule_write")
+        rig.run()
+    _assert_replaced(rig, 2)
+    assert [e[1] for e in rig.world.of("delete")].count("old2") == 1
+    assert not _incidents()
+
+
+def test_the_unfinished_incident_carries_the_lf_and_clears_at_done(tmp_path):
+    from gomoveshift.pipeline.drive_phases import phase_d
+
+    rig = Rig(tmp_path)
+    rig.world.fail.add("delete")
+    rig.run()
+    with pytest.raises(RuntimeError, match="REPLACE-UNFINISHED"):
+        phase_d._assert_replace_finished(tmp_path)
+    rows = _incidents("unfinished")
+    assert sorted(r["lf"] for r in rows) == [2, 3] or sorted(r["lf"] for r in rows) == [2]
+    assert all(r["lf"] is not None for r in rows)
+    rig.world.fail.discard("delete")
+    rig.run()
+    phase_d._assert_replace_finished(tmp_path)  # nothing left: no raise
+    assert not _incidents()
+
+
+def test_the_quality_gate_failure_is_not_hidden_behind_the_replace_check(tmp_path):
+    from gomoveshift.pipeline.drive_phases import phase_d
+
+    rig = Rig(tmp_path)
+    rig.world.fail.add("delete")
+    rig.run()
+    with pytest.raises(RuntimeError) as exc:
+        phase_d._assert_replace_finished(tmp_path, ValueError("title gate: duplicate"))
+    assert "REPLACE-UNFINISHED" in str(exc.value) and "title gate: duplicate" in str(exc.value)
+
+
+def test_a_deferred_pre_upload_check_opens_an_incident(tmp_path):
+    rig = Rig(tmp_path)
+    rig.world.fail.add("schedule")  # the old's live check errors before any insert
+    rig.run()
+    assert rig.prog(2)["state"] == "pending" and not rig.world.of("insert")
+    assert [r for r in _incidents("deferred") if r["lf"] in (2, 3)]
+    rig.world.fail.discard("schedule")
+    rig.run()
+    _assert_replaced(rig, 2)
+    assert not _incidents()
+
+
+def test_abandon_closes_every_incident_but_the_abandoned_one(tmp_path):
+    rig = Rig(tmp_path)
+    rs.record_incident(tmp_path.name, "recheck_failed", "x", lf=2)
+    rs.record_incident(tmp_path.name, "unfinished", "y", lf=2)
+    rs.record_incident(tmp_path.name, "deferred", "z", lf=3)
+    rig.write_plan(progress={"2": {"old_id": "old2", "new_id": "new2", "state": "uploaded"}})
+    rig.state.youtube_uploads = {}
+    rig.world.videos["new2"] = {"privacy": "private", "publish_at": None, "playlists": []}
+    rs.abandon(FakeYT(rig.world), lf=2, old=rig.old2, plan_dir=rig.dir, state=rig.state,
+               save_state=lambda s: None, why="x", old_proven=True)  # fmt: skip
+    codes = sorted((r["code"], r["lf"]) for r in _incidents())
+    assert ("abandoned", 2) in codes and ("deferred", 3) in codes
+    assert not [c for c in codes if c[1] == 2 and c[0] in ("recheck_failed", "unfinished")]
+
+
+def test_a_403_whose_message_mentions_404_is_not_a_not_found():
+    class Resp:
+        status = 403
+
+    class ForbiddenError(Exception):
+        resp = Resp()
+
+    assert rs._is_not_found(ForbiddenError("quota 404 forbidden")) is False
+    Resp.status = 404
+    assert rs._is_not_found(ForbiddenError("gone")) is True
+    assert rs._is_not_found(RuntimeError("HttpError 404 notFound")) is True  # no status: regex
+
+
+def test_the_real_upload_if_needed_persists_the_id_in_the_non_playlist_branch(tmp_path):
+    from gomoveshift.pipeline.drive_phases.youtube_uploader import YouTubeUploader
+
+    yt = YouTubeUploader.__new__(YouTubeUploader)
+    state = make_state()
+    state.youtube_uploads = {}
+    seen = []
+    meta = {"title": "T new", "title_decision": {"chosen_title": "T new", "reason": "fresh"}}
+    with (
+        patch.object(YouTubeUploader, "upload_video", return_value="vidNEW") as up,
+        patch("gomoveshift.pipeline.final_text_record.final_text_context", return_value=None),
+    ):
+        rec = yt.upload_if_needed(
+            state=state, lf_idx=2, video_path=tmp_path / "v.mp4", title="T new", description="d",
+            tags=[], metadata=meta, config=None,
+            persist=lambda: seen.append(dict(state.youtube_uploads)),
+        )  # fmt: skip
+    up.assert_called_once()
+    assert rec["video_id"] == "vidNEW" and len(seen) == 1  # flushed, with the id already in
+    assert seen[0][2]["video_id"] == "vidNEW"
+
+
+def _budget_config(rig, *, units):
+    rig.config.drive = SimpleNamespace(youtube_quota_daily_budget=units,
+                                       youtube_video_insert_quota_cost=1600,
+                                       youtube_playlist_insert_quota_cost=50,
+                                       youtube_quota_enforce=True)  # fmt: skip
+
+
+def test_the_quota_projection_counts_only_the_lfs_still_to_insert(tmp_path):
+    rig = Rig(tmp_path)
+    _budget_config(rig, units=1650)  # fits exactly one insert pair
+    rig.write_plan(progress={"2": {"old_id": "old2", "new_id": "new2", "state": "done"}})
+    rig.world.videos.pop("old2")
+    rig.world.videos["new2"] = {"privacy": "private", "publish_at": AT2, "playlists": ["PL1"]}
+    rig.state.youtube_uploads = {2: {"video_id": "new2", "title": "New 2"}}
+    rig.run()  # LF2 done, LF3 pending: ONE insert is planned, so the one-insert budget holds
+    assert rig.prog(3)["state"] == "done" and [e[1] for e in rig.world.of("insert")] == ["new3"]
+
+
+def test_the_quota_projection_refuses_when_two_lfs_are_pending(tmp_path):
+    from gomoveshift.pipeline.exceptions import YouTubeQuotaError
+
+    rig = Rig(tmp_path)
+    _budget_config(rig, units=1650)
+    with pytest.raises(YouTubeQuotaError):
+        rig.run()  # both pending: two inserts do not fit
+    assert not rig.world.of("insert")
+
+
+def test_an_in_flight_lf_is_finished_before_the_budget_is_checked(tmp_path):
+    rig = Rig(tmp_path)
+    with pytest.raises(Crash):
+        rig.run(crash_after="insert")  # LF2 inserted (uploaded), old still live
+    _budget_config(rig, units=1650)
+    rig.run()  # resume finishes LF2 (no insert), then exactly one insert (LF3) fits the budget
+    _assert_replaced(rig, 2)
+    assert rig.prog(3)["state"] == "done"
+    assert [e[1] for e in rig.world.of("insert")] == ["new2", "new3"]  # LF2 never re-inserted
+
+
+@pytest.mark.parametrize("state_name", ["uploaded", "old_deleted", "slot_passed", "pending", "abandoned"])  # fmt: skip
+def test_an_lf_not_yet_scheduled_gets_no_thumbnail(state_name):
+    plan = {"schema": rs.REPLACE_PLAN_SCHEMA, "kept": {},
+            "replace": {"2": _old("old2", AT2)},
+            "progress": {"2": {"state": state_name, "new_id": "new2", "old_id": "old2"}}}  # fmt: skip
+    uploads = {2: {"video_id": "new2"}}
+    assert rs.thumbnail_targets(plan, uploads) == {}
+    plan["progress"]["2"]["state"] = "scheduled"
+    assert list(rs.thumbnail_targets(plan, uploads)) == [2]
