@@ -6,6 +6,7 @@ immediately before every ``media_publish`` call — never cached, see
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ import requests
 from gomoveshift.publishing.first_comment import post_graph_comment
 from gomoveshift.publishing.instagram_reels_spec import ReelsSpecError, make_in_spec_bytes
 from gomoveshift.publishing.meta_auth import graph_error_tag
-from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
+from gomoveshift.publishing.meta_graph import GRAPH_TIMEOUT, graph_base_url, graph_post
 from gomoveshift.publishing.models import InstagramPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
@@ -92,13 +93,44 @@ class ContainerHandle:
         return (now or datetime.now(timezone.utc)) - self.created_at >= CONTAINER_EXPIRY
 
 
-def _raise_for_graph_error(status_code: int, body: dict) -> None:
+_BODY_EXCERPT_MAX = 300
+_TOKENISH = re.compile(
+    r"(?i)(access_token[\"']?\s*[=:]\s*[\"']?)[^\s&\"',}]+|((?:bearer|oauth)\s+)\S+"
+)
+
+
+def _body_excerpt(raw_text: object, secrets: tuple[str, ...]) -> str:
+    """Bounded, whitespace-collapsed, token-redacted excerpt of a raw
+    response body; empty when there is none."""
+    if not isinstance(raw_text, str):
+        return ""
+    text = raw_text
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    text = _TOKENISH.sub(lambda m: f"{m.group(1) or m.group(2)}[redacted]", text)
+    return " ".join(text.split())[:_BODY_EXCERPT_MAX]
+
+
+def _raise_for_graph_error(
+    status_code: int,
+    body: dict,
+    op: str | None = None,
+    raw_text: object = None,
+    secrets: tuple[str, ...] = (),
+) -> None:
     """Classify a Graph API error. Never includes the token — only the
-    platform's own error body fields."""
+    platform's own error body fields. With no ``error`` object the raw body
+    (bounded, token-redacted) stands in for the missing message, and ``op``
+    names the request in the tag. Neither changes the classification."""
     error = (body or {}).get("error") or {}
     code, subcode = error.get("code"), error.get("error_subcode")
     message = str(error.get("message") or "unknown Graph API error")
-    tag = graph_error_tag(status_code, error)
+    if not error:
+        excerpt = _body_excerpt(raw_text, secrets)
+        if excerpt:
+            message = f"{message} (response body: {excerpt})"
+    tag = graph_error_tag(status_code, error, op)
     if code in _AUTH_ERROR_CODES or subcode in _AUTH_ERROR_SUBCODES:
         raise InstagramAuthBlockedError(f"{tag} Meta access token expired or revoked; reauthorize")
     if (code, subcode) == _MEDIA_NOT_READY:
@@ -152,11 +184,30 @@ class InstagramReelsAdapter:
         URL, which a ConnectionError message then echoes."""
         return {"Authorization": f"OAuth {self._access_token}"}
 
-    def _post(self, url: str, **kwargs) -> dict:
-        return graph_post(self._session, url, _raise_for_graph_error, **kwargs)
+    def _request(self, method: str, url: str, op: str | None, **kwargs) -> dict:
+        """``graph_post``/``graph_get`` with the raw body and the request's
+        name kept for the error: the shared helper decodes to ``{}`` on a
+        non-JSON body and the hook never sees the text."""
+        kwargs.setdefault("timeout", GRAPH_TIMEOUT)
+        response = getattr(self._session, method)(url, **kwargs)
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if response.status_code >= 400 or (body or {}).get("error"):
+            raw = getattr(response, "text", None)
+            if not isinstance(raw, str) and body:
+                raw = json.dumps(body, default=str)
+            _raise_for_graph_error(
+                response.status_code, body, op=op, raw_text=raw, secrets=(self._access_token,)
+            )
+        return body
 
-    def _get(self, url: str, **kwargs) -> dict:
-        return graph_get(self._session, url, _raise_for_graph_error, **kwargs)
+    def _post(self, url: str, op: str | None = None, **kwargs) -> dict:
+        return self._request("post", url, op, **kwargs)
+
+    def _get(self, url: str, op: str | None = None, **kwargs) -> dict:
+        return self._request("get", url, op, **kwargs)
 
     def post_comment(self, object_id: str, text: str) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).
@@ -179,6 +230,7 @@ class InstagramReelsAdapter:
         ``media_publish``, never cached between publishes."""
         body = self._get(
             f"{self._base}/{self._ig_user_id}/content_publishing_limit",
+            op="check_publishing_limit",
             params={"fields": "quota_usage,config"},
             headers=self._auth_headers,
         )
@@ -207,6 +259,7 @@ class InstagramReelsAdapter:
     def create_container(self, payload: InstagramPayload) -> ContainerHandle:
         body = self._post(
             f"{self._base}/{self._ig_user_id}/media",
+            op="create_container",
             data={
                 "media_type": "REELS",
                 "caption": payload.caption,
@@ -255,6 +308,7 @@ class InstagramReelsAdapter:
         try:
             body = self._get(
                 f"{self._base}/{media_id}",
+                op="fetch_permalink",
                 params={"fields": "permalink"},
                 headers=self._auth_headers,
             )
@@ -271,6 +325,7 @@ class InstagramReelsAdapter:
         self._check_publishing_limit()
         body = self._post(
             f"{self._base}/{self._ig_user_id}/media_publish",
+            op="publish_container",
             data={"creation_id": container.container_id, "access_token": self._access_token},
         )
         media_id = body.get("id")
@@ -285,6 +340,7 @@ class InstagramReelsAdapter:
         remote duplicate scan in ``queue recover-terminal``. Publishes nothing."""
         body = self._get(
             f"{self._base}/{self._ig_user_id}/media",
+            op="list_recent_media",
             params={"fields": "id,caption,permalink,timestamp,media_product_type", "limit": limit},
             headers=self._auth_headers,
         )
@@ -314,6 +370,7 @@ class InstagramReelsAdapter:
         scope here."""
         body = self._get(
             f"{self._base}/{container_id}",
+            op="check_container_status",
             params={"fields": "status_code,id,status"},
             headers=self._auth_headers,
         )

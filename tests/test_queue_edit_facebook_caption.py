@@ -230,3 +230,43 @@ def test_measured_caption_without_a_date_says_nothing_about_when():
     assert (
         text == "Passing through Beaufort County, South Carolina.\n\n#BeaufortCounty #SouthCarolina"
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "tail"),
+    [
+        (None, "\n\n#BeaufortCounty #SouthCarolina"),  # not in an experiment: unchanged
+        ("none", ""),  # arm A: the edit adds no hashtags
+        ("location", "\n\n#BeaufortCounty #SouthCarolina"),
+        ("june", "\n\n#POVDriving #ScenicDrive #RoadTrip #BeaufortCounty #SouthCarolina"),
+    ],
+)
+def test_measured_caption_reproduces_the_arms_hashtag_set(mode, tail):
+    text = facebook_caption_edit.measured_caption(COUNTY, "2026-02-20", mode)
+    assert text == f"Passing through {COUNTY}. Filmed February 2026.{tail}"
+
+
+def test_edit_in_arm_a_adds_no_hashtags(tmp_path, monkeypatch, capsys):
+    from gomoveshift.publishing.experiments import parse_experiments
+
+    sc, fake, config = _setup(tmp_path, monkeypatch, regions=(COUNTY,))
+    raw = json.loads(sc.read_text())
+    raw["shorts"][0]["experiment_arms"] = {"fb_hashtags": "A"}
+    sc.write_text(json.dumps(raw))
+    exps = parse_experiments(
+        [
+            {
+                "name": "fb_hashtags",
+                "platforms": ["facebook"],
+                "start": "2026-11-02",
+                "min_n": 20,
+                "stop_after_days": 45,
+                "arms": {"A": {"hashtag_mode": "none"}, "B": {"hashtag_mode": "location"}},
+            }
+        ]
+    )
+    lines = facebook_caption_edit.edit_facebook_caption(
+        str(tmp_path), None, 1, None, apply=True, experiments=exps
+    )
+    assert fake.calls == [("v-1", f"Passing through {COUNTY}. Filmed February 2026.")]
+    assert "#" not in _desc(sc) and any("wrote" in x for x in lines)

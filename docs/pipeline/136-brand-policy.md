@@ -111,6 +111,19 @@ carry the block itself to keep the experiment running.
   (`#POVDriving #ScenicDrive #RoadTrip`, the June 2026 posts' fixed tags) then those two location
   tags. Only `none` omits the region hashtag, so the Facebook `_assert_region_present` check is
   skipped for it; the caption text still names the place.
+- **Enrollment** (`SocialGenerator._enrolled_arms`): a Short is tagged into the experiment only
+  when its arm renders differently from arm A. An arm-B Short with no location tag to carry, or an
+  interactive one (which withholds the place), would ship zero hashtags exactly like `none`; it
+  gets no `experiment_arms` entry and keeps the normal hashtags; so does a hand-captioned Short
+  with no recording date whose bare arm-A caption would equal its YouTube caption. The decision calls the same
+  `_platform_hashtags` the caption uses, so tag and text cannot disagree.
+- **Outcome keying**: `experiments.arm_observations` joins the sidecar's `experiment_arms` to
+  `reel_initial_plays` (the collector's `blue_reels_play_count`); it needs no opener template, so
+  a hand-captioned Short counts the same as a composed one. (`tracking/caption_evidence.py`, the
+  per-opener evidence, does need `caption_templates` and stays separate.)
+- **Caption edits** (`queue edit-facebook-caption`): a built caption keeps the Short's arm
+  (`facebook_caption_edit.measured_caption`): arm A adds no hashtags, B the county's two tags, C
+  the three fixed generics then those two; a Short outside the experiment keeps the county tags.
 - **Report**: `metrics collect` prints one line per arm after the bounded-response step:
   `EXPERIMENT <name> platform=facebook arm=<id> n=<settled> median_plays=<value|unknown>`. A short
   counts toward `n` only with measured `PlatformMetrics.reel_initial_plays` and a settled day-7

@@ -336,8 +336,8 @@ class SEOConfig(BaseModel):
     #
     # Default of 21 = the default cadence's whole-account steady state,
     # NOT a per-region figure: the default publish slots schedule 3
-    # long-forms/week (Ireland Sun, USA Tue, USA Fri) x 7 shorts/long-form (``DriveConfig.min_shorts_per_lf``) x 1
-    # delivery per platform per short = 21. This is a ceiling against
+    # long-forms/week (Ireland Sun, USA Tue, USA Fri) x up to 7 shorts/long-form (``DriveConfig.min_shorts_per_lf``, the
+    # per-LF maximum) x 1 delivery per platform per short = 21 at full volume. This is a ceiling against
     # ACCIDENTAL doubling (e.g. two regions' plans landing in the same
     # week), not a volume target -- lowering it is a deliberate volume
     # decision gated on measured evidence, never a knob to
@@ -1444,7 +1444,8 @@ class DriveConfig(BaseModel):
     # ceiling for validation remains LF_MAX_DURATION in video_types.py.
     # Lowered from LF_MAX_DURATION (1800) to 720 to produce more, shorter LFs.
     max_lf_duration: float = 720.0
-    # Each regular LF must yield this many shorts; the floor is Waypost's policy rail.
+    # Per-LF Shorts maximum (Waypost's volume rail), not a floor: the planner ships only
+    # Shorts that clear the quality bar, so an LF may yield fewer, even zero.
     min_shorts_per_lf: int = Field(default_factory=_shorts_floor)
     shorts_target_count: int = (
         9  # Legacy cap — single-video assembler path only (longform_assembler)
@@ -2420,19 +2421,17 @@ class DriveConfig(BaseModel):
     def check_shorts_consistency(self) -> None:
         """Log a warning if shorts_target_count < min_shorts_per_lf.
 
-        This is not a hard error — the validation gate in Phase D handles
-        the actual enforcement. But it indicates a likely misconfiguration.
+        This is not an error and nothing enforces a minimum: the Shorts count
+        is a per-LF maximum. The warning only flags that the planner will cap
+        below ``min_shorts_per_lf``, a likely misconfiguration.
         """
         if self.shorts_target_count < self.min_shorts_per_lf:
             logger.warning(
                 "shorts_target_count (%d) < min_shorts_per_lf (%d) — "
-                "the planner will cap at %d shorts but the validation "
-                "gate requires %d. Raise shorts_target_count or lower "
-                "min_shorts_per_lf.",
+                "the planner will cap at %d shorts per LF.",
                 self.shorts_target_count,
                 self.min_shorts_per_lf,
                 self.shorts_target_count,
-                self.min_shorts_per_lf,
             )
 
     def resolved_geocode_cache_dir(self) -> Path:

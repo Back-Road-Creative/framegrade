@@ -168,6 +168,35 @@ def test_a_place_a_spooled_title_already_opens_with_is_skipped():
     assert post.youtube_title == "Polk County"
 
 
+def test_another_projects_queued_bare_place_title_is_not_reused(monkeypatch, tmp_path):
+    # Pinning test (behaviour already holds): the read-only queue holds ANOTHER
+    # project's queued Short titled with a bare place; this project must not
+    # pick that same title but the next measured place.
+    from gomoveshift.publishing import anti_spam_gate
+    from gomoveshift.publishing.queue import open_queue_db
+
+    open_queue_db(tmp_path).close()
+    monkeypatch.setattr(lm, "DEFAULT_SEO_STORAGE", tmp_path)
+    calls = []
+
+    def fake_recent(conn, **kw):
+        calls.append(kw)
+        return {"youtube": ["Tryon"]}
+
+    monkeypatch.setattr(anti_spam_gate, "recent_platform_texts", fake_recent)
+    gen = SocialGenerator(location=LABEL, project_name="drive", series_part=1, experiments=())
+    (post,) = gen.generate_all(
+        num_shorts=1,
+        per_short_locations=[LABEL],
+        per_short_regions=[REGIONS],
+        per_short_route_records=[_route("Tryon", "Columbus")],
+        per_short_title_facts=[TitleFacts(DATE, 1, 38, True)],
+    )
+    assert calls == [{"exclude_projects": {"drive"}}]
+    assert post.youtube_title != "Tryon"
+    assert post.youtube_title == "Columbus"
+
+
 def test_shared_used_titles_keep_titles_unique_across_calls():
     used: dict = {}
     titles = []

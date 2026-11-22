@@ -236,8 +236,8 @@ def cap_shorts_to_per_lf_capacity(
     The planner is DAY-WIDE (``plan_shorts`` picks the best-scoring windows
     across the whole day, with no per-LF awareness) but the scheduler is
     PER-LF: an LF's shorts window runs ``lf_date → next_lf_date`` × the
-    region's publish times, so it holds exactly ``required_shorts_per_lf``
-    slots and not one more. Attribution is emergent, so a day can plan the
+    region's publish times, so its slot capacity is ``required_shorts_per_lf``
+    and not one more (fewer Shorts leave later slots unused). Attribution is emergent, so a day can plan the
     right TOTAL and still hand one LF more shorts than it can ever post —
     e.g. a day planned for four LFs can hand one LF more shorts than its
     window holds; the drive-wide count gate sees no shortfall and the CSV

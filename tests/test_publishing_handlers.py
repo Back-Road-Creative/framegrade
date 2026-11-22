@@ -887,3 +887,13 @@ def test_tiktok_pack_mode_never_releases_a_lease_another_worker_holds(
     handler(row)
 
     assert find_delivery(conn, "example-2026-08", 3, "tiktok")["lease_owner"] == "other"
+
+
+def test_detail_keeps_every_reason_of_a_long_final_text_refusal():
+    from gomoveshift.pipeline.final_text_record import FinalTextReviewError
+    from gomoveshift.publishing.dispatch import _detail
+
+    reasons = [f"reason_code_{i:02d}_" + "x" * 30 for i in range(20)]
+    exc = FinalTextReviewError(3, reasons, detail="d" * 200)
+    assert len(str(exc)) > 500
+    assert reasons[-1] in _detail(exc)

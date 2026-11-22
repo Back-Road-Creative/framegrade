@@ -68,8 +68,8 @@ logger = logging.getLogger(__name__)
 #: Used when ``config.seo`` carries no ``rolling_week_ceiling_per_platform``
 #: (a bare-bones test double, or a config predating the field) -- kept in
 #: sync with ``SEOConfig.rolling_week_ceiling_per_platform``'s own default:
-#: 3 long-forms/week (Ireland Sun, USA Tue, USA Fri) x 7 shorts/long-form (``DriveConfig.min_shorts_per_lf``) x 1
-#: delivery/platform/short = 21, the whole-account steady state, not a
+#: 3 long-forms/week (Ireland Sun, USA Tue, USA Fri) x up to 7 shorts/long-form (``DriveConfig.min_shorts_per_lf``, the
+#: per-LF maximum) x 1 delivery/platform/short = 21 at full volume, the whole-account steady state, not a
 #: per-region number.
 _DEFAULT_ROLLING_WEEK_CEILING = 21
 
