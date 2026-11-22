@@ -295,7 +295,8 @@ def test_the_place_chain_is_seeded_from_the_stored_text_of_a_sibling(tmp_path, s
     sync_short_text(conn, apply=True, now=NOW)
     yt = _youtube(plan, 2).payloads.youtube
     assert "Harrow" in yt.title and "Ashby County" not in yt.title.split(" #")[0]
-    assert "through Harrow" in yt.description
+    # the description opens with the Short's own title place, never the sibling's
+    assert yt.description.startswith("Harrow \u2014 POV drive.")
     assert _youtube(plan, 1).payloads.youtube.title.endswith("Ashby County #Shorts")
 
 
@@ -610,14 +611,18 @@ def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
     assert set(_hashes(conn).values()) == {OLD_HASH}
 
 
-def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
+def _live_schedule():
+    """A slot 3 days past the REAL clock: the CLI reads datetime.now, not NOW."""
     soon = datetime.now(timezone.utc) + timedelta(days=3)
-    schedule = {
+    return {
         "display_timezone": "America/New_York",
         "scheduled_at_utc": soon.isoformat(),
         "scheduled_at_utc_by_platform": {},
     }
-    plan, conn = _world(tmp_path, [_short(1, schedule=schedule)])
+
+
+def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
+    plan, conn = _world(tmp_path, [_short(1, schedule=_live_schedule())])
     conn.close()
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
     args = SimpleNamespace(queue_action="sync-short-text", apply=False)
@@ -654,8 +659,12 @@ def test_a_row_on_a_hash_this_sync_never_wrote_is_refused_not_moved(tmp_path):
 
 
 def test_a_rewritten_short_does_not_repeat_the_place_of_a_kept_successor(tmp_path):
-    plan, conn = _world(tmp_path, [_short(1), _named_first(2)])
-    _where(conn, 2, "youtube", status="published")  # kept as stored, names Ashby County
+    successor = _named_first(2)
+    # kept as stored: names Harrow, the place the generator opens the rewritten Short with
+    successor["payloads"]["youtube"]["title"] = "Mar 5, 2nd stretch: Harrow #Shorts"
+    successor["payloads"]["youtube"]["description"] = "Harrow \u2014 POV drive. #Shorts"
+    plan, conn = _world(tmp_path, [_short(1), successor])
+    _where(conn, 2, "youtube", status="published")
     before = plan.read_text()
     changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["refused"] and "next Short" in changes[0].reason
@@ -719,7 +728,9 @@ def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
 
 
 def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
-    plan, conn = _two(tmp_path)
+    # Real-clock slots: a NOW-relative slot fell inside the lead time on 2026-11-22.
+    live = _live_schedule()
+    plan, conn = _world(tmp_path, [_short(1, schedule=live), _short(2, schedule=live)])
     conn.close()
     monkeypatch.setattr(
         "gomoveshift.publishing.brand_policy.load_brand_policy",

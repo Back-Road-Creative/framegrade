@@ -876,27 +876,19 @@ GENERIC_HASHTAGS = [
 ]
 GENERIC_HASHTAGS_PER_POST = 2
 
-#: The lead of a short's YouTube description ("{lead} driving through
-#: {location} Pt.N"), rotated per project like the caption openers. The gate's
-#: ``cross-batch-repeat`` key is the first 6 words, and the part number is
-#: word 7, so one fixed lead made every drive at a place open alike. No lead
-#: may open with a bare preposition ("Through ..."): the plan grammar gate
-#: (``find_grammar_issues``) refuses that shape and fails the whole plan.
+#: The lead of a short's YouTube description when the Short has NO measured title
+#: place (a stamped fallback title, or an interactive Short that withholds it):
+#: "{lead} Pt.N: driving through {location}". A Short with a measured title place opens
+#: with that place instead ("{place} \u2014 POV drive."), unique within the batch, so it
+#: needs no lead. Every lead here is true of every Short (all are first-person drives);
+#: none claims a camera, a vehicle or the driver's body, which the pipeline does not
+#: measure. The gate's ``cross-batch-repeat`` key is the first 6 words, so the part
+#: number sits right after the lead (word 2-3), inside the key, and the two leads only
+#: vary the key between projects. No lead may open with a bare preposition ("Through
+#: ..."): the plan grammar gate (``find_grammar_issues``) refuses that shape.
 YOUTUBE_DESCRIPTION_LEADS = [
     "POV",
-    "Dashcam POV",
-    "Driver's-seat view",
-    "Front-seat view",
-    "Windshield view",
-    "Ride along",
-    "Eyes forward",
-    "Hands on the wheel",
-    "Dashboard view",
-    "Over the hood",
-    "Seat belt on",
-    "Road ahead",
-    "Wheel's-eye view",
-    "Cab view",
+    "First-person",
 ]
 
 #: The ``june`` experiment hashtag mode (``publishing/experiments.py``): the
@@ -1832,39 +1824,45 @@ class SocialGenerator:
         place: "Optional[PlaceChoice]" = None,
         place_kind: str = "",
         hashtag_arm: Optional[str] = None,
+        title_place: Optional[str] = None,
     ) -> str:
         """Build a short YouTube description for Shorts (max 200 chars).
 
         ``hashtag_arm`` (a ``yt_hashtag_set`` arm id) swaps the optional hashtags
         of a non-interactive description; ``None`` or an unknown id keeps today's.
 
-        Per-short differentiation uses most specific data available (priority):
-          1. POI name  — "POV driving near {poi}, {location}"
-          2. Road name — "POV drive along {road}, {location}"
-          3. Part num  — "POV driving through {location} Pt.{short_index}"
+        ``title_place`` is the measured place the Short's fact title named. The
+        description then opens with it, in the channel voice
+        ("{title_place} \u2014 POV drive."), then the measured POI or road, if any. That
+        place is unique within the batch (the title already is), so the 6-word opener
+        key varies and no "Pt.N" stamp is needed. Without it (stamped fallback title)
+        the text is "{lead} Pt.N: driving through {location}" over the facts-only
+        ``YOUTUBE_DESCRIPTION_LEADS``; the part number sits inside the key.
 
         #Shorts is fixed; remaining hashtags are droppable. No "4K" tag: shorts
         are hard-gated to 1080x1920 (encoding_constants SHORTS_WIDTH/HEIGHT),
         never 4K, so a 4K claim on any shorts surface would be false.
 
         When ``interactive``, the base text and hashtags withhold the
-        place (no POI/road/location-tag branch) and the LAST line becomes
-        ``"📍 {social_location_full}"`` instead — so search can still index
-        the place while every other surface stays place-free.
+        place (no POI/road/location-tag branch, no ``title_place``) and the LAST
+        line becomes ``"📍 {social_location_full}"`` instead — so search can still
+        index the place while every other surface stays place-free.
         """
 
-        def lead_for(phrase: str) -> str:
+        def stamped(phrase: str) -> str:
             return self._fresh_rotating_pick(
                 YOUTUBE_DESCRIPTION_LEADS,
                 "youtube",
                 "description-lead",
                 short_index,
-                lambda lead: f"{lead} {phrase}",
+                lambda lead: f"{lead} Pt.{short_index}: {phrase}",
             )
 
+        def stamped_base(phrase: str) -> str:
+            return f"{stamped(phrase)} Pt.{short_index}: {phrase}"
+
         if interactive:
-            phrase = f"driving through {LOCATION_WITHHELD} Pt.{short_index}"
-            base = f"{lead_for(phrase)} {phrase}"
+            base = stamped_base(f"driving through {LOCATION_WITHHELD}")
             fixed_hashtags = ["#Shorts"]
             optional_hashtags = ["#POVDriving"]
             terrain_ht = TERRAIN_HASHTAGS.get(self.terrain_type, [])
@@ -1888,20 +1886,37 @@ class SocialGenerator:
         if self.nearest_poi:
             self._used_pois[self.nearest_poi] = self._used_pois.get(self.nearest_poi, 0) + 1
             phrase = f"driving near {self.nearest_poi}, {self.social_location_full}"
-            if self._used_pois[self.nearest_poi] > 1:
-                phrase += f" Pt.{short_index}"
         elif place is not None and place.reason == REASON_VARIED:
             # A repeated place body gave way to another the clip measured.
             if place_kind == KIND_ROAD:
                 phrase = f"driving along {place.body}, {self.social_location_full}"
             else:
                 phrase = f"driving through {place.body}"
-            phrase += f" Pt.{short_index}"
         elif self.road_name:
-            phrase = f"driving along {self.road_name}, {self.social_location_full} Pt.{short_index}"
+            phrase = f"driving along {self.road_name}, {self.social_location_full}"
         else:
-            phrase = f"driving through {self.social_location_full} Pt.{short_index}"
-        base = f"{lead_for(phrase)} {phrase}"
+            phrase = f"driving through {self.social_location_full}"
+
+        context = ""
+        if title_place:
+            # The Short's own measured place leads, and is the description's place (the
+            # title already varies it from the previous Short's); a varied description
+            # body is not named as well, or two Shorts would share a place in their text.
+            # Only the measured POI or road follows.
+            opener = f"{title_place} \u2014 POV drive."
+            # The route's own text follows only when it adds a place the opener lacks.
+            tail = (
+                ""
+                if _norm(title_place) in _norm(self.social_location_full)
+                else f", {self.social_location_full}"
+            )
+            if self.nearest_poi:
+                context = f"Driving near {self.nearest_poi}{tail}."
+            elif self.road_name:
+                context = f"Driving along {self.road_name}{tail}."
+            base = f"{opener} {context}".strip()
+        else:
+            base = stamped_base(phrase)
 
         # #Shorts is fixed; remaining hashtags are droppable. #4K removed:
         # shorts are 1080x1920 (never 4K), so the claim would be false.
@@ -1925,6 +1940,17 @@ class SocialGenerator:
             pinned = []
             if self.location_tag:
                 optional_hashtags.append(f"#{self.location_tag}")
+
+        if title_place and context:
+            # The context is dropped whole, never cut mid-place, when it would not fit
+            # beside the longest tag block any arm can carry: a rule that does not depend
+            # on the arm, so an arm's text and the legacy text keep the same body.
+            reserve = max(
+                len(" ".join([*fixed_hashtags, *arm, *terrain_ht[:1], *pinned]))
+                for arm in [*SHORTS_HASHTAG_SET_ARMS.values(), ["#POVDriving"]]
+            )
+            if len(base) + 1 + reserve > 200:
+                base = opener
 
         all_hashtags = fixed_hashtags + optional_hashtags + pinned
         description = f"{base} {' '.join(all_hashtags)}"
@@ -2490,19 +2516,31 @@ class SocialGenerator:
                 )
             )
             pois_before = dict(self._used_pois)
+            # The place the fact title actually names (a later measured place when the
+            # first was taken); a stamped fallback title names none.
+            desc_title_place = (
+                title
+                if title_place is not None and (title == title_place.body or title in title_kinds)
+                else None
+            )
             youtube_description = self._build_youtube_description(
                 short_index,
                 interactive=interactive,
                 place=desc_place,
                 place_kind=desc_kind,
                 hashtag_arm=shorts_arms.get("yt_hashtag_set"),
+                title_place=desc_title_place,
             )
             hashtag_arm = shorts_arms.get("yt_hashtag_set")
             if hashtag_arm:
                 pois_arm = self._used_pois
                 self._used_pois = dict(pois_before)
                 legacy = self._build_youtube_description(
-                    short_index, interactive=interactive, place=desc_place, place_kind=desc_kind
+                    short_index,
+                    interactive=interactive,
+                    place=desc_place,
+                    place_kind=desc_kind,
+                    title_place=desc_title_place,
                 )
 
                 def _body(text: str) -> str:
