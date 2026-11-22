@@ -5,6 +5,25 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.135] - 2026-11-22
+
+### Changed
+
+- Shorts are ranked by their opening seconds: a window needs its first 4 seconds and its whole length above the day's bar, and each clip's end is trimmed back to the last second above the bar (never under the minimum). The per-Short window mean, opening mean and bar are recorded in the shorts audit sidecar, outside its hash.
+
+### Fixed
+
+- A failed Instagram delivery now names the Graph request that failed
+  (`op=create_container` and the like) and, when Graph returns no error
+  object, keeps a short redacted excerpt of the response body instead of
+  "unknown Graph API error". Retry and terminal handling are unchanged.
+- `deliveries.error_detail` keeps up to 2000 characters (was 500), so a
+  final-text refusal keeps every reason code.
+- The `fb_hashtags` caption experiment now measures what it assigns. A Short whose arm would ship
+  no hashtags like arm A (no location tag to carry, or an interactive Short) is no longer tagged
+  into arm B and keeps the normal hashtags. `queue edit-facebook-caption` keeps the Short's arm:
+  arm A adds no hashtags, B and C reproduce their own set.
+
 ## [0.3.134] - 2026-11-22
 
 ### Fixed
@@ -1526,7 +1545,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.134...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.135...HEAD
+[0.3.135]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.134...v0.3.135
 [0.3.134]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...v0.3.134
 [0.3.133]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...v0.3.133
 [0.3.132]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.131...v0.3.132
