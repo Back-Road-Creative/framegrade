@@ -295,7 +295,8 @@ def test_the_place_chain_is_seeded_from_the_stored_text_of_a_sibling(tmp_path, s
     sync_short_text(conn, apply=True, now=NOW)
     yt = _youtube(plan, 2).payloads.youtube
     assert "Harrow" in yt.title and "Ashby County" not in yt.title.split(" #")[0]
-    assert "through Harrow" in yt.description
+    # the description opens with the Short's own title place, never the sibling's
+    assert yt.description.startswith("Harrow \u2014 POV drive.")
     assert _youtube(plan, 1).payloads.youtube.title.endswith("Ashby County #Shorts")
 
 
@@ -654,8 +655,12 @@ def test_a_row_on_a_hash_this_sync_never_wrote_is_refused_not_moved(tmp_path):
 
 
 def test_a_rewritten_short_does_not_repeat_the_place_of_a_kept_successor(tmp_path):
-    plan, conn = _world(tmp_path, [_short(1), _named_first(2)])
-    _where(conn, 2, "youtube", status="published")  # kept as stored, names Ashby County
+    successor = _named_first(2)
+    # kept as stored: names Harrow, the place the generator opens the rewritten Short with
+    successor["payloads"]["youtube"]["title"] = "Mar 5, 2nd stretch: Harrow #Shorts"
+    successor["payloads"]["youtube"]["description"] = "Harrow \u2014 POV drive. #Shorts"
+    plan, conn = _world(tmp_path, [_short(1), successor])
+    _where(conn, 2, "youtube", status="published")
     before = plan.read_text()
     changes = sync_short_text(conn, apply=True, now=NOW)
     assert [c.status for c in changes] == ["refused"] and "next Short" in changes[0].reason

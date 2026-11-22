@@ -222,7 +222,9 @@ def test_no_arm_renders_byte_identical_to_origin_main():
     spooled texts and the experiment date pinned, hex ids faked (``_fake_hex``).
     Arms off must reproduce it exactly. The one deliberate change since: a ``place_ok``
     Short 1's titles are its measured place, not the stamp (fact titles), and every
-    caption is a measured-fact shape with no filler tail (fact captions)."""
+    caption is a measured-fact shape with no filler tail (fact captions). The YouTube
+    descriptions changed too: a Short with a title place opens with it, a stamped one with a
+    facts-only lead (fact descriptions)."""
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
     places = {key.split("|")[0] for key in golden}
     assert len(places) == 3 and any("Llanfair" in p for p in places)
@@ -665,7 +667,8 @@ def test_a_kept_hashtag_arm_never_cuts_more_description_body_than_legacy(arm):
 
     legacy, post = render(), render(arm)
     body = lambda d: d.split(" #Shorts", 1)[0]  # noqa: E731
-    assert len(legacy.youtube_description) > 150  # the long case
+    # the long case: a long place with a long POI (the POI context is dropped whole)
+    assert len(legacy.youtube_description) > 120
     if "yt_hashtag_set" in post.experiment_arms:
         assert body(post.youtube_description) == body(legacy.youtube_description)
     else:
