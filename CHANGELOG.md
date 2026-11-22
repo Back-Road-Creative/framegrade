@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.134] - 2026-11-22
+
+### Fixed
+
+- Comments, a config warning and docstrings still called the per-LF Shorts count a floor. It is a maximum (a drive may ship zero Shorts); the consistency warning now states only that the planner caps at the target. No values changed.
+
 ## [0.3.133] - 2026-11-21
 
 ### Changed
@@ -1520,7 +1526,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.134...HEAD
+[0.3.134]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...v0.3.134
 [0.3.133]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...v0.3.133
 [0.3.132]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.131...v0.3.132
 [0.3.131]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.130...v0.3.131
