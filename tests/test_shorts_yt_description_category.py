@@ -444,7 +444,8 @@ class TestYouTubeDescriptionWordSafeTruncation:
         # Within the platform limit …
         assert len(desc) <= 200, f"{len(desc)} chars: {desc!r}"
         # … and cut on a whole-word boundary of the anchor, never mid-word.
-        anchor = f"{prefix}{poi}{joiner}"  # untruncated "{lead} Pt.1: driving near …, Beaufort County"
+        # untruncated "{lead} Pt.1: driving near …, Beaufort County"
+        anchor = f"{prefix}{poi}{joiner}"
         body = desc.rstrip("…").rstrip()  # drop the truncation ellipsis, if any
         assert anchor.startswith(body), f"unexpected body: {body!r}"
         assert body == anchor or anchor[len(body)] == " ", f"truncated mid-word: …{body[-20:]!r}"
