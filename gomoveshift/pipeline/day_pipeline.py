@@ -136,6 +136,7 @@ from .short_planner import (
     DEFAULT_MIN_DURATION_SEC,
     DEFAULT_MIN_GAP_SEC,
     DEFAULT_TARGET_DURATION_SEC,
+    LANDMARK_BONUS,
     ShortRange,
     plan_shorts,
     timeline_quality_bar,
@@ -435,6 +436,53 @@ def fill_shorts_to_per_lf_capacity(
                 len(accepted),
             )
     return shorts, added
+
+
+def _adopt_landmark_plan(
+    boosted: list,
+    day_scores,
+    plan_mask,
+    plan_kwargs: dict,
+    lf_plans: list,
+    file_boundaries: list,
+    per_lf_capacity: Optional[int],
+) -> list:
+    """Keep the landmark-ranked Shorts only when they render as many and as strong.
+
+    ``boosted`` is the plan after the per-LF cap and refill (what would render).
+    The bonus is a tie-breaker, never a cost: the same plan is run WITHOUT the
+    landmark mask through the same cap and refill, and the landmark plan is used
+    only if it renders at least as many Shorts and its total window mean, with
+    each landmark clip weighted by ``1 + LANDMARK_BONUS``, is at least the plain
+    total. So the bonus may trade at most 25% of a landmark window's score and
+    never a Short. A day with no landmark mask returns ``boosted`` unchanged.
+    """
+    if day_scores is None or "landmark_mask" not in plan_kwargs:
+        return boosted
+    plain_kw = {k: v for k, v in plan_kwargs.items() if k != "landmark_mask"}
+    plain = plan_shorts(day_scores, stop_mask=plan_mask, **plain_kw)
+    plain, _ = cap_shorts_to_per_lf_capacity(
+        plain, lf_plans or [], file_boundaries, per_lf_capacity
+    )
+    plain, _ = fill_shorts_to_per_lf_capacity(
+        plain, lf_plans or [], file_boundaries, per_lf_capacity, day_scores, plan_mask, plain_kw
+    )
+
+    def _weighted(sr) -> float:
+        return float(sr.window_mean or 0.0) * (1.0 + LANDMARK_BONUS if sr.landmark else 1.0)
+
+    if (
+        len(boosted) >= len(plain)
+        and sum(map(_weighted, boosted)) >= sum(float(sr.window_mean or 0.0) for sr in plain) - 1e-9
+    ):
+        return boosted
+    logger.info(
+        "SHORTS-PLAN: landmark ranking would render %d Shorts against %d without it; "
+        "using the plain plan",
+        len(boosted),
+        len(plain),
+    )
+    return plain
 
 
 def _render_lf_map_inset(
@@ -3209,6 +3257,15 @@ def run_day_pipeline(
                 len(_refilled),
                 len(short_ranges),
             )
+    short_ranges = _adopt_landmark_plan(
+        short_ranges,
+        day_scores,
+        _plan_mask,
+        _shorts_kw,
+        lf_plans,
+        compute_day_file_boundaries(day_batch),
+        _per_lf_capacity,
+    )
     # No planned-stage count gate: ``target_count`` is a maximum, and a plan with
     # fewer shorts (quality bar, gap, per-LF window) is valid. The count that
     # will be rendered is now the contract for the rest of the day: the

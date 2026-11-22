@@ -59,8 +59,11 @@ inside a measured destination polygon ranks higher: `plan_shorts(landmark_mask=.
 pick-order score by `1 + LANDMARK_BONUS` (0.25) when ONE polygon holds at least `LANDMARK_QUORUM`
 (the resolver's `MIN_PEAK_MASS_SHARE`, 0.5) of the window's seconds, so a polygon the fixes only
 graze, or two parks that together reach half, earn nothing. The planner picks with and without the
-bonus and keeps the boosted picks only when they hold at least as many Shorts, so the bonus can
-re-order the day but never cost it a Short. The mask is one row per polygon, aligned to the score
+bonus and keeps the boosted picks only when they hold at least as many Shorts. What actually renders
+is decided after the per-LF cap and refill, so `day_pipeline._adopt_landmark_plan` runs the plain
+plan through the same cap and refill too and adopts the landmark plan only if it renders at least as
+many Shorts AND its total window mean, each landmark clip weighted by 1.25, is at least the plain
+total: the bonus may trade at most 25% of a landmark window's score and never costs a Short. The mask is one row per polygon, aligned to the score
 rows' own times, built once per day beside `_shorts_planning_mask` and reaching the per-LF refill
 through the same planner kwargs. It uses the resolver's destination tags, `out geom` rings and
 point-in-ring test; only CLOSED rings count (point POIs, bounds-only areas and open ways never do);
@@ -68,10 +71,11 @@ fixes failing the route-claim valid-fix rule are dropped first; a fix holds its 
 fix-to-fix gap within the Shorts GPS-gap bound (`stop_mask.GPS_MAX_FIX_GAP_S`).
 
 The POI lookup is optional and budgeted: one Overpass endpoint, one attempt, a 15 s server and 20 s
-client timeout, no cache write for a partial (remark-bearing) reply, and no query at all when the
+client timeout (per socket operation, not a total deadline), no cache write for a partial
+(remark-bearing) reply (a valid reply without a remark is cached), and no query at all when the
 day's route spans more than 2 degrees on an axis. A GPS-less day, an over-wide day, a failing source
 or no polygon logs `landmark bonus disabled` and plans exactly as before. Because the bonus depends
 on whether Overpass answered, a day's picks can differ between a run that got an answer and one that
 did not; a successful answer is cached, so reruns of the same day are stable. Titles and OST naming
-are unchanged. `ShortRange.landmark` records whether the bonus ranked that Short and is written to
-the audit sidecar outside its hash.
+are unchanged. `ShortRange.landmark` is true when the FINAL clip (after growth and trim) holds the quorum in one
+polygon, and is written to the audit sidecar outside its hash.

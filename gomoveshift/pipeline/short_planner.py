@@ -84,8 +84,9 @@ class ShortRange:
     window_mean: "float | None" = None
     opening_mean: "float | None" = None
     quality_bar: "float | None" = None
-    # True when the final clip holds the landmark quorum (it sat inside a measured
-    # polygon). Observability only; ranking already used it. Outside the audit hash.
+    # True when the FINAL clip (after growth and trim) holds the landmark quorum in
+    # one measured polygon: a fact about the clip, not about how it was ranked.
+    # Outside the audit hash.
     landmark: bool = False
 
     @property
@@ -386,7 +387,6 @@ def plan_shorts(
     # The landmark bonus only re-orders: boosted picks replace the plain ones only
     # when they keep at least as many Shorts (a boosted window under the hard gap
     # can otherwise block two plain ones). It never costs the day a Short.
-    landmark_ranked: set[float] = set()
     if boosted_starts:
         boosted = [
             (st, en, sc * (1.0 + LANDMARK_BONUS) if st in boosted_starts else sc)
@@ -395,7 +395,6 @@ def plan_shorts(
         boosted_chosen = _greedy_pick_with_gap(boosted, target_count, min_gap_sec)
         if len(boosted_chosen) >= len(chosen):
             chosen = boosted_chosen
-            landmark_ranked = boosted_starts
     # What the gap alone cost: qualifying windows a gap of 0 would also have
     # fit (non-overlapping), up to the target. Measured, never used to pick.
     no_gap = _greedy_pick_with_gap(qualifying, target_count, 0.0)
@@ -448,7 +447,7 @@ def plan_shorts(
             window_mean=_window_mean(timestamps, composites, start, end),
             opening_mean=_opening_mean(timestamps, composites, start, end),
             quality_bar=bar,
-            landmark=start in landmark_ranked,
+            landmark=_landmark_share(timestamps, lm_mask, start, end) >= LANDMARK_QUORUM,
         )
         for i, (start, end, score) in enumerate(chosen)
     ]

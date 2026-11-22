@@ -71,23 +71,24 @@ def test_bonus_never_admits_a_below_bar_window():
 
 
 def test_bonus_never_admits_a_weak_opening():
-    # Window mean is far above the bar (0.5) but its first 4 s are silent. The bonus
-    # must not let it in: with the opening check bypassed this window would win on
-    # its large sum, boosted or not. The plain 0.8 moment at 100 is the only valid pick.
+    # Stride 100 leaves ONE window over the landmark moment, and its first 4 s are
+    # silent while its mean (0.89) is far above the bar. Without the opening check it
+    # wins on its sum once boosted (34 * 1.25 beats the plain 0.6 moment's 36.5 * ...);
+    # with it, boosted and plain both pick only the 0.6 moment at 100.
     def fn(t):
-        if 100 <= t < 140:
-            return 0.8
+        if 100 <= t < 138:
+            return 0.6
         if 300 <= t < 304:
             return 0.0
-        return 1.0 if 304 <= t < 340 else 0.3
+        return 1.0 if 304 <= t < 338 else 0.1
 
     scores = _scores(fn)
-    bar = 0.5
-    plain = plan_shorts(scores, target_count=1, quality_bar=bar)
-    boosted = plan_shorts(scores, target_count=1, quality_bar=bar, landmark_mask=_mask(290, 350))
-    assert [(r.start_sec, r.end_sec) for r in boosted] == [(r.start_sec, r.end_sec) for r in plain]
-    assert boosted and all(r.opening_mean > bar for r in boosted)
-    assert all(not (295 <= r.start_sec < 304) for r in boosted)
+    kw = dict(target_count=1, stride_sec=100.0)
+    plain = plan_shorts(scores, **kw)
+    boosted = plan_shorts(scores, landmark_mask=_mask(290, 350), **kw)
+    assert [r.start_sec for r in plain] == [100.0]
+    assert [r.start_sec for r in boosted] == [100.0]
+    assert boosted[0].opening_mean > boosted[0].quality_bar
 
 
 def test_bonus_does_not_override_the_stop_mask():
@@ -248,11 +249,14 @@ def test_mask_follows_score_row_times_and_never_credits_across_a_gps_gap():
     assert m[50:57].all()
 
 
-@pytest.mark.real_overpass
-def test_overpass_fast_budget_and_partial_replies(monkeypatch, tmp_path):
-    from gomoveshift import pipeline  # noqa: F401
-    from gomoveshift.pipeline import overpass_source as op
+# Bound at import so the conftest ``_query_overpass`` stub (a module-attribute
+# patch) does not replace it; the post call below is stubbed instead, and the
+# network guard stays on, so a stub that stops matching fails rather than going live.
+from gomoveshift.pipeline import overpass_source as _op  # noqa: E402
+from gomoveshift.pipeline.overpass_source import _query_overpass as _real_query  # noqa: E402
 
+
+def test_overpass_fast_budget_and_partial_replies(monkeypatch, tmp_path):
     calls = []
 
     def fake_post(query, **kw):
@@ -260,11 +264,39 @@ def test_overpass_fast_budget_and_partial_replies(monkeypatch, tmp_path):
         return {"elements": [], "remark": "runtime error: Query timed out"}
 
     monkeypatch.setenv("GMS_OVERPASS_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(op, "post_overpass_query", fake_post)
+    monkeypatch.setattr(_op, "post_overpass_query", fake_post)
     with pytest.raises(RuntimeError, match="partial"):
-        op._query_overpass((32.0, -80.0, 32.1, -79.9), fast=True)
-    assert f"[timeout:{op.OVERPASS_FAST_TIMEOUT}]" in calls[0][0] and calls[0][1] == {"fast": True}
+        _real_query((32.0, -80.0, 32.1, -79.9), fast=True)
+    assert f"[timeout:{_op.OVERPASS_FAST_TIMEOUT}]" in calls[0][0] and calls[0][1] == {"fast": True}
     assert list(tmp_path.iterdir()) == []  # a partial reply is never cached
+
+
+def test_overpass_fast_truncated_json_raises_and_is_not_cached(monkeypatch, tmp_path):
+    # A 200 whose body was cut off mid-JSON: one attempt, a raise, nothing cached.
+    calls = []
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"elements": [{"type": "way", "geom'
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(timeout)
+        return _Resp()
+
+    monkeypatch.setenv("GMS_OVERPASS_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_op.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(_op.time, "sleep", lambda _s: None)
+    with pytest.raises(RuntimeError, match="every endpoint"):
+        _real_query((32.0, -80.0, 32.1, -79.9), fast=True)
+    assert len(calls) == 1 and list(tmp_path.iterdir()) == []
 
 
 def test_post_overpass_fast_tries_one_endpoint_once(monkeypatch):
@@ -325,7 +357,7 @@ def test_refill_forwards_the_landmark_mask_to_plan_shorts(monkeypatch):
     assert seen["landmark_mask"] is mask
 
 
-def _run_day(tmp_path, monkeypatch, short_ost_text_fn):
+def _run_day(tmp_path, monkeypatch, short_ost_text_fn, plan=None):
     """run_day_pipeline with rendering stubbed; returns (plan kwargs, refill kwargs)."""
     from dataclasses import dataclass
 
@@ -349,10 +381,12 @@ def _run_day(tmp_path, monkeypatch, short_ost_text_fn):
         master.write_bytes(b"x")
         return master
 
-    seen = {"plan": [], "refill": []}
+    seen = {"plan": [], "refill": [], "rendered": []}
 
     def _plan(scores, **kw):
         seen["plan"].append(kw)
+        if plan is not None:
+            return plan(kw)
         return [ShortRange(start_sec=300.0, end_sec=330.0, integrated_score=1.0, rank=1)]
 
     def _fill(shorts, lfs, fb, cap, scores, mask, plan_kw):
@@ -375,6 +409,7 @@ def _run_day(tmp_path, monkeypatch, short_ost_text_fn):
     monkeypatch.setattr(dp, "apply_ost", _apply)
 
     def _render(source_video, output_path, start_time, duration, location, **kw):
+        seen["rendered"].append(start_time)
         output_path.write_bytes(b"x")
         return True
 
@@ -452,3 +487,128 @@ def test_shortrange_landmark_defaults_false_and_is_not_in_the_audit_hash():
     assert rich["shorts"][0]["landmark"] is True and plain["shorts"][0]["landmark"] is None
     assert compute_shorts_ost_audit_hash(rich) == compute_shorts_ost_audit_hash(plain)
     assert compute_shorts_ost_audit_hash(plain) == _CD03920_SHORTS_AUDIT_HASH
+
+
+# ── adoption: the landmark plan is used only when it renders as many and as strong ──
+
+
+def _lfs_by_midpoint(monkeypatch, bounds):
+    """Two LFs whose source windows are ``bounds``; a short belongs to the LF holding its midpoint."""
+    from types import SimpleNamespace
+
+    lfs = [SimpleNamespace(index=i + 1, segments=[b]) for i, b in enumerate(bounds)]
+    monkeypatch.setattr(dp, "to_cut_segment", lambda seg: seg)
+    monkeypatch.setattr(dp, "segments_to_master_ranges", lambda segs, fb: [tuple(s) for s in segs])
+
+    def assign(short_ranges, lf_plans, file_boundaries):
+        out = {lf.index: [] for lf in lf_plans}
+        for i, sr in enumerate(short_ranges):
+            mid = (sr.start_sec + sr.end_sec) / 2
+            for lf in lf_plans:
+                lo, hi = lf.segments[0]
+                if lo <= mid < hi:
+                    out[lf.index].append(i)
+        return out
+
+    monkeypatch.setattr(dp, "assign_shorts_to_lfs_by_source_window", assign)
+    return lfs
+
+
+def _moments(n, spans, base=0.1):
+    arr = np.zeros((n, 9), dtype=np.float64)
+    arr[:, 0] = np.arange(n, dtype=np.float64)
+    arr[:, 1] = base
+    for lo, hi, v in spans:
+        arr[lo:hi, 1] = v
+    return arr
+
+
+def _spans(ranges):
+    return sorted((r.start_sec, r.end_sec) for r in ranges)
+
+
+def test_a_landmark_plan_that_renders_fewer_shorts_is_not_adopted(monkeypatch):
+    # The planner keeps 2 either way, but the boosted pair both sit in LF 1: the
+    # per-LF cap drops one and the refill cannot reach LF 2's only moment (it lies
+    # inside the gap of the kept landmark Short). Rendered: 1 boosted vs 2 plain.
+    arr = _moments(N, [(0, 38, 0.9), (150, 188, 0.8), (220, 258, 0.85)])
+    mask = _mask(150, 188)
+    kw = dict(target_count=2, min_gap_sec=60.0, stride_sec=5.0)
+    lfs = _lfs_by_midpoint(monkeypatch, [(0.0, 200.0), (200.0, 400.0)])
+    bounds = [(0.0, float(N))]
+    plain = plan_shorts(arr, **kw)
+    boosted = plan_shorts(arr, landmark_mask=mask, **kw)
+    assert len(plain) == len(boosted) == 2 and _spans(plain) != _spans(boosted)
+    bkw = {**kw, "landmark_mask": mask}
+    rendered, _ = dp.cap_shorts_to_per_lf_capacity(boosted, lfs, bounds, 1)
+    rendered, _ = dp.fill_shorts_to_per_lf_capacity(rendered, lfs, bounds, 1, arr, None, bkw)
+    assert len(rendered) == 1  # what actually renders is smaller than the planner's count
+    got = dp._adopt_landmark_plan(rendered, arr, None, bkw, lfs, bounds, 1)
+    assert _spans(got) == _spans(plain)
+
+
+def test_a_landmark_plan_may_trade_at_most_the_bonus_never_a_stronger_set(monkeypatch):
+    # Equal count, but the boosted pick (B x1.25) displaces two stronger windows with
+    # a weak one: weighted 0.8*1.25 + 0.5 = 1.5 against the plain 0.9 + 0.85 = 1.75.
+    arr = _moments(N, [(0, 38, 0.9), (100, 138, 0.85), (50, 88, 0.8), (300, 338, 0.5)])
+    mask = _mask(50, 88)
+    kw = dict(target_count=2, min_gap_sec=60.0, stride_sec=5.0)
+    plain = plan_shorts(arr, **kw)
+    boosted = plan_shorts(arr, landmark_mask=mask, **kw)
+    assert len(plain) == len(boosted) == 2 and _spans(plain) != _spans(boosted)
+    got = dp._adopt_landmark_plan(boosted, arr, None, {**kw, "landmark_mask": mask}, [], [], None)
+    assert _spans(got) == _spans(plain)
+
+
+def test_a_landmark_plan_that_is_as_strong_is_adopted():
+    # Two equal moments, the later one a landmark: the bonus breaks the tie, costs nothing.
+    kw = dict(target_count=1)
+    arr = _scores(_two_equal_moments)
+    mask = _mask(295, 345)
+    boosted = plan_shorts(arr, landmark_mask=mask, **kw)
+    got = dp._adopt_landmark_plan(boosted, arr, None, {**kw, "landmark_mask": mask}, [], [], None)
+    assert [r.start_sec >= 290 for r in got] == [True] and got[0].landmark is True
+
+
+def test_run_day_pipeline_renders_the_plain_plan_when_the_landmark_plan_is_weaker(
+    tmp_path, monkeypatch
+):
+    def plan(kw):
+        if "landmark_mask" in kw:
+            return [
+                ShortRange(
+                    start_sec=300.0,
+                    end_sec=330.0,
+                    integrated_score=1.0,
+                    rank=1,
+                    window_mean=0.5,
+                    landmark=True,
+                )
+            ]
+        return [
+            ShortRange(
+                start_sec=100.0, end_sec=130.0, integrated_score=1.0, rank=1, window_mean=0.9
+            ),
+            ShortRange(
+                start_sec=200.0, end_sec=230.0, integrated_score=1.0, rank=2, window_mean=0.8
+            ),
+        ]
+
+    def fn(pts, sr):
+        return "Beaufort County"
+
+    fn.has_landmark_poi_source = True
+    fn.landmark_poi_source = lambda _b: [_poly("Wide Park", 31.9, -80.1, 32.2, -79.9)]
+    seen = _run_day(tmp_path, monkeypatch, fn, plan=plan)
+    assert sorted(seen["rendered"]) == [100.0, 200.0]
+
+
+def test_landmark_flag_is_a_fact_about_the_final_clip():
+    # The 38 s window [100,138) holds 20 s of polygon (53%) and wins the bonus, but the
+    # clip grows to [100,155): 20 of 55 s (36%) is no longer a landmark Short.
+    arr = _moments(N, [(100, 138, 0.8), (138, 155, 0.85)], base=0.3)
+    r = plan_shorts(arr, target_count=1, landmark_mask=_mask(100, 120))
+    assert (r[0].start_sec, r[0].end_sec) == (100.0, 155.0)
+    assert r[0].landmark is False
+    inside = plan_shorts(arr, target_count=1, landmark_mask=_mask(100, 155))
+    assert inside[0].landmark is True
