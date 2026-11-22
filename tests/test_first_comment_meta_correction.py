@@ -35,6 +35,7 @@ NEW = "Watch the full drive: https://youtu.be/new"
 _PUB_AT = "2026-08-23T00:00:00+00:00"
 _NOW = "2026-08-23T00:06:00+00:00"
 FIELD = {"facebook": "message", "instagram": "text"}
+OWN = {"facebook": "p", "instagram": "u"}  # the Page / IG user id the test adapters hold
 
 
 class Resp:
@@ -50,7 +51,10 @@ class FakeGraph:
 
     def __init__(self, platform, comments=(), page=2):
         self.field = FIELD[platform]
-        self.comments = {cid: text for cid, text in comments}
+        self.own = OWN[platform]
+        # (id, text) is ours; (id, text, author_id) is someone else's.
+        self.comments = {c[0]: c[1] for c in comments}
+        self.authors = {c[0]: (c[2] if len(c) > 2 else self.own) for c in comments}
         self.page, self.log, self.n = page, [], 0
         self.fail_post = None
         self.fail_edit = None
@@ -60,7 +64,9 @@ class FakeGraph:
         after = int((params or {}).get("after") or 0)
         items = list(self.comments.items())
         chunk = items[after : after + self.page]
-        body = {"data": [{"id": i, self.field: t} for i, t in chunk]}
+        body = {
+            "data": [{"id": i, self.field: t, "from": {"id": self.authors[i]}} for i, t in chunk]
+        }
         if after + self.page < len(items):
             body["paging"] = {"cursors": {"after": str(after + self.page)}, "next": "n"}
         self.log.append("list")
@@ -74,6 +80,7 @@ class FakeGraph:
             self.n += 1
             cid = f"new{self.n}"
             self.comments[cid] = data["message"]
+            self.authors[cid] = self.own
             self.log.append(f"post:{cid}")
             return Resp({"id": cid})
         cid = url.rsplit("/", 1)[1]
@@ -217,7 +224,7 @@ def test_a_new_comment_beside_a_prior_one_raises_with_the_new_id_and_the_duplica
     with pytest.raises(PriorCommentLiveError) as info:
         post_graph_comment(
             graph, "https://g", "obj", NEW, "t", text_field="message", permission="p",
-            raise_for_error=lambda s, b: None, also_accept=(OLD,),
+            raise_for_error=lambda s, b: None, also_accept=(OLD,), own_id="p",
         )  # fmt: skip
     assert (info.value.comment_id, info.value.said) == ("n1", NEW)
     assert info.value.duplicates == (("o1", OLD),)
@@ -239,6 +246,6 @@ def test_instagram_will_not_post_when_it_cannot_confirm_the_stale_comment_is_gon
     with pytest.raises(CommentCheckError):
         first_comment.replace_graph_comment(
             graph, "https://g", "obj", "missing", NEW, "t", text_field="text", permission="p",
-            raise_for_error=lambda s, b: None,
+            raise_for_error=lambda s, b: None, own_id="u",
         )  # fmt: skip
     assert not [e for e in graph.log if e.startswith("post:")]
