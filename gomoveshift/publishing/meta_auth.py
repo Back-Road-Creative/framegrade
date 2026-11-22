@@ -27,7 +27,7 @@ _FBTRACE_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 _FBTRACE_MAX = 64
 
 
-def graph_error_tag(status_code: int, error: dict) -> str:
+def graph_error_tag(status_code: int, error: dict, op: str | None = None) -> str:
     """``[graph http=.. code=.. subcode=.. fbtrace=..]`` for a Graph error
     response: its HTTP status and its ``error`` object.
 
@@ -35,13 +35,15 @@ def graph_error_tag(status_code: int, error: dict) -> str:
     ``deliveries.error_detail`` keeps the fields that say WHY Meta refused
     (the message alone often doesn't: "unknown Graph API error" is a 4xx
     with no error object, where the status is the only evidence), and the
-    stored bound can never cut them. Missing fields read ``-``."""
+    stored bound can never cut them. Missing fields read ``-``. ``op`` names
+    the request (``create_container``) and is omitted when not given."""
     code = error.get("code")
     subcode = error.get("error_subcode")
     trace = _FBTRACE_UNSAFE.sub("", str(error.get("fbtrace_id") or ""))[:_FBTRACE_MAX]
+    op_part = f" op={_FBTRACE_UNSAFE.sub('', op)[:_FBTRACE_MAX]}" if op else ""
     return (
         f"[graph http={status_code} code={'-' if code is None else code} "
-        f"subcode={'-' if subcode is None else subcode} fbtrace={trace or '-'}]"
+        f"subcode={'-' if subcode is None else subcode} fbtrace={trace or '-'}{op_part}]"
     )
 
 

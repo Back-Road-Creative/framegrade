@@ -526,7 +526,7 @@ def _apply_daily_caps(conn, due: List[Dict[str, Any]], now: str) -> List[Dict[st
     return due
 
 
-_ERROR_DETAIL_MAX = 500
+_ERROR_DETAIL_MAX = 2000
 
 
 def _detail(exc: BaseException) -> str:
