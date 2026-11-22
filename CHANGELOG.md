@@ -5,6 +5,21 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.133] - 2026-11-21
+
+### Changed
+
+- Drive Short captions state measured facts and no filler. The generic openers ("Rolling
+  through ...", "Wheel time in ...") and the "Mostly roads" / "Just roads" tail are gone: a
+  caption is the place, a terrain clause only when the terrain is classified (coastal, mountain
+  or winding), and "Filmed <Month YYYY>." An interactive Short keeps a guess prompt and withholds
+  the place. Hashtags and experiment arms are unchanged. Each platform has three sentence
+  shapes, so a batch at one place repeats a shape after three Shorts; the shapes are stable
+  `caption_template_id`s, and the old ids no longer appear.
+- Caption shapes no longer claim a camera, vehicle or weather: "Dashcam footage from ...",
+  "from the driver's seat", "by car" and the Instagram weather emoji are gone. Each
+  platform's three shapes state the place in the channel's voice ("Driving X — POV.").
+
 ## [0.3.132] - 2026-11-21
 
 ### Changed
@@ -1505,7 +1520,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...HEAD
+[0.3.133]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.132...v0.3.133
 [0.3.132]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.131...v0.3.132
 [0.3.131]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.130...v0.3.131
 [0.3.130]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.129...v0.3.130
