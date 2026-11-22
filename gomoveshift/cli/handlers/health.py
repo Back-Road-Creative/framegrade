@@ -183,6 +183,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         supersede=(args.supersede, args.reason) if args.supersede else None,
         replace_scheduled=bool(getattr(args, "replace_scheduled", False)),
         live_status=launch.default_live_status() if getattr(args, "replace_scheduled", False) else None,  # fmt: skip
+        replace_store=launch.default_replace_store(config),
         horizon_h=launch.render_horizon_h(config),
         latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
         incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),

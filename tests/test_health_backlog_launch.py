@@ -1986,3 +1986,98 @@ def test_replace_unreadable_file_refuses(tmp_path):
     rig.supersede, rig.replace_scheduled = ("day-a", "x"), True
     rig.live = lambda ids: {i: "scheduled" for i in ids}
     assert rig.run()["action"] == "refused"
+
+
+# --replace-scheduled on a ``complete`` store row: Waypost reopens it (``reopen_for_replace``)
+# instead of ``register`` (which refuses complete rows), dry-run first, before any rename.
+
+
+class ReopenStore:
+    """A fake Waypost store: records each ``reopen_for_replace`` and what the disk looked like."""
+
+    def __init__(self, rig, refuse_dry=None, refuse_real=None):
+        self.rig, self.refuse_dry, self.refuse_real, self.calls = rig, refuse_dry, refuse_real, []
+
+    def reopen_for_replace(self, project, **kw):
+        stage_present = (self.rig.stages / project).is_dir()
+        self.calls.append({"project": project, "stage_present": stage_present, **kw})
+        return self.refuse_dry if kw["dry_run"] else self.refuse_real
+
+
+def _complete_run(rig, store):
+    rig.drives.append(drive("day-a", "complete"))
+    kw = rig.kwargs()
+    kw["replace_store"] = lambda: store
+    return launch.run_backlog(**kw)
+
+
+def _three_lfs():
+    return {"1": _rec("a", PAST), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))}
+
+
+def test_complete_row_dry_runs_the_reopen_before_any_rename_then_reopens_for_real(tmp_path):
+    import hashlib
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig)
+    res = _complete_run(rig, store)
+    assert res["action"] == "launched", res
+    dry, real = store.calls
+    assert dry["dry_run"] is True and dry["stage_present"] is True  # nothing renamed yet
+    assert real["dry_run"] is False and not real["stage_present"]  # after the renames
+    assert rig.registered == []  # register would raise on a complete row
+    plan_file = rig.out / "day-a" / "replace_plan.json"
+    for call in (dry, real):
+        assert call["expected"] == {1: "a", 2: "b", 3: "c"}
+        assert call["replace"] == {2, 3}
+        assert call["plan_digest"] == hashlib.sha256(plan_file.read_bytes()).hexdigest()
+        assert call["reason"] == "blur mask was wrong"
+        assert call["output_dir"] == str(rig.out / "day-a") and call["now"] == NOW
+
+
+def test_a_dry_run_refusal_moves_nothing_and_never_registers(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
+    res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "LF2 is not booked as expected" in res["reason"], res
+    assert [c["dry_run"] for c in store.calls] == [True]
+    assert (rig.stages / "day-a").is_dir() and (rig.out / "day-a").is_dir()
+    assert not (rig.out / launch.SUPERSEDED_DIR).exists()
+    assert not rig.launches and not rig.registered
+
+
+def test_a_refused_real_reopen_fails_loudly_and_never_registers(tmp_path, caplog):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig, refuse_real="drifted")
+    with caplog.at_level("ERROR"):
+        res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "drifted" in res["reason"], res
+    assert launch.exit_code(res) != 0 and rig.registered == []
+    assert "drifted" in caplog.text
+
+
+def test_a_claimed_row_is_still_refused_under_replace(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.drives.append(drive("day-a", "claimed"))
+    store = ReopenStore(rig)
+    kw = rig.kwargs()
+    kw["replace_store"] = lambda: store
+    res = launch.run_backlog(**kw)
+    assert res["action"] == "refused" and "claimed" in res["reason"], res
+    assert not store.calls and (rig.stages / "day-a").is_dir()
+
+
+def test_a_complete_row_with_no_replace_plan_is_still_refused(tmp_path):
+    rig = _replace_rig(tmp_path, {})  # empty uploads file: nothing to plan
+    store = ReopenStore(rig)
+    res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "complete" in res["reason"], res
+    assert not store.calls and (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_a_store_without_reopen_for_replace_is_refused_before_any_rename(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    res = _complete_run(rig, object())
+    assert res["action"] == "refused" and "reopen_for_replace" in res["reason"], res
+    assert "repin" in res["reason"]
+    assert (rig.stages / "day-a").is_dir() and not rig.launches and rig.registered == []
