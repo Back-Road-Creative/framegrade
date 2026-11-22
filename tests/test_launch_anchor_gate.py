@@ -562,11 +562,15 @@ def test_a_start_date_refusal_names_start_date_not_lf_publish_date(
 
 def _replace_plan(out: Path, lf1_publish_at: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    (out / "replace_plan.json").write_text(json.dumps({
-        "schema": "replace-scheduled/1",
-        "kept": {"1": {"video_id": "a", "publish_at": lf1_publish_at}},
-        "replace": {"2": {"video_id": "b", "publish_at": "2031-01-10T20:00:00+00:00"}},
-    }))
+    (out / "replace_plan.json").write_text(
+        json.dumps(
+            {
+                "schema": "replace-scheduled/1",
+                "kept": {"1": {"video_id": "a", "publish_at": lf1_publish_at}},
+                "replace": {"2": {"video_id": "b", "publish_at": "2031-01-10T20:00:00+00:00"}},
+            }
+        )
+    )
 
 
 def test_a_past_anchor_is_accepted_when_the_plan_keeps_that_dates_lf1(
