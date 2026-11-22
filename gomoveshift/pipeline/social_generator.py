@@ -2300,6 +2300,35 @@ class SocialGenerator:
             {b: k for k, b in title},
         )
 
+    def _enrolled_arms(self, arms: "dict[str, str]", interactive: bool) -> "dict[str, str]":
+        """``arms`` without a caption experiment whose treatment this Short would
+        render exactly as the control arm (``none``, no hashtags) does.
+
+        An arm-B Short with no location tag to carry, or an interactive one that
+        withholds the place, ships zero hashtags like arm A; tagging it ``B`` would
+        count an untreated Short as treated. It is left out (no ``experiment_arms``
+        entry) and keeps the normal hashtags. Decided here, from the same
+        ``_platform_hashtags`` the caption uses, so the tag cannot disagree with the text.
+        """
+        kept = {}
+        for experiment in self.experiments:
+            arm_id = arms.get(experiment.name)
+            if arm_id is None:
+                continue
+            if "facebook" in experiment.platforms:
+                mode = next(a.hashtag_mode for a in experiment.arms if a.id == arm_id)
+
+                def tags(m: str) -> "list[str]":
+                    return self._platform_hashtags("facebook", 0, interactive, 2, hashtag_mode=m)
+
+                if mode != "none" and tags(mode) == tags("none"):
+                    continue
+            kept[experiment.name] = arm_id
+        return {
+            **{k: v for k, v in arms.items() if k not in {e.name for e in self.experiments}},
+            **kept,
+        }
+
     def _shorts_arm_factors(self, hand_idx: int, title_facts: Optional[TitleFacts]) -> "list[str]":
         """The Shorts factors this Short's text can carry: the hashtag set only off
         an interactive Short (whose description withholds the place). The title body
@@ -2383,7 +2412,10 @@ class SocialGenerator:
             logger.info("pool titles: %s absent/incomplete", self.titles_file)
             self._pool_fallback_logged = True
 
-        arms = assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today)
+        arms = self._enrolled_arms(
+            assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today),
+            hand.interactive if hand is not None else False,
+        )
         eligible = self._shorts_arm_factors(hand_idx, title_facts)
         shorts_arms = {
             f: a
