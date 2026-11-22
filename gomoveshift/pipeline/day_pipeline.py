@@ -75,6 +75,7 @@ from .cleanup import purge_day_intermediates, purge_lf_intermediates
 from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
+from .destination_resolver import landmark_seconds_mask
 from .edit_timeline import EditTimeline, Insert, ReceiptError, load_receipt
 from .ffmpeg_filters import crop_upscaled_from, get_video_dimensions, shorten_ost_for_shorts
 from .gps_quality import (
@@ -135,7 +136,10 @@ from .short_planner import (
     DEFAULT_MIN_DURATION_SEC,
     DEFAULT_MIN_GAP_SEC,
     DEFAULT_TARGET_DURATION_SEC,
+    LANDMARK_BONUS,
+    LANDMARK_QUORUM,
     ShortRange,
+    _landmark_share,
     plan_shorts,
     timeline_quality_bar,
 )
@@ -415,6 +419,7 @@ def fill_shorts_to_per_lf_capacity(
                 window_mean=pick.window_mean,
                 opening_mean=pick.opening_mean,
                 quality_bar=pick.quality_bar,
+                landmark=pick.landmark,
             )
             trial = shorts + accepted + [cand]
             where = assign_shorts_to_lfs_by_source_window(trial, lf_plans, file_boundaries)
@@ -433,6 +438,63 @@ def fill_shorts_to_per_lf_capacity(
                 len(accepted),
             )
     return shorts, added
+
+
+def _adopt_landmark_plan(
+    boosted: list,
+    day_scores,
+    plan_mask,
+    plan_kwargs: dict,
+    lf_plans: list,
+    file_boundaries: list,
+    per_lf_capacity: Optional[int],
+) -> list:
+    """Keep the landmark-ranked Shorts only when they render as many and as strong.
+
+    ``boosted`` is the plan after the per-LF cap and refill (what would render).
+    The bonus is a tie-breaker, never a cost: the same plan is run WITHOUT the
+    landmark mask through the same cap and refill, and the landmark plan is used
+    only if it renders at least as many Shorts and its total window mean (each
+    clip's mean composite), with every landmark clip on BOTH sides weighted by
+    ``1 + LANDMARK_BONUS``, is at least the plain total. So the bonus may trade at
+    most 25% of the score of a landmark window only the landmark plan picks, and
+    never a Short. The plain clips carry the same final-clip ``landmark`` fact.
+    A day with no landmark mask returns ``boosted`` unchanged.
+    """
+    if day_scores is None or "landmark_mask" not in plan_kwargs:
+        return boosted
+    plain_kw = {k: v for k, v in plan_kwargs.items() if k != "landmark_mask"}
+    plain = plan_shorts(day_scores, stop_mask=plan_mask, **plain_kw)
+    plain, _ = cap_shorts_to_per_lf_capacity(
+        plain, lf_plans or [], file_boundaries, per_lf_capacity
+    )
+    plain, _ = fill_shorts_to_per_lf_capacity(
+        plain, lf_plans or [], file_boundaries, per_lf_capacity, day_scores, plan_mask, plain_kw
+    )
+    lm = np.atleast_2d(np.asarray(plan_kwargs["landmark_mask"], dtype=bool))
+    times = np.asarray(day_scores)[:, 0]
+    if lm.shape[1] == len(times):
+        for sr in plain:
+            sr.landmark = _landmark_share(times, lm, sr.start_sec, sr.end_sec) >= LANDMARK_QUORUM
+
+    def _total(ranges) -> float:
+        return sum(
+            float(sr.window_mean or 0.0) * (1.0 + LANDMARK_BONUS if sr.landmark else 1.0)
+            for sr in ranges
+        )
+
+    boosted_total, plain_total = _total(boosted), _total(plain)
+    if len(boosted) >= len(plain) and boosted_total >= plain_total - 1e-9:
+        return boosted
+    logger.info(
+        "SHORTS-PLAN: landmark ranking would render %d Shorts (weighted %.3f) against "
+        "%d (weighted %.3f) without it; using the plain plan",
+        len(boosted),
+        boosted_total,
+        len(plain),
+        plain_total,
+    )
+    return plain
 
 
 def _render_lf_map_inset(
@@ -762,6 +824,28 @@ def _shorts_planning_mask(
     if not veto.any():
         return stop_mask
     return veto if stop_mask is None else (np.asarray(stop_mask, dtype=bool) | veto)
+
+
+def _landmark_planning_mask(day_scores, day_gps_points, date: str, poi_source=None):
+    """Per-second mask of seconds inside a measured landmark polygon, for the
+    shorts planner's ranking bonus; ``None`` (no bonus, WARNING logged) when the
+    day has no GPS, no polygon, or the POI source fails. Never raises."""
+    if not isinstance(day_scores, np.ndarray) or day_scores.size == 0:
+        return None
+    try:
+        mask = landmark_seconds_mask(day_scores[:, 0], day_gps_points, poi_source=poi_source)
+    except Exception as exc:  # noqa: BLE001 — the bonus is optional
+        logger.warning("Day %s: landmark bonus disabled: %s", date, exc)
+        return None
+    if mask is not None:
+        logger.info(
+            "Day %s: landmark bonus — %d/%d s inside a measured landmark polygon (%d polygons)",
+            date,
+            int(np.count_nonzero(mask.any(axis=0))),
+            int(mask.shape[-1]),
+            int(mask.shape[0]),
+        )
+    return mask
 
 
 def slice_scores_for_day(
@@ -1403,6 +1487,7 @@ def _render_day_shorts(
                 "opening_mean": getattr(short_range, "opening_mean", None),
                 "quality_bar": getattr(short_range, "quality_bar", None),
                 "moment_kind": getattr(short_range, "moment_kind", None),
+                "landmark": getattr(short_range, "landmark", None),
                 "regions": list(_clip_regions or []),
                 "roads": list(getattr(_clip_regions, "roads", None) or []),
                 "route_record": _short_route_records.get(rank),
@@ -3097,6 +3182,19 @@ def run_day_pipeline(
         geocoder=getattr(short_ost_text_fn, "geocoder", None),
         half_window_s=_shorts_kw.get("target_duration_sec", DEFAULT_TARGET_DURATION_SEC),
     )
+    # Soft ranking bonus for windows inside a measured landmark polygon; computed
+    # once per day and shared with the per-LF refill through ``_shorts_kw``.
+    # Only when the shorts OST closure carries the POI source (never a bare
+    # network call from a path that did not opt in).
+    if getattr(short_ost_text_fn, "has_landmark_poi_source", False) is True and gps_points_by_date:
+        _landmark_mask = _landmark_planning_mask(
+            day_scores,
+            gps_points_by_date.get(date),
+            date,
+            poi_source=short_ost_text_fn.landmark_poi_source,
+        )
+        if _landmark_mask is not None:
+            _shorts_kw["landmark_mask"] = _landmark_mask
     # Cap the required target by the day's MOVING-seconds budget so a
     # parked-heavy (or GPS-gap-heavy) day doesn't pressure routine
     # --allow-short-count use.
@@ -3171,6 +3269,15 @@ def run_day_pipeline(
                 len(_refilled),
                 len(short_ranges),
             )
+    short_ranges = _adopt_landmark_plan(
+        short_ranges,
+        day_scores,
+        _plan_mask,
+        _shorts_kw,
+        lf_plans,
+        compute_day_file_boundaries(day_batch),
+        _per_lf_capacity,
+    )
     # No planned-stage count gate: ``target_count`` is a maximum, and a plan with
     # fewer shorts (quality bar, gap, per-LF window) is valid. The count that
     # will be rendered is now the contract for the rest of the day: the

@@ -1024,6 +1024,10 @@ def _make_short_ost_text_fn(geocoder, *, poi_source=None, places_fn=None):
     # Expose the shared cached geocoder so the shorts planner's county-line veto
     # reuses it instead of building another.
     _fn.geocoder = geocoder
+    # The POI source the shorts landmark bonus reuses (None -> the production
+    # Overpass query, same as the destination resolver above).
+    _fn.landmark_poi_source = poi_source
+    _fn.has_landmark_poi_source = True
     return _fn
 
 

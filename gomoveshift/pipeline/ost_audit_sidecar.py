@@ -269,6 +269,9 @@ def format_shorts_ost_audit(date: str, entries: Iterable[dict]) -> dict:
                 "opening_mean": _num_or_none(e.get("opening_mean")),
                 "quality_bar": _num_or_none(e.get("quality_bar")),
                 "moment_kind": e.get("moment_kind") or None,
+                # Whether the clip sat inside a measured landmark polygon (the
+                # ranking bonus). Observability only: excluded from the hash.
+                "landmark": e.get("landmark") if isinstance(e.get("landmark"), bool) else None,
             }
             for e in entries
         ),
@@ -319,6 +322,7 @@ _HASH_EXCLUDED_ENTRY_KEYS = (
     "opening_mean",
     "quality_bar",
     "moment_kind",
+    "landmark",
 )
 
 
