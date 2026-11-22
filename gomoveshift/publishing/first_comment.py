@@ -10,6 +10,7 @@ endpoint, so TikTok rows never get a comment (see
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Callable, Iterable, List, Optional, Tuple
 
@@ -125,6 +126,16 @@ def full_drive_comment_text(parent_lf_video_id: str) -> str:
     return f"🎬 Watch the full drive: https://youtu.be/{parent}"
 
 
+_FULL_DRIVE_SHAPE = re.compile(r"\A\W*Watch the full drive: https://youtu\.be/[\w-]+\Z")
+
+
+def is_full_drive_comment(text: str) -> bool:
+    """True when ``text`` has the shape ``full_drive_comment_text`` writes (an optional leading
+    emoji, then ``Watch the full drive: https://youtu.be/<id>``): the only comment a removed row
+    may adopt as its own."""
+    return bool(_FULL_DRIVE_SHAPE.match((text or "").strip()))
+
+
 def _graph_body(response, permission: str, raise_for_error: Callable[[int, dict], None]) -> dict:
     """The JSON body of a Graph answer. A permission-class error raises
     ``CommentPermissionError`` naming ``permission``; any other error goes
@@ -211,6 +222,30 @@ def _read_graph_comments(
         COMMENT_CHECK_MAX_PAGES,
     )
     return found, False
+
+
+def list_own_graph_comments(
+    session,
+    base: str,
+    object_id: str,
+    access_token: str,
+    *,
+    text_field: str,
+    permission: str,
+    raise_for_error: Callable[[int, dict], None],
+    own_id: str = "",
+) -> Tuple[List[Tuple[str, str]], bool]:
+    """``(comments, complete)``: ``(id, text)`` of each comment on ``object_id`` whose ``from.id``
+    is ``own_id``, and whether the listing reached its last page. No ``own_id`` or a failed
+    read raises: whose a comment is must be known."""
+    if not own_id:
+        raise _own_id_unknown(object_id)
+    found, complete = _read_graph_comments(
+        session, base, object_id, access_token,
+        text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+        own_id=own_id,
+    )  # fmt: skip
+    return [(c, s) for c, s, ours in found if ours], complete
 
 
 def _existing_graph_comment(

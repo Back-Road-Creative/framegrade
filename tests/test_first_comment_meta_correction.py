@@ -76,9 +76,9 @@ class FakeGraph:
                 raise ConnectionError("connection reset")
             if cid not in self.comments:
                 return Resp({"error": {"code": 100, "error_subcode": 33, "message": "no"}}, 400)
-            return Resp(
-                {"id": cid, self.field: self.comments[cid], "from": {"id": self.authors[cid]}}
-            )
+            full = {"id": cid, self.field: self.comments[cid], "from": {"id": self.authors[cid]}}
+            asked = ((params or {}).get("fields") or "id,{},from".format(self.field)).split(",")
+            return Resp({k: v for k, v in full.items() if k in asked})  # real Graph: fields only
         assert url.endswith("/comments"), url
         after = int((params or {}).get("after") or 0)
         items = list(self.comments.items())

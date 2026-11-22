@@ -221,6 +221,37 @@ class YouTubeCommentEditor:
         """Our channel's id (``OwnChannelUnknownError`` when it cannot be read)."""
         return _own_channel_id(self._service)
 
+    def own_comments(self, object_id: str) -> Tuple[List[Tuple[str, str]], bool]:
+        """``(id, text)`` of the top-level comments on video ``object_id`` our own channel wrote
+        (``authorChannelId`` positively ours), and whether the listing reached its last page (a
+        removed row adopts one of these). A failed read raises."""
+        own = _own_channel_id(self._service)
+        found: List[Tuple[str, str]] = []
+        request = {
+            "part": "snippet",
+            "videoId": object_id,
+            "maxResults": _COMMENT_PAGE_SIZE,
+            "textFormat": "plainText",
+        }
+        for _ in range(COMMENT_CHECK_MAX_PAGES):
+            response = self._service.commentThreads().list(**request).execute()
+            for thread in response.get("items") or []:
+                top = (thread.get("snippet") or {}).get("topLevelComment") or {}
+                said = top.get("snippet") or {}
+                author = str(((said.get("authorChannelId") or {}).get("value")) or "")
+                if author and author == own:
+                    found.append(
+                        (
+                            str(top.get("id") or thread.get("id") or ""),
+                            str(said.get("textOriginal") or said.get("textDisplay") or "").strip(),
+                        )
+                    )
+            token = response.get("nextPageToken")
+            if not token:
+                return found, True
+            request = {**request, "pageToken": token}
+        return found, False
+
     def edit_comment(self, comment_id: str, text: str, object_id: Optional[str] = None) -> None:
         body = {"id": comment_id, "snippet": {"textOriginal": text}}
         self._service.comments().update(part="snippet", body=body).execute()
