@@ -215,6 +215,10 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         if result.get("replace_retry"):
             tried = result["replace_retry"]
             print(f"replace retry {tried['project']}: {tried['outcome']}: {tried['reason']}")
+        for name in result.get("unclaimed_replace_retry", []):
+            print(
+                f"replace retry {name}: unclaimed (no region, no manifest row); no tick retries it"
+            )
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
         for bad in result.get("failed_audits", []):

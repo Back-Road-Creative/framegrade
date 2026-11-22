@@ -281,7 +281,8 @@ def due_replace_retry(output_root: Path, now: datetime, region: Optional[str] = 
     tick runs it as ``--supersede <project> --replace-scheduled``), else ``None``.
 
     With ``region`` only that region's markers count: a marker's own region, else (written by older
-    code) its project's manifest region from ``regions``, else it is still returned."""
+    code) its project's manifest region from ``regions``, else it is unclaimed and skipped
+    (``unclaimed_replace_retries`` reports it): a tick never stamps its own region on it."""
     from .heal import _retry_wait_s
 
     due = []
@@ -290,7 +291,9 @@ def due_replace_retry(output_root: Path, now: datetime, region: Optional[str] = 
         if not m.get("project") or not str(m.get("reason") or "").strip():
             continue
         own = m.get("region") or (regions or {}).get(m["project"])
-        if region and own and str(own).strip().lower() != str(region).strip().lower():
+        if region and not own:
+            continue  # no region and no manifest row: unclaimed, never stamped with this tick's
+        if region and str(own).strip().lower() != str(region).strip().lower():
             continue
         at = float(m.get("last_at") or 0) + _retry_wait_s(int(m.get("attempts") or 1))
         if now.timestamp() >= at:
@@ -313,7 +316,21 @@ def refusal_is_permanent(reason: str) -> bool:
     return any(p.search(str(reason)) for p in _PERMANENT_REFUSALS)
 
 
+def unclaimed_replace_retries(output_root: Path, region: Optional[str], regions: Optional[Dict[str, str]]) -> List[str]:  # fmt: skip
+    """Projects of markers that name no region and whose manifest row is gone, so no region's tick
+    may claim them (older code wrote no region); reported in the tick output, never retried."""
+    held = (_read_retry_marker(p) for p in sorted((Path(output_root) / REPLACE_RETRY_DIR).glob("*.json")))  # fmt: skip
+    return [m["project"] for m in held if region and m.get("project") and not m.get("region") and not (regions or {}).get(m["project"])]  # fmt: skip
+
+
 def run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run) -> Dict[str, Any]:  # fmt: skip
+    """``_run_tick`` plus ``unclaimed_replace_retry``: the markers no region can claim, once."""
+    out = _run_tick(output_root=output_root, now=now, region=region, regions=regions, dry_run=dry_run, supersede=supersede, replace=replace, run=run)  # fmt: skip
+    unclaimed = unclaimed_replace_retries(output_root, region, regions)
+    return {**out, "unclaimed_replace_retry": unclaimed} if unclaimed else out
+
+
+def _run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, run) -> Dict[str, Any]:  # fmt: skip
     """One ``health backlog`` tick. ``run(supersede, replace)`` is one ``run_backlog`` call.
 
     A due replace marker runs first as ``--supersede --replace-scheduled``; THIS function (so no
@@ -333,9 +350,16 @@ def run_tick(*, output_root, now, region, regions, dry_run, supersede, replace, 
         first = run(due, True)
     except Exception as exc:  # noqa: BLE001 -- a raising marker tick must not repeat forever
         logger.exception("REPLACE-RETRY-TICK-RAISED %s", project)
+        if before and not path.exists():
+            # the replace launched (the launch clears its own marker) and the post-launch work
+            # raised: never re-mark it, never run the plain tick behind a drive just launched
+            return {"action": "launched", "project": project, "skipped": [], "reason": f"{project} replace launched; post-launch work raised {type(exc).__name__}: {exc}"}  # fmt: skip
         first = {"action": "refused", "reason": f"{type(exc).__name__}: {exc}"}
     if first.get("action") == "launched":
-        clear_replace_retry(output_root, project)
+        if first.get("project") == project and first.get("supersede"):
+            clear_replace_retry(output_root, project)  # the replace's OWN launch (not a publish)
+        # any other launch (an auditing drive's publish, a heal resume) is returned as it is: the
+        # marker stays, nothing is bumped and nothing falls through, so the next tick retries it
         return first
     why = str(first.get("reason") or first.get("action"))
     if refusal_is_permanent(why):
@@ -701,9 +725,10 @@ def _uploads_refusal(project, out: Path, replace: Optional[Dict[str, Any]] = Non
     when each is public or live-confirmed scheduled; the replacement plan lands in
     ``replace["plan"]``."""
     uploads = out / "youtube_uploads.json"
-    if replace is not None and not uploads.exists() and replace_unfinished(str(out)):
-        # a replace attempt that died after the run was set aside (its fresh dir holds the plan
-        # and no records): the records are in the set-aside run, so a retry plans from them
+    if replace is not None and not uploads.exists():
+        # a replace attempt that died after the run was set aside (its fresh dir holds the plan, or
+        # never got as far as writing it, and no records): the records are in the set-aside run,
+        # so a retry plans from them
         uploads = _superseded_uploads(project, out) or uploads
     if uploads.exists():
         try:
@@ -847,6 +872,8 @@ def _supersede_plan(
             if src.exists():
                 moves.append({"from": str(src), "to": str(dst)})
     if not moves:
+        if replace is not None and replace.get("plan"):
+            return [], ""  # a replace that died between the renames and the plan write: plan only
         return [], f"nothing to supersede: no {project} under the stages or output root"
     return moves, ""
 
@@ -1393,7 +1420,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         if own:
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: {why}"}
     if target and (row is None or row.project != target):
-        nxt = f"the next eligible {region} row is {row.project}" if row else f"no {region} row {target} in the backlog"  # fmt: skip
+        gone = target not in {r.project for r in rows if r.region == region}
+        nxt = f"the next eligible {region} row is {row.project}" if row and not gone else f"no {region} row {target} in the backlog"  # fmt: skip
         return {**res, "action": "refused", "reason": f"cannot supersede {target}: {nxt}"}
     if row is None and gated:
         return {**res, "action": "refused", "project": gated[0], "reason": gated[1]}
@@ -1495,8 +1523,6 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     planned = (replace or {}).get("plan")
     if planned:
         mark()  # BEFORE the renames: a crash from here on still leaves a marker a later tick retries
-    if supersede:
-        _supersede(row.project, supersede[1], res["supersede"]["moves"], now, planned, out_dir)
 
     def refuse(reason):
         """A refusal after the renames: put the drive back so a retry starts from the same state
@@ -1511,6 +1537,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 retry_later(reason)
         return {**res, "action": "refused", "reason": reason}
 
+    if supersede:
+        try:
+            _supersede(row.project, supersede[1], res["supersede"]["moves"], now, planned, out_dir)
+        except Exception as exc:  # noqa: BLE001 -- a failed rename or plan write: put it back, retry
+            logger.exception("BACKLOG-SUPERSEDE-RAISED %s", row.project)
+            return refuse(f"supersede raised {type(exc).__name__}: {exc}")
     try:
         preflight(
             subset, out_dir, staging_dir=stages_dir, ingest_mode=row.ingest_mode, python=python
