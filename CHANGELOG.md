@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.137] - 2026-11-22
+
+### Changed
+
+- Shorts windows that sit inside one measured landmark or destination polygon rank higher, and the bonus never lowers the rendered Short count or trades more than 25% of the score of a landmark window only it picks (checked after the per-LF cap and refill). The bonus is soft: it never admits a window below the day's bar or with a weak opening, and with no GPS, no polygon or a failing POI source nothing changes. Each Short records `landmark` in the shorts audit sidecar, outside its hash.
+
 ## [0.3.136] - 2026-11-22
 
 ### Fixed
@@ -1551,7 +1557,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.136...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.137...HEAD
+[0.3.137]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.136...v0.3.137
 [0.3.136]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.135...v0.3.136
 [0.3.135]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.134...v0.3.135
 [0.3.134]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.133...v0.3.134
