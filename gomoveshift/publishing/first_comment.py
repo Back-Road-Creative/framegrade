@@ -373,8 +373,9 @@ def _graph_call(
         url, headers={"Authorization": f"OAuth {access_token}"}, timeout=30, **kwargs
     )
     if method == "delete" and _is_gone(response):
-        # Already deleted (an earlier DELETE landed and its answer was lost): the goal holds.
-        return {"success": True}
+        # Already deleted (an earlier DELETE landed and its answer was lost): the goal holds --
+        # but ``gone`` tells the caller to confirm, since the pair also answers other failures.
+        return {"success": True, "gone": True}
     body = _graph_body(response, permission, raise_for_error)
     if body.get("success") is not True:
         raise CommentCorrectionError(f"Graph {method.upper()} {url.rsplit('/', 1)[-1]}: not ok")
@@ -397,12 +398,30 @@ def edit_graph_comment(
 
 
 def delete_graph_comment(
-    session, base, comment_id, access_token, *, permission, raise_for_error
+    session, base, comment_id, access_token, *, text_field, permission, raise_for_error
 ) -> None:
-    """Delete one of the account's own comments (``DELETE /{comment-id}``)."""
-    _graph_call(
+    """Delete one of the account's own comments (``DELETE /{comment-id}``). A "gone" answer
+    (code 100 / subcode 33, whose generic message UNVERIFIED also covers a comment that cannot
+    be loaded for missing permissions) is trusted only once ``GET /{comment-id}`` confirms the
+    comment is absent; one that still reads raises ``CommentCorrectionError``."""
+    body = _graph_call(
         session, "delete", f"{base}/{comment_id}", access_token, permission, raise_for_error
     )  # fmt: skip
+    if body.get("gone") and (
+        read_graph_comment(
+            session,
+            base,
+            comment_id,
+            access_token,
+            text_field=text_field,
+            permission=permission,
+            raise_for_error=raise_for_error,
+        )  # fmt: skip
+        is not None
+    ):
+        raise CommentCorrectionError(
+            f"Graph DELETE {comment_id}: answered gone but the comment still reads; not deleted"
+        )
 
 
 def replace_graph_comment(
@@ -441,7 +460,7 @@ def replace_graph_comment(
     if any(cid == stale_id and ours for cid, _, ours in comments):
         delete_graph_comment(
             session, base, stale_id, access_token,
-            permission=permission, raise_for_error=raise_for_error,
+            text_field=text_field, permission=permission, raise_for_error=raise_for_error,
         )  # fmt: skip
     elif not complete:
         raise CommentCheckError(

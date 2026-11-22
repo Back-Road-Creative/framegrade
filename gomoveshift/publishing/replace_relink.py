@@ -115,6 +115,10 @@ def _split(id_map: Mapping[str, Tuple[str, str]]) -> Tuple[Dict[str, str], Dict[
                 f"id_map[{old!r}] must be (new_video_id, new_publish_at_iso_utc), got {value!r}"
             )
         new, at = value
+        if not isinstance(new, str) or not isinstance(at, str):
+            raise TypeError(
+                f"id_map[{old!r}] must be (str new_video_id, str ISO publish time), got {value!r}"
+            )
         if not old or not new:
             raise ValueError(f"id_map holds an empty id ({old!r} -> {new!r})")
         if old == new:
@@ -238,6 +242,10 @@ def _relink_pending(path: Path, id_map, report: RelinkReport, *, dry_run: bool) 
     return FileRewrite(str(path), len(hit), bool(hit) and not dry_run, note)
 
 
+_PRIVATE_POSTED_NOTE = (
+    ": the replacement is not public by this short's slot ({slot}); a live comment is never "
+    "edited, so re-add the comment by hand once the video is public"
+)
 _PRIVATE_NOTE = (
     ": the replacement is not public by this short's slot ({slot}), so no comment links it "
     "(backfill adds it once the plan allows)"
@@ -312,7 +320,8 @@ def _relink_pending_corrections(conn, row, pat, id_map, times, now, report) -> N
             report.operator_items.append(
                 f"{_row_label(row)}: the replacement is not public by this short's slot "
                 f"({row['scheduled_at']}); the edit of live comment {item.get('live_id') or '?'} "
-                "became a delete, so it links no private video"
+                "became a delete, so it links no private video; re-add the comment by hand "
+                "once the video is public"
             )
     report.queue_rewritten.append(QueueRewrite(*base, written))
 
@@ -341,7 +350,7 @@ def _relink_queue(conn, project, pat, id_map, times, now, report) -> None:
                     if _drain_corrects(row)
                     else ", fix it by hand"
                 )
-                + ("" if public else _PRIVATE_NOTE.format(slot=row["scheduled_at"]))
+                + ("" if public else _PRIVATE_POSTED_NOTE.format(slot=row["scheduled_at"]))
             )
         elif row["status"] in _queue.FIRST_COMMENT_FROZEN_STATUSES:
             reason = f"status {row['status']}"
@@ -365,6 +374,14 @@ def _relink_queue(conn, project, pat, id_map, times, now, report) -> None:
                 f"{_row_label(row)}: comment link dropped"
                 + _PRIVATE_NOTE.format(slot=row["scheduled_at"])
             )
+            if row["status"] == "published":
+                # The text is gone, so the drain never scans this row again: an OLD comment whose
+                # post answer was lost may be live (a dead link) and only a human can look.
+                report.operator_items.append(
+                    f"{_row_label(row)}: published, so a comment with the OLD link may already "
+                    "be live (a lost post answer); the drain no longer looks, check the post by "
+                    "hand and remove it"
+                )
             continue
         else:
             written = False

@@ -23,12 +23,14 @@ from .queue import (
     registered_platform_id,
     resolve_first_comment_correction,
     unpost_first_comment_for_repost,
+    unposted_first_comment_ids,
 )
 
 logger = logging.getLogger(__name__)
 
 KIND = "first_comment_stale"
 CAPPED_KIND = "first_comment_correction_capped"
+REPOST_KIND = "first_comment_repost_failed"
 _DETAIL_MAX = 500
 
 
@@ -143,6 +145,59 @@ def raise_stale_incident(
         )
 
 
+def raise_repost_incident(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    cause: str,
+    incidents_dir: Optional[Path] = None,
+) -> None:
+    """File (or refresh) the open incident for a row whose stale comment was deleted but whose
+    replacement did not post: zero comments are live until the drain reposts. Never fatal."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    row = conn.execute(
+        "SELECT project_name, short_index, platform FROM deliveries WHERE id=?", (delivery_id,)
+    ).fetchone()
+    if row is None:
+        return
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    filename = f"{safe_name(_key(delivery_id, REPOST_KIND))}.json"
+    detail = (
+        f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
+        f"the stale comment was deleted and the replacement did not post ({cause}); no comment "
+        "is live until the drain reposts it"
+    )[:_DETAIL_MAX]
+    try:
+        path = directory / filename
+        prior = json.loads(path.read_text()) if path.is_file() else None
+        if isinstance(prior, dict) and not prior.get("resolved_at"):
+            prior.update(detail=detail, error=cause)
+            write_row(directory, prior)
+            return
+        write_row(
+            directory,
+            new_incident(
+                REPOST_KIND,
+                _key(delivery_id, REPOST_KIND),
+                filename,
+                _now_iso(),
+                delivery_id=delivery_id,
+                platform=row["platform"],
+                project=row["project_name"],
+                error=cause,
+                detail=detail,
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("first comment: could not write the repost incident %s", delivery_id)
+
+
 def _resolve_incidents(
     platforms: Iterable[str],
     still_pending: set,
@@ -244,11 +299,16 @@ def run_corrections(
                 if isinstance(exc, ReplacePostFailedError):
                     # The delete is confirmed; the row goes back to unposted with the new text
                     # and the normal posting path (attempts, alerts) owns the post.
-                    unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())
+                    # Zero comments are live now: the failure counts toward the attempt cap and
+                    # an incident stays open until the comment is back.
+                    unpost_first_comment_for_repost(
+                        conn, row["id"], item, _now_iso(), count_attempt=True
+                    )
                     result.errors.append(
                         f"delivery {row['id']}: stale comment deleted, the replacement post "
                         f"failed ({exc.cause}); the row is unposted and the drain posts it again"
                     )
+                    raise_repost_incident(conn, row["id"], str(exc.cause), incidents_dir)
                     logger.warning("first comment: delivery %s: %s", row["id"], exc)
                     break
                 if gone is not None and gone(exc):
@@ -314,3 +374,6 @@ def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Opti
     pending = first_comment_correction_ids(conn, platforms) - capped
     _resolve_incidents(platforms, pending, incidents_dir)
     _resolve_incidents(platforms, capped, incidents_dir, CAPPED_KIND)
+    _resolve_incidents(
+        platforms, unposted_first_comment_ids(conn, platforms), incidents_dir, REPOST_KIND
+    )

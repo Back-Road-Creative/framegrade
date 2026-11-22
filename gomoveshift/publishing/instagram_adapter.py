@@ -257,7 +257,7 @@ class InstagramReelsAdapter:
         """Delete the account's own comment (``DELETE /{comment-id}``)."""
         delete_graph_comment(
             self._session, self._base, comment_id, self._access_token,
-            permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
+            text_field="text", permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
         )  # fmt: skip
 
     def _check_publishing_limit(self) -> None:

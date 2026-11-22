@@ -760,6 +760,24 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   runs only on an item marked `ours`, not the recorded comment, whose fresh read still says the
   copied text; otherwise it is dropped. A row with no recorded id (older rows) deletes nothing and
   reports the second copy once in `first_comment_error` and the drain's errors.
+- **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
+  unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
+  the row's text NULL.
+- **A Graph "gone" answer is confirmed.** `delete_graph_comment` (and so the Instagram replace)
+  trusts code 100 / subcode 33 on a DELETE only after `GET /{id}` shows the comment absent; one
+  that still reads raises and nothing is posted beside it. An edit answered 100/33 is never a
+  success. (The pair's generic message UNVERIFIED also covers a comment that cannot be loaded.)
+- **A private relink keeps its comment findable.** An unposted, published row relinked to a
+  video that is private at its slot loses its text, so the drain never scans it again: the report
+  carries an operator item to check the post by hand for an OLD comment. A posted row's note says
+  to re-add the comment by hand once the video is public (backfill never refills a posted row).
+  `id_map` values must be `(str, str)`; anything else raises `TypeError` before a write.
+- **`drop_private_edit` is a compare-and-set** on the correction JSON, retried, like
+  `rewrite_first_comment_corrections`.
+- **Zero comments live is never silent.** When an Instagram delete lands and the post fails, the
+  row is unposted, the failure counts toward `first_comment_attempts`, and a
+  `first_comment_repost_failed` incident stays open until the row is posted again (closed by the
+  next correction pass). The dispatch-queue CLI prints a drain's errors even when every counter is 0.
 - **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
   pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
   on the JSON) and reports the row.

@@ -228,13 +228,16 @@ def test_instagram_post_failure_after_the_delete_retries_without_a_second_commen
     graph.fail_post = "boom"
     failed = _drain(conn, "instagram", graph, inc)
     # never silent: the failed post is reported by the posting path that now owns it
-    assert graph.comments == {} and failed.failed >= 1 and failed.errors
+    assert graph.comments == {} and failed.failed == 1 and failed.errors
+    (open_one,) = _open_incidents(inc)  # zero comments live: never silent
+    assert open_one["delivery_id"] == did and "repost" in open_one["kind"]
     row = _row(conn, did)
     assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW
     assert not first_comment_corrections(row) and row["first_comment_error"]
     graph.fail_post = None
     ok = _drain(conn, "instagram", graph, inc)
     assert ok.posted == 1 and list(graph.comments.values()) == [NEW]
+    _drain(conn, "instagram", graph, inc)  # the next pass closes the repost incident
     assert not _open_incidents(inc)
 
 
@@ -311,7 +314,8 @@ def test_a_refused_post_after_a_confirmed_delete_returns_the_row_to_unposted_wit
     # never marked posted with the OLD text; the normal posting path owns the NEW one
     assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW
     assert not first_comment_corrections(row)
-    assert second.failed == 1 and second.errors and row["first_comment_attempts"] == 1
+    # the failed repost counts toward the cap (the first pass's attempt plus this one)
+    assert second.failed == 1 and second.errors and row["first_comment_attempts"] == 2
     assert row["first_comment_error"]  # visible on the row
     for _ in range(FIRST_COMMENT_MAX_ATTEMPTS + 2):
         _drain(conn, "instagram", graph, inc)

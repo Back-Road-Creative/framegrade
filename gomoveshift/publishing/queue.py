@@ -1617,13 +1617,20 @@ def record_stale_live_comment(
         else:
             if current == live_text:
                 return None
-            fix = {**item, "action": "edit", "to": current}
+            # An empty current text (a private relink dropped it) never becomes an edit to "":
+            # the live comment goes, and the row keeps no text (a delete of an intended text
+            # never runs, and none is intended).
+            fix = (
+                {**item, "action": "edit", "to": current}
+                if current
+                else {**item, "action": "delete"}
+            )
             done = conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=?, "
                 "first_comment_live_id=?, first_comment_error=?, first_comment_correction=?, "
                 "updated_at=? WHERE id=? AND first_comment_posted_at IS NULL",
                 (
-                    live_text,
+                    live_text if current else None,
                     now,
                     live_id or None,
                     error,
@@ -1683,8 +1690,22 @@ def capped_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterab
     ).fetchall()
 
 
+def unposted_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
+    """Ids of deliveries on ``platforms`` whose first comment is not posted."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM deliveries WHERE first_comment_posted_at IS NULL "  # noqa: S608
+            f"AND platform IN ({marks})",
+            wanted,
+        )
+    }
+
+
 def unpost_first_comment_for_repost(
-    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str
+    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str, *, count_attempt: bool = False
 ) -> None:
     """An ``edit`` found its comment gone (404): unpost the row with the edit's ``to`` as its
     text, so the normal drain posts it. Items for the same dead comment go."""
@@ -1701,11 +1722,12 @@ def unpost_first_comment_for_repost(
         conn.execute(
             "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
             "first_comment_live_id=NULL, first_comment_error=NULL, first_comment_correction=?, "
-            "updated_at=? "
+            "first_comment_attempts=first_comment_attempts+?, updated_at=? "
             "WHERE id=? AND first_comment_correction=?",
             (
                 item.get("to") or "",
                 json.dumps(left) if left else None,
+                int(count_attempt),
                 now,
                 delivery_id,
                 row["first_comment_correction"],
@@ -1767,27 +1789,35 @@ def rewrite_first_comment_corrections(
         return done == 1
 
 
+_CAS_RETRIES = 5
+
+
 def drop_private_edit(conn: sqlite3.Connection, delivery_id: int, item: dict, now: str) -> None:
     """``item`` (an ``edit``) would link a video that is still private at the row's slot: it
     becomes a ``delete`` of the live comment and the row's intended text goes, so the delete
-    (never run against the intended text) can run."""
-    with conn:
-        row = conn.execute(
-            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
-        ).fetchone()
-        if row is None:
+    (never run against the intended text) can run. A compare-and-set on the JSON, retried when a
+    concurrent drain moved it, so an item it appended is never lost."""
+    for _ in range(_CAS_RETRIES):
+        with conn:
+            row = conn.execute(
+                "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                return
+            out = [
+                {"live_id": i.get("live_id"), "live_text": i.get("live_text"), "action": "delete"}
+                if _same_correction(i, item) and i.get("action") == "edit"
+                else i
+                for i in first_comment_corrections(row)
+            ]
+            done = conn.execute(
+                "UPDATE deliveries SET first_comment_correction=?, first_comment_text=NULL, "
+                "updated_at=? WHERE id=? AND first_comment_correction IS ?",
+                (json.dumps(out), now, delivery_id, row["first_comment_correction"]),
+            ).rowcount
+        if done == 1:
             return
-        out = [
-            {"live_id": i.get("live_id"), "live_text": i.get("live_text"), "action": "delete"}
-            if _same_correction(i, item) and i.get("action") == "edit"
-            else i
-            for i in first_comment_corrections(row)
-        ]
-        conn.execute(
-            "UPDATE deliveries SET first_comment_correction=?, first_comment_text=NULL, "
-            "updated_at=? WHERE id=?",
-            (json.dumps(out), now, delivery_id),
-        )
+    raise sqlite3.OperationalError(f"delivery {delivery_id}: the correction JSON kept moving")
 
 
 def resolve_first_comment_correction(

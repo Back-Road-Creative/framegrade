@@ -207,7 +207,7 @@ class FacebookReelsAdapter:
         """Delete the Page's own comment (``DELETE /{comment-id}``)."""
         delete_graph_comment(
             self._session, self._base, comment_id, self._access_token,
-            permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
+            text_field="message", permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
         )  # fmt: skip
 
     def start_upload(self) -> UploadHandle:
