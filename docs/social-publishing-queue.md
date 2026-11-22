@@ -710,6 +710,12 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   fails closed. The check before a post counts a comment with the current text whoever wrote it. A
   live comment saying the row's text or a pending edit's `to` is adopted, never deleted. A row's
   other items wait for the pass after its first failed item.
+- **Races never lose or delete the intended comment.** While a pending edit fixes a comment that
+  says the row's text, the intended texts are the edits' `to` only, so a second stale duplicate
+  gets a delete. Adopting a comment drops its own pending items and turns only the others into
+  deletes. Applying an edit or a 404 unpost matches the item's `to` too: a relink that moved it
+  mid-edit leaves it pending for the next pass. A 404 edit still runs the row's deletes. `forbidden`
+  is a scope gap when posting but a refusal for a correction; a `channels.list` scope gap is a re-auth.
 - **Own counter, own cap, never silent.** Corrections count in `first_comment_correction_attempts`;
   a refusal (403 `forbidden`, 400 `invalidValue`) counts, only `insufficientPermissions` sets
   `needs_reauth`. At `FIRST_COMMENT_MAX_ATTEMPTS` the drain stops, the summary line keeps

@@ -1498,10 +1498,24 @@ def _same_correction(a: dict, b: dict) -> bool:
     return a.get("live_id") == b.get("live_id") and a.get("live_text") == b.get("live_text")
 
 
+def _same_applied(a: dict, b: dict) -> bool:
+    """``a`` is ``b`` as it was read: same comment, text, action AND intended ``to``."""
+    return (
+        _same_correction(a, b) and a.get("action") == b.get("action") and a.get("to") == b.get("to")
+    )
+
+
 def first_comment_intended_texts(row: Any) -> set:
-    """The texts the row means to have live: its current text and every pending edit's ``to``."""
-    texts = {(row["first_comment_text"] or "").strip()}
-    texts.update((i.get("to") or "").strip() for i in first_comment_corrections(row))
+    """The texts the row means to have live: every pending edit's ``to``, plus its current text
+    unless a pending edit is still fixing a comment that says it (the row text is then the stale
+    one a drain recorded, not an intended one)."""
+    current = (row["first_comment_text"] or "").strip()
+    items = first_comment_corrections(row)
+    texts = {(i.get("to") or "").strip() for i in items}
+    if not any(
+        i.get("action") == "edit" and (i.get("live_text") or "").strip() == current for i in items
+    ):
+        texts.add(current)
     return texts - {""}
 
 
@@ -1529,21 +1543,30 @@ def record_stale_live_comment(
             return None
         if row["first_comment_posted_at"] is not None:
             said = live_text.strip()
-            if said == current.strip():
+            intended = first_comment_intended_texts(row)
+            if said == current.strip() and said in intended:
                 return None
-            if said in first_comment_intended_texts(row):
+            if said in intended:
                 items = [
                     {**i, "action": "delete"}
                     if i.get("action") == "edit" and (i.get("to") or "").strip() == said
                     else i
                     for i in items
+                    if not (live_id and i.get("live_id") == live_id)
                 ]
-                error = stale_live_error(current, live_text)
+                error = stale_live_error(current, live_text) if items else None
                 done = conn.execute(
                     "UPDATE deliveries SET first_comment_text=?, first_comment_error=?, "
                     "first_comment_correction=?, updated_at=? WHERE id=? "
                     "AND first_comment_posted_at IS NOT NULL AND first_comment_text=?",
-                    (live_text, error, json.dumps(items), now, delivery_id, current),
+                    (
+                        live_text,
+                        error,
+                        json.dumps(items) if items else None,
+                        now,
+                        delivery_id,
+                        current,
+                    ),
                 ).rowcount
                 return error if done == 1 else None
             done = conn.execute(
@@ -1622,15 +1645,21 @@ def unpost_first_comment_for_repost(
         ).fetchone()
         if row is None:
             return
-        left = [
-            i
-            for i in first_comment_corrections(row)
-            if not _same_correction(i, item) and i.get("live_id") != item.get("live_id")
-        ]
+        items = first_comment_corrections(row)
+        if not any(_same_applied(i, item) for i in items):
+            return  # a relink moved its ``to`` meanwhile: the next pass edits to the new one
+        left = [i for i in items if i.get("live_id") != item.get("live_id")]
         conn.execute(
             "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
-            "first_comment_error=NULL, first_comment_correction=?, updated_at=? WHERE id=?",
-            (item.get("to") or "", json.dumps(left) if left else None, now, delivery_id),
+            "first_comment_error=NULL, first_comment_correction=?, updated_at=? "
+            "WHERE id=? AND first_comment_correction=?",
+            (
+                item.get("to") or "",
+                json.dumps(left) if left else None,
+                now,
+                delivery_id,
+                row["first_comment_correction"],
+            ),
         )
 
 
@@ -1678,15 +1707,27 @@ def resolve_first_comment_correction(
         ).fetchone()
         if row is None:
             return
-        left = [i for i in first_comment_corrections(row) if not _same_correction(i, item)]
+        items = first_comment_corrections(row)
+        left = [i for i in items if not _same_applied(i, item)]
         text = row["first_comment_text"]
-        if item.get("action") == "edit" and text == item.get("live_text"):
+        if (
+            len(left) < len(items)
+            and item.get("action") == "edit"
+            and text == item.get("live_text")
+        ):
             text = item.get("to") or text
         conn.execute(
             "UPDATE deliveries SET first_comment_text=?, first_comment_correction=?, "
             "first_comment_error=CASE WHEN ? THEN first_comment_error ELSE NULL END, "
-            "updated_at=? WHERE id=?",
-            (text, json.dumps(left) if left else None, int(bool(left)), now, delivery_id),
+            "updated_at=? WHERE id=? AND first_comment_correction=?",
+            (
+                text,
+                json.dumps(left) if left else None,
+                int(bool(left)),
+                now,
+                delivery_id,
+                row["first_comment_correction"],
+            ),
         )
 
 

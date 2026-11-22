@@ -176,14 +176,18 @@ def run_corrections(
     post the comment is on, for a platform that can only replace a comment). ``result`` gains
     ``corrected`` per fix and ``stale`` plus an error line per failure; ``refused(exc)`` counts
     toward the correction cap. After a row's first failure its other items wait for the next
-    pass. ``gone(exc)`` is "comment not found": a delete is then done, an edit unposts the row.
+    pass. ``gone(exc)`` is "comment not found": a delete is then done, an edit unposts the row
+    (its deletes still run).
     A delete of the row's intended text is never run. A capped row is counted in
     ``result.correction_capped`` and gets the capped incident every pass."""
     platforms = tuple(platforms)
     _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
         keep = first_comment_intended_texts(row)
+        unposted = False
         for item in first_comment_corrections(row):
+            if unposted and item.get("action") != "delete":
+                continue  # the row is reposting: another edit would duplicate it
             if item.get("action") == "delete" and (item.get("live_text") or "").strip() in keep:
                 resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                 continue
@@ -203,7 +207,8 @@ def run_corrections(
                 if gone is not None and gone(exc):
                     if item.get("action") == "edit":
                         unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())
-                        break
+                        unposted = True  # its deletes still run, or the repost scan stalls on them
+                        continue
                     resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                     result.corrected += 1
                     continue
