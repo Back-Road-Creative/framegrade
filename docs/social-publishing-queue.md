@@ -663,6 +663,39 @@ line per Short (`changed` / `unchanged` / `refused`, old -> new title). Local fi
 (no queue row, no platform call); the plan is re-parsed by `load_publish_plan` before it replaces
 the old file, and `reviewed_plan_hash` stays a stored field.
 
+## A replace re-render (`rebuild_replaced_sidecar`)
+
+A replace supersedes the project dir and re-renders every Short to the same output path, but the
+replace run emits no `<project>_publish_plan.json` and enqueues nothing, so queued rows pointed at
+a missing sidecar (`TransientMediaError` forever). `replace_rebuild.py::rebuild_replaced_sidecar(conn,
+*, old_sidecar, new_sidecar, project, stages_dir, now, incidents_dir=None)` reads the OLD sidecar
+from `_superseded/<at>/...` and writes the rebuilt one at the ORIGINAL path (tmp file then
+`os.replace`), so rows' `sidecar_path` resolves again with no row edit. **Rebuild, then relink:**
+every other field, `parent_lf_video_id` included, is kept; `relink_replaced_lf` rewrites it after.
+It is not wired into `replace_scheduled`; the wiring unit calls it.
+
+A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed with `review_hash`,
+`consent_hash` moved only when it equalled the old derived hash) only when: the re-render is the
+same clip (same parent LF; the stages' `shorts_ost_audit_<date>.json` window and the new media
+agree with the old duration to `DURATION_TOLERANCE_S`); the new run's privacy attestation verifies
+(`privacy_hold_reason`); `mask_frame_refusal` passes; the old hash was the derived one (a hand-set
+hash needs a human re-review); and no queued row is inside the 24 h lead time. Otherwise it is
+refused: its record keeps the OLD fingerprint (dispatch's media check then refuses the stale
+bytes, never uploads them), its rows are unchanged, and one `replace_rebuild_refused` incident
+shows in `gomoveshift status --json` (resolved when a later run swaps it).
+
+Rows of a swapped Short that are queued, unleased and have no upload id move `plan_hash` in one
+transaction with a `response_log` audit row (compare-and-set; commit, then `os.replace`; a crash
+between leaves the old file or none and a rerun converges). Leased, in-flight and uploaded rows
+are never changed and block that Short's swap; published and awaiting-manual rows are never
+changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
+
+**Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
+ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
+`delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
+(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
+error, i.e. after it uploads.
+
 ## A replaced long-form upload (`relink_replaced_lf`)
 
 Replacing a still-scheduled long-form video uploads the re-render under a NEW id and deletes the

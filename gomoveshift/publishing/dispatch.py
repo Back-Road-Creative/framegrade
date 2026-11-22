@@ -76,6 +76,16 @@ HELD_PAST_SLOT_KIND = "delivery_held_past_slot"
 _DEFAULT_BACKOFF_BASE_SECONDS = 60
 _DEFAULT_BACKOFF_CAP_SECONDS = 3600
 _DEFAULT_MAX_ATTEMPTS = 8
+#: A media stall is visible once the backoff has reached its ceiling: the first attempt whose
+#: delay (``base * 2**(n-1)``) is already the cap (7 at 60 s doubling to 3600 s). Derived from
+#: the existing backoff, not a new bound; the row keeps retrying (``TransientMediaError`` is
+#: exempt from ``max_attempts``) and the incident closes when it next uploads.
+MEDIA_STALL_ATTEMPTS = next(
+    n
+    for n in range(1, 64)
+    if _DEFAULT_BACKOFF_BASE_SECONDS * 2 ** (n - 1) >= _DEFAULT_BACKOFF_CAP_SECONDS
+)
+MEDIA_STALL_KIND = "delivery_media_stalled"
 
 #: A throttled delivery waits this long regardless of `attempt_count`.
 #: Six hours is well inside the daily publishing cadence (slots are
@@ -811,6 +821,65 @@ def _raise_held_incident(
         logger.exception("dispatch: could not write held-past-slot incident for %s", row["id"])
 
 
+def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = None) -> None:
+    """Open (or leave open) one ``delivery_media_stalled`` incident per queued row whose last
+    failure was ``TransientMediaError`` and whose attempts reached :data:`MEDIA_STALL_ATTEMPTS`;
+    resolve the incident of any row no longer in that state (it uploaded, or its media came
+    back). Never changes a row and never fatal: the row keeps retrying."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        load_all,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
+    try:
+        stalled = conn.execute(
+            "SELECT id, platform, project_name, short_index, attempt_count, error_detail "  # noqa: S608
+            f"FROM deliveries WHERE error_class = 'TransientMediaError' AND attempt_count >= ? "
+            f"AND status NOT IN ({terminal})",
+            (MEDIA_STALL_ATTEMPTS, *TERMINAL_STATUSES),
+        ).fetchall()
+        directory = incidents_dir or default_incidents_dir(default_data_root())
+        live = {r["id"] for r in stalled}
+        rows, _ = load_all(directory)
+        open_ids = set()
+        for row in rows:
+            if row.get("kind") != MEDIA_STALL_KIND or row.get("resolved_at"):
+                continue
+            if row.get("delivery_id") in live:
+                open_ids.add(row.get("delivery_id"))
+            else:
+                row["resolved_at"] = now
+                write_row(directory, row)
+        for r in stalled:
+            if r["id"] in open_ids:
+                continue
+            key = f"{MEDIA_STALL_KIND}:{r['id']}"
+            write_row(
+                directory,
+                new_incident(
+                    MEDIA_STALL_KIND,
+                    key,
+                    f"{safe_name(key)}.json",
+                    now,
+                    delivery_id=r["id"],
+                    platform=r["platform"],
+                    project=r["project_name"],
+                    detail=(
+                        f"{r['platform']}#{r['id']} {r['project_name']} short {r['short_index']}: "
+                        f"media unreadable for {r['attempt_count']} attempts "
+                        f"(backoff at its ceiling); still retrying: {r['error_detail']}"
+                    )[:500],
+                ),
+            )
+    except (OSError, ValueError):
+        logger.exception("dispatch: could not sync media-stall incidents")
+
+
 def _defer_same_hour(conn, row: Dict[str, Any], now: str, released_hours: set) -> bool:
     """Keep one YouTube Short per clock hour. ``True`` when this row was moved.
 
@@ -1155,6 +1224,7 @@ def drain_queue(
             transition(conn, delivery_id, status, "published", published_at_source=CONFIRMED)
             result.succeeded += 1
 
+    sync_media_stall_incidents(conn, now, incidents_dir)
     return result
 
 
