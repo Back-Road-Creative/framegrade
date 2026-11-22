@@ -2300,14 +2300,18 @@ class SocialGenerator:
             {b: k for k, b in title},
         )
 
-    def _enrolled_arms(self, arms: "dict[str, str]", interactive: bool) -> "dict[str, str]":
+    def _enrolled_arms(
+        self, arms: "dict[str, str]", interactive: bool, hand_caption: Optional[str] = None
+    ) -> "dict[str, str]":
         """``arms`` without a caption experiment whose treatment this Short would
         render exactly as the control arm (``none``, no hashtags) does.
 
         An arm-B Short with no location tag to carry, or an interactive one that
         withholds the place, ships zero hashtags like arm A; tagging it ``B`` would
         count an untreated Short as treated. It is left out (no ``experiment_arms``
-        entry) and keeps the normal hashtags. Decided here, from the same
+        entry) and keeps the normal hashtags. So does a Short whose bare hand caption (no tags,
+        no recording date to append to YouTube's) would read the same on Facebook and
+        YouTube, which the identical-caption check refuses. Decided here, from the same
         ``_platform_hashtags`` the caption uses, so the tag cannot disagree with the text.
         """
         kept = {}
@@ -2323,11 +2327,20 @@ class SocialGenerator:
 
                 if mode != "none" and tags(mode) == tags("none"):
                     continue
+                if not tags(mode) and self._bare_copy_of_youtube(hand_caption):
+                    continue
             kept[experiment.name] = arm_id
         return {
             **{k: v for k, v in arms.items() if k not in {e.name for e in self.experiments}},
             **kept,
         }
+
+    def _bare_copy_of_youtube(self, hand_caption: Optional[str]) -> bool:
+        """True when a hand caption with no hashtags is the Facebook caption AND the
+        YouTube caption verbatim (YouTube only differs by its "Filmed ..." line)."""
+        if not hand_caption or self.recording_date:
+            return False
+        return f"{hand_caption.strip().rstrip('.')}." == hand_caption.strip()
 
     def _shorts_arm_factors(self, hand_idx: int, title_facts: Optional[TitleFacts]) -> "list[str]":
         """The Shorts factors this Short's text can carry: the hashtag set only off
@@ -2415,6 +2428,7 @@ class SocialGenerator:
         arms = self._enrolled_arms(
             assign_arms(self.experiments, self.project_name, hand_idx, self.experiment_today),
             hand.interactive if hand is not None else False,
+            hand.caption if hand is not None else None,
         )
         eligible = self._shorts_arm_factors(hand_idx, title_facts)
         shorts_arms = {

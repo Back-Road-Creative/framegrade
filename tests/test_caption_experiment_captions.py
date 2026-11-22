@@ -250,3 +250,17 @@ def test_enrolled_shorts_reach_arm_results_hand_caption_or_composed(tmp_path, ca
         a: sum(1 for t in tags.values() if t.get("fb_hashtags") == a) for a in "ABC"
     }
     assert all(r.n >= 3 and r.median_plays is not None for r in results.values())
+
+
+def test_hand_caption_without_date_is_not_enrolled_where_arm_a_would_copy_youtube(tmp_path):
+    # Arm A adds no tags, so a hand caption with no recording date would read the same on
+    # Facebook and YouTube; the identical-caption check would raise. Such a Short stays out.
+    gen = _gen_at(
+        "Dingle Peninsula, County Kerry, Ireland",
+        _titles_yaml(30, caption="Filmed on a Tuesday."),
+        tmp_path,
+    )
+    posts = gen.generate_all(num_shorts=30)  # must not raise
+    arms = {p.experiment_arms.get("fb_hashtags") for p in posts}
+    assert "A" not in arms
+    assert arms >= {"B", "C"}

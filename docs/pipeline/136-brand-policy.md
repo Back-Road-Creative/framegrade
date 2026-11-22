@@ -114,7 +114,8 @@ carry the block itself to keep the experiment running.
 - **Enrollment** (`SocialGenerator._enrolled_arms`): a Short is tagged into the experiment only
   when its arm renders differently from arm A. An arm-B Short with no location tag to carry, or an
   interactive one (which withholds the place), would ship zero hashtags exactly like `none`; it
-  gets no `experiment_arms` entry and keeps the normal hashtags. The decision calls the same
+  gets no `experiment_arms` entry and keeps the normal hashtags; so does a hand-captioned Short
+  with no recording date whose bare arm-A caption would equal its YouTube caption. The decision calls the same
   `_platform_hashtags` the caption uses, so tag and text cannot disagree.
 - **Outcome keying**: `experiments.arm_observations` joins the sidecar's `experiment_arms` to
   `reel_initial_plays` (the collector's `blue_reels_play_count`); it needs no opener template, so
