@@ -83,6 +83,12 @@ class _GoneLies(FakeGraph):
     """Graph answers 100/33 on a DELETE of a comment that is still there (the pair's generic
     message also covers 'cannot be loaded due to missing permissions' -- UNVERIFIED)."""
 
+    def get(self, url, params=None, **kw):
+        if not url.endswith("/comments"):  # a GET of the one comment lies the same way
+            self.log.append(f"read-100-33:{url.rsplit('/', 1)[1]}")
+            return Resp({"error": {"code": 100, "error_subcode": 33, "message": "no such"}}, 400)
+        return super().get(url, params=params, **kw)
+
     def delete(self, url, **kw):
         cid = url.rsplit("/", 1)[1]
         self.log.append(f"delete-100-33:{cid}")
@@ -106,15 +112,35 @@ def test_a_plain_delete_answered_100_33_for_a_readable_comment_is_not_done(platf
     graph = _GoneLies(platform, [("c1", OLD)])
     adapter = _adapter(platform, graph)
     with pytest.raises(Exception):  # noqa: B017 -- any failure: the delete is not confirmed
-        adapter.delete_comment("c1")
+        adapter.delete_comment("c1", object_id="post")
     assert graph.comments == {"c1": OLD}
+
+
+@pytest.mark.parametrize("platform", ["facebook", "instagram"])
+def test_x5_a_gone_answer_with_no_post_to_list_is_never_trusted(platform):
+    graph = FakeGraph(platform, [])
+    with pytest.raises(Exception):  # noqa: B017 -- absence cannot be confirmed without a listing
+        _adapter(platform, graph).delete_comment("c1")
+
+
+@pytest.mark.parametrize("platform", ["facebook", "instagram"])
+def test_x5_a_gone_answer_when_the_listing_fails_leaves_the_delete_pending(platform):
+    class _ListFails(FakeGraph):
+        def get(self, url, params=None, **kw):
+            if url.endswith("/comments"):
+                raise ConnectionError("connection reset")
+            return super().get(url, params=params, **kw)
+
+    with pytest.raises(Exception):  # noqa: B017 -- never done on a listing that did not answer
+        _adapter(platform, _ListFails(platform, [])).delete_comment("c1", object_id="post")
 
 
 @pytest.mark.parametrize("platform", ["facebook", "instagram"])
 def test_a_plain_delete_answered_100_33_for_an_absent_comment_is_done(platform):
     graph = FakeGraph(platform, [])
-    _adapter(platform, graph).delete_comment("c1")  # gone and confirmed absent: the goal holds
-    assert "read:c1" in graph.log
+    # gone, and the listing does not show it: the goal holds
+    _adapter(platform, graph).delete_comment("c1", object_id="post")
+    assert "list" in graph.log
 
 
 class _EditGone(FakeGraph):
@@ -131,6 +157,55 @@ def test_an_edit_answered_100_33_is_not_a_success():
     with pytest.raises(Exception):  # noqa: B017 -- the edit did not land
         adapter.edit_comment("c1", NEW)
     assert graph.comments == {"c1": OLD}
+
+
+# --- x3: an Instagram replace records the id of the comment it posted -------------------------------
+
+
+def test_x3_an_instagram_replace_updates_the_recorded_live_id_so_a_later_scan_keeps_it(conn, inc):
+    did = _meta_relinked(conn, "instagram")
+    graph = FakeGraph("instagram", [("c1", OLD)])
+    _meta_drain(conn, "instagram", graph, inc)  # finds the stale comment, queues the replace
+    _meta_drain(conn, "instagram", graph, inc)  # deletes c1, posts new1
+    assert graph.comments == {"new1": NEW}
+    assert _meta_row(conn, did)["first_comment_live_id"] == "new1"
+    for _ in range(3):  # a later drain that finds new1 never queues, or runs, a delete of it
+        _meta_drain(conn, "instagram", graph, inc)
+    assert graph.comments == {"new1": NEW} and not [e for e in graph.log if "delete:new1" in e]
+    assert not first_comment_corrections(_meta_row(conn, did))
+
+
+# --- x4: a deleted comment with nothing to replace it stays an open incident --------------------
+
+
+def _open(inc, kind):
+    rows = [json.loads(p.read_text()) for p in sorted(inc.glob("*.json"))] if inc.is_dir() else []
+    return [r for r in rows if r.get("kind") == kind and not r.get("resolved_at")]
+
+
+def test_x4_a_private_relink_delete_leaves_an_open_incident_until_the_comment_is_back(conn, inc):
+    did = _published(conn)
+    with conn:
+        conn.execute("UPDATE deliveries SET scheduled_at=? WHERE id=?", (SLOT, did))
+    _drain(
+        conn,
+        _Service(on_insert=lambda: rewrite_unposted_first_comment(conn, did, OLD_TEXT, None, _NOW)),
+        inc,
+    )
+    nxt = _Service()
+    result = _drain(conn, nxt, inc)
+    assert nxt.comments_api.deletes == ["new-thread"]
+    row = _row(conn, did)
+    assert row["first_comment_posted_at"] and not row["first_comment_text"]  # posted_at kept
+    (incident,) = _open(inc, "first_comment_removed")
+    assert incident["delivery_id"] == did
+    assert any("by hand" in e for e in result.errors)
+    _drain(conn, _Service(), inc)  # another pass: still no comment, still open
+    assert len(_open(inc, "first_comment_removed")) == 1
+    with conn:  # the row has its comment text again
+        conn.execute("UPDATE deliveries SET first_comment_text=? WHERE id=?", (OLD_TEXT, did))
+    _drain(conn, _Service(), inc)
+    assert not _open(inc, "first_comment_removed")
 
 
 # --- F5 / F7: a private relink keeps its comment findable and tells the truth ------------------

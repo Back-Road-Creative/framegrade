@@ -762,11 +762,20 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   reports the second copy once in `first_comment_error` and the drain's errors.
 - **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
   unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
-  the row's text NULL.
-- **A Graph "gone" answer is confirmed.** `delete_graph_comment` (and so the Instagram replace)
-  trusts code 100 / subcode 33 on a DELETE only after `GET /{id}` shows the comment absent; one
-  that still reads raises and nothing is posted beside it. An edit answered 100/33 is never a
-  success. (The pair's generic message UNVERIFIED also covers a comment that cannot be loaded.)
+  the row's text NULL (`first_comment_posted_at` stays set). When that delete lands the row has no
+  comment live and nothing refills it, so `run_corrections` adds an error line ("re-add it by
+  hand once the video is public") and keeps a `first_comment_removed` incident open
+  (`removed_first_comment_ids`: posted, text empty); it closes once the row has comment text again.
+- **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
+  replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
+  (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on
+  `GET /{id}` proves nothing (UNVERIFIED: the pair also covers a comment that cannot be loaded).
+  Still listed, a failed or cut-short listing, or no `object_id` raises, the delete stays pending
+  and nothing is posted or resolved. An edit answered 100/33 is never a success.
+- **A replace records the new comment.** `edit_comment` returns the id of the comment it posted
+  (Instagram, or a Facebook edit Graph refused); `resolve_first_comment_correction(new_live_id=)`
+  makes it the row's `first_comment_live_id` when the replaced one was the recorded one, so a
+  later scan never takes it for a second copy and deletes it.
 - **A private relink keeps its comment findable.** An unposted, published row relinked to a
   video that is private at its slot loses its text, so the drain never scans it again: the report
   carries an operator item to check the post by hand for an OLD comment. A posted row's note says

@@ -21,6 +21,7 @@ from .queue import (
     first_comment_intended_texts,
     pending_first_comment_corrections,
     registered_platform_id,
+    removed_first_comment_ids,
     resolve_first_comment_correction,
     unpost_first_comment_for_repost,
     unposted_first_comment_ids,
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 KIND = "first_comment_stale"
 CAPPED_KIND = "first_comment_correction_capped"
 REPOST_KIND = "first_comment_repost_failed"
+REMOVED_KIND = "first_comment_removed"
 _DETAIL_MAX = 500
 
 
@@ -150,9 +152,12 @@ def raise_repost_incident(
     delivery_id: int,
     cause: str,
     incidents_dir: Optional[Path] = None,
+    kind: str = REPOST_KIND,
 ) -> None:
     """File (or refresh) the open incident for a row whose stale comment was deleted but whose
-    replacement did not post: zero comments are live until the drain reposts. Never fatal."""
+    replacement did not post: zero comments are live until the drain reposts. ``kind``
+    ``REMOVED_KIND``: the comment was deleted and nothing replaces it (a private relink left no
+    text), so only a hand re-add brings it back. Never fatal."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -167,12 +172,18 @@ def raise_repost_incident(
     if row is None:
         return
     directory = incidents_dir or default_incidents_dir(default_data_root())
-    filename = f"{safe_name(_key(delivery_id, REPOST_KIND))}.json"
-    detail = (
-        f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
-        f"the stale comment was deleted and the replacement did not post ({cause}); no comment "
-        "is live until the drain reposts it"
-    )[:_DETAIL_MAX]
+    filename = f"{safe_name(_key(delivery_id, kind))}.json"
+    where = f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
+    if kind == REMOVED_KIND:
+        detail = (
+            f"{where}the comment was deleted and the row has no text to post ({cause}); no "
+            "comment is live: re-add it by hand once the video is public"
+        )[:_DETAIL_MAX]
+    else:
+        detail = (
+            f"{where}the stale comment was deleted and the replacement did not post ({cause}); "
+            "no comment is live until the drain reposts it"
+        )[:_DETAIL_MAX]
     try:
         path = directory / filename
         prior = json.loads(path.read_text()) if path.is_file() else None
@@ -183,8 +194,8 @@ def raise_repost_incident(
         write_row(
             directory,
             new_incident(
-                REPOST_KIND,
-                _key(delivery_id, REPOST_KIND),
+                kind,
+                _key(delivery_id, kind),
                 filename,
                 _now_iso(),
                 delivery_id=delivery_id,
@@ -196,6 +207,22 @@ def raise_repost_incident(
         )
     except (OSError, ValueError):
         logger.exception("first comment: could not write the repost incident %s", delivery_id)
+
+
+def _note_removed(
+    conn: sqlite3.Connection, delivery_id: int, result: Any, incidents_dir: Optional[Path]
+) -> None:
+    """A delete landed: when the row now holds no comment text, zero comments are live, the
+    backfill never refills a posted row and no drain scans it, so say so and keep an incident
+    open until the row has its text again (closed by ``_resolve_all``)."""
+    if delivery_id not in removed_first_comment_ids(conn, ("youtube", "facebook", "instagram")):
+        return
+    cause = "its replacement is private at the short's slot, or the text was dropped"
+    result.errors.append(
+        f"delivery {delivery_id}: the stale comment was deleted and no comment replaces it; "
+        "no comment is live, re-add it by hand once the video is public"
+    )
+    raise_repost_incident(conn, delivery_id, cause, incidents_dir, kind=REMOVED_KIND)
 
 
 def _resolve_incidents(
@@ -281,8 +308,9 @@ def run_corrections(
                         f"{row['platform']} cannot {item.get('action')} comment "
                         f"{item.get('live_id') or '(id unknown)'}"
                     )
+                new_id = None
                 if item["action"] == "edit":
-                    call(item["live_id"], item["to"], object_id=_target(row))
+                    new_id = call(item["live_id"], item["to"], object_id=_target(row))
                 else:
                     if item.get("extra"):
                         # A second copy: re-read it. Only our own, still saying the copied text and
@@ -294,7 +322,7 @@ def run_corrections(
                         # A stale observation: the comment has since been corrected.
                         resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                         continue
-                    call(item["live_id"])
+                    call(item["live_id"], object_id=_target(row))
             except Exception as exc:  # noqa: BLE001 -- graded per correction
                 if isinstance(exc, ReplacePostFailedError):
                     # The delete is confirmed; the row goes back to unposted with the new text
@@ -318,6 +346,8 @@ def run_corrections(
                         continue
                     resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                     result.corrected += 1
+                    if item["action"] == "delete":
+                        _note_removed(conn, row["id"], result, incidents_dir)
                     continue
                 detail = str(exc).strip() or exc.__class__.__name__
                 fail_first_comment_correction(
@@ -333,8 +363,16 @@ def run_corrections(
                 )
                 raise_stale_incident(conn, row["id"], incidents_dir)
                 break
-            resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+            resolve_first_comment_correction(
+                conn,
+                row["id"],
+                item,
+                _now_iso(),
+                new_live_id=new_id if isinstance(new_id, str) else None,
+            )
             result.corrected += 1
+            if item["action"] == "delete":
+                _note_removed(conn, row["id"], result, incidents_dir)
     capped = capped_first_comment_corrections(conn, platforms)
     result.correction_capped += len(capped)
     for row in capped:
@@ -376,4 +414,7 @@ def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Opti
     _resolve_incidents(platforms, capped, incidents_dir, CAPPED_KIND)
     _resolve_incidents(
         platforms, unposted_first_comment_ids(conn, platforms), incidents_dir, REPOST_KIND
+    )
+    _resolve_incidents(
+        platforms, removed_first_comment_ids(conn, platforms), incidents_dir, REMOVED_KIND
     )

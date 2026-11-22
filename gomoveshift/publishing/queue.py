@@ -1704,6 +1704,21 @@ def unposted_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str
     }
 
 
+def removed_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
+    """Ids of deliveries on ``platforms`` marked posted whose comment text is empty: their live
+    comment was deleted with nothing to replace it, and the drain never scans or refills them."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM deliveries WHERE first_comment_posted_at IS NOT NULL "  # noqa: S608
+            f"AND (first_comment_text IS NULL OR first_comment_text='') AND platform IN ({marks})",
+            wanted,
+        )
+    }
+
+
 def unpost_first_comment_for_repost(
     conn: sqlite3.Connection, delivery_id: int, item: dict, now: str, *, count_attempt: bool = False
 ) -> None:
@@ -1821,18 +1836,28 @@ def drop_private_edit(conn: sqlite3.Connection, delivery_id: int, item: dict, no
 
 
 def resolve_first_comment_correction(
-    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    item: dict,
+    now: str,
+    new_live_id: Optional[str] = None,
 ) -> None:
     """``item`` was applied: drop it (an ``edit`` also sets the row's intended text); the last
-    one clears the error."""
+    one clears the error. ``new_live_id``: the replace (Instagram, or a Facebook edit Graph
+    refused) posted a new comment; it becomes the row's recorded live id when the replaced
+    comment was the recorded one, so a later scan never takes it for a second copy."""
     with conn:
         row = conn.execute(
-            "SELECT first_comment_text, first_comment_correction FROM deliveries WHERE id=?",
+            "SELECT first_comment_text, first_comment_correction, first_comment_live_id "
+            "FROM deliveries WHERE id=?",
             (delivery_id,),
         ).fetchone()
         if row is None:
             return
         items = first_comment_corrections(row)
+        live = row["first_comment_live_id"]
+        if new_live_id and item.get("action") == "edit" and live in (None, item.get("live_id")):
+            live = new_live_id
         left = [i for i in items if not _same_applied(i, item)]
         text = row["first_comment_text"]
         if (
@@ -1842,11 +1867,13 @@ def resolve_first_comment_correction(
         ):
             text = item.get("to") or text
         conn.execute(
-            "UPDATE deliveries SET first_comment_text=?, first_comment_correction=?, "
+            "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
+            "first_comment_correction=?, "
             "first_comment_error=CASE WHEN ? THEN first_comment_error ELSE NULL END, "
             "updated_at=? WHERE id=? AND first_comment_correction=?",
             (
                 text,
+                live,
                 json.dumps(left) if left else None,
                 int(bool(left)),
                 now,
