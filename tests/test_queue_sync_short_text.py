@@ -611,14 +611,18 @@ def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):
     assert set(_hashes(conn).values()) == {OLD_HASH}
 
 
-def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
+def _live_schedule():
+    """A slot 3 days past the REAL clock: the CLI reads datetime.now, not NOW."""
     soon = datetime.now(timezone.utc) + timedelta(days=3)
-    schedule = {
+    return {
         "display_timezone": "America/New_York",
         "scheduled_at_utc": soon.isoformat(),
         "scheduled_at_utc_by_platform": {},
     }
-    plan, conn = _world(tmp_path, [_short(1, schedule=schedule)])
+
+
+def test_the_cli_action_is_dry_run_by_default(tmp_path, capsys, monkeypatch):
+    plan, conn = _world(tmp_path, [_short(1, schedule=_live_schedule())])
     conn.close()
     config = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path)))
     args = SimpleNamespace(queue_action="sync-short-text", apply=False)
@@ -724,7 +728,9 @@ def test_the_location_cap_is_counted_across_the_sidecar(tmp_path):
 
 
 def test_the_cli_passes_the_brand_location_cap(tmp_path, monkeypatch):
-    plan, conn = _two(tmp_path)
+    # Real-clock slots: a NOW-relative slot fell inside the lead time on 2026-11-22.
+    live = _live_schedule()
+    plan, conn = _world(tmp_path, [_short(1, schedule=live), _short(2, schedule=live)])
     conn.close()
     monkeypatch.setattr(
         "gomoveshift.publishing.brand_policy.load_brand_policy",
