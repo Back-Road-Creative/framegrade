@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from .dynamic_schedule import staggered_by_platform
-from .first_comment import COMMENT_PLATFORMS, full_drive_comment_text
+from .first_comment import COMMENT_PLATFORMS, full_drive_comment_text, parent_is_public_at
 from .models import KNOWN_PLATFORMS
 from .queue import enqueue, find_delivery
 
@@ -360,6 +360,7 @@ def enqueue_from_plan_sidecar(
                 (project_name, short_index, platform, plan_hash),
             ).fetchone()
 
+            platform_at = _platform_scheduled_at(by_platform, platform, scheduled_at, path, context)
             try:
                 delivery_id = enqueue(
                     conn,
@@ -369,10 +370,8 @@ def enqueue_from_plan_sidecar(
                     plan_hash,
                     shadow=shadow,
                     sidecar_path=str(path),
-                    scheduled_at=_platform_scheduled_at(
-                        by_platform, platform, scheduled_at, path, context
-                    ),
-                    first_comment_text=_first_comment_for(record, platform, context),
+                    scheduled_at=platform_at,
+                    first_comment_text=_first_comment_for(record, platform, platform_at, context),
                 )
             except sqlite3.IntegrityError as exc:
                 active = find_delivery(conn, project_name, short_index, platform)
@@ -399,11 +398,22 @@ def enqueue_from_plan_sidecar(
     )
 
 
-def _first_comment_for(record: dict, platform: str, context: str) -> Optional[str]:
+def _first_comment_for(
+    record: dict, platform: str, platform_at: str, context: str
+) -> Optional[str]:
     """The full-drive first comment for ``platform``, or ``None`` (TikTok has
     no comment API; a record with no parent id is warned about and left for
-    ``backfill_first_comment_text`` -- a comment must never block an enqueue)."""
+    ``backfill_first_comment_text`` -- a comment must never block an enqueue).
+    No comment when the drive is not public by ``platform_at``, the platform's
+    own slot (``parent_is_public_at``): it would link a private video."""
     if platform not in COMMENT_PLATFORMS:
+        return None
+    if not parent_is_public_at(platform_at, record.get("parent_lf_publish_at")):
+        logger.warning(
+            "first comment not scheduled: the full drive is not public by the %s slot (%s)",
+            platform,
+            context,
+        )
         return None
     try:
         return full_drive_comment_text(record.get("parent_lf_video_id") or "")
@@ -426,7 +436,7 @@ def backfill_first_comment_text(conn: sqlite3.Connection) -> BackfillResult:
     never raises."""
     marks = ",".join("?" for _ in COMMENT_PLATFORMS)
     rows = conn.execute(
-        f"SELECT id, project_name, short_index, sidecar_path FROM deliveries "  # noqa: S608
+        f"SELECT id, project_name, short_index, sidecar_path, scheduled_at FROM deliveries "  # noqa: S608
         f"WHERE platform IN ({marks}) AND first_comment_posted_at IS NULL "
         "AND (first_comment_text IS NULL OR first_comment_text = '') ORDER BY id",
         COMMENT_PLATFORMS,
@@ -473,6 +483,12 @@ def _backfill_text(row, cache: dict) -> Optional[str]:
             record.get("short_index") == row["short_index"]
             and record.get("project_name") == row["project_name"]
         ):
+            if not parent_is_public_at(row["scheduled_at"], record.get("parent_lf_publish_at")):
+                logger.warning(
+                    "first-comment backfill: %s goes out before its full drive is public; skipped",
+                    label,
+                )
+                return None
             try:
                 return full_drive_comment_text(record.get("parent_lf_video_id") or "")
             except ValueError:

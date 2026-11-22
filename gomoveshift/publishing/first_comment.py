@@ -10,6 +10,7 @@ endpoint, so TikTok rows never get a comment (see
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,30 @@ class CommentPermissionError(Exception):
 class CommentCheckError(RuntimeError):
     """The existing-comment check got a 2xx that is not a comment list, so
     posting could duplicate a comment the check failed to see."""
+
+
+def _aware(value) -> Optional[datetime]:
+    """``value`` (a datetime or ISO string) as a zoned datetime, else ``None``."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return None
+    return value
+
+
+def parent_is_public_at(short_at, parent_at) -> bool:
+    """True when the parent drive is public by the time the Short is.
+
+    The one rule for every link from a Short to its full drive: the reviewed
+    description block, the plan's description and each first comment. A
+    scheduled parent stays private until its publish time, so a Short that goes
+    out earlier would link a video nobody can watch. An unknown or unzoned time
+    cannot be ordered, so it never links."""
+    short, parent = _aware(short_at), _aware(parent_at)
+    return short is not None and parent is not None and short >= parent
 
 
 def full_drive_comment_text(parent_lf_video_id: str) -> str:

@@ -44,6 +44,8 @@ _PUB_AT = "2026-08-23T00:00:00+00:00"
 _NOW = "2026-08-23T00:06:00+00:00"  # 6 minutes after publish: due
 _TOO_SOON = "2026-08-23T00:04:00+00:00"  # 4 minutes: not yet
 _TEXT = "🎬 Watch the full drive: https://youtu.be/PARENT1"
+#: Before ``_record``'s slot: the drive is public when the Short goes out.
+_PARENT_PUBLIC = "2026-09-07T12:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +99,7 @@ def test_delay_is_five_minutes():
 
 def test_enqueue_sets_text_for_three_platforms_and_none_for_tiktok(conn, tmp_path):
     record = _record(selected=("youtube", "instagram", "facebook", "tiktok"))
-    record["parent_lf_video_id"] = "PARENT1"
+    record.update(parent_lf_video_id="PARENT1", parent_lf_publish_at=_PARENT_PUBLIC)
     path = _write_sidecar(tmp_path, [record])
     enqueue_from_plan_sidecar(conn, path)
     got = dict(conn.execute("SELECT platform, first_comment_text FROM deliveries").fetchall())
@@ -121,10 +123,17 @@ def test_enqueue_without_parent_id_leaves_text_null(conn, tmp_path):
 def _backfill_fixture(conn, tmp_path, platform="youtube", parent="PARENT1"):
     record = _record(short_index=7, selected=(platform,))
     if parent is not None:
-        record["parent_lf_video_id"] = parent
+        record.update(parent_lf_video_id=parent, parent_lf_publish_at=_PARENT_PUBLIC)
     path = _write_sidecar(tmp_path, [record])
     delivery_id = enqueue(
-        conn, "p", 7, platform, "hash-a", sidecar_path=str(path), first_comment_text=None
+        conn,
+        "p",
+        7,
+        platform,
+        "hash-a",
+        sidecar_path=str(path),
+        first_comment_text=None,
+        scheduled_at=record["schedule"]["scheduled_at_utc"],
     )
     return delivery_id, path
 

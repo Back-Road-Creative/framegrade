@@ -99,12 +99,17 @@ its rows never carry text.
 - **Enqueue.** `enqueue_from_plan_sidecar` sets `first_comment_text` from
   the record's `parent_lf_video_id` for youtube/instagram/facebook rows and
   leaves it `NULL` for tiktok (a record without a parent id is warned about
-  and left for backfill; it never blocks the enqueue).
+  and left for backfill; it never blocks the enqueue). A row whose own slot
+  (`scheduled_at_utc_by_platform`, else `scheduled_at_utc`) is before the
+  record's `parent_lf_publish_at`, or where either time is missing or has no
+  timezone, gets no text: a scheduled parent is private until it publishes, so
+  the link would not play. `first_comment.parent_is_public_at` is the one rule;
+  the Short's reviewed and plan descriptions use it too.
 - **Backfill.** `enqueue_from_plan.backfill_first_comment_text` fills rows
   whose text is `NULL`/empty from the row's `sidecar_path` record (matched on
   project + `short_index`). Idempotent; a posted row is never touched; an
-  unreadable sidecar or missing parent id is skipped with a WARNING and never
-  raises. `dispatch-queue` runs it once per run, before the drains, when any
+  unreadable sidecar, missing parent id, or a row whose `scheduled_at` is
+  before the drive is public is skipped with a WARNING and never raises. `dispatch-queue` runs it once per run, before the drains, when any
   of the three platforms is routed `first_party`.
 - **Selection.** `queue.select_due_first_comments` returns rows with a
   text, no `first_comment_posted_at`, a publish at least

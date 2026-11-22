@@ -228,6 +228,8 @@ def _youtube_text(short: dict, post) -> dict:
         recording_date=short["recording_date"],
         parent_id=short["parent_lf_video_id"],
         tiktok_privacy_level=tiktok.get("privacy_level") or "SELF_ONLY",
+        short_at=(short.get("schedule") or {}).get("scheduled_at_utc"),
+        parent_at=short.get("parent_lf_publish_at"),
     ).youtube
     return {"title": built.title, "description": built.description, "tags": list(built.tags)}
 
