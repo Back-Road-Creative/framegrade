@@ -54,7 +54,9 @@ OPENING_SECONDS = 4
 class ShortRange:
     """A scored short-clip range selected from a source timeline.
 
-    `rank` is 1-based, 1 = highest integrated score. Publish order
+    `rank` is 1-based, 1 = highest opening-weighted score
+    (``integrated_score * (1 + opening_mean)``); ``integrated_score`` stays
+    the plain window sum, so it need not fall with rank. Publish order
     follows rank: `short_01` is the day's best, `short_02` second, etc.
     """
 
@@ -200,9 +202,13 @@ def _window_mean(timestamps: np.ndarray, composites: np.ndarray, start: float, e
     return float(composites[in_window].sum()) / n if n else 0.0
 
 
-def _opening_mean(timestamps: np.ndarray, composites: np.ndarray, start: float) -> float:
-    """Mean composite of the first ``OPENING_SECONDS`` seconds from ``start``."""
-    return _window_mean(timestamps, composites, start, start + OPENING_SECONDS)
+def _opening_mean(
+    timestamps: np.ndarray, composites: np.ndarray, start: float, end: float
+) -> float:
+    """Mean composite of the first ``OPENING_SECONDS`` seconds from ``start``,
+    never past the window's ``end`` (a window shorter than the opening is its
+    own opening)."""
+    return _window_mean(timestamps, composites, start, min(start + OPENING_SECONDS, end))
 
 
 def _ranking_score(window_sum: float, opening_mean: float) -> float:
@@ -257,8 +263,9 @@ def plan_shorts(
 
     Returns:
         List of `ShortRange` objects sorted by rank (best score first,
-        rank 1 = highest integrated score). Only windows whose mean
-        composite is strictly above the quality bar are eligible, so a
+        rank 1 = highest opening-weighted score). Only windows whose mean
+        composite AND opening mean are strictly above the quality bar are
+        eligible, so a
         flat timeline, or a day with nothing above its own mean, returns
         fewer than `target_count` — possibly none. Fewer is a valid plan;
         this never raises and the SHORTS-CONTRACT gate does not read a
@@ -311,15 +318,18 @@ def plan_shorts(
     # uses the opening-weighted score; the plain sum is restored afterwards.
     qualifying = []
     plain_sum: dict[float, float] = {}
+    below_bar = 0
+    weak_opening = 0
     for w_start, w_end, w_sum in windows:
         if _window_mean(timestamps, composites, w_start, w_end) <= bar + _BAR_EPSILON:
+            below_bar += 1
             continue
-        opening = _opening_mean(timestamps, composites, w_start)
+        opening = _opening_mean(timestamps, composites, w_start, w_end)
         if opening <= bar + _BAR_EPSILON:
+            weak_opening += 1
             continue
         plain_sum[w_start] = w_sum
         qualifying.append((w_start, w_end, _ranking_score(w_sum, opening)))
-    below_bar = len(windows) - len(qualifying)
     chosen = _greedy_pick_with_gap(qualifying, target_count, min_gap_sec)
     # What the gap alone cost: qualifying windows a gap of 0 would also have
     # fit (non-overlapping), up to the target. Measured, never used to pick.
@@ -327,10 +337,12 @@ def plan_shorts(
     lost_to_gap = max(0, len(no_gap) - len(chosen))
     logger.info(
         "SHORTS-PLAN: %d of target %d clear the quality bar "
-        "(%d candidates below the timeline mean, %d lost to the %gs gap)",
+        "(%d candidates below the timeline mean, %d with a weak opening, "
+        "%d lost to the %gs gap)",
         len(chosen),
         target_count,
         below_bar,
+        weak_opening,
         lost_to_gap,
         min_gap_sec,
     )
@@ -369,7 +381,7 @@ def plan_shorts(
             rank=i + 1,
             moment_kind=("sustained" if end > pre_growth_ends[i] else "peak"),
             window_mean=_window_mean(timestamps, composites, start, end),
-            opening_mean=_opening_mean(timestamps, composites, start),
+            opening_mean=_opening_mean(timestamps, composites, start, end),
             quality_bar=bar,
         )
         for i, (start, end, score) in enumerate(chosen)

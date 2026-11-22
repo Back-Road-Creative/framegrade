@@ -402,8 +402,9 @@ class TestQualityBar:
         )
         assert line.startswith(f"SHORTS-PLAN: {len(result)} of target 3 clear the quality bar (")
         assert "candidates below the timeline mean" in line
+        assert "with a weak opening" in line
         assert "lost to the 60s gap)" in line
-        lost = int(line.split("mean, ")[1].split(" lost")[0])
+        lost = int(line.split("opening, ")[1].split(" lost")[0])
         assert lost >= 1
 
     def test_stride_is_never_halved(self, monkeypatch):
@@ -655,6 +656,24 @@ class TestOpeningSecondsAndVariableLength:
         # sums: A = 4*0.6+36*0.8 = 31.2, B = 4*0.9+36*0.7 = 28.8 -> sum alone ranks A first.
         # weighted: A = 31.2*1.6 = 49.9, B = 28.8*1.9 = 54.7 -> B first.
         assert b.rank == 1 and a.rank == 2
+
+    def test_opening_never_reads_past_a_window_shorter_than_the_opening(self):
+        from gomoveshift.pipeline.short_planner import plan_shorts
+
+        # A 3s window (min=target=max=3) over a strong 3s moment followed by
+        # silence: the opening is the window itself, never the silent second
+        # after it.
+        scores = _make_scores(30, lambda t: 0.9 if 10 <= t < 13 else 0.05)
+        result = plan_shorts(
+            scores,
+            target_count=1,
+            stride_sec=1,
+            target_duration_sec=3,
+            min_duration_sec=3,
+            max_duration_sec=3,
+        )
+        assert len(result) == 1
+        assert result[0].opening_mean == pytest.approx(0.9)
 
     def test_trim_shortens_tail_below_bar_but_never_below_min(self):
         from gomoveshift.pipeline.short_planner import plan_shorts
