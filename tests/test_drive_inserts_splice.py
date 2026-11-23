@@ -212,9 +212,11 @@ def test_the_per_day_gate_hash_covers_the_inserts(tmp_path):
     assert hash_of(None) != hash_of(ins_mod.insert_records(ins))
     # A persisted confirmation (no --ost-audit-confirmed on THIS run) hashed without the
     # inserts is stale once they exist: the per-day gate refuses it.
+    # ``ost_audit_passed`` is set so the refusal is the STALE hash, not "no route passes".
     stale = make_state(
         ost_audit_confirmed=True,
         ost_audit_confirmed_this_run=None,
+        ost_audit_passed={day: True},
         ost_audit_hash={day: hash_of(None)},
     )
     with pytest.raises(OstAuditPendingError):
@@ -226,8 +228,12 @@ def test_the_per_day_gate_hash_covers_the_inserts(tmp_path):
     art, _, _, _ = _run_day(tmp_path / "now", ins, state=stale_confirmed_now)
     assert art is not None
     assert stale_confirmed_now.ost_audit_hash[day] == hash_of(ins_mod.insert_records(ins))
+    # No this-run confirm: the fresh half passes on the hash alone.
     fresh = make_state(
-        ost_audit_confirmed=True, ost_audit_hash={day: hash_of(ins_mod.insert_records(ins))}
+        ost_audit_confirmed=True,
+        ost_audit_confirmed_this_run=None,
+        ost_audit_passed={day: True},
+        ost_audit_hash={day: hash_of(ins_mod.insert_records(ins))},
     )
     art, _, _, _ = _run_day(tmp_path / "ok", ins, state=fresh)
     assert art is not None

@@ -405,19 +405,63 @@ def _deployed_split_title(entry: dict) -> str:
     return title
 
 
-def _deployed_base_title(entry: dict) -> str:
+def deployed_part_numbering(titles, recording) -> dict:
+    """``{lf_index: (k, N)}``: the `` (Part k of N)`` the DEPLOYED code gave each LF.
+
+    Deployed ``ensure_unique_titles`` deduped drive-wide: every LF sharing a base label (the
+    title without its drive date and part suffix) got `` (Part k of N)``, k its place in LF
+    order and N the number of LFs holding that label across the WHOLE drive. ``titles`` and
+    ``recording`` are the drive-wide ``per_lf_titles`` / ``per_lf_recording_date`` maps. A label
+    held by one LF has no entry (the deployed code left it bare). Labels are grouped
+    case-insensitively and trimmed, as the deployed dedup compared them. A label whose split
+    LFs disagree with their own part keys (a ``— Part k of K`` set on one day that is not
+    exactly parts 1..K) is left unnumbered, so its part count stays bound to its title."""
+    groups: dict = {}
+    for raw_idx in sorted(titles or {}, key=int):
+        title = str((titles or {})[raw_idx] or "")
+        date = str((recording or {}).get(raw_idx, "") or "")
+        entry = {"youtube_title": title, "recording_date": date}
+        part = title_part_suffix(title)
+        if part is not None:
+            entry["part_index"], entry["part_count"] = part
+        key = _normalised_title(entry).strip().lower()
+        groups.setdefault(key, []).append((int(raw_idx), date, part))
+    numbering: dict = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        splits: dict = {}
+        for _, date, part in members:
+            if part is not None:
+                splits.setdefault((date, part[1]), []).append(part[0])
+        if any(sorted(got) != list(range(1, count + 1)) for (_, count), got in splits.items()):
+            continue
+        for k, (idx, _, _) in enumerate(members, 1):
+            numbering[idx] = (k, len(members))
+    return numbering
+
+
+def _deployed_base_title(entry: dict, numbering=None) -> str:
     """The title the DEPLOYED code gave an LF whose title is now drive-dated: the normalised
-    base label (no drive date, no part suffix) plus, for an LF with part keys, the in-batch
-    dedup suffix `` (Part k of K)`` built from those keys. Burn text, base label and part
-    count all stay bound: they are the same inputs the normalised hash covers."""
+    base label (no drive date, no part suffix) plus the dedup suffix `` (Part k of N)``.
+    ``numbering`` (:func:`deployed_part_numbering`) is the drive-wide k and N; an LF it does not
+    number (a caller with no drive-wide titles) falls back to its own part keys. Burn text, base
+    label and part count all stay bound: they are the same inputs the normalised hash covers."""
     title = _normalised_title(entry)
-    if entry.get("part_index") is not None and entry.get("part_count") is not None:
-        title += f" (Part {entry['part_index']} of {entry['part_count']})"
+    k_n = (numbering or {}).get(entry.get("lf_index"))
+    if k_n is None and entry.get("part_index") is not None and entry.get("part_count") is not None:
+        k_n = (entry["part_index"], entry["part_count"])
+    if k_n is not None:
+        title += f" (Part {k_n[0]} of {k_n[1]})"
     return title
 
 
 def _hash_entries(
-    entries, normalise: bool, deployed_split: bool = False, deployed_base: bool = False
+    entries,
+    normalise: bool,
+    deployed_split: bool = False,
+    deployed_base: bool = False,
+    numbering=None,
 ) -> list:
     out = []
     for e in _strip_hash_excluded(entries):
@@ -426,7 +470,7 @@ def _hash_entries(
                 e["youtube_title"] = _normalised_title(e)
         else:
             if deployed_base and "youtube_title" in e:
-                e["youtube_title"] = _deployed_base_title(e)
+                e["youtube_title"] = _deployed_base_title(e, numbering)
             elif deployed_split and "youtube_title" in e:
                 e["youtube_title"] = _deployed_split_title(e)
             e = {k: v for k, v in e.items() if k not in _PART_ENTRY_KEYS}
@@ -439,6 +483,7 @@ def compute_ost_audit_hash(
     normalise: bool = True,
     deployed_split: bool = False,
     deployed_base: bool = False,
+    numbering=None,
 ) -> str:
     """Return a stable hash of the audit content (excludes ``generated_at``).
 
@@ -457,33 +502,37 @@ def compute_ost_audit_hash(
     `` (Part k of K)`` the deployed code gave them, i.e. the raw hash such a day stored.
     ``deployed_base`` (with ``normalise=False``) instead rewrites each title to its normalised
     base plus `` (Part k of K)`` from the title's own part suffix (see
-    :func:`_deployed_base_title`): the raw hash of a bracket-dated day confirmed before dating.
+    :func:`_deployed_base_title`) and the drive-wide ``numbering``
+    (:func:`deployed_part_numbering`): the raw hash of a bracket-dated day confirmed before dating.
     """
     content = {
         "date": payload.get("date"),
-        "lfs": _hash_entries(payload.get("lfs", []), normalise, deployed_split, deployed_base),
+        "lfs": _hash_entries(
+            payload.get("lfs", []), normalise, deployed_split, deployed_base, numbering
+        ),
     }
     serialised = json.dumps(content, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()
 
 
-def legacy_ost_audit_hashes(payload: dict) -> tuple:
+def legacy_ost_audit_hashes(payload: dict, numbering=None) -> tuple:
     """Every hash a confirmation stored by earlier code may hold for ``payload``: the raw
     (un-normalised) hash, the raw hash of a split day under its deployed titles, and the raw
     hash of a bracket-dated day under its deployed (undated, `` (Part k of K)``) titles. Each
     covers the same burn text, base label and part count as ``payload`` (all are in the hashed
-    content), so a changed burn, label or part count matches none of them."""
+    content), so a changed burn, label or part count matches none of them. ``numbering`` is the
+    drive-wide :func:`deployed_part_numbering` the deployed titles were built from."""
     raw = compute_ost_audit_hash(payload, normalise=False)
     split = compute_ost_audit_hash(payload, normalise=False, deployed_split=True)
-    base = compute_ost_audit_hash(payload, normalise=False, deployed_base=True)
+    base = compute_ost_audit_hash(payload, normalise=False, deployed_base=True, numbering=numbering)
     return tuple(dict.fromkeys((raw, split, base)))
 
 
-def accepted_ost_audit_hashes(payload: dict) -> tuple:
+def accepted_ost_audit_hashes(payload: dict, numbering=None) -> tuple:
     """Every hash the gate accepts as covering ``payload``: the current (normalised) one
     first, then :func:`legacy_ost_audit_hashes`. The one rule shared by
     :func:`lf_gate_or_raise` and the resume drift check."""
-    return (compute_ost_audit_hash(payload), *legacy_ost_audit_hashes(payload))
+    return (compute_ost_audit_hash(payload), *legacy_ost_audit_hashes(payload, numbering))
 
 
 def compute_shorts_ost_audit_hash(payload: dict) -> str:
@@ -528,6 +577,21 @@ def write_surface_review_copy(output_base: Path, surface: str, date: str, state)
     return path
 
 
+def _stamped_this_run(state) -> dict:
+    """``{date: hash}`` this run's gate passes stamped: never persisted (a dict state carries it
+    as a plain key, a ``PipelineState`` as a non-field attribute ``to_dict`` does not write)."""
+    if state is None:
+        return {}
+    stamped = _state_field(state, "ost_audit_stamped_this_run")
+    if stamped is None:
+        stamped = {}
+        if isinstance(state, dict):
+            state["ost_audit_stamped_this_run"] = stamped
+        else:
+            object.__setattr__(state, "ost_audit_stamped_this_run", stamped)
+    return stamped
+
+
 def lf_gate_or_raise(
     output_dir: Path,
     date: str,
@@ -562,7 +626,10 @@ def lf_gate_or_raise(
         "per_lf_locations": _state_field(state, "per_lf_locations") or per_lf_locations or {},
     }
     payload = format_ost_audit(date, audit_state, lf_indices, location=location, inserts=inserts)
-    current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload)
+    numbering = deployed_part_numbering(
+        audit_state["per_lf_titles"], audit_state["per_lf_recording_date"]
+    )
+    current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload, numbering)
     # The hashes a confirmation stored before suffixes were normalised: they vouch for the
     # same burn, so they cover the current payload too (and are re-stamped normalised below).
     covers = (current_hash, *legacy_hashes)
@@ -585,6 +652,16 @@ def lf_gate_or_raise(
     # hash-stamped marker bound to it) vouch for text that is no longer burned, so
     # they never pass it on their own. Each route below judges the current payload
     # and, on a pass, the code after it re-binds the stored hash to it.
+    stamped = _stamped_this_run(state).get(date)
+    if cli_confirmed and stamped is not None and stamped != current_hash:
+        # This run's confirm covered the payload it showed (hash ``stamped``), no other.
+        sidecar_path = write_ost_audit(Path(output_dir), date, payload)
+        raise OstAuditPendingError(
+            f"OST audit pending for day {date}: the payload changed between the front-load and "
+            f"the burn (confirmed this run as {stamped}, now {current_hash}): review "
+            f"{sidecar_path} and confirm the changed day again."
+        )
+
     gate_passes = False
     reason = ""
     if cli_confirmed:
@@ -608,7 +685,8 @@ def lf_gate_or_raise(
                 f"day {date}: its OST audit (burn text or title) changed since it was confirmed, "
                 "so the old confirmation no longer covers it: review the changed day in that audit, "
                 f"then write its audit hash {current_hash} into {confirmed_file} "
-                "(an operator's own --ost-audit-confirmed run also confirms it)"
+                "(an operator's own --ost-audit-confirmed run, after reviewing the changed day, also "
+                "confirms it)"
             )
         else:
             how = (
@@ -633,6 +711,7 @@ def lf_gate_or_raise(
             hm = {}
             state["ost_audit_hash"] = hm
         hm[date] = current_hash
+        _stamped_this_run(state)[date] = current_hash
     rewrite_sidecar_to_match(Path(output_dir), date, payload, current_hash)
     # Bind the marker so a later changed burn reads a stale binding.
     if confirmed_file.exists():

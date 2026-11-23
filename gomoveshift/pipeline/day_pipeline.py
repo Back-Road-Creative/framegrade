@@ -2564,11 +2564,14 @@ def run_day_pipeline(
     # Operator confirms via:
     #   1. ``<output_dir>/ost_audit_<date>.confirmed`` file, or
     #   2. ``state["ost_audit_passed"][date] = True`` (resume marker), or
-    #   3. ``--ost-audit-confirmed`` CLI flag → state["ost_audit_confirmed"].
+    #   3. ``--ost-audit-confirmed`` CLI flag → state["ost_audit_confirmed_this_run"].
     #
     # Hash mismatch (operator edits per-LF labels and re-runs phase_bc)
     # re-prompts: the stored hash no longer matches the just-computed
-    # one, so OstAuditPendingError fires again.
+    # one, so OstAuditPendingError fires again, unless this run's own
+    # confirm passes it. That confirm covers only the payload this run showed:
+    # when this run's front-load already stamped the day, a per-day payload that
+    # hashes to something else refuses (``lf_gate_or_raise``).
     #
     _gate_lf_indices = [int(getattr(plan, "index", i + 1)) for i, plan in enumerate(lf_plans or [])]
     # Burn-loop-consumes-gate-return (fix): the burn loop below reads its
@@ -3530,7 +3533,7 @@ def run_all_days(
             "OST audit pending for day(s) "
             f"{sorted(str(d) for d in _pending_ost_days)}: review each "
             "ost_audit_<date>.json sidecar (each says whether its day is unconfirmed or "
-            "its burn text changed since it was confirmed) and confirm it with the "
+            "its OST audit (burn text or title) changed since it was confirmed) and confirm it with the "
             "matching .confirmed file, an operator's own --ost-audit-confirmed run or "
             "the system review, before the first master encode (front-load)."
         )

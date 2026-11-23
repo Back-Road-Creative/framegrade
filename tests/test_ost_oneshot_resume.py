@@ -211,3 +211,25 @@ def test_a_refused_recipe_write_removes_the_previous_runs_recipe(tmp_path, monke
     assert refused is None
     assert not first.exists()  # heal finds no recipe, never the earlier run's argv
     assert read_recipe(first) is None
+
+
+def test_a_refused_recipe_write_removes_a_leftover_tmp_file(tmp_path, monkeypatch):
+    from gomoveshift.health import resume
+
+    tmp = tmp_path / (resume.RECIPE_NAME + ".tmp")
+    tmp.write_text("{}")  # an earlier run's half-written recipe
+    keep = tmp_path / "keep.json"
+    keep.write_text("{}")
+
+    def boom():
+        raise RuntimeError("no parser")
+
+    monkeypatch.setattr(resume, "_drive_options", boom)
+    assert (
+        write_recipe(
+            tmp_path, ["drive", "/new-src", "--location", "X"], cwd="/", sha=None, now_iso="y"
+        )
+        is None
+    )
+    assert not tmp.exists()  # a replay can never pick up the leftover
+    assert keep.exists()
