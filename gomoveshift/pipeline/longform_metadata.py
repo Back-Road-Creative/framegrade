@@ -386,7 +386,7 @@ def _live_catalog_videos() -> dict:
     ``catalog-fetch --known-ids-from-queue`` writes beside the queue DB
     (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``). Never fetches; a
     missing or unreadable snapshot is ``{}``."""
-    from ..cli.handlers.pub_status import live_catalog_snapshot_path
+    from ..publishing.live_catalog import live_catalog_snapshot_path
 
     try:
         catalog = json.loads(

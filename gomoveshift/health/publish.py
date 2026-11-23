@@ -28,10 +28,18 @@ from seo_manager.scheduling.claim import Claim, claim_or_reason
 from seo_manager.scheduling.store import SlotTaken, StaleDrive
 
 from .. import run_origin
+from ..pipeline.replace_scheduled import record_incident, resolve_incidents
 from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
-from .launch import _uploaded, default_launcher, upload_receipts
+from .launch import (
+    _uploaded,
+    default_launcher,
+    plan_total_lfs,
+    read_replace_plan,
+    replace_unfinished,
+    upload_receipts,
+)
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -134,6 +142,11 @@ def run_publish(
     lf_count = rendered_lf_count(recipe_path)
     if lf_count is None:
         return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip
+    plan = read_replace_plan(Path(d.output_dir)) if d.output_dir else {}
+    if plan and lf_count != plan_total_lfs(plan):
+        # a different split would upload other content under the old titles and slots (M5)
+        return _refuse(res, f"{project} rendered {lf_count} long-forms but its replace plan covers "
+                       f"{plan_total_lfs(plan)}; re-render it to the same split or supersede it again")  # fmt: skip
     older = [r for r in store.drives(region, "ready") if (r.created_at, r.project) < (d.created_at, d.project)]  # fmt: skip
     published = [r.project for r in older if upload_receipts(r.output_dir)]
     older = [r for r in older if r.project not in published]
@@ -215,7 +228,8 @@ def retire_uploaded(store: Any, *, now: Optional[datetime] = None) -> List[Dict[
     done: List[Dict[str, str]] = []
     for d in store.all_drives():
         held = upload_receipts(d.output_dir) if d.status in ("ready", "auditing") else {}
-        if not held:
+        if not held or replace_unfinished(d.output_dir):  # fmt: skip
+            # (a replace still to finish is not published)
             continue
         try:
             done.append({"project": d.project, "status": store.retire_published(d.project, held, now=now)})  # fmt: skip
@@ -244,8 +258,21 @@ def reconcile_publishes(
         state = ((max(runs, key=lambda r: float(r.get("created_at") or 0))).get("result") or {}).get("state")  # fmt: skip
         if state in (None, "running"):
             continue
-        ok = uploaded(d.output_dir)
-        done.append({"project": d.project, "status": store.finish_claim(d.claim_id, ok=ok)})
+        left = replace_unfinished(d.output_dir)
+        held = uploaded(d.output_dir)
+        # a replace with an unfinished LF closes ``failed`` even over kept receipts: ``health
+        # backlog`` republishes a failed drive, which resumes the LF; only done/abandoned is clean
+        row = {"project": d.project, "status": store.finish_claim(d.claim_id, ok=held and not left)}  # fmt: skip
+        if left:
+            why = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
+            row["partial"] = f"replace not finished: {why}"
+            # one key (the project): the drive's incident is opened once, not once per alias
+            record_incident(d.project, "partial_finish", f"claim closed {row['status']} but {row['partial']}; the publish is retried automatically")  # fmt: skip
+        else:
+            names = {d.project, Path(d.output_dir).name} if d.output_dir else {d.project}
+            for name in names:
+                resolve_incidents(name, drive_level=True)
+        done.append(row)
     return done + retire_uploaded(store)
 
 

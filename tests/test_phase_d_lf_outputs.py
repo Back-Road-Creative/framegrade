@@ -77,6 +77,9 @@ def _install_fake_youtube_uploader(monkeypatch, video_id_prefix="vid"):
 
     fake_mod.YouTubeUploader = YouTubeUploader
     fake_mod._instance = uploader_instance
+    # lazy import chain (gomoveshift.cli -> publishing/youtube_comments) reads these names
+    fake_mod.QUOTA_REASONS = frozenset({"quotaExceeded", "dailyLimitExceeded", "userRateLimitExceeded"})  # fmt: skip
+    fake_mod.RETRIABLE_STATUS_CODES = {429, 500, 502, 503, 504}
     monkeypatch.setitem(sys.modules, "gomoveshift.pipeline.drive_phases.youtube_uploader", fake_mod)
     return uploader_instance
 
@@ -156,6 +159,12 @@ def _build_state(tmp_path, num_lfs=3, youtube_upload=False, skip_upload=True):
         per_lf_locations={i + 1: "Cork, Ireland" for i in range(num_lfs)},
         per_lf_trim_ratio={i + 1: 0.75 for i in range(num_lfs)},
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_catalog(monkeypatch):
+    """Never read the real live-catalog snapshot from a phase D test."""
+    monkeypatch.setattr("gomoveshift.pipeline.longform_metadata._live_catalog_videos", lambda: {})
 
 
 def _phase_d_patches():

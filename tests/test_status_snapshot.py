@@ -275,3 +275,48 @@ def test_a_missing_ledger_is_unavailable_not_an_empty_schedule(env, monkeypatch)
     section = snapshot._section(NOW, snapshot.RUNWAY_SOURCE, lambda: snapshot._runway(None))
     assert section["unavailable"] == f"FileNotFoundError: no file {env / 'absent.json'}"
     assert "queue_ends" not in section
+
+
+def test_incidents_name_recently_resolved_rows_with_project_kind_and_outcome(env, monkeypatch):
+    """A given-up replace is resolved, not open: ``status --json`` must still name its project
+    and outcome for a week, not only count it."""
+    inc = env / "incidents"
+    inc.mkdir()
+    monkeypatch.setenv("GMS_HEALTH_INCIDENTS_DIR", str(inc))
+    base = {"schema": "health-incident/1", "detected_at": "2026-11-01T00:00:00+00:00"}
+    rows = {
+        "recent": {
+            "kind": "replace_scheduled_partial",
+            "drive": "ghost-a",
+            "code": "replace_retry",
+            "resolved_at": "2026-11-12T18:00:00+00:00",
+            "outcome": "given up: no row in any region",
+        },  # fmt: skip
+        "old": {
+            "kind": "replace_scheduled_partial",
+            "drive": "old-a",
+            "code": "replace_retry",
+            "resolved_at": "2026-11-01T18:00:00+00:00",
+            "outcome": "given up: x",
+        },  # fmt: skip
+        "open": {"kind": "drive_failed", "drive": "open-a", "resolved_at": None},
+    }
+    for name, row in rows.items():
+        (inc / f"{name}.json").write_text(json.dumps({**base, "key": name, "file": f"{name}.json", **row}))  # fmt: skip
+
+    section = snapshot.build_snapshot(_config(env), now=NOW)["incidents"]
+
+    assert section["resolved"] == 2 and [r["key"] for r in section["open"]] == ["open"]
+    (recent,) = section["recently_resolved"]
+    assert recent == {"project": "ghost-a", "kind": "replace_scheduled_partial", "code": "replace_retry", "outcome": "given up: no row in any region", "resolved_at": "2026-11-12T18:00:00+00:00"}  # fmt: skip
+
+
+def test_recently_resolved_is_newest_first():
+    rows = [
+        {"drive": "a", "kind": "k", "resolved_at": "2026-11-10T00:00:00+00:00"},
+        {"drive": "c", "kind": "k", "resolved_at": "2026-11-12T00:00:00+00:00"},
+        {"drive": "b", "kind": "k", "resolved_at": "2026-11-11T00:00:00+00:00"},
+        {"drive": "old", "kind": "k", "resolved_at": "2026-10-01T00:00:00+00:00"},
+    ]
+    out = snapshot._recently_resolved(rows, "2026-11-13T00:00:00+00:00")
+    assert [r["project"] for r in out] == ["c", "b", "a"]

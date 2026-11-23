@@ -139,6 +139,20 @@ def test_supersede_and_reason_reach_run_backlog(tmp_path, capsys, wired):
     assert "superseded /s/ire-a -> /s/_x" in capsys.readouterr().out
 
 
+def test_a_due_replace_retry_is_run_by_the_plain_tick_with_the_replace_flag(tmp_path, wired):
+    from datetime import datetime, timezone
+
+    wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="usa")  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert wired["supersede"] == ("ire-a", "blur fix") and wired["replace_scheduled"] is True
+    assert callable(wired["live_status"])
+    # a dry run never starts a retry
+    wired["_result"] = {"action": "noop", "reason": "r", "skipped": []}
+    health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace())
+    assert wired["supersede"] is None and wired["replace_scheduled"] is False
+
+
 def test_dry_run_supersede_says_would_supersede(tmp_path, capsys, wired):
     wired["_result"] = {
         "action": "would_launch", "reason": "ire-a for slot", "skipped": [],
@@ -196,3 +210,106 @@ def test_failed_audits_reach_the_cron_log_and_a_launch_exits_zero(tmp_path, caps
     out = capsys.readouterr().out
     assert "failed audit ire-a: audit failed: ire-a job 1 ended failed" in out
     assert out.rstrip().endswith("launched: ire-b for slot")
+
+
+def test_refused_publishes_reach_the_cron_log_beside_a_launch(tmp_path, capsys, wired):
+    """A refused failed publish no longer holds the region (U2), so it must still be visible."""
+    wired["_result"] = {
+        "action": "launched", "reason": "morning-kerry for slot", "skipped": [],
+        "failed_publishes": [{"project": "kerry", "reason": "mask_frame_count_unknown"}],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "failed publish kerry: mask_frame_count_unknown" in out
+    assert out.rstrip().endswith("launched: morning-kerry for slot")
+
+
+def test_replace_scheduled_reaches_run_backlog(tmp_path, wired):
+    wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
+    args = _args(tmp_path, "--supersede", "ire-a", "--reason", "x", "--replace-scheduled")
+    assert health.cmd_health(args, SimpleNamespace()) == 0
+    assert wired["replace_scheduled"] is True and callable(wired["live_status"])
+
+
+def test_replace_scheduled_needs_supersede(tmp_path):
+    with pytest.raises(SystemExit):
+        health.cmd_health(_args(tmp_path, "--replace-scheduled"), SimpleNamespace())
+
+
+def _marker_wired(monkeypatch, tmp_path, calls, rows=()):
+    monkeypatch.setattr(
+        launch, "load_inputs",
+        lambda config, region, ledger_path, now: ("usa", list(rows), [], [], set(), lambda **kw: None),
+    )  # fmt: skip
+    monkeypatch.setattr(launch, "lease_fns", lambda code_root: (lambda: True, lambda: None))
+    monkeypatch.setattr(launch, "render_horizon_h", lambda config: 1680)
+    answers = iter([{"action": "refused", "reason": "cannot supersede ire-a: pinned", "skipped": []},
+                    {"action": "launched", "reason": "day-b for slot", "skipped": []}])  # fmt: skip
+
+    def fake(**kw):
+        calls.append((kw["supersede"], kw["replace_scheduled"]))
+        return next(answers)
+
+    monkeypatch.setattr(launch, "run_backlog", fake)
+
+
+def test_a_marker_tick_that_does_not_launch_falls_through_to_the_plain_tick(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls)
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="usa")  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(("ire-a", "blur fix"), True), (None, False)]  # the region still launches
+
+
+def test_the_handler_gives_the_marker_lookup_the_ticks_region(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls)
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="ireland")  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "noop", "reason": "covered", "skipped": []})  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(None, False)]  # an ireland marker never hijacks a usa tick
+
+
+def test_the_handler_hands_the_tick_each_rows_region_so_a_regionless_marker_resolves(tmp_path, monkeypatch):  # fmt: skip
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls, rows=[SimpleNamespace(project="ire-a", region="ireland")])  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "noop", "reason": "covered", "skipped": []})  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(None, False)]  # its manifest region is ireland: a usa tick leaves it alone
+
+
+def test_the_handler_hands_an_ireland_tick_its_claimed_marker(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls, rows=[SimpleNamespace(project="ire-a", region="ireland")])  # fmt: skip
+    monkeypatch.setattr(
+        launch, "load_inputs",
+        lambda config, region, ledger_path, now: ("ireland", [SimpleNamespace(project="ire-a", region="ireland")], [], [], set(), lambda **kw: None),
+    )  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "launched", "reason": "r", "skipped": [], "project": "ire-a", "supersede": {"moves": []}})  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # no region: the row's is ireland  # fmt: skip
+    assert health.cmd_health(_args(tmp_path, "--region", "ireland"), SimpleNamespace()) == 0
+    assert calls == [(("ire-a", "blur fix"), True)]  # claimed by the ireland tick, run once
+    assert not launch._retry_marker(tmp_path / "out", "ire-a").exists()
+
+
+def test_the_handler_hands_the_marker_tick_its_jobs_dir(tmp_path, wired, monkeypatch):
+    """``run_tick`` finds a launched replace's job in ``jobs_dir``: without it (``None``) a crash
+    after the launcher replaces the fresh run a second time."""
+    got = {}
+
+    def fake_tick(**kw):
+        got.update(kw)
+        return {"action": "would_launch", "reason": "r", "skipped": []}
+
+    monkeypatch.setattr(launch, "run_tick", fake_tick)
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    assert got["jobs_dir"] == tmp_path / "logs" / "jobs"
