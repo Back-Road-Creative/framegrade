@@ -258,7 +258,7 @@ into `DriveOrchestrator.run` before the DoD validator. A refusal from it is a
 run error, never a silent skip.
 
 When a human *did* confirm Gate C/D, `review_gate` records
-`gate_cd_confirmation_hash` over every `*_publish_plan.json` sidecar, and the
+`gate_cd_confirmation_hash` (the FULL hash) over every `*_publish_plan.json` sidecar, and the
 command still refuses when that confirmation carries no hash or the
 recomputed hash no longer matches — the plan changed after it was reviewed,
 so what was approved is not what would be published.
@@ -679,12 +679,15 @@ is the set-aside run's stage dir. **Rebuild, then relink:** every other field,
 run's `<stages>/pipeline_state.json`. A `--no-review` replace never persists a confirmation, so it
 normally passes as unreviewed; a stale confirmation hash or unreadable state refuses EVERY Short
 with one `...:gate_cd` incident ("Gate C/D must be re-confirmed"). Nothing forges a confirmation.
-The Gate C/D hash projects `media`, `reviewed_plan_hash` and `consent_hash` out of every plan's
-Shorts (the only fields a swap rewrites), so a confirmation holds whichever order it was taken in
-relative to a swap; a confirmation taken before the swap's own sidecar existed is also accepted
-(the check retries with that sidecar left out), and one recorded under the earlier whole-file hash
-still approves. Text, schedule, routes, the LF JSON, the CSV and every other plan file are still
-hashed, so a real content change refuses.
+A confirmation records TWO hashes: `gate_cd_confirmation_hash`, the FULL hash of every plan, and
+`gate_cd_confirmation_swap_hash`, the same hash with `media`, `reviewed_plan_hash` and `consent_hash`
+projected out of each Short (the only fields a swap rewrites). Only this replace gate may accept the
+projected hash, and only when the plan file on disk is a proven swap of the old plan (every record is
+the old record or exactly its swap); `enqueue-plan` and the Gate C/D auto-pass accept the full hash
+alone, so repointed media, re-rendered bytes or a changed consent still refuse there. A confirmation
+taken before the swap's own sidecar existed is also accepted (the check retries with that sidecar
+left out). Text, schedule, routes, the LF JSON, the CSV and every other plan file are hashed either
+way, so a real content change refuses.
 
 A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed, `consent_hash`
 moved only when it equalled the old derived hash) only when:
@@ -727,8 +730,13 @@ media); any other record is refused with an incident, discarded, and the rows fo
 Rows left at the old hash do not undo it: a movable one follows the swap, an uploaded one is
 refused, a terminal one is left. A day whose Shorts are all finished is judged by the verified
 attestation beside the plan, so a reclaimed stage copy never holds the other Shorts. A Short with no
-`recording_date` key is refused and left out of the written plan; a Short whose rows are all terminal (cancelled, published) has nothing left
-to swap and its refusal incident resolves; a rerun that swaps a Short converges.
+`recording_date` key is refused and written back with a null date, so it keeps its `short_index` and
+dispatch holds its stale bytes (rows stay queued, never burned); it is never settled while the date is
+missing. A Short whose rows are all terminal (cancelled, published) has nothing left to swap and its
+refusal incident resolves; a rerun that swaps a Short converges. A finished swap is bound to the file:
+a settled Short whose media on disk no longer matches the carried sha is refused ("the media changed
+again"). A verified attestation beside the plan is kept over a present but unverified stage copy and
+reported in `RebuildResult.attestations_kept`.
 Other rows are never changed and are listed in `RebuildResult.untouched`.
 `old_stages_dir` is the set-aside run's stage dir,
 `<stages_root>/_superseded/<project>-<stamp>/<project>/_stages`; a missing audit names the path it

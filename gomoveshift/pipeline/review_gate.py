@@ -155,8 +155,8 @@ def _label_quality_warning(metadata_json: dict) -> "str | None":
     )
 
 
-#: Per-Short fields a replace swap rewrites on a plan: left out of the plan hash, so a swap (which
-#: changes only these) never voids a confirmation. Every other field of every plan is still hashed.
+#: Per-Short fields a replace swap rewrites on a plan. Left out of the plan hash ONLY under
+#: ``swap_projection=True``, which the replace swap's own gate check alone accepts.
 _SWAP_FIELDS = ("media", "reviewed_plan_hash", "consent_hash")
 
 
@@ -175,7 +175,7 @@ def _project_plan(payload):
 
 
 def compute_gate_cd_hash(
-    *, state, output_dir: Path, skip_plans: tuple = (), full_plans: bool = False
+    *, state, output_dir: Path, skip_plans: tuple = (), swap_projection: bool = False
 ) -> str:
     """Stable sha256 of Gate C/D content payload.
 
@@ -196,11 +196,13 @@ def compute_gate_cd_hash(
     don't churn the hash. ``skip_plans`` names sidecars left out of the hash (the replace swap's
     own, which it rewrites on every run); every other file is still covered.
 
-    Each plan is hashed with every Short's ``media``, ``reviewed_plan_hash`` and ``consent_hash``
-    projected out (the only fields a replace swap rewrites), so a confirmation holds whichever
-    order it was taken in relative to a swap; text, schedule, routes and every other field still
-    count. ``full_plans=True`` is the earlier whole-file hash: a confirmation recorded under it
-    must keep approving, so the checks that compare a recorded hash accept both.
+    By default every plan is hashed whole, media included: this is the hash a confirmation records
+    (``gate_cd_confirmation_hash``) and the only one ``enqueue-plan`` and the Gate C/D auto-pass
+    accept, so a plan repointed, re-rendered or given another consent hash after review is refused.
+    ``swap_projection=True`` leaves out each Short's ``media``, ``reviewed_plan_hash`` and
+    ``consent_hash`` (the fields a replace swap rewrites); it is recorded as
+    ``gate_cd_confirmation_swap_hash`` and read by the replace swap's gate check alone, and only
+    for a plan whose swap it just proved deterministic.
     """
     output_dir = Path(output_dir)
     lf_count = len(list(state.regular_lf_paths or []))
@@ -234,7 +236,7 @@ def compute_gate_cd_hash(
             plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             plan_payload = {}
-        if not full_plans:
+        if swap_projection:
             plan_payload = _project_plan(plan_payload)
         plan_sha = hashlib.sha256(
             json.dumps(plan_payload, sort_keys=True).encode("utf-8")
@@ -248,6 +250,14 @@ def compute_gate_cd_hash(
         # sidecar is written, which is every run today.
         payload["plans"] = plan_entries
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def record_gate_cd_confirmation(state, output_dir: Path) -> None:
+    """Record a human Gate C/D confirmation: the full hash, and beside it the swap-projected one."""
+    state.gate_cd_confirmation_hash = compute_gate_cd_hash(state=state, output_dir=output_dir)
+    state.gate_cd_confirmation_swap_hash = compute_gate_cd_hash(
+        state=state, output_dir=output_dir, swap_projection=True
+    )
 
 
 # Pipeline evidence embedded in the metadata JSON, judged by its own gate
@@ -735,11 +745,7 @@ class ReviewGate:
         # an already-human-reviewed day) — waives the re-prompt. A material
         # content change flips the hash and reopens the gate.
         current_hash = compute_gate_cd_hash(state=state, output_dir=output_dir)
-        recorded = state.gate_cd_confirmation_hash
-        if state.gate_cd_confirmed is True and recorded in (
-            current_hash,
-            compute_gate_cd_hash(state=state, output_dir=output_dir, full_plans=True),
-        ):
+        if state.gate_cd_confirmed is True and state.gate_cd_confirmation_hash == current_hash:
             print("\n  [Gate C/D auto-passed — --gate-cd-confirmed + hash match]")
             return
         # Known hole: a run whose stdin is not a TTY used to
@@ -766,7 +772,7 @@ class ReviewGate:
         )
         if decision == "approve":
             state.gate_cd_confirmed = True
-            state.gate_cd_confirmation_hash = current_hash
+            record_gate_cd_confirmation(state, output_dir)
             return
         if decision == "reject":
             self._fail(f"Human review rejected via answer file: {message}")
@@ -792,7 +798,7 @@ class ReviewGate:
             )
         self._prompt(message)
         state.gate_cd_confirmed = True
-        state.gate_cd_confirmation_hash = current_hash
+        record_gate_cd_confirmation(state, output_dir)
 
     # ------------------------------------------------------------------
     # Internal helpers

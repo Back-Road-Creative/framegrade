@@ -89,14 +89,22 @@ def _load_state(state_path: Path) -> PipelineState:
 
 
 def assert_gate_cd_approved(
-    state: PipelineState, output_dir: Path, *, skip_plans: tuple = ()
+    state: PipelineState,
+    output_dir: Path,
+    *,
+    skip_plans: tuple = (),
+    swap_projection: bool = False,
 ) -> None:
     """Raise when a human Gate C/D confirmation no longer matches the content.
 
     An unreviewed run (no confirmation recorded) passes: shorts publish
     automatically through the automated pre-spool gates. A confirmed run
-    must still carry a hash, and the sidecars must be unchanged since. ``skip_plans`` names
-    sidecars left out of the comparison (see ``compute_gate_cd_hash``)."""
+    must still carry a hash, and the sidecars must be unchanged since: the recorded FULL hash
+    (media included) must equal the recomputed one. ``skip_plans`` names sidecars left out of
+    the comparison (see ``compute_gate_cd_hash``). ``swap_projection=True`` additionally accepts
+    the recorded swap-projected hash (``gate_cd_confirmation_swap_hash``); only the replace swap's
+    own check passes it, and only for a plan whose swap it just proved deterministic. Every other
+    caller, ``enqueue-plan`` included, leaves it False."""
     if not getattr(state, "gate_cd_confirmed", None):
         return
     recorded = getattr(state, "gate_cd_confirmation_hash", None)
@@ -106,15 +114,23 @@ def assert_gate_cd_approved(
             "cannot be tied to any particular content — refusing to enqueue."
         )
     current = compute_gate_cd_hash(state=state, output_dir=output_dir, skip_plans=skip_plans)
-    legacy = compute_gate_cd_hash(
-        state=state, output_dir=output_dir, skip_plans=skip_plans, full_plans=True
-    )  # a confirmation recorded before the plan hash dropped the swap's fields
-    if recorded not in (current, legacy):
-        raise GateNotApprovedError(
-            "the reviewed content has CHANGED since Gate C/D was confirmed "
-            f"(recorded={recorded[:12]}… current={current[:12]}…) — what was approved is not "
-            "what would be published. Re-run Gate C/D before enqueuing."
+    if recorded == current:
+        return
+    swap_recorded = getattr(state, "gate_cd_confirmation_swap_hash", None)
+    if (
+        swap_projection
+        and swap_recorded
+        and swap_recorded
+        == compute_gate_cd_hash(
+            state=state, output_dir=output_dir, skip_plans=skip_plans, swap_projection=True
         )
+    ):
+        return
+    raise GateNotApprovedError(
+        "the reviewed content has CHANGED since Gate C/D was confirmed "
+        f"(recorded={recorded[:12]}… current={current[:12]}…) — what was approved is not "
+        "what would be published. Re-run Gate C/D before enqueuing."
+    )
 
 
 def _default_output_dir(state: PipelineState, state_path: Path) -> Path:

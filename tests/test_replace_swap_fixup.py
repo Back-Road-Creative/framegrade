@@ -17,6 +17,8 @@ from gomoveshift.cli.handlers.dispatch_queue import (
     _verified_path,
 )
 from gomoveshift.health.store import load_all
+from gomoveshift.pipeline.drive_state_model import PipelineState
+from gomoveshift.pipeline.review_gate import record_gate_cd_confirmation
 from gomoveshift.publishing import dispatch, replace_rebuild
 from gomoveshift.publishing.dispatch import PRIVACY_REQUIRED_CLASSES, TransientMediaError
 from gomoveshift.publishing.plan_io import load_publish_plan
@@ -196,6 +198,17 @@ def _state(w, **fields):
     (w.stages / "pipeline_state.json").write_text(json.dumps(fields))
 
 
+def _confirmed_fields(out):
+    """What a human Gate C/D confirmation records over ``out`` as it is (full and swap hash)."""
+    state = PipelineState.from_dict({"gate_cd_confirmed": True})
+    record_gate_cd_confirmation(state, out)
+    return {
+        "gate_cd_confirmed": True,
+        "gate_cd_confirmation_hash": state.gate_cd_confirmation_hash,
+        "gate_cd_confirmation_swap_hash": state.gate_cd_confirmation_swap_hash,
+    }
+
+
 def test_a_confirmed_gate_whose_content_changed_refuses_every_short_once(w):
     a = w.row(1)
     old = w.hash_of(a)
@@ -226,12 +239,10 @@ def test_the_gate_check_is_called_with_the_run_state_and_the_plan_dir(w, monkeyp
 
     monkeypatch.setattr(enqueue_plan, "assert_gate_cd_approved", spy)
     result = w.run()
-    assert (
-        seen
-        and set(seen) == {w.out}
-        and result.rebuilt == []
-        and "spy refuses" in json.dumps(_open(w))
-    )
+    # Exactly two checks on a refusing gate: the plan-skipping full hash, then the projected hash
+    # the proven swap may use; one more or fewer means a hash path was added or lost.
+    assert seen == [w.out, w.out]
+    assert result.rebuilt == [] and "spy refuses" in json.dumps(_open(w))
 
 
 def test_an_incident_write_failure_is_logged_at_error_level(w, tmp_path, caplog):

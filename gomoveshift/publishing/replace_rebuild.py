@@ -5,7 +5,8 @@ re-renders every Short to the SAME path but enqueues nothing, so queued rows nam
 :func:`rebuild_replaced_sidecar` reads the OLD sidecar and swaps in a fresh ``fingerprint_media``
 at the original path; other fields are kept (rebuild, THEN relink ``parent_lf_video_id``).
 
-Gate C/D is checked first (a refusal refuses every Short, one incident). A Short is swapped only
+Gate C/D is checked first (a refusal refuses every Short, one incident; the swap-invariant hash is
+accepted only here, and only for a plan that proves to be a swap of the old one). A Short is swapped only
 when it is the same FOOTAGE (old and new audit segments agree within ``DURATION_TOLERANCE_S``),
 its OWN day has a verified attestation, the mask gate passes, its hash is the derived one and no
 row blocks it; else it is REFUSED (old fingerprint kept, one incident). A Short that is only
@@ -85,6 +86,8 @@ class RebuildResult:
     refused: List[Refused] = field(default_factory=list)
     deferred: List[Deferred] = field(default_factory=list)
     untouched: List[Untouched] = field(default_factory=list)
+    #: Days whose verified attestation beside the plan was kept over an unverified stage copy.
+    attestations_kept: List[str] = field(default_factory=list)
 
 
 def privacy_refusal(stages_dir: Path, date: str) -> Optional[str]:
@@ -320,6 +323,20 @@ def _carry_refusal(short: dict, disk: dict) -> Optional[str]:
     return "it differs from the reviewed record in " + ", ".join(changed)
 
 
+def _changed_again(disk: dict, fingerprint_fn) -> Optional[str]:
+    """Why the file at a carried record's path no longer matches the record's own sha (``None``:
+    it matches, or the file is gone, as it is once a finished swap's clip is reclaimed)."""
+    try:
+        path = Path(disk["media"]["path"])
+        if not path.is_file():
+            return None
+        if fingerprint_fn(path).sha256 == disk["media"]["sha256"]:
+            return None
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError) as exc:
+        return f"cannot fingerprint the media of the finished swap: {exc!r}"
+    return "the media changed again since the swap: a human must look"
+
+
 def _incident_dir(directory):
     from gomoveshift.health.store import default_data_root, default_incidents_dir
 
@@ -375,13 +392,28 @@ def _resolve_incident(project: str, index, now: datetime, directory) -> None:
         logger.exception("replace-rebuild: could not resolve the incident %s", key)
 
 
-def _gate_cd_refusal(stages_dir: Path, output_dir: Path, own_plan: str) -> Optional[str]:
+def _swap_proven(old_shorts: list, on_disk: dict) -> bool:
+    """True when every record already in the new plan file is the OLD record or exactly its swap
+    (:func:`_carry_refusal`) and no Short of it is foreign to the old plan: the plan differs from
+    the reviewed one only by a deterministic swap."""
+    old = {s["short_index"]: s for s in old_shorts}
+    return set(on_disk) <= set(old) and all(
+        disk == old[i] or _carry_refusal(old[i], disk) is None for i, disk in on_disk.items()
+    )
+
+
+def _gate_cd_refusal(
+    stages_dir: Path, output_dir: Path, own_plan: str, swap_proven: bool = False
+) -> Optional[str]:
     """The enqueue-plan Gate C/D check on the replace run's state (``None`` = passes); an unreadable
-    state refuses, as ``enqueue-plan`` does. The Gate C/D hash leaves out the fields a swap rewrites
-    (media, reviewed_plan_hash, consent_hash), so a confirmation taken with the swap's own sidecar
-    present holds after every swap; one taken before it existed (a replace run emitted none) is
-    accepted with ``own_plan`` left out. The text the swap keeps comes from the old record and is
-    proven on a carry; any other file in the plan dir still counts."""
+    state refuses, as ``enqueue-plan`` does.
+
+    The recorded FULL hash is accepted as ``enqueue-plan`` accepts it (own plan included), and with
+    ``own_plan`` left out (a confirmation taken before the swap's sidecar existed: a replace run
+    emits none). Only here, and only when ``swap_proven`` (every record in the new plan is the old
+    one or its proven swap), is the recorded swap-projected hash (media, reviewed_plan_hash and
+    consent_hash left out) accepted too, so a confirmation taken after an earlier run wrote the
+    sidecar still holds. Any other file in the plan dir still counts whole."""
     from gomoveshift.cli.handlers import enqueue_plan
 
     try:
@@ -389,7 +421,7 @@ def _gate_cd_refusal(stages_dir: Path, output_dir: Path, own_plan: str) -> Optio
         try:  # a confirmation taken before the swap covers no own plan, one taken after covers it
             enqueue_plan.assert_gate_cd_approved(state, output_dir, skip_plans=(own_plan,))
         except enqueue_plan.GateNotApprovedError:
-            enqueue_plan.assert_gate_cd_approved(state, output_dir)
+            enqueue_plan.assert_gate_cd_approved(state, output_dir, swap_projection=swap_proven)
     except enqueue_plan.GateNotApprovedError as exc:
         return f"Gate C/D must be re-confirmed: {exc}"
     return None
@@ -419,14 +451,20 @@ def rebuild_replaced_sidecar(
     old_sidecar, new_sidecar = Path(old_sidecar), Path(new_sidecar)
     stages_dir, old_stages_dir = Path(stages_dir), Path(old_stages_dir)
     raw = json.loads(old_sidecar.read_text(encoding="utf-8"))
+    for record in raw["shorts"]:
+        # The plan parser needs the key, so a Short whose old record lacks it cannot go back
+        # verbatim: it goes back with ``recording_date: null`` (which parses, keeps its short_index,
+        # and is what the Short is refused for below), so dispatch holds its stale bytes.
+        record.setdefault("recording_date", None)
     target = new_sidecar.resolve()
     result = RebuildResult()
     gate: Dict[Any, Optional[str]] = {}
     settled: set = set()
     settled_pos: set = set()  # positions judged by the copy beside the plan, not a stage copy
-    dropped: set = set()  # positions with no recording_date key: no parseable record to write
-    gate_cd = _gate_cd_refusal(stages_dir, new_sidecar.parent, new_sidecar.name)
     on_disk = _on_disk(new_sidecar)
+    gate_cd = _gate_cd_refusal(
+        stages_dir, new_sidecar.parent, new_sidecar.name, _swap_proven(raw["shorts"], on_disk)
+    )
     null_ok = _null_path_is_target(conn, project, target, sidecar_dir)
     moves: List[tuple] = []  # (delivery_id, short_index, from_hash, to_hash, action)
     staged: List[tuple] = []  # (pos, new_short, Rebuilt, moves), applied after placement
@@ -438,40 +476,31 @@ def rebuild_replaced_sidecar(
         movable, listed, blocking, refuse, defer, retry_at = _classify(
             old_rows, now, target, null_ok
         )
-        if (
-            "recording_date" not in short
-        ):  # unparseable: it cannot be written back, so it is left out
-            dropped.add(pos)
-            result.refused.append(
-                Refused(
-                    index,
-                    "the Short has no recording_date: its privacy day is unknown",
-                    tuple(r["id"] for r in movable),
-                )
-            )
-            continue
         result.untouched += [
             Untouched(r["id"], index, r["platform"], r["status"], why)
             for r, why in listed + blocking
         ]
         disk = on_disk.get(index)
         disk_hash = disk.get("reviewed_plan_hash") if disk else None
-        carried, carry_bad = False, ""
+        carried, carry_bad, changed = False, "", None
         if disk_hash not in (None, old_hash):
             bad = _carry_refusal(short, disk)
             if bad is None:  # a finished swap: judged by ALL the Short's rows, never undone
                 carried = True
                 raw["shorts"][pos] = disk
                 if not (movable or refuse or defer):
-                    settled.add(index)  # nothing at the old hash can still move or publish
-                    settled_pos.add(pos)
-                    continue
+                    changed = _changed_again(disk, fingerprint_fn)
+                    if changed is None:
+                        settled.add(index)  # nothing at the old hash can still move or publish
+                        settled_pos.add(pos)
+                        continue
             else:
                 carry_bad = f"the plan file's record for this Short is not the swap ({bad})"
                 disk_hash = None  # it is overwritten with the reviewed record: rows follow it
         elif (
             old_rows
             and not refuse
+            and short.get("recording_date")  # a Short refused for its missing day is not finished
             and all(r["status"] in TERMINAL_STATUSES for r in old_rows)
             and not _ahead(conn, project, index, old_hash, target, disk_hash, now)[0]
         ):  # (a row a crashed run moved ahead of the file is not settled: the swap completes)
@@ -479,7 +508,7 @@ def rebuild_replaced_sidecar(
             settled_pos.add(pos)
             continue
         ids = tuple(r["id"] for r in movable)
-        reason = carry_bad or gate_cd or refuse
+        reason = carry_bad or changed or gate_cd or refuse
         new_fp = None
         if not reason and not defer:
             try:
@@ -572,7 +601,14 @@ def rebuild_replaced_sidecar(
             staged = []
     if staged:
         try:
-            _place_attestations(new_sidecar, stages_dir, raw)
+            result.attestations_kept = _place_attestations(new_sidecar, stages_dir, raw)
+            for day in result.attestations_kept:
+                logger.warning(
+                    "replace-rebuild: %s kept the verified attestation for %s beside the plan; "
+                    "the stage copy is not verified",
+                    project,
+                    day,
+                )
         except (OSError, ValueError) as exc:
             why = f"cannot place the per-day privacy attestations beside the plan: {exc}"
             result.refused += [Refused(st[2].short_index, why, st[2].delivery_ids) for st in staged]
@@ -581,7 +617,6 @@ def rebuild_replaced_sidecar(
         raw["shorts"][pos] = swapped
         result.rebuilt.append(rebuilt)
         moves += mv
-    raw["shorts"] = [s for i, s in enumerate(raw["shorts"]) if i not in dropped]
     result.refused.sort(key=lambda r: r.short_index)
     # Always written: a refused Short keeps its old record, so dispatch refuses the stale bytes.
     _write(conn, raw, old_sidecar, new_sidecar, project, moves, now)
@@ -615,24 +650,32 @@ def _finished_day_refusal(plan_dir: Path, stages_dir: Path, day: str, privacy_fn
     return None if beside is None else why
 
 
-def _place_attestations(new_sidecar: Path, stages_dir: Path, raw: dict) -> None:
-    """Put the per-day attestations beside the sidecar."""
+def _place_attestations(new_sidecar: Path, stages_dir: Path, raw: dict) -> List[str]:
+    """Put the per-day attestations beside the sidecar; returns the days whose VERIFIED copy beside
+    the plan was kept because the stage copy is present but not verified (an ``inconclusive`` or
+    unreadable one would otherwise hold every upload of the run). A copy beside the plan whose
+    stage copy is gone is kept too (a reclaim removed it)."""
     from gomoveshift.pipeline.day_master_encoder import PRIVACY_ATTESTATION_NAME
     from gomoveshift.pipeline.drive_phases import phase_d
 
     dates = sorted({s["recording_date"] for s in raw["shorts"] if s.get("recording_date")})
-    kept = {}  # a copy beside the plan whose stage copy is gone: never replaced by "inconclusive"
+    kept, notes = {}, []
     for date in dates:
         name = PRIVACY_ATTESTATION_NAME.format(date=date)
-        if (new_sidecar.parent / name).is_file() and not (
-            stages_dir / f"day_{date}" / name
-        ).is_file():
-            kept[name] = (new_sidecar.parent / name).read_bytes()
+        beside, stage = new_sidecar.parent / name, stages_dir / f"day_{date}" / name
+        if not beside.is_file():
+            continue
+        if not stage.is_file():
+            kept[name] = beside.read_bytes()
+        elif _attestation_refusal(beside, date) is None and _attestation_refusal(stage, date):
+            kept[name] = beside.read_bytes()
+            notes.append(date)
     phase_d._sync_privacy_attestations(
         output_base=new_sidecar.parent, stages_base=stages_dir, dates=dates
     )
     for name, data in kept.items():
         (new_sidecar.parent / name).write_bytes(data)
+    return notes
 
 
 def _write(conn, raw, old_sidecar, new_sidecar, project, moves, now: datetime) -> None:
