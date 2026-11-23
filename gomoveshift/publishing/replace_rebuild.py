@@ -12,7 +12,11 @@ row blocks it; else it is REFUSED (old fingerprint kept, one incident). A Short 
 waiting (live lease, in-flight row, future slot inside ``SYNC_LEAD_TIME``) is DEFERRED; a past or
 missing slot moves. The per-day attestations are placed beside the sidecar in the same write.
 Rows move by compare-and-set (commit, then ``os.replace``); a crash leaves rows ahead of the file,
-which a refusing rerun restores. See ``docs/social-publishing-queue.md``.
+which a refusing rerun restores ONLY while the file still carries the old hash and the row is still
+queued and unuploaded. A finished swap (its record on disk, no row at the old hash) is carried
+through every later run untouched. ``old_stages_dir`` is the set-aside run's stage dir,
+``<stages_root>/_superseded/<project>-<stamp>/<project>/_stages`` (``launch.py`` supersede plan).
+See ``docs/social-publishing-queue.md``.
 """
 
 from __future__ import annotations
@@ -118,11 +122,18 @@ def _identity_refusal(short: dict, new_fp, stages_dir: Path, old_stages_dir: Pat
     if not found:
         return f"cannot read the clip rank from {media['path']!r}"
     rank = int(found.group(1))
-    new = _audit_entry(stages_dir, short["recording_date"], rank)
-    old_entry = _audit_entry(old_stages_dir, short["recording_date"], rank)
-    for which, entry in (("new", new), ("old", old_entry)):
+    date = short["recording_date"]
+    new = _audit_entry(stages_dir, date, rank)
+    old_entry = _audit_entry(old_stages_dir, date, rank)
+    for which, entry, where in (("new", new, stages_dir), ("old", old_entry, old_stages_dir)):
         if entry is None:
-            return f"the {which} run's Shorts audit has no rank {rank}: identity unconfirmed"
+            hint = ""
+            if which == "old":
+                hint = " (the set-aside stage dir is <stages_root>/_superseded/<project>-<stamp>/<project>/_stages)"
+            return (
+                f"the {which} run's Shorts audit has no rank {rank}: identity unconfirmed; "
+                f"expected {where / f'shorts_ost_audit_{date}.json'}{hint}"
+            )
     try:
         for label, entry in (("old", old_entry), ("new", new)):
             if entry.get("parent_lf_index") != short["lf_index"]:
@@ -162,14 +173,17 @@ def _rows(conn: sqlite3.Connection, project: str, index: int, plan_hash: str) ->
     ).fetchall()
 
 
-def _classify(rows, now: datetime, target: Path):
+def _classify(rows, now: datetime, target: Path, null_is_target: bool = False):
     """``(movable, listed, blocking, refuse, defer, retry_at)``; refuse/defer are reasons (``""`` =
-    none) and refuse beats defer."""
+    none) and refuse beats defer. ``null_is_target``: a row with no ``sidecar_path`` is served
+    from ``target`` (the plan dispatch reads for it)."""
     movable, listed, blocking, refuse, defer, retries = [], [], [], "", "", []
     for r in rows:
         who = f"{r['platform']} row {r['id']}"
         done = r["status"] in TERMINAL_STATUSES
-        if not _same_file(r["sidecar_path"], target):
+        if not (
+            _same_file(r["sidecar_path"], target) or (null_is_target and not r["sidecar_path"])
+        ):
             if not done:
                 refuse = refuse or f"{who} points at another sidecar file ({r['sidecar_path']})"
         elif r["recovers_delivery_id"] is not None:
@@ -196,13 +210,26 @@ def _classify(rows, now: datetime, target: Path):
                     or f"{who} is queued for {at.isoformat()}, inside the {SYNC_LEAD_TIME} lead time"
                 )
             movable.append(r)
+    if not refuse and any(r["status"] not in TERMINAL_STATUSES for r in rows):
+        sent = [r for r in rows if r["status"] == "published" and r["platform_upload_id"]]
+        if sent:  # old bytes already went out on a platform: the Short never goes half new
+            refuse = (
+                f"{sent[0]['platform']} row {sent[0]['id']} already published the old bytes: "
+                "one Short cannot be half old, half new"
+            )
     retry_at = min(retries).isoformat() if retries else None
     return movable, listed, blocking, refuse, defer, retry_at
 
 
-def _ahead(conn: sqlite3.Connection, project: str, index: int, old_hash: str, target: Path):
-    """Rows a crashed run moved but whose file never replaced: ``[(id, their_hash)]``."""
-    out = set()
+def _ahead(conn, project: str, index: int, old_hash: str, target: Path, disk_hash, now):
+    """Rows a crashed run moved but whose file never replaced: ``(restorable, left)``.
+
+    Only while the file still carries the old hash (``disk_hash`` is ``None`` or ``old_hash``) and
+    only a row that is still queued, unuploaded and unleased goes back; any other such row is
+    returned in ``left`` (listed, never changed)."""
+    if disk_hash not in (None, old_hash):
+        return [], []  # the swap is on disk: finished, nothing to undo
+    out, left = {}, {}
     for (reason,) in conn.execute(
         "SELECT reason FROM response_log WHERE action = 'replace_rebuild'"
     ):
@@ -220,9 +247,35 @@ def _ahead(conn: sqlite3.Connection, project: str, index: int, old_hash: str, ta
             "SELECT * FROM deliveries WHERE id = ? AND plan_hash = ?",
             (doc.get("delivery_id"), doc.get("new_plan_hash")),
         ).fetchone()
-        if r and _same_file(r["sidecar_path"], target) and r["recovers_delivery_id"] is None:
-            out.add((r["id"], r["plan_hash"]))
-    return sorted(out)
+        if not (r and _same_file(r["sidecar_path"], target) and r["recovers_delivery_id"] is None):
+            continue
+        if r["status"] == "queued" and not r["platform_upload_id"] and not _leased(r, now):
+            out[r["id"]] = r["plan_hash"]
+        else:
+            left[r["id"]] = r
+    return sorted(out.items()), [left[k] for k in sorted(left)]
+
+
+def _on_disk(new_sidecar: Path) -> dict:
+    """``{short_index: record}`` of the sidecar already at ``new_sidecar`` (``{}`` if none)."""
+    try:
+        shorts = json.loads(new_sidecar.read_text(encoding="utf-8")).get("shorts") or []
+        return {s["short_index"]: s for s in shorts if isinstance(s, dict) and "short_index" in s}
+    except (OSError, ValueError, AttributeError, KeyError):
+        return {}
+
+
+def _null_path_is_target(conn, project: str, target: Path) -> bool:
+    """Dispatch serves a NULL ``sidecar_path`` row from the project's newest recorded sidecar, else
+    ``<sidecar_dir>/<project>_publish_plan.json``; is that ``target``?"""
+    row = conn.execute(
+        "SELECT sidecar_path FROM deliveries WHERE project_name = ? AND sidecar_path IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (project,),
+    ).fetchone()
+    if row is not None:
+        return _same_file(row["sidecar_path"], target)
+    return target.name == f"{project}_publish_plan.json"
 
 
 def _incident_dir(directory):
@@ -280,14 +333,18 @@ def _resolve_incident(project: str, index, now: datetime, directory) -> None:
         logger.exception("replace-rebuild: could not resolve the incident %s", key)
 
 
-def _gate_cd_refusal(stages_dir: Path, output_dir: Path) -> Optional[str]:
+def _gate_cd_refusal(stages_dir: Path, output_dir: Path, own_plan: str) -> Optional[str]:
     """The enqueue-plan Gate C/D check on the replace run's state (``None`` = passes); an unreadable
-    state refuses, as ``enqueue-plan`` does."""
+    state refuses, as ``enqueue-plan`` does. The swap's OWN sidecar (``own_plan``) is left out of
+    the hash: the swap rewrites it on every run, which would void a confirmation after the first
+    one, and a replace run emitted none when the gate was confirmed. Everything the swap keeps
+    (text, payloads) is read from the old record, and it is gated by identity, derived hash, own
+    day privacy and mask; any other file in the plan dir still counts."""
     from gomoveshift.cli.handlers import enqueue_plan
 
     try:
         state = enqueue_plan._load_state(stages_dir / "pipeline_state.json")
-        enqueue_plan.assert_gate_cd_approved(state, output_dir)
+        enqueue_plan.assert_gate_cd_approved(state, output_dir, skip_plans=(own_plan,))
     except enqueue_plan.GateNotApprovedError as exc:
         return f"Gate C/D must be re-confirmed: {exc}"
     return None
@@ -318,20 +375,33 @@ def rebuild_replaced_sidecar(
     target = new_sidecar.resolve()
     result = RebuildResult()
     gate: Dict[Any, Optional[str]] = {}
-    gate_cd = _gate_cd_refusal(stages_dir, new_sidecar.parent)
+    settled: set = set()
+    gate_cd = _gate_cd_refusal(stages_dir, new_sidecar.parent, new_sidecar.name)
+    on_disk = _on_disk(new_sidecar)
+    null_ok = _null_path_is_target(conn, project, target)
     moves: List[tuple] = []  # (delivery_id, short_index, from_hash, to_hash, action)
     staged: List[tuple] = []  # (pos, new_short, Rebuilt, moves), applied after placement
     for pos, short in enumerate(raw["shorts"]):
         index, media = short["short_index"], short["media"]
         yt = short["payloads"]["youtube"]
         old_hash = short["reviewed_plan_hash"]
+        old_rows = _rows(conn, project, index, old_hash)
         movable, listed, blocking, refuse, defer, retry_at = _classify(
-            _rows(conn, project, index, old_hash), now, target
+            old_rows, now, target, null_ok
         )
         result.untouched += [
             Untouched(r["id"], index, r["platform"], r["status"], why)
             for r, why in listed + blocking
         ]
+        disk = on_disk.get(index)
+        disk_hash = disk.get("reviewed_plan_hash") if disk else None
+        if disk_hash not in (None, old_hash) and not old_rows:
+            raw["shorts"][pos] = disk  # finished: a later run never undoes it
+            settled.add(index)
+            continue
+        if old_rows and not refuse and all(r["status"] in TERMINAL_STATUSES for r in old_rows):
+            settled.add(index)  # nothing of this Short can still publish: no gate, no incident
+            continue
         ids = tuple(r["id"] for r in movable)
         reason = gate_cd or refuse
         new_fp = None
@@ -344,15 +414,15 @@ def rebuild_replaced_sidecar(
                     new_fp = fingerprint_fn(path)
             except (OSError, ValueError, RuntimeError) as exc:
                 reason = f"cannot fingerprint the new media: {exc}"
+            day = short.get("recording_date")
+            if not reason and not day:
+                reason = "the Short has no recording_date: its privacy day is unknown"
             if not reason:
                 reason = _identity_refusal(short, new_fp, stages_dir, old_stages_dir) or ""
             if not reason:
                 derived = review_hash(yt["title"], yt["description"], yt["tags"], media["sha256"])
                 if old_hash != derived:
                     reason = "reviewed_plan_hash is not media-derived: a human re-review is needed"
-            day = short.get("recording_date")
-            if not reason and not day:
-                reason = "the Short has no recording_date: its privacy day is unknown"
             if not reason and ("privacy", day) not in gate:
                 gate["privacy", day] = privacy_fn(stages_dir, day)
             if not reason and gate["privacy", day]:
@@ -362,11 +432,20 @@ def rebuild_replaced_sidecar(
             if not reason and gate["mask"]:
                 reason = f"mask-frame gate: {gate['mask']}"
         if reason or defer:
-            ahead = _ahead(conn, project, index, old_hash, target)
+            ahead, left = _ahead(conn, project, index, old_hash, target, disk_hash, now)
             moves += [
                 (did, index, theirs, old_hash, "replace_rebuild_restore") for did, theirs in ahead
             ]
             ids += tuple(did for did, _ in ahead)
+            for r in left:
+                result.untouched.append(
+                    Untouched(r["id"], index, r["platform"], r["status"], "moved ahead: left as is")
+                )
+            note = "".join(
+                f"; row {r['id']} moved ahead of the plan file but is {r['status']}: left as is"
+                for r in left
+            )
+            reason, defer = (reason + note if reason else ""), (defer + note if defer else "")
             if reason:
                 result.refused.append(Refused(index, reason, ids))
             else:
@@ -387,6 +466,25 @@ def rebuild_replaced_sidecar(
                 [(r["id"], index, old_hash, new_hash, "replace_rebuild") for r in movable],
             )
         )
+    if staged:
+        for day in sorted({s["recording_date"] for s in raw["shorts"] if s.get("recording_date")}):
+            if ("privacy", day) not in gate:
+                gate["privacy", day] = privacy_fn(stages_dir, day)
+        held = [
+            f"{k[1]}: {why}"
+            for k, why in sorted(gate.items(), key=str)
+            if k[0] == "privacy" and why
+        ]
+        if held:  # dispatch merges a run's days worst-state-wins: another day holds every upload
+            why = (
+                "another day's privacy attestation holds the whole run in dispatch ("
+                + "; ".join(held)
+                + ")"
+            )
+            result.deferred += [
+                Deferred(st[2].short_index, why, None, st[2].delivery_ids) for st in staged
+            ]
+            staged = []
     if staged:
         try:
             _place_attestations(new_sidecar, stages_dir, raw)
@@ -413,20 +511,30 @@ def rebuild_replaced_sidecar(
         _raise_incident(
             project, d.short_index, d.reason + when, now, incidents_dir, what="deferred"
         )
-    for r in result.rebuilt:
-        if r.short_index not in bad:
-            _resolve_incident(project, r.short_index, now, incidents_dir)
+    for index in sorted({r.short_index for r in result.rebuilt} | settled):
+        if index not in bad:
+            _resolve_incident(project, index, now, incidents_dir)
     return result
 
 
 def _place_attestations(new_sidecar: Path, stages_dir: Path, raw: dict) -> None:
     """Put the per-day attestations beside the sidecar."""
+    from gomoveshift.pipeline.day_master_encoder import PRIVACY_ATTESTATION_NAME
     from gomoveshift.pipeline.drive_phases import phase_d
 
     dates = sorted({s["recording_date"] for s in raw["shorts"] if s.get("recording_date")})
+    kept = {}  # a copy beside the plan whose stage copy is gone: never replaced by "inconclusive"
+    for date in dates:
+        name = PRIVACY_ATTESTATION_NAME.format(date=date)
+        if (new_sidecar.parent / name).is_file() and not (
+            stages_dir / f"day_{date}" / name
+        ).is_file():
+            kept[name] = (new_sidecar.parent / name).read_bytes()
     phase_d._sync_privacy_attestations(
         output_base=new_sidecar.parent, stages_base=stages_dir, dates=dates
     )
+    for name, data in kept.items():
+        (new_sidecar.parent / name).write_bytes(data)
 
 
 def _write(conn, raw, old_sidecar, new_sidecar, project, moves, now: datetime) -> None:
