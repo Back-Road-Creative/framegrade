@@ -52,6 +52,11 @@ class PublishPlanFormatError(ValueError):
     """Sidecar JSON is malformed or shaped wrong. Message names the path."""
 
 
+class DuplicateShortIndexError(PublishPlanFormatError):
+    """The plan lists one ``short_index`` more than once, so no reader can know which record is
+    the Short's (the last would upload another Short's video under this one's row)."""
+
+
 def _fail(path: Path, what: str) -> "PublishPlanFormatError":
     return PublishPlanFormatError(f"publish-plan sidecar {path}: {what}")
 
@@ -276,10 +281,14 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
         raise _fail(path, f"{exc} ({ctx})") from exc
 
 
-def load_publish_plan(sidecar_path: Union[str, Path]) -> PublishPlan:
+def load_publish_plan(
+    sidecar_path: Union[str, Path], *, allow_duplicate_index: bool = False
+) -> PublishPlan:
     """Read a ``<project>_publish_plan.json`` sidecar back into a
     :class:`PublishPlan`. Raises :class:`PublishPlanFormatError` on any
-    malformed input, always naming the file."""
+    malformed input, always naming the file, and :class:`DuplicateShortIndexError` for a repeated
+    ``short_index``. Only a writer validating a file every reader will still refuse (the replace
+    rebuild, which keeps both old records verbatim) passes ``allow_duplicate_index``."""
     path = Path(sidecar_path)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -295,15 +304,22 @@ def load_publish_plan(sidecar_path: Union[str, Path]) -> PublishPlan:
             "is a publish_preview (not_for_publish): a review-only payload preview "
             "with placeholder parent ids, never a plan",
         )
-    return plan_from_raw(raw, path)
+    return plan_from_raw(raw, path, allow_duplicate_index=allow_duplicate_index)
 
 
-def plan_from_raw(raw: Any, path: Path) -> PublishPlan:
+def plan_from_raw(raw: Any, path: Path, *, allow_duplicate_index: bool = False) -> PublishPlan:
     """The :class:`PublishPlan` of an already-parsed sidecar ``raw`` (``path`` names it in
     errors only; nothing is read or written)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("shorts"), list):
         raise _fail(path, "missing a 'shorts' list")
     plan = PublishPlan(shorts=tuple(_record(r, path, i) for i, r in enumerate(raw["shorts"])))
+    seen = [s.short_index for s in plan.shorts]
+    twice = sorted({i for i in seen if seen.count(i) > 1}, key=str)
+    if twice and not allow_duplicate_index:
+        raise DuplicateShortIndexError(
+            f"publish-plan sidecar {path}: short_index {twice} appears more than once; "
+            "which record is the Short's cannot be known"
+        )
     _assert_consistent(plan, path)
     return plan
 

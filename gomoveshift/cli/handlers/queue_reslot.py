@@ -31,7 +31,7 @@ from ...pipeline import seo_slots
 from ...pipeline.playlist_resolver import short_region
 from ...publishing.dispatch import TransientMediaError
 from ...publishing.handlers import resolve_tiktok_mode
-from ...publishing.plan_io import load_publish_plan
+from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
 from ...publishing.plan_title_sync import write_plan_slot
 from ...publishing.queue import (
     STATUS_AWAITING_MANUAL_PUBLISH,
@@ -83,7 +83,11 @@ def _record_for(row):
     path = Path(row["sidecar_path"])
     if not path.exists():
         raise _RefusedError(f"publish-plan sidecar not readable: {path}")
-    for record in load_publish_plan(path).shorts:
+    try:
+        plan = load_publish_plan(path)
+    except PublishPlanFormatError as exc:  # incl. a duplicated short_index: named, never a crash
+        raise _RefusedError(str(exc)) from exc
+    for record in plan.shorts:
         if record.short_index == row["short_index"]:
             return record
     raise _RefusedError(f"sidecar {path} has no short_index {row['short_index']}")

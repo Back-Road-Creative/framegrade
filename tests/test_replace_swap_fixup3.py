@@ -258,15 +258,15 @@ def _gate_hash(w, **kw):
 
 def test_the_swap_projection_ignores_the_swapped_fields_but_not_the_text(w):
     _plan(w)
-    base = _gate_hash(w, swap_projection=True)
+    base = _gate_hash(w, project_plans=("x_publish_plan.json",))
     whole = _gate_hash(w)
     _plan(w, media={"sha256": "b"}, reviewed_plan_hash="h2", consent_hash="c2")
-    assert _gate_hash(w, swap_projection=True) == base
+    assert _gate_hash(w, project_plans=("x_publish_plan.json",)) == base
     assert _gate_hash(w) != whole  # the default hash covers the swapped fields
     _plan(w, payloads={"youtube": {"title": "t2"}})
-    assert _gate_hash(w, swap_projection=True) != base
+    assert _gate_hash(w, project_plans=("x_publish_plan.json",)) != base
     _plan(w, short_index=2)
-    assert _gate_hash(w, swap_projection=True) != base
+    assert _gate_hash(w, project_plans=("x_publish_plan.json",)) != base
 
 
 def test_a_confirmation_recorded_with_the_full_plan_hash_is_approved_until_the_plan_changes(w):

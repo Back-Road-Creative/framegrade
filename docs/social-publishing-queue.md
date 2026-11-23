@@ -680,8 +680,10 @@ run's `<stages>/pipeline_state.json`. A `--no-review` replace never persists a c
 normally passes as unreviewed; a stale confirmation hash or unreadable state refuses EVERY Short
 with one `...:gate_cd` incident ("Gate C/D must be re-confirmed"). Nothing forges a confirmation.
 A confirmation records TWO hashes: `gate_cd_confirmation_hash`, the FULL hash of every plan, and
-`gate_cd_confirmation_swap_hash`, the same hash with `media`, `reviewed_plan_hash` and `consent_hash`
-projected out of each Short (the only fields a swap rewrites). Only this replace gate may accept the
+`gate_cd_confirmation_swap_hash`, a map `{plan file name: hash}` where each hash projects `media`,
+`reviewed_plan_hash` and `consent_hash` out of the Shorts of THAT one plan (the only fields a swap
+rewrites) and hashes every other plan whole. The replace gate looks up its own plan's entry, so a
+sibling plan's repointed media or changed consent still refuses. Only this replace gate may accept the
 projected hash, and only when the plan file on disk is a proven swap of the old plan (every record is
 the old record or exactly its swap); `enqueue-plan` and the Gate C/D auto-pass accept the full hash
 alone, so repointed media, re-rendered bytes or a changed consent still refuse there. A confirmation
@@ -732,7 +734,16 @@ refused, a terminal one is left. A day whose Shorts are all finished is judged b
 attestation beside the plan, so a reclaimed stage copy never holds the other Shorts. A Short with no
 `recording_date` key is refused and written back with a null date, so it keeps its `short_index` and
 dispatch holds its stale bytes (rows stay queued, never burned); it is never settled while the date is
-missing. A Short whose rows are all terminal (cancelled, published) has nothing left to swap and its
+missing. Dispatch holds those rows itself: `SidecarRecordLoader` raises `TransientMediaError` (row
+stays queued, never burned, visible in the row's error and the media-stall incident) for a record with
+a null `recording_date`, because the privacy attestation is per run and would otherwise pass its
+unchanged bytes. A plan that lists one `short_index` more than once is refused by `load_publish_plan` itself
+(`DuplicateShortIndexError`, a `PublishPlanFormatError`), so EVERY reader refuses it; dispatch turns
+that into the same hold for every row of the project (the last record would upload another Short's
+video). The rebuild refuses every position of that index with one incident and writes both records
+back verbatim (the only caller that validates with `allow_duplicate_index=True`); fixing the plan and
+rerunning converges with no hand step. A confirmation whose swap hash is the legacy single string is
+refused by the replace gate with "re-confirm Gate C/D" (a re-confirmation records it per plan). A Short whose rows are all terminal (cancelled, published) has nothing left to swap and its
 refusal incident resolves; a rerun that swaps a Short converges. A finished swap is bound to the file:
 a settled Short whose media on disk no longer matches the carried sha is refused ("the media changed
 again"). A verified attestation beside the plan is kept over a present but unverified stage copy and

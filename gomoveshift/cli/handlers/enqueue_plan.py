@@ -35,7 +35,7 @@ import os
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ...console.library import privacy_status_blocks_publish, privacy_status_for_media
 from ...console.settings import current_brand
@@ -93,7 +93,7 @@ def assert_gate_cd_approved(
     output_dir: Path,
     *,
     skip_plans: tuple = (),
-    swap_projection: bool = False,
+    swap_plan: Optional[str] = None,
 ) -> None:
     """Raise when a human Gate C/D confirmation no longer matches the content.
 
@@ -101,9 +101,10 @@ def assert_gate_cd_approved(
     automatically through the automated pre-spool gates. A confirmed run
     must still carry a hash, and the sidecars must be unchanged since: the recorded FULL hash
     (media included) must equal the recomputed one. ``skip_plans`` names sidecars left out of
-    the comparison (see ``compute_gate_cd_hash``). ``swap_projection=True`` additionally accepts
-    the recorded swap-projected hash (``gate_cd_confirmation_swap_hash``); only the replace swap's
-    own check passes it, and only for a plan whose swap it just proved deterministic. Every other
+    the comparison (see ``compute_gate_cd_hash``). ``swap_plan`` (a sidecar file name) additionally
+    accepts that plan's recorded swap-projected hash (``gate_cd_confirmation_swap_hash[name]``;
+    every other plan hashed whole); only the replace swap's own check passes it, and only for its
+    own plan after proving the swap deterministic. Every other
     caller, ``enqueue-plan`` included, leaves it False."""
     if not getattr(state, "gate_cd_confirmed", None):
         return
@@ -116,14 +117,16 @@ def assert_gate_cd_approved(
     current = compute_gate_cd_hash(state=state, output_dir=output_dir, skip_plans=skip_plans)
     if recorded == current:
         return
-    swap_recorded = getattr(state, "gate_cd_confirmation_swap_hash", None)
-    if (
-        swap_projection
-        and swap_recorded
-        and swap_recorded
-        == compute_gate_cd_hash(
-            state=state, output_dir=output_dir, skip_plans=skip_plans, swap_projection=True
+    by_plan = getattr(state, "gate_cd_confirmation_swap_hash", None)
+    if swap_plan and by_plan and not isinstance(by_plan, dict):
+        raise GateNotApprovedError(
+            "the swap-invariant Gate C/D hash was recorded in a legacy format (one string for "
+            "every plan), which no longer proves the replace swap; re-confirm Gate C/D "
+            "(it is then recorded per plan) and rerun the replace"
         )
+    swap_recorded = by_plan.get(swap_plan) if swap_plan and isinstance(by_plan, dict) else None
+    if swap_recorded and swap_recorded == compute_gate_cd_hash(
+        state=state, output_dir=output_dir, skip_plans=skip_plans, project_plans=(swap_plan,)
     ):
         return
     raise GateNotApprovedError(

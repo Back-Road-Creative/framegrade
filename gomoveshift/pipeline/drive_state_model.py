@@ -498,10 +498,11 @@ class PipelineState:
     # for resume so the operator doesn't re-confirm identical content.
     gate_cd_confirmed: Optional[bool] = None
     gate_cd_confirmation_hash: Optional[str] = None
-    # The same confirmation hashed with each Short's swap fields projected out
-    # (``review_gate.compute_gate_cd_hash(swap_projection=True)``). Only the replace swap's own gate
-    # check reads it; every other caller compares ``gate_cd_confirmation_hash`` alone.
-    gate_cd_confirmation_swap_hash: Optional[str] = None
+    # ``{plan file name: hash}``: the confirmation hashed with that ONE plan's Short swap fields
+    # projected out (``review_gate.compute_gate_cd_hash(project_plans=(name,))``), every other
+    # plan whole. Only the replace swap's own gate check reads it; every other caller compares
+    # ``gate_cd_confirmation_hash`` alone.
+    gate_cd_confirmation_swap_hash: Optional[dict] = None
     # Per-day OST audit resume markers (``{date: bool}`` / ``{date: hex}``).
     # ``ost_audit_sidecar.gate_or_raise`` populates these when audit
     # passes; on resume, a matching ``ost_audit_hash`` short-circuits
