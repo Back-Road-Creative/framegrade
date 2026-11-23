@@ -61,3 +61,17 @@ def test_cross_drive_dated_never_dates_an_already_dated_title():
     assert _drive_dated("Ireland", "2025-09-17") == "Ireland (Sep 17, 2025)"
     assert _drive_dated("Ireland", "") is None
     assert _drive_dated("Ireland", "garbage") is None
+
+
+def test_an_already_dated_title_is_never_dated_twice_so_a_dated_live_title_refuses():
+    dated = "County Cork, Ireland (Sep 19, 2025)"
+    live = dated.lower() + " in 4k"
+    with pytest.raises(PhaseBCExitContractError):
+        ensure_unique_titles(
+            {1: dated},
+            published_titles={live},
+            published_title_ids={live: "VID1"},
+            drive_project="ireland-2025-09-19-old-head-courtmacsherry",
+            lf_dates={1: "2025-09-19"},
+            video_projects={"VID1": "ireland-2025-09-17-baltimore-clonakilty"},
+        )

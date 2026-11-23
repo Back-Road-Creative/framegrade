@@ -152,3 +152,21 @@ def test_dated_bracket_title_still_refuses_an_exact_live_duplicate(tmp_path):
 def test_dated_input_still_passes_the_uniqueness_gate_when_nothing_collides():
     dated = bracket_dated_title_inputs({1: "Ireland"}, _record(), {1: "2025-09-16"})
     assert ensure_unique_titles(dated, published_titles={"ireland in 4k"}) == dated
+
+
+def test_a_label_with_stray_whitespace_is_dated_without_a_double_space():
+    out = bracket_dated_title_inputs({1: "Ireland "}, _record(), {1: "2025-09-16"})
+    assert out == {1: "Ireland (Sep 16, 2025)"}
+
+
+def test_the_backstop_strips_a_label_before_dating_so_a_dated_live_title_still_refuses():
+    live = "ireland (sep 16, 2025) in 4k"
+    with pytest.raises(PhaseBCExitContractError):
+        ensure_unique_titles(
+            {1: "Ireland "},
+            published_titles={"ireland in 4k", live},
+            published_title_ids={"ireland in 4k": "V1", live: "V2"},
+            drive_project="mine",
+            lf_dates={1: "2025-09-16"},
+            video_projects={"V1": "other", "V2": "other"},
+        )

@@ -500,6 +500,7 @@ class PhaseBCDayFirst:
             state.per_lf_ost_text = dict(_preseed_ost_text)
             state.per_lf_titles = kit.unique_titles(
                 dict(_preseed_ost_text),
+                bracket_route=getattr(state, "bracket_route", None),
                 published_titles=kit.published_titles() | set(_channel_title_ids),
                 published_title_ids=_channel_title_ids,
                 drive_project=_drive_project(state),
@@ -1149,6 +1150,7 @@ class PhaseBCDayFirst:
         # ``_channel_title_ids`` was refreshed once, earlier in this method.
         per_lf_titles = kit.unique_titles(
             dict(per_lf_ost_text),
+            bracket_route=getattr(state, "bracket_route", None),
             published_titles=kit.published_titles() | set(_channel_title_ids),
             published_title_ids=_channel_title_ids,
             drive_project=_drive_project(state),
@@ -1895,6 +1897,7 @@ def _apply_demoted_labels(
     state.per_lf_ost_text = dict(per_lf_ost_text)
     state.per_lf_titles = kit.unique_titles(
         dict(per_lf_ost_text),
+        bracket_route=getattr(state, "bracket_route", None),
         published_titles=kit.published_titles(),
         published_title_ids=title_ids,
         drive_project=_drive_project(state),

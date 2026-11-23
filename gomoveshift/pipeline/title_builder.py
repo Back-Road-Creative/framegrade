@@ -1893,7 +1893,8 @@ def _drive_dated(title, raw_date):
     """``title`` + `` (Mon D, YYYY)`` for the measured ``raw_date`` (``YYYY-MM-DD…``).
 
     ``None`` when ``raw_date`` is missing or unparseable: a date is never guessed. A
-    date suffix already on ``title`` is stripped first, so a title is never dated twice.
+    date suffix already on ``title`` is stripped first, so a title is never dated twice;
+    stray whitespace is stripped too, so the suffix never follows a double space.
     """
     import datetime as _dt
 
@@ -1904,7 +1905,7 @@ def _drive_dated(title, raw_date):
         day = _dt.date.fromisoformat(raw[:10])
     except ValueError:
         return None
-    return f"{strip_drive_date(title)} ({day.strftime('%b')} {day.day}, {day.year})"
+    return f"{strip_drive_date(str(title).strip())} ({day.strftime('%b')} {day.day}, {day.year})"
 
 
 def bracket_dated_title_inputs(ost_text, bracket_route, lf_dates):
@@ -1953,6 +1954,7 @@ def ensure_unique_titles(
     drive_project: str | None = None,
     lf_dates: dict[int, str] | None = None,
     video_projects: dict[str, str] | None = None,
+    bracket_route: dict | None = None,
 ) -> dict[int, str]:
     """Post-process: append ``(Part N)`` to any duplicate titles.
 
@@ -1996,11 +1998,18 @@ def ensure_unique_titles(
     project (a genuine re-upload), an unknown project (``drive_project`` or the
     video's), no measured date, or a dated title that also collides.
 
+    ``bracket_route`` (the ``state.bracket_route`` record): Phase BC passes it so its
+    preview, audit hash and uniqueness check run on the SAME dated bracket title Phase D
+    ships (``bracket_dated_title_inputs`` with ``lf_dates``) without importing this
+    module. Phase D dates its input itself and leaves it unset.
+
     Titles that are already unique (in-batch and vs the channel) are
     returned unchanged.
     """
     if not lf_titles:
         return {}
+    if bracket_route:
+        lf_titles = bracket_dated_title_inputs(lf_titles, bracket_route, lf_dates)
     # Count occurrences
     from collections import Counter
 
