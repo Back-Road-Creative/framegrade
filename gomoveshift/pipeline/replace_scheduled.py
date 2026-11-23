@@ -59,6 +59,9 @@ logger = logging.getLogger(__name__)
 #: status --json`` lists it under ``incidents.open``); ``resolve_incidents`` closes a row when its LF
 #: finishes.
 INCIDENT_KIND = "replace_scheduled_partial"
+#: The ``code`` of an unbooked-upload incident (``longform_metadata.orphan_upload_refusal`` opens it
+#: per LF): only that gate closes it, so ``resolve_incidents`` without ``codes`` never does.
+ORPHAN_UPLOAD_CODE = "orphan_upload"
 REPLACE_PLAN_FILENAME = "replace_plan.json"
 REPLACE_PLAN_SCHEMA = "replace-scheduled/1"
 #: A scheduled upload is replaced only while its ``publishAt`` is at least this far ahead: the
@@ -106,8 +109,8 @@ def record_incident(drive: str, code: str, detail: str, *, lf: Optional[int] = N
 
 
 def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, ...] = (), drive_level: bool = False, incidents_dir: Optional[Path] = None, codes: Tuple[str, ...] = (), outcome: str = "") -> int:  # fmt: skip
-    """Resolve this drive's open ``INCIDENT_KIND`` rows for ``lf`` (all its codes but ``keep``, or
-    only ``codes`` when given), or with ``drive_level`` the rows that carry no LF; ``outcome`` is
+    """Resolve this drive's open ``INCIDENT_KIND`` rows for ``lf`` (all its codes but ``keep`` and
+    ``ORPHAN_UPLOAD_CODE``, or only ``codes`` when given), or with ``drive_level`` the rows that carry no LF; ``outcome`` is
     stamped on each as the terminal reason. Returns how many it closed; never raises."""
     closed = 0
     try:
@@ -129,6 +132,8 @@ def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, 
                 continue
             if row.get("code") in keep or (codes and row.get("code") not in codes) or (row.get("lf") is None) != drive_level:  # fmt: skip
                 continue
+            if not codes and row.get("code") == ORPHAN_UPLOAD_CODE:
+                continue  # an LF finishing (or a drive-level sweep) says nothing of a stray upload
             if not drive_level and row.get("lf") != lf:
                 continue
             row["resolved_at"] = utc_iso()

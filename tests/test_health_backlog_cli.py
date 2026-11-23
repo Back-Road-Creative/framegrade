@@ -212,6 +212,18 @@ def test_failed_audits_reach_the_cron_log_and_a_launch_exits_zero(tmp_path, caps
     assert out.rstrip().endswith("launched: ire-b for slot")
 
 
+def test_refused_publishes_reach_the_cron_log_beside_a_launch(tmp_path, capsys, wired):
+    """A refused failed publish no longer holds the region (U2), so it must still be visible."""
+    wired["_result"] = {
+        "action": "launched", "reason": "morning-kerry for slot", "skipped": [],
+        "failed_publishes": [{"project": "kerry", "reason": "mask_frame_count_unknown"}],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    out = capsys.readouterr().out
+    assert "failed publish kerry: mask_frame_count_unknown" in out
+    assert out.rstrip().endswith("launched: morning-kerry for slot")
+
+
 def test_replace_scheduled_reaches_run_backlog(tmp_path, wired):
     wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
     args = _args(tmp_path, "--supersede", "ire-a", "--reason", "x", "--replace-scheduled")

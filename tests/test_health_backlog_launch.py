@@ -348,6 +348,159 @@ def test_a_failed_publish_of_a_listed_drive_is_published_again(tmp_path):
     assert not rig.launches and not rig.registered
 
 
+# 2026-11-23 (Kerry-to-Cork): its publish was refused (``mask_frame_count_unknown``, then a
+# duplicate title) and the refusal RETURNED from the failed-publish loop, so every tick ended
+# there and morning-kerry/afternoon-kerry never launched. A refused drive stays unpublished, but
+# it no longer holds its region: it is reported under ``failed_publishes`` and the tick goes on.
+
+MASK_REFUSAL = "mask_frame_count_unknown: no container to count"
+
+
+def _refused_failed_publish(rig, project="day-a"):
+    rig.drives.append(drive(project, "failed"))
+    job(rig, f"ok-{project}", project, "succeeded", 100.0, exit_code=0)
+    job(rig, f"pub-{project}", project, "failed", 200.0, name=f"gms-publish-{project}")
+    rig.publish_result = {"action": "refused", "reason": MASK_REFUSAL}
+
+
+def test_a_refused_failed_publish_does_not_hold_the_region(tmp_path):
+    rig = Rig(tmp_path)
+    _refused_failed_publish(rig)
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)]
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert [a[0][a[0].index("--name") + 1] for a in rig.launches] == ["gms-backlog-day-b"]
+    assert [r["project"] for r in rig.registered] == ["day-b"]
+
+
+def test_a_refused_publish_is_reported_beside_the_launch(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    _refused_failed_publish(rig)
+    with caplog.at_level("WARNING", logger=launch.logger.name):
+        res = rig.run()
+    assert res["action"] == "launched", res
+    assert res["failed_publishes"][0]["project"] == "day-a"
+    assert MASK_REFUSAL in res["failed_publishes"][0]["reason"]
+    assert "publish" not in res  # the refused drive's publish result is not the tick's
+    assert any(
+        "day-a" in r.getMessage() and MASK_REFUSAL in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+
+
+def test_a_refused_publish_is_not_relaunched_by_the_row_loop_in_the_same_tick(tmp_path):
+    rig = Rig(tmp_path)
+    _refused_failed_publish(rig)
+    rig.rows[:] = [rig.row("day-a", 10), rig.row("day-b", 4)]  # the refused drive is listed first
+    res = rig.run()
+    assert res["project"] == "day-b" and len(rig.launches) == 1
+    assert all(r["project"] != "day-a" for r in rig.registered)
+    assert any(s["project"] == "day-a" for s in res["skipped"])  # named, never silently passed
+
+
+def test_two_refused_failed_drives_are_both_reported_and_a_fresh_row_launches(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows.append(rig.row("day-c", 4))
+    rig.rows.append(rig.row("day-d", 4))
+    _refused_failed_publish(rig, "day-a")
+    _refused_failed_publish(rig, "day-c")
+    res = rig.run()
+    assert [p for p, _ in rig.publishes] == ["day-a", "day-c"]
+    assert [f["project"] for f in res["failed_publishes"]] == ["day-a", "day-c"]
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+
+
+def test_a_refused_publish_with_no_fresh_row_is_reported_not_silent(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows[:] = [r for r in rig.rows if r.project == "day-a"]
+    _refused_failed_publish(rig)
+    res = rig.run()
+    # still fail-closed: nothing published or relaunched
+    assert not rig.launches and not rig.registered
+    assert res["failed_publishes"][0]["project"] == "day-a", res
+
+
+def test_an_auditing_drives_refused_publish_does_not_hold_the_region(tmp_path, caplog):
+    rig = Rig(tmp_path)
+    _audited(rig, action="refused", reason=MASK_REFUSAL)
+    with caplog.at_level("WARNING", logger=launch.logger.name):
+        res = rig.run()
+    assert "publish" not in res  # the refused drive's publish result is not the tick's
+    assert any(
+        "day-a" in r.getMessage() and MASK_REFUSAL in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    )
+    assert rig.publishes == [("day-a", False)]  # asked once, never re-asked by a later loop
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert [f["project"] for f in res["failed_publishes"]] == ["day-a"]
+    assert MASK_REFUSAL in res["failed_publishes"][0]["reason"]
+    assert [r["project"] for r in rig.registered] == ["day-b"]
+
+
+def test_two_refused_auditing_drives_are_each_published_once_and_the_next_row_launches(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows.append(rig.row("day-c", 4))
+    for p, rid in (("day-a", "a"), ("day-c", "c")):
+        rig.drives.append(drive(p, "auditing"))
+        job(rig, rid, p, "succeeded", 100.0, exit_code=0)
+    rig.publish_result = {"action": "refused", "reason": MASK_REFUSAL}
+    res = rig.run()
+    assert sorted(p for p, _ in rig.publishes) == ["day-a", "day-c"], rig.publishes  # once each
+    assert sorted(f["project"] for f in res["failed_publishes"]) == ["day-a", "day-c"], res
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert len(rig.launches) == 1
+
+
+def test_a_refused_failed_drive_with_no_resume_json_is_superseded_from_source(tmp_path):
+    # the refused drive's stage dir holds only calibration.json, so heal can never resume it and
+    # ``FailedRelaunch`` relaunches it from source once its failure fingerprint changed
+    from gomoveshift.health import retry_policy
+    from gomoveshift.health.store import new_incident, write_row
+
+    rig = Rig(tmp_path)
+    rig.rows[:] = [rig.row("day-a", 10)]
+    _refused_failed_publish(rig)
+    (rig.stages / "day-a" / "day-a" / "_stages").mkdir(parents=True)
+    (rig.stages / "day-a" / "day-a" / "_stages" / "calibration.json").write_text("{}")
+    (rig.out / "day-a").mkdir(exist_ok=True)
+    old = {"versions": {"gomoveshift": "0.3.25"}, "manifest_sha": "m1", "config_sha": "c1", "phase": "x"}  # fmt: skip
+    incidents = rig.tmp / "incidents"
+    row = new_incident("drive_failed", "drive_failed:day-a:r1", "day-a.json", "2026-11-07T10:00:00Z",
+                       drive="day-a", phase="x", error="BLUR GATE", resume_recipe=None, resume_attempts=[])  # fmt: skip
+    row["failure_fingerprint"] = {"hash": retry_policy.fingerprint_hash(old), "fingerprint": old, "class": "deterministic"}  # fmt: skip
+    write_row(incidents, row)
+    rig.relaunch = launch.FailedRelaunch(
+        incidents, rig.stages, fingerprint_fn=lambda project, phase: {**old, "manifest_sha": "m2"},
+        now=NOW,
+    )  # fmt: skip
+    res = rig.run()
+    assert [f["project"] for f in res["failed_publishes"]] == ["day-a"]
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert "relaunch" in res and len(rig.launches) == 1
+
+
+def test_a_slot_wait_or_noop_publish_still_returns_and_launches_nothing(tmp_path):
+    for result in (
+        {"action": "refused", "reason": "no claim: outside_lead_window (next slot x)"},
+        {"action": "noop", "reason": "nothing to do"},
+    ):
+        rig = Rig(tmp_path / result["action"])
+        _failed_publish(rig, **result)
+        res = rig.run()
+        assert rig.publishes == [("day-a", False)] and not rig.launches, res
+        assert "failed_publishes" not in res
+
+
+def test_a_backoff_wait_is_not_a_refusal(tmp_path):
+    rig = Rig(tmp_path)
+    _unfinished_publish(rig, tmp_path, age_s=60)
+    res = rig.run()
+    assert rig.publishes == [] and "failed_publishes" not in res
+    assert res["publish_backoff"][0]["project"] == "day-a"
+    # a replace backoff never held the region: the next fresh row launches in the same tick
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+
+
 def test_a_failed_publish_retry_dry_run_asks_for_the_dry_run(tmp_path):
     rig = Rig(tmp_path)
     _failed_publish(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
@@ -424,13 +577,17 @@ def test_a_slot_outside_the_lead_window_waits_and_is_not_a_failure(tmp_path):
     assert launch.exit_code(res) == 0 and not rig.launches
 
 
-def test_any_other_publish_refusal_is_a_refusal_naming_it(tmp_path):
+def test_any_other_publish_refusal_is_reported_and_exits_0(tmp_path):
     rig = Rig(tmp_path)
+    rig.rows[:] = [r for r in rig.rows if r.project == "day-a"]  # no fresh row behind it
     _audited(rig, action="refused", reason="day-a's checkpoint is stale under the current code (B re-run)")  # fmt: skip
     res = rig.run()
-    assert res["action"] == "refused" and res["project"] == "day-a"
-    assert "publish refused: day-a's checkpoint is stale" in res["reason"]
-    assert launch.exit_code(res) == 2
+    # a refused publish no longer holds the region: reported, and nothing launches
+    assert res["failed_publishes"][0]["project"] == "day-a"
+    assert "checkpoint is stale" in res["failed_publishes"][0]["reason"]
+    assert not rig.launches and not rig.registered
+    assert res["action"] == "noop" and launch.exit_code(res) == 0, res
+    assert "no eligible backlog row" in res["reason"], res
 
 
 def test_a_dry_run_asks_the_publisher_for_its_dry_run(tmp_path):

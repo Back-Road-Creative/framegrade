@@ -20,7 +20,7 @@ and retires each ``ready`` drive that is already uploaded."""
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,7 +33,9 @@ from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
 from .launch import (
+    SUPERSEDED_DIR,
     _uploaded,
+    dead_publish_result,
     default_launcher,
     plan_total_lfs,
     read_replace_plan,
@@ -85,6 +87,168 @@ def rendered_lf_count(recipe_path: Path) -> Optional[int]:
     return len(lfs) if isinstance(lfs, list) and lfs else None
 
 
+def known_video_ids(drives: Any) -> set:
+    """Every video id any drive's own files name, whatever its ``publish_at``: its
+    ``youtube_uploads.json`` receipts (a replace's new upload is saved with none), the ids in its
+    ``replace_plan.json`` (``replace`` / ``kept`` ``video_id``, ``progress`` ``old_id`` /
+    ``new_id``) and the receipts of its superseded runs. None of them is an orphan."""
+    ids: set = set()
+    for d in drives:
+        if not d.output_dir:
+            continue
+        out = Path(d.output_dir)
+        files = [out / "youtube_uploads.json", *sorted(out.glob("*/youtube_uploads.json")),
+                 *sorted((out.parent / SUPERSEDED_DIR).glob(f"{d.project}-*/youtube_uploads.json"))]  # fmt: skip
+        for path in files:
+            try:
+                held = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            ids.update(r["video_id"] for r in (held.values() if isinstance(held, dict) else ()) if isinstance(r, dict) and r.get("video_id"))  # fmt: skip
+        plan = read_replace_plan(out)
+        for part in ("replace", "kept"):
+            ids.update(r["video_id"] for r in (plan.get(part) or {}).values() if isinstance(r, dict) and r.get("video_id"))  # fmt: skip
+        ids.update(i for p in (plan.get("progress") or {}).values() if isinstance(p, dict) for i in (p.get("old_id"), p.get("new_id")) if i)  # fmt: skip
+    return ids
+
+
+def _ts(seconds: float) -> datetime:
+    return datetime.fromtimestamp(seconds, timezone.utc)
+
+
+def _job_end(jobs_dir: Path, rec: Dict[str, Any]) -> tuple:
+    """When a finished publish job ended: its ``result.ended_at``, else the last write of its
+    ``job.json`` (``<jobs>/<run_id>/job.json``), else its creation plus the runner's stall window
+    (``--stall``, which kills a job that long silent). Never ``now``: an anchor that moves with
+    the tick would re-fetch the catalog on every tick. ``(when, how)``, ``how`` the anchor used."""
+    try:
+        return _ts(float((rec.get("result") or {}).get("ended_at"))), "stamped"
+    except (TypeError, ValueError, OverflowError, OSError):
+        pass
+    run_id = rec.get("run_id")
+    if isinstance(run_id, str) and run_id and Path(run_id).name == run_id:
+        try:
+            return _ts((Path(jobs_dir) / run_id / "job.json").stat().st_mtime), "record"
+        except (OSError, OverflowError, ValueError):
+            pass
+    return _ts(float(rec.get("created_at") or 0) + float(_STALL_S)), "stall"
+
+
+def publish_job_windows(jobs_dir: Path, project: str) -> List[tuple]:
+    """``[(created, ended or None)]`` of every ``gms-publish-<project>`` job, as aware UTC
+    datetimes: ``None`` for a job still running (``state`` unset or ``running``); a finished one
+    ends as :func:`_job_end` says."""
+    out = []
+    for r in _job_records(Path(jobs_dir)):
+        if r.get("name") == f"{JOB_PREFIX}{project}":
+            running = (r.get("result") or {}).get("state") in (None, "running")
+            out.append((_ts(float(r.get("created_at") or 0)), None if running else _job_end(jobs_dir, r)[0]))  # fmt: skip
+    return sorted(out, key=lambda w: w[0])
+
+
+def publish_job_times(jobs_dir: Path, project: str) -> tuple:
+    """``(first attempt, when the newest dead attempt ended, how that is known)`` of ``gms-publish-<project>`` jobs as
+    aware UTC datetimes (``None`` for none): the window a catalog snapshot must cover. A dead job
+    is one :func:`launch.dead_publish_result` calls dead (the backlog retries the same set). The
+    window opens when it ENDED, not when it started: the upload happens inside the run, so a
+    snapshot fetched mid-run cannot hold it. A dead job with no ``ended_at`` ends where
+    :func:`_job_end` anchors it, the same instant on every tick."""
+    made, dead = [], []
+    for r in _job_records(Path(jobs_dir)):
+        if r.get("name") != f"{JOB_PREFIX}{project}":
+            continue
+        at = float(r.get("created_at") or 0)
+        made.append(at)
+        if dead_publish_result(r.get("result")):
+            dead.append((at, r))
+    ended, how = _job_end(jobs_dir, max(dead, key=lambda d: d[0])[1]) if dead else (None, None)
+    return (_ts(min(made)) if made else None, ended, how)
+
+
+def _fresh_note(ended: Optional[datetime], how: Optional[str], now: datetime) -> Optional[str]:
+    """What the refusal says anchors the fresh window (:func:`orphan_upload_refusal`)."""
+    if ended is None:
+        return f"{{drive}}: the drive was reopened from failed with no publish job record (checked as of {now.isoformat()})"  # fmt: skip
+    if how == "stamped":
+        return None
+    when = ended.isoformat()
+    if how == "record":
+        return f"{{drive}}: an earlier publish failed (no end stamp; its job record was last written {when})"  # fmt: skip
+    return f"{{drive}}: an earlier publish failed (no end stamp or readable record; taken to have ended {when}, its creation plus the stall window)"  # fmt: skip
+
+
+def _attribution(store: Any, project: str, jobs_dir: Path) -> Dict[str, Any]:
+    """The evidence :func:`orphan_upload_refusal` attributes a shared-title upload by: this drive's
+    publish job windows, and for every other drive its Phase D sidecar titles and job windows."""
+    from ..pipeline.longform_metadata import phase_d_titles
+
+    others = {}
+    for other in store.all_drives():
+        if other.project != project:
+            others[other.project] = {
+                "titles": set(phase_d_titles(other.output_dir).values()),
+                "windows": publish_job_windows(jobs_dir, other.project),
+            }
+    return {"own": publish_job_windows(jobs_dir, project), "others": others}
+
+
+def once_per_tick(refresh: Callable[[], Any]) -> Callable[[], None]:
+    """``refresh`` that runs at most once however many failed drives ask: the outcome, a failure
+    included, is remembered, so a quota or network error costs one fetch attempt per tick."""
+    outcome: List[Any] = []
+
+    def run() -> None:
+        if not outcome:
+            try:
+                refresh()
+                outcome.append(None)
+            except Exception as exc:  # noqa: BLE001 - re-raised to every caller, never swallowed
+                outcome.append(exc)
+        if outcome[0] is not None:
+            raise outcome[0]
+
+    return run
+
+
+def catalog_refresher(config: Any) -> Callable[[], None]:
+    """``refresh()`` that runs ``catalog-fetch --known-ids-from-queue`` (a read-only YouTube pull)
+    and so rewrites ``live_catalog.latest.json``; raises when it fails."""
+
+    def refresh() -> None:
+        import argparse
+        import contextlib
+        import sys
+
+        from ..cli.handlers.catalog_fetch import cmd_catalog_fetch
+
+        out = Path(config.seo.storage_path) / "live_catalog.json"
+        ns = argparse.Namespace(known_ids=None, known_ids_from_queue=True, out=str(out))
+        # the fetch's summary lines go to stderr: stdout is `health backlog --json`'s
+        with contextlib.redirect_stdout(sys.stderr):
+            cmd_catalog_fetch(ns, config)  # always 0: a failed fetch raises
+
+    return refresh
+
+
+def _other_forms(store: Any, project: str, stages_root: Path) -> Dict[str, str]:
+    """``{title: "drive, drive"}`` for every title the OTHER drives derive from their checkpoints
+    (``expected_lf_titles``), so a shared title can name them."""
+    from ..pipeline.longform_metadata import expected_lf_titles
+
+    forms: Dict[str, set] = {}
+    for other in store.all_drives():
+        recipe = find_recipe(stages_root, other.project) if other.project != project else None
+        try:
+            saved = json.loads((recipe.parent / "pipeline_state.json").read_text()) if recipe else None  # fmt: skip
+        except (OSError, ValueError):
+            continue
+        if isinstance(saved, dict):
+            for ts in expected_lf_titles(saved).values():
+                for t in ts:
+                    forms.setdefault(t, set()).add(other.project)
+    return {t: ", ".join(sorted(names)) for t, names in forms.items()}
+
+
 def _refuse(res: Dict[str, Any], reason: str) -> Dict[str, Any]:
     return {**res, "action": "refused", "reason": reason}
 
@@ -111,6 +275,7 @@ def run_publish(
     launcher: Callable[..., Any] = default_launcher,
     lead_hours: Optional[int] = None,
     expect_sha: Optional[str] = None,
+    refresh_catalog: Optional[Callable[[], Any]] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"project": project, "region": region, "action": "noop", "steps": []}
     d = store.drive(project)
@@ -139,6 +304,21 @@ def run_publish(
     masks = mask_frame_refusal(recipe_path.parent, drive=project, record=not dry_run)
     if masks:
         return _refuse(res, f"{project} blur mask does not match its source: {masks}")
+    from ..pipeline.longform_metadata import orphan_upload_refusal
+
+    first_try, last_failed, how_ended = publish_job_times(jobs_dir, project)
+    orphans = orphan_upload_refusal(
+        project, recipe_path.parent, receipt_ids=known_video_ids(store.all_drives()),
+        record=not dry_run, output_dir=d.output_dir, other_forms=_other_forms(store, project, stages_root),
+        first_attempt=first_try, attribution=_attribution(store, project, jobs_dir),
+        # a failed publish may have died after the upload: only a snapshot fetched since sees it
+        # a reopened drive with no job record fetches too: nothing says when its upload ran
+        fresh_since=last_failed or (now if reopen else None),
+        fresh_note=_fresh_note(last_failed, how_ended, now),
+        refresh=None if dry_run else refresh_catalog,
+    )  # fmt: skip
+    if orphans:
+        return _refuse(res, orphans)
     lf_count = rendered_lf_count(recipe_path)
     if lf_count is None:
         return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip
@@ -285,9 +465,15 @@ def backlog_publisher(
     jobs_dir: Path,
     now: datetime,
     drive_running: Callable[[Path], bool],
+    refresh: Optional[Callable[[], None]] = None,
 ) -> Callable[[str, bool], Dict[str, Any]]:
     """``publish(project, dry_run)`` for ``health backlog``: ``run_publish`` with the tick's own
-    roots and Waypost's default lead window; the store is opened only when a drive is due."""
+    roots and Waypost's default lead window; the store is opened only when a drive is due. One
+    catalog refresher serves the whole tick: a failing fetch is tried once, not per failed drive.
+    A tick that builds a publisher more than once (a replace-retry run, then the plain run) passes
+    the same ``refresh`` (``once_per_tick(catalog_refresher(config))``) to each, so the whole tick
+    fetches at most once; without one this publisher makes its own."""
+    refresh = refresh or once_per_tick(catalog_refresher(config))
 
     def publish(project: str, dry_run: bool) -> Dict[str, Any]:
         store, cadence = open_schedule_store(config)
@@ -297,7 +483,7 @@ def backlog_publisher(
         return run_publish(
             project=project, region=region, store=store, cadence=cadence, stages_root=stages_root,
             code_root=code_root, jobs_dir=jobs_dir, now=now, dry_run=dry_run,
-            drive_running=drive_running,
+            drive_running=drive_running, refresh_catalog=refresh,
         )  # fmt: skip
 
     return publish

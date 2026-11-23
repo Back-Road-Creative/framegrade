@@ -11,7 +11,7 @@ drives (none left = covered). A drive whose output dir already holds Phase D upl
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
 (``storage_plan``); the subset dir of symlinks; ``run_preflight``; launch; ``register_ready``
 as ``auditing``. A region drive whose newest audit succeeded is handed to ``publish`` (the
-caller's ``health publish``) instead of a noop; nothing here uploads or books itself.
+caller's ``health publish``) instead of a noop; any publish ``health publish`` refuses, a failed drive's republish or an auditing drive's, is listed under ``failed_publishes`` and skipped, never a hold on the region; nothing here uploads or books itself.
 
 ``supersede=(project, reason)`` replaces that row's own stale run (an earlier render of the same
 project, e.g. on an older release): its stage root and output dir are moved under
@@ -1401,6 +1401,15 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str, since: float = 0.
 PUBLISH_JOB_PREFIX = "gms-publish-"
 
 
+def dead_publish_result(result: Any) -> bool:
+    """A ``gms-publish-*`` job result that ended in anything but success: failed, or cancelled,
+    stalled or killed with no exit code. The backlog's retry and the orphan gate's fresh window
+    both ask this one question (a job the runner cancelled carries no exit code, so keying on the
+    code alone left Kerry-to-Cork unpublished and the gate blind to it)."""
+    state = (result or {}).get("state")
+    return state not in (None, "running", "succeeded")
+
+
 def _failed_publish(jobs_dir: Path, project: str) -> bool:
     """The newest ``gms-publish-<project>`` job (Phase D after a passed audit) ended in anything
     but success: failed, or cancelled, stalled or killed with no exit code."""
@@ -1408,11 +1417,9 @@ def _failed_publish(jobs_dir: Path, project: str) -> bool:
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
         return False
-    result = max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result") or {}
-    state = result.get("state")
-    # any terminal state but success is a dead publish: a job the runner cancelled, stalled or
-    # killed carries no exit code, so keying on the code alone left Kerry-to-Cork unpublished
-    return state not in (None, "running", "succeeded")
+    return dead_publish_result(
+        max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result")
+    )
 
 
 def _audit_passed(jobs_dir: Path, project: str, since: float = 0.0) -> bool:
@@ -1672,7 +1679,14 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 # a replace that has not finished is retried with the heal backoff, never hot
                 res.setdefault("publish_backoff", []).append({"project": proj, "wait_s": wait})
                 continue
-            return _publish_audited(res, proj, publish, dry_run)
+            out = _publish_audited(dict(res), proj, publish, dry_run)
+            if out.get("action") != "refused":  # a ``no claim:`` slot wait carries no action
+                return out  # launched, a dry run, a noop or a Waypost slot wait: the tick ends here
+            # a refused publish (a mask or title gate) stays unpublished, but never holds the
+            # region: it is reported and the tick goes on to the next drive (2026-11-23, Kerry)
+            why = str(out["publish"].get("reason") or "")
+            logger.warning("backlog: publish of %s refused, the region goes on: %s", proj, why)
+            res.setdefault("failed_publishes", []).append({"project": proj, "reason": why})
     relaunch, auto = None, False
     for proj in auditing:
         since = since_of.get(proj, 0.0)
@@ -1688,7 +1702,14 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                                      jobs_dir, dry_run, launcher, installed_version,
                                      latest_version)  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj, since):
-            return _publish_audited(res, proj, publish, dry_run)
+            out = _publish_audited(dict(res), proj, publish, dry_run)
+            if out.get("action") != "refused":  # a ``no claim:`` slot wait carries no action
+                return out  # launched, a dry run, a noop or a Waypost slot wait: the tick ends here
+            # a refused publish stays unpublished, but never holds the region (as above)
+            why = str(out["publish"].get("reason") or "")
+            logger.warning("backlog: publish of %s refused, the region goes on: %s", proj, why)
+            res.setdefault("failed_publishes", []).append({"project": proj, "reason": why})
+            continue
         if (
             failed_relaunch is not None and not supersede and not _audit_running(jobs_dir, proj, since)
             and (why := failed_relaunch.due(proj))
