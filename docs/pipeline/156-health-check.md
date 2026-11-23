@@ -484,7 +484,16 @@ gated). Per `day_<date>` stage dir it compares `source_frame_count` in
 `day_<date>_blur_regions.json` with the container's ffprobe `nb_frames` (`day_<date>_raw.mp4`, else
 `day_<date>_master.mp4`). Unequal counts refuse, naming the day, both counts and the difference. A
 missing sidecar, a missing count, or no probeable container refuses too, as
-`mask_frame_count_unknown` (fail closed). Each refused day gets one `mask_index_mismatch` incident
+`mask_frame_count_unknown` (fail closed). Once the raw and the master are both purged, the check
+reads `day_<date>_source_frames.json` instead, which `blur_gate.persist_source_frames` writes (atomic
+tmp + rename) beside the sidecar only after the final frame-pairing check passes, on the day-master
+and the stage path. It holds the three equal counts, the source fingerprint, the sidecar's sha256,
+the mask's size and mtime, the renderer identity and the redactcam commit (from `direct_url.json`,
+`null` when absent). The gate accepts it only while the sidecar's sha256 and the mask's size/mtime
+still equal what is on disk, and never when a raw or master exists (their live probe wins); a
+missing, unreadable, malformed, stale or unequal file leaves the day `mask_frame_count_unknown`, and
+counts that disagree with the sidecar refuse as a mismatch. A day rendered before this file existed
+has none, so it stays unknown until a re-render. Each refused day gets one `mask_index_mismatch` incident
 (`mask_index_mismatch_<drive>_<date>.json`, key `mask_index_mismatch:<drive>:<date>`), never one
 per tick; it is resolved once the counts agree. There is no override flag or variable: re-render
 the day on the fixed renderer, which rewrites the sidecar. A `--dry-run` refuses but records no

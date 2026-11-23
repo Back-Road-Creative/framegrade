@@ -24,6 +24,7 @@ commands (like ``pipeline``) that register no such flag.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -405,6 +406,86 @@ def renderer_identity() -> dict:
         "redactcam_version": version,
         "decode_mode": (os.environ.get("REDACTCAM_DECODE") or "auto").strip().lower(),
     }
+
+
+SOURCE_FRAMES_SCHEMA = "gomoveshift.source_frames/v1"
+
+
+def source_frames_path(sidecar: Path) -> Path:
+    """``day_<date>_source_frames.json``, beside ``day_<date>_blur_regions.json``."""
+    sidecar = Path(sidecar)
+    stem = sidecar.stem.removesuffix("_blur_regions")
+    return sidecar.with_name(stem + "_source_frames.json")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def mask_identity(mask: Path) -> dict:
+    """The mask's size and mtime: a rebuilt or repaired mask changes at least one."""
+    st = Path(mask).stat()
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def redactcam_commit() -> Optional[str]:
+    """The installed redactcam's VCS commit from its ``direct_url.json`` (PEP 610), or ``None``
+    when it is absent (a wheel install, or not installed). Never guessed."""
+    from importlib import metadata
+
+    try:
+        raw = metadata.distribution("redactcam").read_text("direct_url.json")
+        commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+    except (metadata.PackageNotFoundError, ValueError, AttributeError):
+        return None
+    return commit if isinstance(commit, str) and commit else None
+
+
+def persist_source_frames(
+    video: Path, mask: Optional[Path], sidecar: Optional[Path], *, source_fingerprint
+) -> Optional[Path]:
+    """Keep the source frame count the pairing check just proved, beside the sidecar.
+
+    Call ONLY after ``frame_pairing_error`` returned ``None``. Once the raw and the master
+    are purged nothing else can say how many frames the mask was paired with, and the publish
+    gate (``mask_frame_gate``) then reads this file, accepting it only while the sidecar's
+    sha256 and the mask's size/mtime still match disk. Re-checks the three counts itself and
+    writes nothing unless they are equal and positive. Atomic (tmp + rename). A failed write
+    is logged and returns ``None``: the gate then stays ``unknown`` (fail closed), and the
+    encode, which this file never gates, goes on."""
+    if mask is None or sidecar is None:
+        return None
+    try:
+        counts = {
+            "container": container_frame_count(Path(video)),
+            "mask": container_frame_count(Path(mask)),
+            "sidecar": sidecar_frame_count(sidecar),
+        }
+        if counts["container"] <= 0 or not (
+            counts["container"] == counts["mask"] == counts["sidecar"]
+        ):
+            return None
+        doc = {
+            "schema": SOURCE_FRAMES_SCHEMA,
+            "counts": counts,
+            "source_fingerprint": source_fingerprint,
+            "sidecar_sha256": file_sha256(Path(sidecar)),
+            "mask": mask_identity(Path(mask)),
+            "renderer": renderer_identity(),
+            "redactcam_commit": redactcam_commit(),
+        }
+        target = source_frames_path(Path(sidecar))
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, target)
+        return target
+    except (OSError, ValueError) as exc:
+        logger.warning("BLUR: could not persist the source frame count (%s)", exc)
+        return None
 
 
 def blur_required(config) -> bool:

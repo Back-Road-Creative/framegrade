@@ -5,6 +5,7 @@ The detector and video probe are mocked, so these run without the optional
 the ``redactcam`` package's own suite.
 """
 
+import json
 from unittest.mock import MagicMock
 
 from redactcam import timeline as br
@@ -83,6 +84,31 @@ def test_run_detects_and_writes_sidecar(tmp_path, monkeypatch):
     # A fresh detection materializes the mask and exposes it for the render stage.
     assert ctx.blur_mask_path == tmp_path / "stages" / "proj_blur_mask.mkv"
     assert mask_calls == [ctx.blur_mask_path]
+
+
+def test_stage_path_persists_the_source_count_only_after_pairing_passes(tmp_path, monkeypatch):
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 96)
+    monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: 96)
+    monkeypatch.setattr("gomoveshift.pipeline.stop_processor.compute_file_hash", lambda p: "HASH1")
+    monkeypatch.setattr(br, "probe_video", lambda p: (30.0, 0, 1920, 1080))
+    monkeypatch.setattr(
+        "redactcam.detect_and_track", lambda *a, **k: ({0: [(10, 10, 20, 20)]}, 96, 1, 0)
+    )
+    monkeypatch.setattr(
+        "redactcam.materialize_mask_video", lambda tl, p, **k: p.write_bytes(b"m") or p
+    )
+    out = tmp_path / "stages" / "proj_source_frames.json"
+
+    monkeypatch.setattr(blur_gate, "frame_pairing_error", lambda *a, **k: "BLUR GATE (pairing)")
+    assert not BlurDetectionStage().run(_ctx(tmp_path)).success
+    assert not out.exists()
+
+    (tmp_path / "stages" / "proj_blur_regions.json").unlink()  # else the next run resumes it
+    monkeypatch.setattr(blur_gate, "frame_pairing_error", lambda *a, **k: None)
+    assert BlurDetectionStage().run(_ctx(tmp_path)).success
+    doc = json.loads(out.read_text())
+    assert doc["counts"] == {"container": 96, "mask": 96, "sidecar": 96}
+    assert doc["source_fingerprint"] == "HASH1"
 
 
 def test_run_resumes_on_hash_match_without_redetecting(tmp_path, monkeypatch):

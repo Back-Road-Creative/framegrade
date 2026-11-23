@@ -5,6 +5,7 @@ probe is patched."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -106,6 +107,114 @@ def test_sidecar_count_reads_only_the_header(tmp_path):
     p = tmp_path / "s.json"
     p.write_text('{"source_frame_count": 12, "frame_boxes": {"source_frame_count": 99}}')
     assert gate.sidecar_frame_count(p) == 12
+
+
+# ── purged master: the persisted source frame count ──────────────────────────
+
+
+def persist(day: Path, count=306377, *, date=DATE, **over) -> Path:
+    """Write the mask and the file ``blur_gate.persist_source_frames`` would, as the pairing
+    check leaves them (all three counts equal), then drop the raw so only the file speaks."""
+    mask = day / f"day_{date}_blur_mask.mkv"
+    mask.write_bytes(b"mask")
+    sidecar = day / f"day_{date}_blur_regions.json"
+    doc = {
+        "schema": gate.SOURCE_FRAMES_SCHEMA,
+        "counts": {"container": count, "mask": count, "sidecar": count},
+        "source_fingerprint": "fp",
+        "sidecar_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+        "mask": {"size": mask.stat().st_size, "mtime_ns": mask.stat().st_mtime_ns},
+        "renderer": {"redactcam_version": "1", "decode_mode": "auto"},
+        "redactcam_commit": None,
+    }
+    doc.update(over)
+    path = day / f"day_{date}_source_frames.json"
+    path.write_text(json.dumps(doc))
+    (day / f"day_{date}_raw.mp4").unlink(missing_ok=True)
+    return path
+
+
+def no_probe(monkeypatch):
+    def boom(path):
+        raise AssertionError("no container is left to probe")
+
+    monkeypatch.setattr(gate, "probe_frames", boom)
+
+
+def test_purged_master_reads_the_persisted_source_count(tmp_path, monkeypatch, incidents):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    no_probe(monkeypatch)
+    assert gate.mask_frame_refusal(tmp_path / "st", drive="kerry") is None
+    assert rows(incidents) == []
+
+
+def test_persisted_count_from_another_sidecar_is_unknown(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    sidecar = day / f"day_{DATE}_blur_regions.json"
+    sidecar.write_text(sidecar.read_text() + "\n")  # a re-detect: a different sidecar
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_unknown" in why
+
+
+def test_persisted_count_with_a_replaced_mask_is_unknown(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_blur_mask.mkv").write_bytes(b"a different, longer mask")
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_unknown" in why
+
+
+def test_persisted_count_disagreeing_with_sidecar_is_a_mismatch(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306385)
+    persist(day, count=306377)
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_mismatch" in why and "306385" in why and "306377" in why
+
+
+def test_live_master_still_wins_over_the_persisted_count(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_master.mp4").write_bytes(b"")
+    probe(monkeypatch, 306000)  # the live container disagrees: the file must not vouch for it
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_mismatch" in why and "306000" in why
+
+
+def test_an_unprobeable_raw_does_not_fall_back_to_the_persisted_count(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_raw.mp4").write_bytes(b"")  # present but unreadable
+    probe(monkeypatch, None)
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_unknown" in why
+
+
+def test_an_unreadable_persisted_file_stays_unknown(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    path = persist(day)
+    path.write_text("{not json")
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_unknown" in why
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"counts": {"container": 306377, "mask": 306385, "sidecar": 306377}},
+        {"counts": {"container": 0, "mask": 0, "sidecar": 0}},
+        {"counts": {"container": True, "mask": True, "sidecar": True}},
+        {"schema": "other/v9"},
+        {"sidecar_sha256": None},
+        {"mask": None},
+    ],
+)
+def test_a_malformed_or_unpaired_persisted_file_stays_unknown(tmp_path, over):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day, **over)
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
+    assert why and "mask_frame_count_unknown" in why
 
 
 # ── entry points ─────────────────────────────────────────────────────────────
