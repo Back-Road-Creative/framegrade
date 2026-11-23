@@ -364,7 +364,7 @@ A failed drive whose publish job failed after a passed audit is published again 
 `auditing` drive whose audit passed is published too; if `health publish` refuses either (any
 refusal: anything but a launch, a dry run, a noop or a `no claim:` slot wait) it stays unpublished, is logged at WARNING, is
 listed under `failed_publishes` (project, reason), printed as `failed publish <project>: <reason>`
-in the text output, and is skipped by the row loop in that tick, and the next eligible row launches. A refused drive never holds its region. A replace backoff (a replace that has not finished, retried with the heal backoff) does not hold the region either: the tick goes on to the next row.
+in the text output, and is skipped by the row loop in that tick (unless `FailedRelaunch` relaunches a failed drive with no `resume.json` from source), and the next eligible row launches (exit 0, `noop` when no row is eligible). A refused drive never holds its region. Only the mask gate records an incident for its refusal; any other refusal (a stale checkpoint, no LF plan, a refused claim, a failed launch) is a WARNING log line and a `failed_publishes` entry each tick, with no incident row. A replace backoff (a replace that has not finished, retried with the heal backoff) does not hold the region either: the tick goes on to the next row.
 An audit whose newest job stopped at the OST audit gate (exit 5, `DRIVE WAITING:`; every
 placeless drive does, since a no-GPS LF gets no system review) is not failed: it is a `noop`
 naming each `ost_audit_<date>.json` sidecar under its stages and the `.confirmed` marker to

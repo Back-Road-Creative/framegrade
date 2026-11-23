@@ -420,15 +420,35 @@ def test_a_refused_publish_with_no_fresh_row_is_reported_not_silent(tmp_path):
     assert res["failed_publishes"][0]["project"] == "day-a", res
 
 
-def test_an_auditing_drives_refused_publish_does_not_hold_the_region(tmp_path):
+def test_an_auditing_drives_refused_publish_does_not_hold_the_region(tmp_path, caplog):
     rig = Rig(tmp_path)
     _audited(rig, action="refused", reason=MASK_REFUSAL)
-    res = rig.run()
+    with caplog.at_level("WARNING", logger=launch.logger.name):
+        res = rig.run()
+    assert "publish" not in res  # the refused drive's publish result is not the tick's
+    assert any(
+        "day-a" in r.getMessage() and MASK_REFUSAL in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    )
     assert rig.publishes == [("day-a", False)]  # asked once, never re-asked by a later loop
     assert res["action"] == "launched" and res["project"] == "day-b", res
     assert [f["project"] for f in res["failed_publishes"]] == ["day-a"]
     assert MASK_REFUSAL in res["failed_publishes"][0]["reason"]
     assert [r["project"] for r in rig.registered] == ["day-b"]
+
+
+def test_two_refused_auditing_drives_are_each_published_once_and_the_next_row_launches(tmp_path):
+    rig = Rig(tmp_path)
+    rig.rows.append(rig.row("day-c", 4))
+    for p, rid in (("day-a", "a"), ("day-c", "c")):
+        rig.drives.append(drive(p, "auditing"))
+        job(rig, rid, p, "succeeded", 100.0, exit_code=0)
+    rig.publish_result = {"action": "refused", "reason": MASK_REFUSAL}
+    res = rig.run()
+    assert sorted(p for p, _ in rig.publishes) == ["day-a", "day-c"], rig.publishes  # once each
+    assert sorted(f["project"] for f in res["failed_publishes"]) == ["day-a", "day-c"], res
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert len(rig.launches) == 1
 
 
 def test_a_refused_failed_drive_with_no_resume_json_is_superseded_from_source(tmp_path):
@@ -557,7 +577,7 @@ def test_a_slot_outside_the_lead_window_waits_and_is_not_a_failure(tmp_path):
     assert launch.exit_code(res) == 0 and not rig.launches
 
 
-def test_any_other_publish_refusal_is_a_refusal_naming_it(tmp_path):
+def test_any_other_publish_refusal_is_reported_and_exits_0(tmp_path):
     rig = Rig(tmp_path)
     rig.rows[:] = [r for r in rig.rows if r.project == "day-a"]  # no fresh row behind it
     _audited(rig, action="refused", reason="day-a's checkpoint is stale under the current code (B re-run)")  # fmt: skip
@@ -566,6 +586,8 @@ def test_any_other_publish_refusal_is_a_refusal_naming_it(tmp_path):
     assert res["failed_publishes"][0]["project"] == "day-a"
     assert "checkpoint is stale" in res["failed_publishes"][0]["reason"]
     assert not rig.launches and not rig.registered
+    assert res["action"] == "noop" and launch.exit_code(res) == 0, res
+    assert "no eligible backlog row" in res["reason"], res
 
 
 def test_a_dry_run_asks_the_publisher_for_its_dry_run(tmp_path):
