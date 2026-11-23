@@ -23,7 +23,7 @@ import logging
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Union
 
@@ -745,6 +745,7 @@ FIRST_COMMENT_BACKLOG_PER_PASS = 1
 #: outage can't use up a live short's tries. Each drain decides which is
 #: which. The row keeps its last ``first_comment_error``.
 FIRST_COMMENT_MAX_ATTEMPTS = 8
+REOPEN_LAG_WINDOW = timedelta(hours=24)
 
 
 def select_due_first_comments(
@@ -1804,15 +1805,26 @@ def adopt_removed_first_comment(
         )
 
 
-def _own_extra_delete(live_id: str, live_text: str) -> dict:
-    """A correction item: delete our own comment ``live_id`` if it still says ``live_text``."""
-    return {
+def _own_extra_delete(live_id: str, live_text: str, reopened_at: Optional[str] = None) -> dict:
+    """A correction item: delete our own comment ``live_id`` if it still says ``live_text``.
+    ``reopened_at`` marks the delete a gone reopen queued: the read that said gone may have
+    lagged, so ``first_comment_stale`` holds it for ``REOPEN_LAG_WINDOW`` instead of dropping it."""
+    item = {
         "live_id": live_id,
         "live_text": live_text,
         "action": "delete",
         "extra": True,
         "ours": True,
     }
+    if reopened_at:
+        item.update(reopened=True, reopened_at=reopened_at)
+    return item
+
+
+def _is_own_extra(item: dict) -> bool:
+    """A delete of a second copy of ours: the only kind of pending correction that may sit
+    beside a gone reopen (it never decides what the row says)."""
+    return bool(item.get("action") == "delete" and item.get("extra") and item.get("ours"))
 
 
 def reopen_gone_first_comment(
@@ -1822,27 +1834,104 @@ def reopen_gone_first_comment(
     unpost the row with its own text, so the drain reposts it, and count the try
     (``first_comment_attempts``): a comment that is gone again after every repost stops at
     ``FIRST_COMMENT_MAX_ATTEMPTS`` instead of reposting forever. The old id is queued as our own
-    extra delete (checked against its author and text when the drain runs), so a read that only
-    lagged cannot leave a second live copy. Only a row with text, no pending correction and
-    still recording that ``live_id``; ``False`` (nothing written) else."""
+    extra delete marked ``reopened`` (checked against its author and text when the drain runs,
+    and held through a gone read for ``REOPEN_LAG_WINDOW``), so a read that only lagged cannot
+    leave a second live copy. Delete items of our own already pending (a held one, or a capped
+    one) stay and never block the route; any other pending correction does. Only a row with
+    text, still recording that ``live_id``; ``False`` (nothing written) else."""
     with conn:
         old = conn.execute(
-            "SELECT first_comment_text FROM deliveries WHERE id=?", (delivery_id,)
+            "SELECT first_comment_text, first_comment_correction FROM deliveries WHERE id=?",
+            (delivery_id,),
         ).fetchone()
         text = (old["first_comment_text"] or "") if old is not None else ""
-        queued = json.dumps([_own_extra_delete(live_id, text)]) if live_id and text else None
+        raw = old["first_comment_correction"] if old is not None else None
+        items = first_comment_corrections(old) if old is not None else []
+        if raw and not (items and all(_is_own_extra(i) for i in items)):
+            return False
+        value = raw or None
+        if live_id and text and not any(i.get("live_id") == live_id for i in items):
+            value = json.dumps([*items, _own_extra_delete(live_id, text, now)])
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_posted_at=NULL, first_comment_live_id=NULL, "
                 "first_comment_error=?, first_comment_attempts=first_comment_attempts+1, "
                 "first_comment_correction=?, "
-                "updated_at=? WHERE id=? AND first_comment_correction IS NULL "
+                "updated_at=? WHERE id=? AND first_comment_correction IS ? "
                 "AND first_comment_removed_at IS NULL "
                 "AND first_comment_text=? AND first_comment_text <> '' "
                 "AND COALESCE(first_comment_live_id, '')=?",
-                (error[:500], queued, now, delivery_id, text, live_id),
+                (error[:500], value, now, delivery_id, raw, text, live_id),
             ).rowcount
         )
+
+
+def reopen_lag_expired(item: dict, now: Optional[datetime] = None) -> bool:
+    """A ``reopened`` delete queued ``REOPEN_LAG_WINDOW`` ago or more (a malformed time counts as
+    past): a read that still says gone is no longer put down to lag."""
+    try:
+        queued = datetime.fromisoformat(str(item.get("reopened_at")))
+        if queued.tzinfo is None:
+            queued = queued.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return (now or datetime.now(timezone.utc)) - queued >= REOPEN_LAG_WINDOW
+
+
+def capped_unposted_lag_rows(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
+    """Unposted rows with text that hit ``FIRST_COMMENT_MAX_ATTEMPTS`` while a delete queued by a
+    gone reopen is still pending: the drain no longer posts them, but a copy of ours that only
+    lagged may be live (and several may be), so ``first_comment_stale`` lists the post and
+    settles on one."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    rows = conn.execute(
+        "SELECT id, project_name, short_index, platform, first_comment_text, "  # noqa: S608
+        "first_comment_correction, platform_upload_id, platform_post_id, first_comment_live_id "
+        f"FROM deliveries WHERE platform IN ({marks}) AND first_comment_posted_at IS NULL "
+        "AND first_comment_attempts >= ? AND first_comment_text IS NOT NULL "
+        "AND first_comment_text <> '' AND first_comment_correction IS NOT NULL ORDER BY id",
+        (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
+    ).fetchall()
+    return [r for r in rows if any(i.get("reopened") for i in first_comment_corrections(r))]
+
+
+def adopt_capped_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, comment_id: str, text: str, now: str
+) -> bool:
+    """A capped unposted row found OUR comment ``comment_id`` saying exactly its text live: record
+    it as the row's live comment and mark it posted (attempts stay as counted). ``False`` when
+    the row moved meanwhile (posted, a new text, below the cap)."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_posted_at=?, first_comment_live_id=?, "
+                "first_comment_error=NULL, updated_at=? WHERE id=? "
+                "AND first_comment_posted_at IS NULL AND first_comment_attempts >= ? "
+                "AND first_comment_text=?",
+                (now, comment_id, now, delivery_id, FIRST_COMMENT_MAX_ATTEMPTS, text),
+            ).rowcount
+        )
+
+
+def drop_reopened_deletes(conn: sqlite3.Connection, delivery_id: int) -> list:
+    """Remove the ``reopened`` deletes of an unposted row (compare-and-set on the correction
+    value); returns the items removed, ``[]`` when the row moved."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None:
+            return []
+        items = first_comment_corrections(row)
+        gone = [i for i in items if i.get("reopened")]
+        left = [i for i in items if not i.get("reopened")]
+        done = conn.execute(
+            "UPDATE deliveries SET first_comment_correction=? WHERE id=? "
+            "AND first_comment_correction IS ?",
+            (json.dumps(left) if left else None, delivery_id, row["first_comment_correction"]),
+        ).rowcount
+        return gone if done else []
 
 
 def queue_own_extra_deletes(
