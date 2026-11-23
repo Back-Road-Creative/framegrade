@@ -87,8 +87,12 @@ def media_stall_attempts(
     base_seconds: int = _DEFAULT_BACKOFF_BASE_SECONDS,
     cap_seconds: int = _DEFAULT_BACKOFF_CAP_SECONDS,
 ) -> int:
-    """The first attempt whose backoff delay is already the cap, for the given backoff."""
-    return next(n for n in range(1, 64) if base_seconds * 2 ** (n - 1) >= cap_seconds)
+    """The first attempt whose backoff delay is already the cap, for the given backoff. A base of
+    zero or less never waits (every delay is already as long as it will get), so the first attempt
+    counts, never a search that cannot end."""
+    if base_seconds <= 0:
+        return 1
+    return next((n for n in range(1, 64) if base_seconds * 2 ** (n - 1) >= cap_seconds), 63)
 
 
 MEDIA_STALL_ATTEMPTS = media_stall_attempts()

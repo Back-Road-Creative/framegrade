@@ -293,19 +293,19 @@ def test_a_short_with_a_null_recording_date_is_refused_never_a_key_error(w):
     assert "no recording_date" in _reasons(w.run())[1]
 
 
-def test_a_short_missing_its_recording_date_stops_at_the_parse_check_with_nothing_written(w):
+def test_a_short_missing_its_recording_date_key_is_refused_with_its_rows_held(w):
     raw = json.loads(w.old_sidecar.read_text())
     del raw["shorts"][0]["recording_date"]
     w.old_sidecar.write_text(json.dumps(raw))
     did = w.row(1)
-    with pytest.raises(PublishPlanFormatError):  # the old plan was never parseable: fail closed
-        w.run()
-    assert w.sidecar.read_text() == "{}" and w.hash_of(did) == w.records[0].reviewed_plan_hash
+    r = w.run()  # it cannot be written back (the plan parser needs the key): refused, not raised
+    assert "no recording_date" in _reasons(r)[1] and _open(w, 1)
+    assert w.hash_of(did) == w.records[0].reviewed_plan_hash
 
 
 def test_a_legacy_row_without_a_sidecar_path_is_served_from_the_plan_dispatch_reads(w):
     did = w.row(1, sidecar_path=None)
-    result = w.run()
+    result = w.run(sidecar_dir=w.out)
     assert 1 in _rebuilt(result) and w.hash_of(did) != w.records[0].reviewed_plan_hash
 
 

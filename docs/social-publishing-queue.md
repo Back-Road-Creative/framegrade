@@ -679,11 +679,12 @@ is the set-aside run's stage dir. **Rebuild, then relink:** every other field,
 run's `<stages>/pipeline_state.json`. A `--no-review` replace never persists a confirmation, so it
 normally passes as unreviewed; a stale confirmation hash or unreadable state refuses EVERY Short
 with one `...:gate_cd` incident ("Gate C/D must be re-confirmed"). Nothing forges a confirmation.
-The check leaves the swap's OWN sidecar out of the hash (`skip_plans`): the swap rewrites it on
-every run, so a confirmation taken before the first swap would otherwise refuse every later run
-(and the deferred sibling). The rewrite keeps every reviewed text field from the old record and is
-covered by the identity, derived-hash, own-day privacy and mask checks below; the LF JSON, the CSV
-and every other plan file in the directory are still hashed, so a real content change refuses.
+The Gate C/D hash projects `media`, `reviewed_plan_hash` and `consent_hash` out of every plan's
+Shorts (the only fields a swap rewrites), so a confirmation holds whichever order it was taken in
+relative to a swap; a confirmation taken before the swap's own sidecar existed is also accepted
+(the check retries with that sidecar left out), and one recorded under the earlier whole-file hash
+still approves. Text, schedule, routes, the LF JSON, the CSV and every other plan file are still
+hashed, so a real content change refuses.
 
 A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed, `consent_hash`
 moved only when it equalled the old derived hash) only when:
@@ -719,8 +720,14 @@ transaction with a `response_log` audit row (compare-and-set on `status='queued'
 Short restores them (action `replace_rebuild_restore`) only while the file still carries the OLD
 hash and the row is still queued, unuploaded and unleased; any other such row is listed in
 `RebuildResult.untouched` and named in the Short's reason, never changed, and never makes the run
-raise. A finished swap (its record on disk, no row at the old hash) is carried through every later
-run, refusing or not; a Short whose rows are all terminal (cancelled, published) has nothing left
+raise. A finished swap is carried through every later run, refusing or not, but only when the record on
+disk is exactly the swap of the reviewed one (every field but `media`, `reviewed_plan_hash` and
+`consent_hash` equal, the same media path, the hash the review hash of the old text and that
+media); any other record is refused with an incident, discarded, and the rows follow the file back.
+Rows left at the old hash do not undo it: a movable one follows the swap, an uploaded one is
+refused, a terminal one is left. A day whose Shorts are all finished is judged by the verified
+attestation beside the plan, so a reclaimed stage copy never holds the other Shorts. A Short with no
+`recording_date` key is refused and left out of the written plan; a Short whose rows are all terminal (cancelled, published) has nothing left
 to swap and its refusal incident resolves; a rerun that swaps a Short converges.
 Other rows are never changed and are listed in `RebuildResult.untouched`.
 `old_stages_dir` is the set-aside run's stage dir,
