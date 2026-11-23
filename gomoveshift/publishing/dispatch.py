@@ -988,9 +988,9 @@ def sync_record_held_incidents(
     conn, now: str, incidents_dir: Optional[Path] = None
 ) -> Optional[str]:
     """Close every open ``delivery_record_held`` incident whose Short (or, for a project-wide
-    hold, project) has no non-terminal row left in the queue: its rows were cancelled or went
-    terminal, so nothing selects them and no pass would ever resolve it. Keeps ``pushed`` and
-    ``detected_at``. Never fatal; returns ``None`` or the error text (logged)."""
+    hold, project) has no non-terminal real row left in the queue (a shadow row is never selected,
+    so it does not count): its rows were cancelled or went terminal, so nothing selects them and no
+    pass would ever resolve it. Keeps ``pushed`` and ``detected_at``. Never fatal; returns ``None`` or the error text (logged)."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -1010,7 +1010,8 @@ def sync_record_held_incidents(
                 where += " AND short_index = ?"
                 args.append(inc["short_index"])
             live = conn.execute(
-                f"SELECT 1 FROM deliveries WHERE {where} AND status NOT IN ({terminal}) LIMIT 1",  # noqa: S608
+                f"SELECT 1 FROM deliveries WHERE {where} AND shadow = 0 "  # noqa: S608
+                f"AND status NOT IN ({terminal}) LIMIT 1",
                 (*args, *TERMINAL_STATUSES),
             ).fetchone()
             if live is None:

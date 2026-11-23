@@ -17,3 +17,4 @@
   longer closes a hold still in force and re-pushes it. The resolve runs after the publish transition and
   never aborts a drain on a malformed incident file (WARNING naming the key); a per-pass sweep closes an
   incident whose rows are all terminal; the per-Short detail reads `<project> short <N>, every platform held`.
+- A shadow row (never selected, never published) no longer keeps a `delivery_record_held` incident open: the sweep counts only real rows.

@@ -751,7 +751,7 @@ missing sidecar, a transient media error) proves nothing, so the incident stays 
 The resolve runs after the row's published/waiting transition and never aborts a drain (a malformed
 incident file logs a WARNING naming its key). A per-pass sweep (`sync_record_held_incidents`, run beside
 the media-stall sweep) also closes an incident whose Short (or project) has no non-terminal row left, so
-rows cancelled by hand do not leave it open. A later hold files a fresh, unpushed incident. While open, reruns
+rows cancelled by hand do not leave it open (a shadow row never counts as one). A later hold files a fresh, unpushed incident. While open, reruns
 never duplicate them (`detected_at` and `pushed` do not change), the cron summary line carries
 `held_record=N` when non-zero, and a row released by a fixed plan still has its whole `max_attempts` budget. The rebuild refuses every position of that index with one incident and writes both records
 back verbatim (the only caller that validates with `allow_duplicate_index=True`); fixing the plan and

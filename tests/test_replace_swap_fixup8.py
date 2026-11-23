@@ -9,15 +9,23 @@ import logging
 import os
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 from test_replace_rebuild import World
 from test_replace_swap_fixup import LATER, REAL, _attest, _drain
 from test_replace_swap_fixup5 import _dup_world, _undated_world
 
-from gomoveshift.cli.handlers.dispatch_queue import PrivacyAttestationLoader, SidecarRecordLoader
+from gomoveshift.cli.handlers import dispatch_queue as dq
+from gomoveshift.cli.handlers.dispatch_queue import (
+    PrivacyAttestationLoader,
+    SidecarRecordLoader,
+    _media_path,
+)
 from gomoveshift.health.store import safe_name
 from gomoveshift.publishing import dispatch
+from gomoveshift.publishing.handlers import make_youtube_handler
 from gomoveshift.publishing.queue import enqueue, open_queue_db
 
 KIND = "delivery_record_held"
@@ -310,3 +318,171 @@ def test_the_sweep_leaves_an_incident_open_while_a_row_of_the_short_is_live(w):
     for h in (0, 1, 2):
         _drain(w, LATER + timedelta(hours=h))
     assert len(_held(w)) == 1
+
+
+# ---- fixup 8 minors: shadow rows, sweep scope, project-clean, resolve paths, CLI -----------------
+
+PAST = "2026-11-20T12:00:00+00:00"
+
+
+def test_a_shadow_row_of_a_held_short_never_keeps_its_incident_open(w):
+    _undated_world(w)
+    did = w.row(1)
+    w.run(privacy_fn=REAL)
+    _drain(w, LATER)
+    assert len(_held(w)) == 1
+    sid = enqueue(w.conn, w.records[0].project_name, 1, "tiktok", "SHADOWH", shadow=True)
+    w.conn.execute("UPDATE deliveries SET status='cancelled' WHERE id=?", (did,))
+    w.conn.commit()
+    assert _row(w.conn, sid)["shadow"] == 1  # a live, never-selected row remains
+    _drain(w, LATER + timedelta(hours=1))
+    assert _held(w) == []
+
+
+def test_the_sweep_scopes_a_short_incident_to_its_own_short_index(w):
+    raw = _undated_world(w)
+    del raw["shorts"][1]["recording_date"]  # Short 2 is held too
+    w.old_sidecar.write_text(json.dumps(raw))
+    (w.out / "shorts" / "lf_01" / "short_02.mp4").write_bytes(b"old-bytes-2")
+    d1, _d2 = w.row(1), w.row(2)
+    w.run(privacy_fn=REAL)
+    for att in w.stages.rglob("*_privacy_attestation.json"):  # both held: none was copied for us
+        (w.sidecar.parent / att.name).write_bytes(att.read_bytes())
+    for h in (0, 1):  # one pass may not reach both rows
+        _drain(w, LATER + timedelta(hours=h))
+    assert sorted(i["short_index"] for i in _held(w)) == [1, 2]
+    w.conn.execute("UPDATE deliveries SET status='cancelled' WHERE id=?", (d1,))
+    w.conn.commit()
+    _drain(w, LATER + timedelta(hours=2))
+    assert [i["short_index"] for i in _held(w)] == [2]  # Short 2 is still queued
+
+
+def test_a_fixed_plan_that_no_longer_lists_the_row_still_closes_the_project_incident(w):
+    _attest(w.stages)
+    _dup_world(w, identical_second_render=True)
+    w.row(1)
+    w.run(privacy_fn=REAL)
+    _drain(w, LATER)
+    held = _held(w)
+    assert len(held) == 1 and held[0]["key"] == f"{KIND}:{held[0]['project']}"
+    for path in (w.sidecar, w.old_sidecar):  # the plan the loader reads: no duplicate, no index 1
+        doc = json.loads(path.read_text())
+        doc["shorts"] = [s for s in doc["shorts"] if s["short_index"] != 1]
+        path.write_text(json.dumps(doc))
+    loader = SidecarRecordLoader(w.out, conn=w.conn)
+    seen = []
+
+    def handler(row):
+        try:
+            loader(row["project_name"], row["short_index"])
+        except LookupError as exc:  # the plan parsed clean but names no such Short
+            seen.append(exc)
+
+    # a not-yet-due row of the project stays live, so only the loader's clean parse can close it
+    enqueue(
+        w.conn,
+        w.records[0].project_name,
+        1,
+        "tiktok",
+        "T2",
+        scheduled_at="2099-01-01T00:00:00+00:00",
+    )
+    w.conn.commit()
+    res = _drain_with(w, LATER + timedelta(hours=1), handler)
+    assert len(seen) == 1, res
+    assert _held(w) == []
+
+
+@pytest.mark.parametrize("park", ["deferred", "awaiting_manual_publish", "missing_remote"])
+def test_the_resolve_runs_on_waiting_and_missing_remote_returns(w, park):
+    raw = _undated_world(w)
+    did = w.row(1)
+    w.run(privacy_fn=REAL)
+    _drain(w, LATER)
+    raw["shorts"][0]["recording_date"] = w.records[0].recording_date
+    w.old_sidecar.write_text(json.dumps(raw))
+    w.run(privacy_fn=REAL, now=LATER)
+    # a second live row of the Short keeps the sweep from closing it: only the resolve can
+    enqueue(w.conn, w.records[0].project_name, 1, "tiktok", "T2")
+    w.conn.commit()
+    loader = SidecarRecordLoader(w.out, conn=w.conn)
+
+    def handler(row):
+        loader(row["project_name"], row["short_index"])
+        w.conn.execute("UPDATE deliveries SET status=? WHERE id=?", (park, row["id"]))
+        w.conn.commit()
+
+    _drain_with(w, LATER + timedelta(hours=3), handler)
+    assert _row(w.conn, did)["status"] == park
+    assert _held(w) == []
+
+
+class _Adapter:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, record, *, conn, delivery_id, video_path):
+        self.published.append((record.short_index, Path(video_path).name))
+
+
+def _cli_config(w):
+    drive = SimpleNamespace(
+        publishing_route_youtube="first_party",
+        publishing_route_instagram="metricool",
+        publishing_route_facebook="metricool",
+        publishing_route_tiktok="metricool",
+        publishing_tiktok_audit_approved=False,
+    )
+    return SimpleNamespace(drive=drive, seo=SimpleNamespace(storage_path=str(w.conn_dir)))
+
+
+def _cli_drain(w, monkeypatch, tmp_path, adapter):
+    monkeypatch.setenv("GMS_HEALTH_INCIDENTS_DIR", str(w.incidents))
+    monkeypatch.setenv("GMS_CONSOLE_DATA_DIR", str(tmp_path / "_console"))
+
+    def fake_build(conn, loader, config, routed, *, worker_id="adapter"):
+        return {"youtube": make_youtube_handler(adapter, conn, loader, _media_path)}
+
+    args = SimpleNamespace(apply=True, sidecar_dir=str(w.out))
+    with (
+        mock.patch.object(dq, "_build_routed_handlers", side_effect=fake_build),
+        mock.patch.object(dq, "_run_queue_repair"),
+        mock.patch.object(dq, "_validate_held_scopes", return_value=None),
+        mock.patch.object(dq, "_confirm_live"),
+        mock.patch.object(dq.notify, "check_missed_slots"),
+        mock.patch.object(dq.notify, "check_queue_regressions"),
+    ):
+        return dq.cmd_dispatch_queue(args, _cli_config(w))
+
+
+def test_the_cli_path_populates_the_collector_end_to_end(w, monkeypatch, tmp_path, capsys):
+    w.conn_dir = tmp_path / "q"
+    raw = _undated_world(w)
+    did = w.row(1, slot=PAST)
+    w.run(privacy_fn=REAL)
+    ad = _Adapter()
+    _cli_drain(w, monkeypatch, tmp_path, ad)
+    out = capsys.readouterr().out
+    assert "held_record=1" in out, out
+    assert len(_held(w)) == 1 and ad.published == []
+    first = _mark_pushed(w)
+    side = Path(_row(w.conn, did)["sidecar_path"])
+    os.chmod(side, 0)  # unreadable sidecar: still open, still pushed
+    try:
+        _cli_drain(w, monkeypatch, tmp_path, ad)
+    finally:
+        os.chmod(side, 0o644)
+    held = _held(w)
+    assert len(held) == 1 and held[0]["pushed"] is True
+    assert held[0]["detected_at"] == first["detected_at"]
+    raw["shorts"][0]["recording_date"] = w.records[0].recording_date
+    w.old_sidecar.write_text(json.dumps(raw))
+    w.run(privacy_fn=REAL, now=LATER)
+    w.conn.execute("UPDATE deliveries SET next_attempt_at=NULL")  # skip the wall-clock backoff
+    w.conn.commit()
+    _cli_drain(w, monkeypatch, tmp_path, ad)
+    out3 = capsys.readouterr().out
+    assert ad.published, out3 + repr(dict(_row(w.conn, did)))
+    assert _row(w.conn, did)["status"] == "published"
+    assert _held(w) == []
+    assert _all_held(w)[0]["pushed"] is True
