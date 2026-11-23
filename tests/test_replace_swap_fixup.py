@@ -371,7 +371,7 @@ def test_the_rebuilt_file_must_parse_before_it_replaces_anything(w, monkeypatch)
     a = w.row(1)
     before, old = w.sidecar.read_bytes(), w.hash_of(a)
 
-    def bad(_p):
+    def bad(_p, **_kw):
         raise ValueError("does not parse")
 
     monkeypatch.setattr(plan_io, "load_publish_plan", bad)

@@ -31,6 +31,7 @@ from ...config import ConfigError
 from ...console import notify
 from ...publishing.dispatch import (
     PRIVACY_ATTESTATION_GLOB,
+    RecordHeldError,
     TransientMediaError,
     drain_queue,
     merge_privacy_attestations,
@@ -44,7 +45,11 @@ from ...publishing.meta_comments import drain_meta_first_comments
 from ...publishing.models import ShortPublishRecord
 from ...publishing.photo_adapter import PhotoPermanentError
 from ...publishing.photo_image_url import PhotoImageUrlError, image_url_for_media_path
-from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
+from ...publishing.plan_io import (
+    DuplicateShortIndexError,
+    PublishPlanFormatError,
+    load_publish_plan,
+)
 from ...publishing.queue import TERMINAL_STATUSES, open_queue_db
 from ...publishing.tiktok_pack import reconcile_packed, resolve_pack_dir, sweep_queued
 from ...publishing.tiktok_rendition import ensure_h264_rendition, ensure_instagram_rendition
@@ -115,19 +120,36 @@ class SidecarRecordLoader:
                 # not a bad delivery, so it must not be counted toward
                 # max_attempts any more than missing media is.
                 raise TransientMediaError(f"publish plan sidecar not readable: {path}")
-            plan = load_publish_plan(path)
+            try:
+                plan = load_publish_plan(path)
+            except DuplicateShortIndexError as exc:
+                # Which record is the Short's cannot be known, and the last would upload another
+                # Short's video under this row: hold the whole project, unburned, until fixed.
+                raise RecordHeldError(
+                    f"{exc}; every row of {project_name!r} is held until the plan names each "
+                    "Short once",
+                    project_wide=True,
+                ) from exc
             self._cache[project_name] = {s.short_index: s for s in plan.shorts}
         return self._cache[project_name]
 
     def __call__(self, project_name: str, short_index: int) -> ShortPublishRecord:
         shorts = self._project(project_name)
         try:
-            return shorts[short_index]
+            record = shorts[short_index]
         except KeyError:
             raise LookupError(
                 f"publish plan for project {project_name!r} has no short_index "
                 f"{short_index}; the sidecar and the queue disagree"
             ) from None
+        if not record.recording_date:
+            # The privacy attestation is per run, not per Short's day, so an undated Short's
+            # unchanged bytes would pass it: hold the row (never burned) until the day is known.
+            raise RecordHeldError(
+                f"short {short_index} of {project_name!r} has no recording_date: its privacy "
+                "day is unknown, so its row is held"
+            )
+        return record
 
 
 class PrivacyAttestationLoader:
@@ -709,6 +731,7 @@ def cmd_dispatch_queue(args, config) -> int:
             # was refused at the irreversible step. Printed only when
             # non-zero so it never becomes a field nobody reads.
             + (f" held_validate={result.held_validate}" if result.held_validate else "")
+            + (f" held_record={result.held_record}" if result.held_record else "")
             + (
                 f" held_privacy_unverified={result.held_privacy_unverified}"
                 " Held: privacy classes unverified"

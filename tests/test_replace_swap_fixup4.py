@@ -113,12 +113,12 @@ def test_the_projected_hash_is_accepted_only_when_the_caller_names_a_proven_swap
     assert state.gate_cd_confirmation_hash != state.gate_cd_confirmation_swap_hash
     swapped = {**SHORT, **EDITS["rerendered_bytes"]}
     plan.write_text(json.dumps({"shorts": [swapped]}))
-    assert_gate_cd_approved(state, w.out, swap_projection=True)
+    assert_gate_cd_approved(state, w.out, swap_plan="other_publish_plan.json")
     with pytest.raises(GateNotApprovedError):
         assert_gate_cd_approved(state, w.out)
     plan.write_text(json.dumps({"shorts": [{**swapped, **EDITS["title"]}]}))
     with pytest.raises(GateNotApprovedError):
-        assert_gate_cd_approved(state, w.out, swap_projection=True)
+        assert_gate_cd_approved(state, w.out, swap_plan="other_publish_plan.json")
 
 
 def test_the_replace_gate_refuses_an_unproven_plan_even_under_a_confirmation(w):
@@ -202,7 +202,8 @@ def test_a_duplicate_short_index_never_resolves_the_incident_it_just_raised(w):
     w.old_sidecar.write_text(json.dumps(raw))
     w.row(1)
     r = w.run()
-    assert 1 in _rebuilt(r) and 1 in _reasons(r) and _open(w, 1)
+    # fixup 5: a duplicated index is refused at every position, never rebuilt from a guess
+    assert 1 not in _rebuilt(r) and 1 in _reasons(r) and _open(w, 1)
 
 
 # ---- MINOR-1: a finished swap is bound to the file on disk ----

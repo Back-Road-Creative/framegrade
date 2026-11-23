@@ -155,8 +155,8 @@ def _label_quality_warning(metadata_json: dict) -> "str | None":
     )
 
 
-#: Per-Short fields a replace swap rewrites on a plan. Left out of the plan hash ONLY under
-#: ``swap_projection=True``, which the replace swap's own gate check alone accepts.
+#: Per-Short fields a replace swap rewrites on a plan. Left out of the plan hash ONLY for the plans
+#: named in ``project_plans``, which the replace swap's own gate check alone passes (its own plan).
 _SWAP_FIELDS = ("media", "reviewed_plan_hash", "consent_hash")
 
 
@@ -175,7 +175,7 @@ def _project_plan(payload):
 
 
 def compute_gate_cd_hash(
-    *, state, output_dir: Path, skip_plans: tuple = (), swap_projection: bool = False
+    *, state, output_dir: Path, skip_plans: tuple = (), project_plans: tuple = ()
 ) -> str:
     """Stable sha256 of Gate C/D content payload.
 
@@ -199,8 +199,9 @@ def compute_gate_cd_hash(
     By default every plan is hashed whole, media included: this is the hash a confirmation records
     (``gate_cd_confirmation_hash``) and the only one ``enqueue-plan`` and the Gate C/D auto-pass
     accept, so a plan repointed, re-rendered or given another consent hash after review is refused.
-    ``swap_projection=True`` leaves out each Short's ``media``, ``reviewed_plan_hash`` and
-    ``consent_hash`` (the fields a replace swap rewrites); it is recorded as
+    ``project_plans`` names the sidecars whose Shorts leave out ``media``, ``reviewed_plan_hash``
+    and ``consent_hash`` (the fields a replace swap rewrites): the replace run's OWN plan only,
+    every other plan is hashed whole. It is recorded per plan name as
     ``gate_cd_confirmation_swap_hash`` and read by the replace swap's gate check alone, and only
     for a plan whose swap it just proved deterministic.
     """
@@ -236,7 +237,7 @@ def compute_gate_cd_hash(
             plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             plan_payload = {}
-        if swap_projection:
+        if plan_path.name in project_plans:
             plan_payload = _project_plan(plan_payload)
         plan_sha = hashlib.sha256(
             json.dumps(plan_payload, sort_keys=True).encode("utf-8")
@@ -253,11 +254,13 @@ def compute_gate_cd_hash(
 
 
 def record_gate_cd_confirmation(state, output_dir: Path) -> None:
-    """Record a human Gate C/D confirmation: the full hash, and beside it the swap-projected one."""
+    """Record a human Gate C/D confirmation: the full hash, and beside it, per plan name, the hash
+    with only that plan swap-projected (the others whole)."""
     state.gate_cd_confirmation_hash = compute_gate_cd_hash(state=state, output_dir=output_dir)
-    state.gate_cd_confirmation_swap_hash = compute_gate_cd_hash(
-        state=state, output_dir=output_dir, swap_projection=True
-    )
+    state.gate_cd_confirmation_swap_hash = {
+        p.name: compute_gate_cd_hash(state=state, output_dir=output_dir, project_plans=(p.name,))
+        for p in sorted(Path(output_dir).glob("*_publish_plan.json"))
+    }
 
 
 # Pipeline evidence embedded in the metadata JSON, judged by its own gate

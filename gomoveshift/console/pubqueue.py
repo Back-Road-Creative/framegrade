@@ -463,6 +463,7 @@ _ERROR_CLASS_EXPLANATIONS = {
     "PermanentDeliveryError": "The platform rejected this outright; it will not retry.",
     "ThrottledDeliveryError": "The platform rate-limited this; retrying after a fixed delay.",
     "TransientMediaError": "A transient media problem; retrying with backoff.",
+    "RecordHeldError": "Held, not failed: the publish plan names this Short wrongly; no attempt is counted.",
     "quota": "YouTube's daily upload quota was exhausted; this retries once it resets.",
     "tiktok_publish_failed": "TikTok reported this manually-published draft failed to publish.",
     # Written by ``dispatch.reconcile_interrupted_attempts``, not by any

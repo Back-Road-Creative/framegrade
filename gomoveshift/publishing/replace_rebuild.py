@@ -268,10 +268,13 @@ def _ahead(conn, project: str, index: int, old_hash: str, target: Path, disk_has
 
 
 def _on_disk(new_sidecar: Path) -> dict:
-    """``{short_index: record}`` of the sidecar already at ``new_sidecar`` (``{}`` if none)."""
+    """``{short_index: record}`` of the sidecar already at ``new_sidecar`` (``{}`` if none). An
+    index the file lists more than once is left out: no record of it is the Short's."""
     try:
         shorts = json.loads(new_sidecar.read_text(encoding="utf-8")).get("shorts") or []
-        return {s["short_index"]: s for s in shorts if isinstance(s, dict) and "short_index" in s}
+        found = [s for s in shorts if isinstance(s, dict) and "short_index" in s]
+        seen = [s["short_index"] for s in found]
+        return {s["short_index"]: s for s in found if seen.count(s["short_index"]) == 1}
     except (OSError, ValueError, AttributeError, KeyError):
         return {}
 
@@ -411,8 +414,8 @@ def _gate_cd_refusal(
     The recorded FULL hash is accepted as ``enqueue-plan`` accepts it (own plan included), and with
     ``own_plan`` left out (a confirmation taken before the swap's sidecar existed: a replace run
     emits none). Only here, and only when ``swap_proven`` (every record in the new plan is the old
-    one or its proven swap), is the recorded swap-projected hash (media, reviewed_plan_hash and
-    consent_hash left out) accepted too, so a confirmation taken after an earlier run wrote the
+    one or its proven swap), is the recorded swap-projected hash of the OWN plan (its media, reviewed_plan_hash and
+    consent_hash left out; every other plan whole) accepted too, so a confirmation taken after an earlier run wrote the
     sidecar still holds. Any other file in the plan dir still counts whole."""
     from gomoveshift.cli.handlers import enqueue_plan
 
@@ -421,7 +424,9 @@ def _gate_cd_refusal(
         try:  # a confirmation taken before the swap covers no own plan, one taken after covers it
             enqueue_plan.assert_gate_cd_approved(state, output_dir, skip_plans=(own_plan,))
         except enqueue_plan.GateNotApprovedError:
-            enqueue_plan.assert_gate_cd_approved(state, output_dir, swap_projection=swap_proven)
+            enqueue_plan.assert_gate_cd_approved(
+                state, output_dir, swap_plan=own_plan if swap_proven else None
+            )
     except enqueue_plan.GateNotApprovedError as exc:
         return f"Gate C/D must be re-confirmed: {exc}"
     return None
@@ -466,10 +471,34 @@ def rebuild_replaced_sidecar(
         stages_dir, new_sidecar.parent, new_sidecar.name, _swap_proven(raw["shorts"], on_disk)
     )
     null_ok = _null_path_is_target(conn, project, target, sidecar_dir)
+    counts: Dict[Any, int] = {}
+    for short in raw["shorts"]:
+        counts[short["short_index"]] = counts.get(short["short_index"], 0) + 1
+    twice = {i for i, n in counts.items() if n > 1}
     moves: List[tuple] = []  # (delivery_id, short_index, from_hash, to_hash, action)
     staged: List[tuple] = []  # (pos, new_short, Rebuilt, moves), applied after placement
     for pos, short in enumerate(raw["shorts"]):
         index, media = short["short_index"], short["media"]
+        if index in twice:
+            # Which record is the Short's is unknowable: refuse every position once, change
+            # nothing (both old records go back verbatim; dispatch holds the whole project).
+            if not any(x.short_index == index for x in result.refused):
+                ids = tuple(
+                    r["id"]
+                    for s in raw["shorts"]
+                    if s["short_index"] == index
+                    for r in _rows(conn, project, index, s["reviewed_plan_hash"])
+                    if r["status"] not in TERMINAL_STATUSES
+                )
+                result.refused.append(
+                    Refused(
+                        index,
+                        f"short_index {index} appears more than once ({counts[index]} records) in "
+                        "the plan: which record is the Short's cannot be known",
+                        tuple(sorted(set(ids))),
+                    )
+                )
+            continue
         yt = short["payloads"]["youtube"]
         old_hash = short["reviewed_plan_hash"]
         old_rows = _rows(conn, project, index, old_hash)
@@ -686,7 +715,9 @@ def _write(conn, raw, old_sidecar, new_sidecar, project, moves, now: datetime) -
     try:
         from gomoveshift.publishing.plan_io import load_publish_plan
 
-        load_publish_plan(tmp)  # the rebuilt file must still parse before it replaces anything
+        # The rebuilt file must still parse before it replaces anything. A duplicated index is
+        # allowed ONLY here (both old records go back verbatim, refused); every reader refuses it.
+        load_publish_plan(tmp, allow_duplicate_index=True)
         with conn:
             for did, index, old, new, action in moves:
                 moved = conn.execute(
