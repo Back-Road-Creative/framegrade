@@ -221,13 +221,14 @@ def test_repeat_invocation_after_a_launch_is_a_noop(tmp_path):
     assert len(rig.launches) == 1
 
 
-def job(rig, run_id, project, state, created_at, exit_code=1, name=None):
-    """A job-runner record for the backlog drive of ``project``."""
+def job(rig, run_id, project, state, created_at, exit_code=1, name=None, worker_pid=4242):
+    """A job-runner record for the backlog drive of ``project`` (``worker_pid=None``: jobrun's own
+    launch failure, the worker never started)."""
     d = rig.tmp / "jobs" / run_id
     d.mkdir(parents=True)
     result = {"state": state, "exit_code": None if state == "running" else exit_code}
     rec = {"schema": "job/1", "run_id": run_id, "name": name or f"gms-backlog-{project}",
-           "created_at": created_at, "result": result}  # fmt: skip
+           "created_at": created_at, "worker": {"pid": worker_pid}, "result": result}  # fmt: skip
     (d / "job.json").write_text(json.dumps(rec))
 
 
