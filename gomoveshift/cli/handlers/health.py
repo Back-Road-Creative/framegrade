@@ -142,7 +142,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
         stages_root=args.stages_root, code_root=Path(args.code_root) if args.code_root else root,
         jobs_dir=jobs_dir, now=datetime.now(timezone.utc), dry_run=args.dry_run,
         drive_running=default_drive_running, lead_hours=args.lead_hours,
-        expect_sha=args.expect_sha,
+        expect_sha=args.expect_sha, refresh_catalog=publish.catalog_refresher(config),
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -173,6 +173,8 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     acquire, release = launch.lease_fns(code_root)
     supersede = (args.supersede, args.reason) if args.supersede else None
     replace = bool(getattr(args, "replace_scheduled", False))
+    # one refresher for the whole tick: a replace-retry run and the plain run behind it share it
+    refresh = publish.once_per_tick(publish.catalog_refresher(config))
 
     def run(supersede, replace):
         return launch.run_backlog(
@@ -198,7 +200,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
             ),
             publish=publish.backlog_publisher(
                 config, region=region, stages_root=args.stages_root, code_root=code_root,
-                jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,
+                jobs_dir=jobs_dir, now=now, drive_running=default_drive_running, refresh=refresh,
             ),
         )  # fmt: skip
 

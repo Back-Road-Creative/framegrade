@@ -22,7 +22,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from seo_manager.core.locality import dedupe_places
 
@@ -495,19 +495,8 @@ def phase_d_titles(output_dir: Optional[str]) -> dict[int, str]:
     return out
 
 
-def expected_lf_titles(
-    state: dict, output_dir: Optional[str] = None, other_forms: Optional[set[str]] = None
-) -> dict[int, set[str]]:
-    """``{lf_index: {lowercased final title, ...}}`` a drive's own checkpoint says it will upload.
-
-    An LF whose exact title Phase D already wrote (:func:`phase_d_titles`) expects just that. The
-    fallback is derived: each label (``per_lf_ost_text``, else ``per_lf_titles``, and the
-    ``input_label`` of ``per_lf_pre_render_title_decisions``) assembled bare, and dated
-    (`` (Mon D, YYYY)`` from ``per_lf_recording_date``), the form ``ensure_unique_titles`` falls
-    back to when the bare title is another drive's; a part suffix is stripped from the catalog
-    title when matching (:func:`orphan_uploads`). ``other_forms`` (what other drives derive) are
-    dropped from the fallback: that title cannot be told from theirs. No label, no entry.
-    """
+def _derived_lf_titles(state: dict) -> dict[int, set[str]]:
+    """``{lf_index: every lowercased title form the checkpoint's labels derive}``, shared or not."""
     labels = state.get("per_lf_ost_text") or state.get("per_lf_titles") or {}
     dates = state.get("per_lf_recording_date") or {}
     decisions = state.get("per_lf_pre_render_title_decisions") or {}
@@ -530,9 +519,43 @@ def expected_lf_titles(
                 forms.add(f"{label} ({day.strftime('%b')} {day.day}, {day.year})")
             except ValueError:
                 pass
-        derived = {assemble_final_title(f).strip().lower() for f in forms} - set(other_forms or ())
+        derived = {assemble_final_title(f).strip().lower() for f in forms}
         if derived:
             out[idx] = derived
+    return out
+
+
+def shared_lf_titles(
+    state: dict, output_dir: Optional[str] = None, other_forms: Optional[Iterable[str]] = None
+) -> dict[int, set[str]]:
+    """``{lf_index: derived forms another drive derives too}`` for each LF without a Phase D title:
+    what :func:`expected_lf_titles` drops. A video matching only these cannot be told from the other
+    drive's, so the gate names both drives instead of passing it (:func:`orphan_upload_refusal`)."""
+    sidecar, other = phase_d_titles(output_dir), set(other_forms or ())
+    shared = {
+        i: forms & other for i, forms in _derived_lf_titles(state).items() if i not in sidecar
+    }
+    return {i: forms for i, forms in shared.items() if forms}
+
+
+def expected_lf_titles(
+    state: dict, output_dir: Optional[str] = None, other_forms: Optional[Iterable[str]] = None
+) -> dict[int, set[str]]:
+    """``{lf_index: {lowercased final title, ...}}`` a drive's own checkpoint says it will upload.
+
+    An LF whose exact title Phase D already wrote (:func:`phase_d_titles`) expects just that. The
+    fallback is derived: each label (``per_lf_ost_text``, else ``per_lf_titles``, and the
+    ``input_label`` of ``per_lf_pre_render_title_decisions``) assembled bare, and dated
+    (`` (Mon D, YYYY)`` from ``per_lf_recording_date``), the form ``ensure_unique_titles`` falls
+    back to when the bare title is another drive's; a part suffix is stripped from the catalog
+    title when matching (:func:`orphan_uploads`). ``other_forms`` (what other drives derive) are
+    dropped from the fallback (:func:`shared_lf_titles` keeps them): that title cannot be told from
+    theirs. No label, no entry.
+    """
+    out: dict[int, set[str]] = {}
+    for idx, forms in _derived_lf_titles(state).items():
+        if forms - set(other_forms or ()):
+            out[idx] = forms - set(other_forms or ())
     for idx, title in phase_d_titles(output_dir).items():
         out[idx] = {title}  # the exact title beats every derived form of the LF
     return out
@@ -591,7 +614,7 @@ def _resolve_gone_lfs(drive: str, expected: dict[int, set[str]], incidents_dir: 
             resolve_incidents(drive, lf=lf, codes=(ORPHAN_UPLOAD_CODE,), incidents_dir=incidents_dir, outcome="the drive's checkpoint no longer has this LF")  # fmt: skip
 
 
-def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callable[[], object]]) -> Optional[str]:  # fmt: skip
+def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callable[[], object]], note: Optional[str] = None) -> Optional[str]:  # fmt: skip
     """``None`` when the local snapshot was fetched after ``since`` (refreshed through ``refresh``
     first when it was not), else why the publish waits: the next tick tries again."""
     fetched = live_catalog_fetched_at()
@@ -608,7 +631,8 @@ def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callab
             if fetched is not None and fetched > since:
                 return None
             why = "the refresh wrote no newer snapshot"
-    return (f"{drive}: an earlier publish failed (started {since.isoformat()}) and the live-catalog "
+    lead = note.format(drive=drive) if note else f"{drive}: an earlier publish failed (ended {since.isoformat()})"  # fmt: skip
+    return (f"{lead} and the live-catalog "
             f"snapshot (fetched {fetched.isoformat() if fetched else 'never'}) predates it, so an "
             f"upload it left cannot be ruled out ({why}); nothing was changed, the next tick "
             "retries")  # fmt: skip
@@ -626,6 +650,8 @@ def orphan_upload_refusal(
     first_attempt: Optional[datetime] = None,
     fresh_since: Optional[datetime] = None,
     refresh: Optional[Callable[[], object]] = None,
+    attribution: Optional[dict] = None,
+    fresh_note: Optional[str] = None,
 ) -> Optional[str]:
     """``None`` when no live-catalog video is an unbooked upload of this drive, else the reason
     its publish must wait. A publish that died after the YouTube upload left such a video; the
@@ -636,10 +662,14 @@ def orphan_upload_refusal(
     exact titles, ``other_forms`` the titles other drives derive and ``first_attempt`` this drive's
     first publish job (:func:`expected_lf_titles`, :func:`orphan_uploads`). ``fresh_since`` is set
     after a failed publish: the snapshot must have been fetched after it, ``refresh`` is called to
-    get one, and without one the publish waits for the next tick. ``record`` opens one
+    get one (``fresh_note``, ``{drive}`` formatted, replaces the "ended" lead of the refusal when
+    the anchor is not a job's own end stamp), and without one the publish waits for the next tick. ``record`` opens one
     ``orphan_upload`` incident per LF (a rerun leaves it as it is), resolves the LF's row once the
     catalog no longer holds the video and closes rows of LFs the checkpoint dropped; a dry run
-    passes False. A drive with no checkpoint or no snapshot has nothing to match; an unreadable or
+    passes False. ``attribution`` (``{"own": windows, "others": {drive: {"titles", "windows"}}}``,
+    :func:`_attributed_to`) lets a match on a title another drive derives too be proven that other
+    drive's alone: then only that drive is refused, never this one. Without positive evidence for
+    exactly one other drive the match refuses every drive sharing the title. A drive with no checkpoint or no snapshot has nothing to match; an unreadable or
     missing ledger refuses.
     """
     from .replace_scheduled import ORPHAN_UPLOAD_CODE, record_incident, resolve_incidents
@@ -648,29 +678,48 @@ def orphan_upload_refusal(
         saved = json.loads((Path(stages_dir) / "pipeline_state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    expected = expected_lf_titles(saved, output_dir, other_forms) if isinstance(saved, dict) else {}
-    if record and isinstance(saved, dict):
-        _resolve_gone_lfs(drive, expected, incidents_dir)
-    if not expected:
+    saved = saved if isinstance(saved, dict) else {}
+    expected = expected_lf_titles(saved, output_dir, other_forms)
+    shared = shared_lf_titles(saved, output_dir, other_forms)
+    if record and saved:
+        # an LF is dropped when the checkpoint has no label for it, judged before shared forms go
+        _resolve_gone_lfs(drive, {*_derived_lf_titles(saved), *phase_d_titles(output_dir)}, incidents_dir)  # fmt: skip
+    if not expected and not shared:
         return None
     if fresh_since is not None:
-        stale = _stale_snapshot_reason(drive, fresh_since, refresh)
+        stale = _stale_snapshot_reason(drive, fresh_since, refresh, fresh_note)
         if stale:
             return stale
     videos = _live_catalog_videos()
     if not videos:
         return None
     ledger_ids = ledger_video_ids()
-    candidates = orphan_uploads(expected, videos, set(receipt_ids or ()), first_attempt=first_attempt)  # fmt: skip
+    known = set(receipt_ids or ())
+    candidates = orphan_uploads(expected, videos, known, first_attempt=first_attempt)
+    # a match on a form another drive derives too: this drive's only if it could be, never a pass
+    sure = {(o["lf"], o["video_id"]) for o in candidates}
+    for o in orphan_uploads(shared, videos, known, first_attempt=first_attempt):
+        if (o["lf"], o["video_id"]) not in sure and not _uploaded_before(videos[o["video_id"]], first_attempt):  # fmt: skip
+            others = _sharing_drives(other_forms, shared[o["lf"]], o["title"])
+            owner = _attributed_to(drive, videos[o["video_id"]], o["title"], others, attribution)
+            if owner is not None and owner != drive:
+                continue  # proven another drive's upload: its own gate refuses it, this one passes
+            candidates.append({**o, "shared_with": others})
     if ledger_ids is None:
         if not candidates:
             return None
-        return (f"{drive}: the content ledger is unreadable, so a live video titled "
+        text = (f"{drive}: the content ledger is missing or unreadable, so a live video titled "
                 f"{candidates[0]['title']!r} ({candidates[0]['video_id']}) cannot be told from an "
                 "orphan upload; fix the ledger, then retry")  # fmt: skip
+        if record:
+            for idx in sorted({o["lf"] for o in candidates}):
+                record_incident(
+                    drive, ORPHAN_UPLOAD_CODE, text, lf=idx, incidents_dir=incidents_dir
+                )
+        return text
     found = [o for o in candidates if o["video_id"] not in ledger_ids]
     if record:
-        for idx in sorted(expected):
+        for idx in sorted({*expected, *shared}):
             mine = [o for o in found if o["lf"] == idx]
             if mine:
                 record_incident(drive, ORPHAN_UPLOAD_CODE, _orphan_text(drive, mine), lf=idx, incidents_dir=incidents_dir)  # fmt: skip
@@ -679,9 +728,57 @@ def orphan_upload_refusal(
     return "; ".join(_orphan_text(drive, [o]) for o in found) or None
 
 
+def _uploaded_before(video: dict, first_attempt: Optional[datetime]) -> bool:
+    """The video went up (``published_at``) before this drive's first publish attempt, so it is
+    not this drive's upload. Unknown upload time or no attempt: cannot be ruled out."""
+    went_up = _parse_utc(video.get("published_at")) if isinstance(video, dict) else None
+    return bool(first_attempt and went_up and went_up < first_attempt)
+
+
+def _covers(window: tuple, went_up: datetime, *, open_ok: bool) -> bool:
+    """``window`` is ``(created, ended or None)`` of one publish job: the upload fell inside it. A
+    job with no end stamp covers only when ``open_ok`` (this drive: fail closed), else it proves
+    nothing."""
+    created, ended = window
+    if ended is None:
+        return open_ok and created <= went_up
+    return created <= went_up <= ended
+
+
+def _attributed_to(drive: str, video: dict, title: str, sharers: str, attribution: Optional[dict]) -> Optional[str]:  # fmt: skip
+    """The one drive positive evidence ties a shared-title upload to, else ``None``. Evidence for
+    another drive: its Phase D sidecar names this exact title, or its publish job window covers the
+    video's ``published_at``. Evidence for this drive: its own publish job window covers it. More
+    than one drive with evidence, or none, is ``None``: the match refuses every sharing drive."""
+    if not isinstance(attribution, dict):
+        return None
+    went_up = _parse_utc(video.get("published_at")) if isinstance(video, dict) else None
+    names = {title.lower(), _part_base(title).lower()}
+    named = set(sharers.split(", "))
+    hit = {drive} if went_up and any(_covers(w, went_up, open_ok=True) for w in attribution.get("own") or ()) else set()  # fmt: skip
+    for other, ev in (attribution.get("others") or {}).items():
+        if names & set(ev.get("titles") or ()) or (went_up and other in named and any(_covers(w, went_up, open_ok=False) for w in ev.get("windows") or ())):  # fmt: skip
+            hit.add(other)
+    return next(iter(hit)) if len(hit) == 1 else None
+
+
+def _sharing_drives(other_forms: Any, forms: set[str], title: str) -> str:
+    """Names of the other drives deriving the matched title (``other_forms`` as ``{title: names}``)."""
+    if not isinstance(other_forms, dict):
+        return "another drive"
+    hit = [t for t in (title.lower(), _part_base(title).lower()) if t in forms]
+    return ", ".join(sorted({other_forms[t] for t in hit if t in other_forms})) or "another drive"
+
+
 def _orphan_text(drive: str, orphans: list[dict]) -> str:
     return "; ".join(
-        f"orphan upload: {drive} LF {o['lf']} title {o['title']!r} is already on YouTube as "
+        f"orphan upload: {drive} LF {o['lf']} title {o['title']!r}"
+        + (
+            f" (a title {o['shared_with']} derives too, so it may be that drive's upload)"
+            if o.get("shared_with")
+            else ""
+        )  # fmt: skip
+        + f" is already on YouTube as "
         f"{o['video_id']} (privacy {o['privacy']}, publish_at {o['publish_at']}) with no ledger "
         "row or receipt; verify which drive uploaded it, then delete it in YouTube Studio or book "
         "it into the ledger, then retry (nothing was changed on YouTube)"
