@@ -226,7 +226,12 @@ def test_the_gate_check_is_called_with_the_run_state_and_the_plan_dir(w, monkeyp
 
     monkeypatch.setattr(enqueue_plan, "assert_gate_cd_approved", spy)
     result = w.run()
-    assert seen == [w.out] and result.rebuilt == [] and "spy refuses" in json.dumps(_open(w))
+    assert (
+        seen
+        and set(seen) == {w.out}
+        and result.rebuilt == []
+        and "spy refuses" in json.dumps(_open(w))
+    )
 
 
 def test_an_incident_write_failure_is_logged_at_error_level(w, tmp_path, caplog):

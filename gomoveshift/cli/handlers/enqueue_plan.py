@@ -106,7 +106,10 @@ def assert_gate_cd_approved(
             "cannot be tied to any particular content — refusing to enqueue."
         )
     current = compute_gate_cd_hash(state=state, output_dir=output_dir, skip_plans=skip_plans)
-    if current != recorded:
+    legacy = compute_gate_cd_hash(
+        state=state, output_dir=output_dir, skip_plans=skip_plans, full_plans=True
+    )  # a confirmation recorded before the plan hash dropped the swap's fields
+    if recorded not in (current, legacy):
         raise GateNotApprovedError(
             "the reviewed content has CHANGED since Gate C/D was confirmed "
             f"(recorded={recorded[:12]}… current={current[:12]}…) — what was approved is not "

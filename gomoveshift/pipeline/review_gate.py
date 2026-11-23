@@ -155,7 +155,28 @@ def _label_quality_warning(metadata_json: dict) -> "str | None":
     )
 
 
-def compute_gate_cd_hash(*, state, output_dir: Path, skip_plans: tuple = ()) -> str:
+#: Per-Short fields a replace swap rewrites on a plan: left out of the plan hash, so a swap (which
+#: changes only these) never voids a confirmation. Every other field of every plan is still hashed.
+_SWAP_FIELDS = ("media", "reviewed_plan_hash", "consent_hash")
+
+
+def _project_plan(payload):
+    """``payload`` without the :data:`_SWAP_FIELDS` of each Short (anything else is returned as is)."""
+    shorts = payload.get("shorts") if isinstance(payload, dict) else None
+    if not isinstance(shorts, list):
+        return payload
+    return {
+        **payload,
+        "shorts": [
+            {k: v for k, v in s.items() if k not in _SWAP_FIELDS} if isinstance(s, dict) else s
+            for s in shorts
+        ],
+    }
+
+
+def compute_gate_cd_hash(
+    *, state, output_dir: Path, skip_plans: tuple = (), full_plans: bool = False
+) -> str:
     """Stable sha256 of Gate C/D content payload.
 
     Covers LF count, per-LF title + youtube.json sha, consolidated
@@ -174,6 +195,12 @@ def compute_gate_cd_hash(*, state, output_dir: Path, skip_plans: tuple = ()) -> 
     mtimes) so a stale state file + freshly-regenerated artefact pair
     don't churn the hash. ``skip_plans`` names sidecars left out of the hash (the replace swap's
     own, which it rewrites on every run); every other file is still covered.
+
+    Each plan is hashed with every Short's ``media``, ``reviewed_plan_hash`` and ``consent_hash``
+    projected out (the only fields a replace swap rewrites), so a confirmation holds whichever
+    order it was taken in relative to a swap; text, schedule, routes and every other field still
+    count. ``full_plans=True`` is the earlier whole-file hash: a confirmation recorded under it
+    must keep approving, so the checks that compare a recorded hash accept both.
     """
     output_dir = Path(output_dir)
     lf_count = len(list(state.regular_lf_paths or []))
@@ -207,6 +234,8 @@ def compute_gate_cd_hash(*, state, output_dir: Path, skip_plans: tuple = ()) -> 
             plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             plan_payload = {}
+        if not full_plans:
+            plan_payload = _project_plan(plan_payload)
         plan_sha = hashlib.sha256(
             json.dumps(plan_payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -706,7 +735,11 @@ class ReviewGate:
         # an already-human-reviewed day) — waives the re-prompt. A material
         # content change flips the hash and reopens the gate.
         current_hash = compute_gate_cd_hash(state=state, output_dir=output_dir)
-        if state.gate_cd_confirmed is True and state.gate_cd_confirmation_hash == current_hash:
+        recorded = state.gate_cd_confirmation_hash
+        if state.gate_cd_confirmed is True and recorded in (
+            current_hash,
+            compute_gate_cd_hash(state=state, output_dir=output_dir, full_plans=True),
+        ):
             print("\n  [Gate C/D auto-passed — --gate-cd-confirmed + hash match]")
             return
         # Known hole: a run whose stdin is not a TTY used to
