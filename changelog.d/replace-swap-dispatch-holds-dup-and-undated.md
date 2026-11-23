@@ -8,3 +8,7 @@
 - The replace gate's swap-invariant Gate C/D hash projects only the replace run's own plan (recorded
   per plan name); a sibling plan's repointed media or changed consent is refused.
   A legacy single-string swap hash is refused with a re-confirm Gate C/D reason.
+- A `delivery_record_held` incident resolves itself when the hold clears, so a later hold files a
+  fresh, unpushed incident instead of being swallowed by a stale open one. One Short on several
+  platforms files one incident (keyed `project:short_index`), and the cron summary line carries
+  `held_record=N` when non-zero.

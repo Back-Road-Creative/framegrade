@@ -731,6 +731,7 @@ def cmd_dispatch_queue(args, config) -> int:
             # was refused at the irreversible step. Printed only when
             # non-zero so it never becomes a field nobody reads.
             + (f" held_validate={result.held_validate}" if result.held_validate else "")
+            + (f" held_record={result.held_record}" if result.held_record else "")
             + (
                 f" held_privacy_unverified={result.held_privacy_unverified}"
                 " Held: privacy classes unverified"

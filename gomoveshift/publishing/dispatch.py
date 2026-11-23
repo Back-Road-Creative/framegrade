@@ -854,6 +854,40 @@ def _raise_held_incident(
         logger.exception("dispatch: could not write held-past-slot incident for %s", row["id"])
 
 
+def _record_held_key(row: Dict[str, Any], project_wide: bool) -> str:
+    """The Short's key (``project:short_index``, one incident however many platforms route it) or,
+    for a project-wide hold, the project's."""
+    scope = row["project_name"] if project_wide else f"{row['project_name']}:{row['short_index']}"
+    return f"{RECORD_HELD_KIND}:{scope}"
+
+
+def _resolve_record_held_incidents(
+    row: Dict[str, Any], now: str, incidents_dir: Optional[Path]
+) -> None:
+    """The record loader passed for this row, so the Short is not held and (the duplicate check
+    being project-wide) its project has no duplicate: close both open incidents. A later hold
+    files a fresh, unpushed one. Never fatal."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        safe_name,
+        write_row,
+    )
+
+    try:
+        directory = incidents_dir or default_incidents_dir(default_data_root())
+        for wide in (False, True):
+            path = directory / f"{safe_name(_record_held_key(row, wide))}.json"
+            if not path.is_file():
+                continue
+            doc = json.loads(path.read_text())
+            if doc.get("resolved_at") is None:
+                doc["resolved_at"] = now
+                write_row(directory, doc)
+    except (OSError, ValueError):
+        logger.exception("dispatch: could not resolve record-held incidents for %s", row["id"])
+
+
 def _raise_record_held_incident(
     row: Dict[str, Any], now: str, exc: "RecordHeldError", incidents_dir: Optional[Path]
 ) -> None:
@@ -868,8 +902,7 @@ def _raise_record_held_incident(
         write_row,
     )
 
-    scope = row["project_name"] if exc.project_wide else row["id"]
-    key = f"{RECORD_HELD_KIND}:{scope}"
+    key = _record_held_key(row, exc.project_wide)
     directory = incidents_dir or default_incidents_dir(default_data_root())
     filename = f"{safe_name(key)}.json"
     try:
@@ -1191,6 +1224,9 @@ def drain_queue(
                 else None
             )
             new_attempt_count = (live["attempt_count"] if live is not None else 0) + 1
+            if not isinstance(exc, RecordHeldError):
+                # The loader passed (a hold is raised by it, before the handler's work).
+                _resolve_record_held_incidents(row, now, incidents_dir)
             if isinstance(exc, RecordHeldError):
                 # A hold, like the privacy hold: no transition, no attempt bump, no backoff.
                 # Only the error is made visible and this pass's lease dropped.
@@ -1322,6 +1358,7 @@ def drain_queue(
             # lease expired into an "interrupted attempt" whose retry time
             # un-parked the draft, and the next pass read the handler's early
             # return for it as a publish.
+            _resolve_record_held_incidents(row, now, incidents_dir)
             live = _live_row(conn, delivery_id)
             if live is not None and live["status"] == STATUS_MISSING_REMOTE:
                 # U-R1: the handler uploaded, then found YouTube does not

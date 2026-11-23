@@ -742,9 +742,12 @@ unchanged bytes. A plan that lists one `short_index` more than once is refused b
 (`DuplicateShortIndexError`, a `PublishPlanFormatError`), so EVERY reader refuses it; dispatch turns
 that into the same `RecordHeldError` hold for every row of the project (the last record would upload
 another Short's video), with one `delivery_record_held` incident per project naming the index and that
-every row is held. Both incidents stay open until resolved through the health incident store (as
-`delivery_held_past_slot` does); reruns never duplicate them, and a row released by a fixed plan still
-has its whole `max_attempts` budget. The rebuild refuses every position of that index with one incident and writes both records
+every row is held. The Short's incident is keyed `project:short_index`, so one Short routed to several platforms files one.
+Both incidents close themselves: when a row's record loader passes (its handler returns, or fails on
+something other than a hold) the drain sets `resolved_at` on that Short's incident and on its project's
+(the loader passing proves no duplicate); a later hold files a fresh, unpushed incident. While open, reruns
+never duplicate them (`detected_at` and `pushed` do not change), the cron summary line carries
+`held_record=N` when non-zero, and a row released by a fixed plan still has its whole `max_attempts` budget. The rebuild refuses every position of that index with one incident and writes both records
 back verbatim (the only caller that validates with `allow_duplicate_index=True`); fixing the plan and
 rerunning converges with no hand step. A confirmation whose swap hash is the legacy single string is
 refused by the replace gate with "re-confirm Gate C/D" (a re-confirmation records it per plan). A Short whose rows are all terminal (cancelled, published) has nothing left to swap and its
