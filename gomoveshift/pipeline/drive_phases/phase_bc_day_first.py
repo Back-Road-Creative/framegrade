@@ -445,7 +445,7 @@ class PhaseBCDayFirst:
         endpoint_loss_by_lf = getattr(enrichment, "endpoint_loss_by_lf", None) or {}
 
         recorded, skipped_artifacts, remaining_batches = self._partition_batches_by_resume_state(
-            state, day_batches, stages_dir
+            state, day_batches, stages_dir, lf_plans_by_date=lf_plans_by_date
         )
         # A resumed day keeps its recorded trail outcome, and a recorded skip whose
         # cause is now resolved re-runs the trail step alone (never the day).
@@ -1291,7 +1291,9 @@ class PhaseBCDayFirst:
             produced, required, reconstructed.date, allow, stage="reconstructed"
         )
 
-    def _partition_batches_by_resume_state(self, state, day_batches, stages_dir):
+    def _partition_batches_by_resume_state(
+        self, state, day_batches, stages_dir, lf_plans_by_date=None
+    ):
         # ── Resume safety net: skip days already recorded as done ─────
         # `per_day_completed` is the outer
         # bookkeeping layer on top of the per-stage file-existence +
@@ -1341,6 +1343,22 @@ class PhaseBCDayFirst:
                     if master.is_file()
                     else "ABSENT: it must be re-encoded first — superlong parts can "
                     "only be cut from the day master",
+                )
+                remaining_batches.append(batch)
+                continue
+
+            if entry and _recorded_day_short_of_planned_lfs(
+                day_dir, (lf_plans_by_date or {}).get(batch.date)
+            ):
+                # A day recorded complete with fewer finals than planned (state left by
+                # a run that dropped a long-form) would be skipped for ever and hit the
+                # shorts_per_lf split-brain every retry. Re-run it: the master is reused
+                # by its own checks, fresh finals by their burned-text fingerprint.
+                logger.warning(
+                    "  day-first: day %s is recorded complete but has fewer long-form "
+                    "finals than the %d planned — re-running it",
+                    batch.date,
+                    len((lf_plans_by_date or {}).get(batch.date) or []),
                 )
                 remaining_batches.append(batch)
                 continue
@@ -2677,6 +2695,21 @@ def day_superlong_complete(date: str, day_dir: Path, state) -> bool:
     if not expected:
         return False
     return finalized_superlong_count(day_dir) >= int(expected)
+
+
+def _recorded_day_short_of_planned_lfs(day_dir: Path, planned) -> bool:
+    """True when ``day_dir`` holds fewer non-empty ``lf_NN.mp4`` finals than the
+    day's planned long-forms. No plan (legacy / plan-less resume) never trips it."""
+    n_planned = len(planned or [])
+    if n_planned == 0:
+        return False
+    lf_dir = day_dir / "regular_lfs"
+    found = (
+        [p for p in lf_dir.glob("lf_[0-9][0-9].mp4") if p.is_file() and p.stat().st_size > 0]
+        if lf_dir.is_dir()
+        else []
+    )
+    return len(found) < n_planned
 
 
 def _reconstruct_day_artifacts_from_disk(
