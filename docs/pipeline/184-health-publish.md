@@ -34,10 +34,17 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    ledger) and opens one `orphan_upload` incident per LF (`replace_scheduled_partial` kind, never
    duplicated by a rerun and never closed by the replace flow's LF-done resolve; closed once a snapshot
    that lists other videos no longer holds it, or when the checkpoint drops the LF; a dry run records
-   none). After a failed publish (a failed job, or a `failed` drive) the snapshot must have been fetched
-   after that job started: `backlog_publisher` runs `catalog-fetch --known-ids-from-queue` first
-   (`catalog_refresher`; `health publish` passes none), and a snapshot still older, or a failed fetch,
-   refuses with a reason saying the next tick retries. A clean first publish needs no fresh snapshot.
+   none). After a failed publish (a dead `gms-publish-<project>` job: failed, cancelled, stalled or killed,
+   the one rule `launch.dead_publish_result` that the backlog's retry uses too, or a `failed` drive) the
+   snapshot must have been fetched after the newest dead job ENDED (`result.ended_at`; `now` when the
+   record has none; a failed drive with no job record also uses `now`), since the upload happens inside
+   the run: `backlog_publisher` and `health publish` run `catalog-fetch --known-ids-from-queue` first
+   (`catalog_refresher`, stdout kept clean for `--json`; the tick builds one refresher, so a failing fetch
+   is tried once per tick), and a snapshot still older, or a failed fetch, refuses with a reason saying
+   the next tick retries. A clean first publish needs no fresh snapshot. A video matching only a title
+   another drive derives too (every form of an LF, or just its bare form) is refused naming both drives,
+   unless a receipt names it or it went up before this drive's first attempt. A missing ledger refuses
+   ("missing or unreadable") and opens the incident too.
    The refusal writes nothing to the store, counts no attempt and touches no other drive; nothing on
    YouTube is deleted or unlisted. An unreadable or missing ledger refuses too; no checkpoint or no
    snapshot has nothing to match;

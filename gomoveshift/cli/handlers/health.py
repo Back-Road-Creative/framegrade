@@ -142,7 +142,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
         stages_root=args.stages_root, code_root=Path(args.code_root) if args.code_root else root,
         jobs_dir=jobs_dir, now=datetime.now(timezone.utc), dry_run=args.dry_run,
         drive_running=default_drive_running, lead_hours=args.lead_hours,
-        expect_sha=args.expect_sha,
+        expect_sha=args.expect_sha, refresh_catalog=publish.catalog_refresher(config),
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))

@@ -368,7 +368,9 @@ def test_another_drives_same_title_upload_is_not_attributed_to_this_drive(tmp_pa
     state(rig, "day-b", label="Ireland", date="2025-09-20")
     catalog({"vidB": {**ORPHAN, "title": "Ireland in 4K"}})  # the bare title both drives expect
     res = rig.run("day-a")
-    assert res["action"] == "launched", res
+    # unbooked and matching only a shared title: not silently this drive's, not a pass either; the
+    # refusal names both drives (a receipt naming the video clears it: test_orphan_gate_fresh_window)
+    assert res["action"] == "refused" and "day-a" in res["reason"] and "day-b" in res["reason"], res
     catalog(
         {"vidB": {**ORPHAN, "title": "Ireland (Sep 16, 2025) in 4K"}}
     )  # day-a's own dated title
@@ -491,7 +493,7 @@ def test_a_missing_ledger_file_blocks_fail_closed(tmp_path):
     (Path(get_config().seo.storage_path) / ".content_ledger.json").unlink()
     catalog({"vidKerry": ORPHAN})
     res = rig.run()
-    assert res["action"] == "refused" and "ledger is unreadable" in res["reason"], res
+    assert res["action"] == "refused" and "ledger is missing or unreadable" in res["reason"], res
     assert not rig.launches
 
 
