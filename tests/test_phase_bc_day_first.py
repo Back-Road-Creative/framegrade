@@ -22,6 +22,7 @@ from gomoveshift.pipeline.drive_phases.phase_bc_day_first import (
 )
 
 from gomoveshift.pipeline.drive_phases import phase_bc_day_first as phase_bc_day_first_mod
+from gomoveshift.pipeline.title_builder import split_lf_parts as _split_lf_parts
 from _state_helpers import make_state
 from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PHASE_BC_CODE_VERSION
 
@@ -3014,3 +3015,208 @@ class TestBCTitleIsTheDatedBracketTitlePhaseDShips:
         live = {"ireland in 4k": "vid123"}
         with pytest.raises(Exception, match="vid123"):
             _apply_demoted_labels({1: "Ireland"}, {1: "old"}, {}, state, kit, title_ids=live)
+
+
+@pytest.mark.overpass_answers_empty
+class TestBCOwnTitleSitesOnASplitDayMatchPhaseD:
+    """Every title site BC owns (pre-seed, post-render, demoted preview, approval)
+    carries the ``— Part k of K`` suffix, so BC confirms what Phase D ships."""
+
+    _REC = {"level": "country", "label": "Ireland", "gap_h": 41.5}
+    _DATED = {
+        1: "Ireland (Sep 16, 2025) — Part 1 of 2",
+        2: "Ireland (Sep 16, 2025) — Part 2 of 2",
+    }
+
+    def _run_bc(self, tmp_path, dates=("2025-09-16",), split=True, demote=False):
+        """Real Phase BC over split full_drive days: two LFs per day in ``dates``."""
+        from gomoveshift.config import Config
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PhaseBCDayFirst
+
+        output_base = tmp_path / "out"
+        stages_dir = output_base / "_stages"
+        stages_dir.mkdir(parents=True)
+        n = 2 * len(dates)
+        lfs = [
+            dict(
+                _make_real_lf_dict(
+                    i, [_seg_dict((i - 1) // 2, 100 * i, 100 * i + 50, 36.0 - i, -80.0)]
+                ),
+                part_index=(i - 1) % 2 + 1 if split else None,
+                part_count=2 if split else None,
+            )
+            for i in range(1, n + 1)
+        ]
+        TestRealLFPlansThreaded._write_drive_plan(None, stages_dir, lfs)
+        eps = [
+            SimpleNamespace(
+                index=d,
+                concat_path=Path(f"/fake/ep_00{d}.mp4"),
+                date=day,
+                total_duration=1500.0,
+                gpx_path=None,
+                creation_time=None,
+            )
+            for d, day in enumerate(dates)
+        ]
+        state = make_state(
+            output_base=output_base,
+            ingest_plan=SimpleNamespace(episodes=eps),
+            episode_files=[str(e.concat_path) for e in eps],
+            episode_dates=list(dates),
+            episode_locations=[""] * len(dates),
+            file_durations=[1500.0] * len(dates),
+            region="usa",
+            location="Ireland",
+            drive_scores=None,
+            file_boundaries=[(1500.0 * d, 1500.0 * (d + 1)) for d in range(len(dates))],
+            bracket_route=dict(self._REC),
+            source_dir="/footage/Ireland-Kerry",
+        )
+        geocoder = MagicMock()
+        geocoder.reverse_geocode.side_effect = lambda lat, lon: _Loc("Cork", country="USA")
+        geocoder.reverse_geocode_detailed.side_effect = _detailed_by_lat
+        seen: dict = {}
+        rendered = tmp_path / "rendered"
+        rendered.mkdir()
+        files = {}
+        for day in dates:
+            files[day] = [rendered / f"{day}_lf{k}.mp4" for k in (1, 2)]
+            for f in files[day]:
+                f.write_bytes(b"x")
+        master = rendered / "master.mp4"
+        master.write_bytes(b"x")
+
+        def _fake_run_all_days(**kwargs):
+            seen["titles"] = dict(state.get("per_lf_titles") or {})
+            return [
+                SimpleNamespace(
+                    date=b.date,
+                    master_path=master,
+                    regular_lf_paths=list(files[str(b.date)]),
+                    short_paths=[],
+                )
+                for b in kwargs["day_batches"]
+            ]
+
+        real_apply = phase_bc_day_first_mod._apply_demoted_labels
+
+        def _spy_apply(*args, **kwargs):
+            real_apply(*args, **kwargs)
+            seen["demoted_lf_parts"] = kwargs.get("lf_parts")
+            seen["demoted_titles"] = dict(state.per_lf_titles)
+
+        demoted = {i: "Ireland" for i in range(1, n + 1)} if demote else {}
+        with (
+            patch(
+                "gomoveshift.pipeline.gps_enrichment._build_shared_geocoder",
+                return_value=geocoder,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
+                side_effect=_fake_run_all_days,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.flatten_ost_text",
+                return_value={i: "Ireland" for i in range(1, n + 1)},
+            ),
+            patch.object(
+                phase_bc_day_first_mod, "_degrade_labels_to_awarded_tier", return_value=demoted
+            ),
+            patch.object(phase_bc_day_first_mod, "_apply_demoted_labels", _spy_apply),
+        ):
+            PhaseBCDayFirst(Config()).run(state, probe_duration_fn=lambda p: 100.0)
+        return state, seen
+
+    def test_preseed_titles_carry_the_part_suffix(self, tmp_path):
+        _state, seen = self._run_bc(tmp_path)
+        assert seen["titles"] == self._DATED
+
+    def test_final_titles_carry_the_part_suffix(self, tmp_path):
+        state, _seen = self._run_bc(tmp_path)
+        assert dict(state.per_lf_titles) == self._DATED
+
+    def test_bc_final_titles_are_the_titles_phase_d_ships(self, tmp_path):
+        from test_bracket_title_dated import _split_run_with_state
+
+        state, _seen = self._run_bc(tmp_path)
+        ost = {1: "Ireland", 2: "Ireland"}
+        _plans, gen = _split_run_with_state(tmp_path / "d", state, ost, {1: (1, 2), 2: (2, 2)})
+        shipped = {
+            i + 1: call.kwargs["title_override"]
+            for i, call in enumerate(gen.generate.call_args_list)
+        }
+        assert shipped == dict(state.per_lf_titles)
+
+    def test_the_demoted_preview_site_in_run_hands_the_split_parts_over(self, tmp_path):
+        _state, seen = self._run_bc(tmp_path, demote=True)
+        assert seen["demoted_lf_parts"] == {1: (1, 2), 2: (2, 2)}
+        assert seen["demoted_titles"] == self._DATED
+
+    def test_demoted_label_preview_carries_the_part_suffix(self):
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _apply_demoted_labels
+        from gomoveshift.pipeline.title_builder import ensure_unique_titles
+
+        kit = SimpleNamespace(unique_titles=ensure_unique_titles, published_titles=lambda: set())
+        state = SimpleNamespace(
+            per_lf_ost_text={},
+            per_lf_titles={},
+            bracket_route=dict(self._REC),
+            per_lf_recording_date={1: "2025-09-16", 2: "2025-09-16"},
+        )
+        plans = [SimpleNamespace(index=i, part_index=i, part_count=2) for i in (1, 2)]
+        _apply_demoted_labels(
+            {1: "Ireland", 2: "Ireland"},
+            {1: "old", 2: "old"},
+            {},
+            state,
+            kit,
+            lf_parts=_split_lf_parts(plans),
+        )
+        assert state.per_lf_titles == self._DATED
+
+    def test_approval_passes_the_lfs_part_to_the_title_decision(self):
+        seen: dict = {}
+
+        def _capture(label, route_ev, evidence, *, resolved=None, title_part=None):
+            seen[label] = title_part
+            return {"chosen_title": label, "input_label": label}
+
+        state = SimpleNamespace(
+            per_lf_titles=dict(self._DATED),
+            per_lf_pre_render_title_decisions=None,
+            per_lf_gps_coverage_pct=None,
+            per_lf_resolved_location=None,
+            per_lf_location_evidence=None,
+        )
+        plans = [SimpleNamespace(index=i, part_index=i, part_count=2) for i in (1, 2)]
+        with (
+            patch.object(
+                phase_bc_day_first_mod, "_build_location_evidence_per_lf", return_value={}
+            ),
+            patch("gomoveshift.pipeline.title_decision.approve_retained_title", _capture),
+            patch("gomoveshift.pipeline.title_decision.assert_gps_density_backs_title"),
+        ):
+            phase_bc_day_first_mod._approve_waypost_titles_before_encode(
+                state, {1: "Ireland", 2: "Ireland"}, plans, {}, None, {1: object(), 2: object()}
+            )
+        assert seen == {self._DATED[1]: (1, 2), self._DATED[2]: (2, 2)}
+        assert {
+            k: v["chosen_title"] for k, v in state.per_lf_pre_render_title_decisions.items()
+        } == (self._DATED)
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            [(1, None, 1)],
+            [(1, None, None)],
+            [(1, 1, 2), (2, 2, 2)],
+            [(3, 1, 3), (4, 2, 3), (5, 3, 3), (6, None, 1)],
+        ],
+    )
+    def test_bcs_lf_parts_helper_agrees_with_the_one_phase_d_uses(self, spec):
+        """BC may not import ``title_builder`` (media boundary), so its helper is a copy."""
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _lf_parts_of
+
+        lfs = [SimpleNamespace(index=i, part_index=pi, part_count=pc) for i, pi, pc in spec]
+        assert _lf_parts_of(lfs) == _split_lf_parts(lfs)

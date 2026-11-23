@@ -177,20 +177,13 @@ def test_the_backstop_strips_a_label_before_dating_so_a_dated_live_title_still_r
 _REC = {"level": "country", "label": "Ireland", "gap_h": 41.5}
 
 
-def _bc_titles(ost, dates, plans, published=frozenset(), project="ireland-kerry"):
-    """Phase BC's post-render site: the title kit's ``unique_titles`` with the LF parts."""
-    from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _lf_parts_of
+def _bc_titles(tmp_path, dates=("2025-09-16",), split=True):
+    """What REAL Phase BC (pre-seed, post-render and all) leaves as the per-LF titles."""
+    import test_phase_bc_day_first as bc_tests
 
-    return ensure_unique_titles(
-        dict(ost),
-        bracket_route=dict(_REC),
-        published_titles=set(published),
-        published_title_ids={},
-        drive_project=project,
-        lf_dates=dates,
-        video_projects={},
-        lf_parts=_lf_parts_of(plans),
-    )
+    harness = bc_tests.TestBCOwnTitleSitesOnASplitDayMatchPhaseD()
+    state, _seen = harness._run_bc(tmp_path / "bc", dates, split)
+    return {int(k): v for k, v in state.per_lf_titles.items()}
 
 
 def _split_run(tmp_path, ost, dates, parts, published=frozenset(), record=None):
@@ -248,11 +241,12 @@ def _split_run_with_state(tmp_path, state, ost, parts=None, published=frozenset(
     return plans, gen
 
 
+@pytest.mark.overpass_answers_empty
 def test_split_bracket_day_bc_confirms_the_dated_title_phase_d_ships(tmp_path):
     ost = {1: "Ireland", 2: "Ireland"}
     dates = {1: "2025-09-16", 2: "2025-09-16"}
     plans, gen = _split_run(tmp_path, ost, dates, {1: (1, 2), 2: (2, 2)})
-    bc = _bc_titles(ost, dates, plans)
+    bc = _bc_titles(tmp_path)
     assert bc == {
         1: "Ireland (Sep 16, 2025) — Part 1 of 2",
         2: "Ireland (Sep 16, 2025) — Part 2 of 2",
@@ -275,6 +269,7 @@ def test_split_day_title_is_dated_all_the_way_through_the_real_generator():
     assert meta["title"] == "Ireland (Sep 16, 2025) in 4K — Part 1 of 2"
 
 
+@pytest.mark.overpass_answers_empty
 def test_two_split_days_on_different_dates_get_distinct_titles(tmp_path):
     ost = {1: "Ireland", 2: "Ireland", 3: "Ireland", 4: "Ireland"}
     dates = {1: "2025-09-16", 2: "2025-09-16", 3: "2025-09-17", 4: "2025-09-17"}
@@ -282,7 +277,7 @@ def test_two_split_days_on_different_dates_get_distinct_titles(tmp_path):
     plans, gen = _split_run(tmp_path, ost, dates, parts)
     shipped = _titles(gen)
     assert len(set(shipped)) == 4
-    assert shipped == list(_bc_titles(ost, dates, plans).values())
+    assert shipped == list(_bc_titles(tmp_path, ("2025-09-16", "2025-09-17")).values())
     assert shipped[0].startswith("Ireland (Sep 16, 2025)")
     assert shipped[2].startswith("Ireland (Sep 17, 2025)")
 
@@ -319,6 +314,7 @@ def test_the_part_suffix_is_applied_once(tmp_path):
     assert out == {1: "Kerry — Part 1 of 2"}
 
 
+@pytest.mark.overpass_answers_empty
 def test_a_pre_render_decision_lf_is_counted_in_phase_ds_uniqueness_like_bc(tmp_path):
     """Phase D no longer leaves a pre-render-decision LF out of its dedup map."""
     from gomoveshift.pipeline.title_decision import route_fingerprint
@@ -331,19 +327,20 @@ def test_a_pre_render_decision_lf_is_counted_in_phase_ds_uniqueness_like_bc(tmp_
         bracket_route=dict(_REC),
         source_dir="/footage/Ireland-Kerry",
     )
+    bc = _bc_titles(tmp_path, split=False)
     record = {"segments": []}
     state.per_lf_route_record = {1: record}
     state.per_lf_pre_render_title_decisions = {
         1: {
-            "input_label": "decided label",
-            "chosen_title": "decided label",
+            "input_label": bc[1],
+            "chosen_title": bc[1],
             "ost_text": "Ireland",
             "route_fingerprint": route_fingerprint(record),
         }
     }
     plans, gen = _split_run_with_state(tmp_path, state, ost)
-    assert _titles(gen) == ["decided label", "Ireland (Sep 16, 2025) (Part 2 of 2)"]
-    assert _bc_titles(ost, dates, plans)[2] == "Ireland (Sep 16, 2025) (Part 2 of 2)"
+    assert _titles(gen) == [bc[1], "Ireland (Sep 16, 2025) (Part 2 of 2)"]
+    assert _titles(gen) == [bc[1], bc[2]]
 
 
 # ── a confirm flag is one-shot; a title-only suffix change never restales a day ──
@@ -734,3 +731,61 @@ def test_the_sidecars_drive_date_suffix_is_the_one_title_builder_dates_with(raw)
     from gomoveshift.pipeline.title_builder import _drive_dated
 
     assert _drive_date_suffix(raw) == (_drive_dated("", raw) or "")
+
+
+# ── a pre-render-decision LF is checked as the title Phase D ships ──────────
+
+
+def _decision_state(input_label, ost_text=_COUNTY):
+    from gomoveshift.pipeline.title_decision import route_fingerprint
+
+    state = make_state(
+        per_lf_ost_text={1: ost_text},
+        per_lf_recording_date={1: "2025-09-19"},
+        source_dir="/footage/Ireland-Courtmacsherry",
+    )
+    record = {"segments": []}
+    state.per_lf_route_record = {1: record}
+    state.per_lf_pre_render_title_decisions = {
+        1: {
+            "input_label": input_label,
+            "chosen_title": input_label,
+            "ost_text": ost_text,
+            "route_fingerprint": route_fingerprint(record),
+        }
+    }
+    return state
+
+
+def _live_under_an_unowned_video(monkeypatch, title_key):
+    from gomoveshift.pipeline import longform_metadata as lm
+
+    monkeypatch.setattr(lm, "live_catalog_title_ids", lambda: {title_key: "VIDX"})
+    monkeypatch.setattr(lm, "ledger_video_projects", lambda: {})
+
+
+def test_a_decision_lf_is_checked_as_the_dated_label_it_ships(tmp_path, monkeypatch):
+    _live_under_an_unowned_video(monkeypatch, "county cork, ireland in 4k")
+    dated = f"{_COUNTY} (Sep 19, 2025)"
+    state = _decision_state(dated)
+    _plans, gen = _split_run_with_state(
+        tmp_path, state, {1: _COUNTY}, published={f"{_COUNTY} in 4K"}
+    )
+    assert _titles(gen) == [dated]
+
+
+def test_a_decision_lf_whose_shipped_label_is_a_real_duplicate_still_refuses(tmp_path, monkeypatch):
+    _live_under_an_unowned_video(monkeypatch, "county cork, ireland in 4k")
+    state = _decision_state(_COUNTY)
+    with pytest.raises(PhaseBCExitContractError):
+        _split_run_with_state(tmp_path, state, {1: _COUNTY}, published={f"{_COUNTY} in 4K"})
+
+
+def test_a_split_decision_lf_is_checked_without_its_part_suffix(tmp_path, monkeypatch):
+    _live_under_an_unowned_video(monkeypatch, "county cork, ireland in 4k")
+    label = f"{_COUNTY} (Sep 19, 2025) — Part 1 of 2"
+    state = _decision_state(label)
+    _plans, gen = _split_run_with_state(
+        tmp_path, state, {1: _COUNTY}, {1: (1, 2)}, published={f"{_COUNTY} in 4K"}
+    )
+    assert _titles(gen) == [label]

@@ -10,6 +10,7 @@ preserved for tests and the inline orchestrator call site.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,12 @@ from ..title_builder import ensure_unique_titles, split_lf_parts
 # stay valid across the module split (tests assert on
 # "gomoveshift.pipeline.drive_phases.phase_d" log records).
 logger = logging.getLogger("gomoveshift.pipeline.drive_phases.phase_d")
+
+# The part suffixes BC can bake into a decision label: the full-drive split's `` — Part k of K``
+# and the collision dedup's `` (Part N of M)``.
+_DECISION_PART_SUFFIX_RE = re.compile(
+    r"\s+(?:—\s+Part\s+\d+\s+of\s+\d+|\(Part\s+\d+\s+of\s+\d+\))\s*$"
+)
 
 
 def _lf_inserts(state) -> dict[int, list[dict]]:
@@ -310,8 +317,18 @@ def _build_metadata_per_lf(
         # a country/state bracket label is dated with its LF's measured date, a split
         # full_drive day's LFs carry their ``— Part k of K`` suffix after the dating,
         # and uniqueness runs over all of them (pre-render decisions included).
+        # A pre-render-decision LF ships its decision's ``input_label``, so uniqueness
+        # checks THAT (its date kept; the ``— Part k of K`` and the dedup ``(Part N of M)``
+        # suffixes BC baked in are left to ``lf_parts`` / the dedup to re-derive), not the
+        # bare burned text it would be refused on and then discard.
+        unique_input = {int(k): v for k, v in per_lf_ost_text_state.items()}
+        for k, decision in pre_render_decisions.items():
+            if int(k) in unique_input and decision.get("input_label"):
+                unique_input[int(k)] = _DECISION_PART_SUFFIX_RE.sub(
+                    "", str(decision["input_label"])
+                ).strip()
         per_lf_titles_override = ensure_unique_titles(
-            {int(k): v for k, v in per_lf_ost_text_state.items()},
+            unique_input,
             published_titles=known_channel_titles(),
             drive_project=(
                 Path(str(state.source_dir)).stem.replace(" ", "_").lower()
