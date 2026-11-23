@@ -1401,6 +1401,15 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str, since: float = 0.
 PUBLISH_JOB_PREFIX = "gms-publish-"
 
 
+def dead_publish_result(result: Any) -> bool:
+    """A ``gms-publish-*`` job result that ended in anything but success: failed, or cancelled,
+    stalled or killed with no exit code. The backlog's retry and the orphan gate's fresh window
+    both ask this one question (a job the runner cancelled carries no exit code, so keying on the
+    code alone left Kerry-to-Cork unpublished and the gate blind to it)."""
+    state = (result or {}).get("state")
+    return state not in (None, "running", "succeeded")
+
+
 def _failed_publish(jobs_dir: Path, project: str) -> bool:
     """The newest ``gms-publish-<project>`` job (Phase D after a passed audit) ended in anything
     but success: failed, or cancelled, stalled or killed with no exit code."""
@@ -1408,11 +1417,9 @@ def _failed_publish(jobs_dir: Path, project: str) -> bool:
     recs = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == name]
     if not recs:
         return False
-    result = max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result") or {}
-    state = result.get("state")
-    # any terminal state but success is a dead publish: a job the runner cancelled, stalled or
-    # killed carries no exit code, so keying on the code alone left Kerry-to-Cork unpublished
-    return state not in (None, "running", "succeeded")
+    return dead_publish_result(
+        max(recs, key=lambda r: float(r.get("created_at") or 0)).get("result")
+    )
 
 
 def _audit_passed(jobs_dir: Path, project: str, since: float = 0.0) -> bool:

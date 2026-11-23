@@ -18,6 +18,44 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
    version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing
    prerequisite only after the slot is booked), else `refused` naming the phases: re-audit it;
+   no live-catalog video may be an unbooked upload of this drive (`longform_metadata.
+   orphan_upload_refusal`): a publish that died after `videos().insert` leaves a scheduled video with no
+   receipt and no ledger row, and the only key tying it to the drive is its title. Each LF expects the
+   exact title Phase D wrote to `<output>/<project>_lfNN_youtube.json`; with none, the derived forms
+   (each `per_lf_ost_text` label and each `per_lf_pre_render_title_decisions[...]["input_label"]`,
+   assembled, bare and dated ` (Mon D, YYYY)`, with a ` — Part N of M` / `(Part k [of N])` suffix
+   stripped from the catalog title), minus any form another drive derives too. Never a known id: any
+   drive's receipt whatever its `publish_at` (a replace's new upload is saved with none), any drive's
+   `replace_plan.json` id (`replace`/`kept` `video_id`, `progress` `old_id`/`new_id`) and any
+   superseded run's receipt. Only a private/unlisted (or privacy-unknown) video, or a public one that
+   went live after this drive's first `gms-publish-<project>` job, counts: a public historic video
+   with the title does not block. A match is `refused` naming its id, title, privacy and
+   `publish_at` (verify which drive uploaded it, then delete it in YouTube Studio or book it into the
+   ledger) and opens one `orphan_upload` incident per LF (`replace_scheduled_partial` kind, never
+   duplicated by a rerun and never closed by the replace flow's LF-done resolve; closed once a snapshot
+   that lists other videos no longer holds it, or when the checkpoint drops the LF; a dry run records
+   none). After a failed publish (a dead `gms-publish-<project>` job: failed, cancelled, stalled or killed,
+   the one rule `launch.dead_publish_result` that the backlog's retry uses too, or a `failed` drive) the
+   snapshot must have been fetched after the newest dead job ENDED (`result.ended_at`; with no stamp the
+   job record's last write, else its creation plus the runner's stall window, never `now`, so the anchor
+   is the same on every tick; the refusal names which; a `failed` drive with no job record at all has no
+   stable anchor and still uses `now`, so it fetches on each tick until it publishes), since the upload happens inside
+   the run: `backlog_publisher` and `health publish` run `catalog-fetch --known-ids-from-queue` first
+   (`catalog_refresher`, stdout kept clean for `--json`; `health backlog` builds one refresher per tick and
+   hands it to every publisher the tick builds, replace-retry run included, so the catalog is fetched at
+   most once and a failing fetch is tried once per tick), and a snapshot still older, or a failed fetch, refuses with a reason saying
+   the next tick retries. A clean first publish needs no fresh snapshot. A video matching only a title
+   another drive derives too (every form of an LF, or just its bare form) is refused naming both drives,
+   unless a receipt names it or it went up before this drive's first attempt, or positive evidence ties it
+   to exactly one other drive: that drive's Phase D sidecar names the exact title, or its
+   `gms-publish-<project>` job window (created to ended) covers the video's `published_at` while no
+   publish job of this drive does. Then only that drive is refused (its incident names the video) and
+   this one passes; evidence for more than one drive (or none, or an open-ended job) refuses every
+   drive sharing the title. A missing ledger refuses
+   ("missing or unreadable") and opens the incident too.
+   The refusal writes nothing to the store, counts no attempt and touches no other drive; nothing on
+   YouTube is deleted or unlisted. An unreadable or missing ledger refuses too; no checkpoint or no
+   snapshot has nothing to match;
    and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
    the oldest ready drive of the region, never a named one. An older `ready` drive that already
    holds an upload receipt with `publish_at` (uploaded outside a claim) does not block: it is
