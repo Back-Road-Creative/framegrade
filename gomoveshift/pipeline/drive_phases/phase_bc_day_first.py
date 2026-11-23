@@ -505,6 +505,9 @@ class PhaseBCDayFirst:
                 published_title_ids=_channel_title_ids,
                 drive_project=_drive_project(state),
                 lf_dates=_build_per_lf_recording_date_map(lf_plans_by_date),
+                lf_parts=_lf_parts_of(
+                    lf for day_lfs in (lf_plans_by_date or {}).values() for lf in (day_lfs or [])
+                ),
             )
         _preseed_recording_date = _build_per_lf_recording_date_map(lf_plans_by_date)
         if _preseed_recording_date:
@@ -561,6 +564,7 @@ class PhaseBCDayFirst:
                     state,
                     kit,
                     title_ids=_channel_title_ids,
+                    lf_parts=_lf_parts_of(_flat_lf_plans),
                 )
             _assert_pre_encode_location_invariant(
                 _preseed_ost_text,
@@ -1155,6 +1159,7 @@ class PhaseBCDayFirst:
             published_title_ids=_channel_title_ids,
             drive_project=_drive_project(state),
             lf_dates=per_lf_recording_date,
+            lf_parts=_lf_parts_of(skeleton_lfs),
         )
         state.per_lf_titles = per_lf_titles
 
@@ -1868,6 +1873,19 @@ def _degrade_labels_to_awarded_tier(
     return demoted
 
 
+def _lf_parts_of(lfs) -> dict:
+    """``{lf: (part_index, part_count)}`` of the split days among ``lfs``.
+
+    Same shape ``title_builder.split_lf_parts`` gives Phase D (BC may not import
+    ``title_builder``; the title kit's ``unique_titles`` applies the suffix).
+    """
+    return {
+        int(lf.index): (getattr(lf, "part_index", None), lf.part_count)
+        for lf in lfs or ()
+        if (getattr(lf, "part_count", None) or 1) > 1
+    }
+
+
 def _apply_demoted_labels(
     demoted: dict,
     per_lf_ost_text: dict,
@@ -1876,6 +1894,7 @@ def _apply_demoted_labels(
     kit: TitleKit,
     *,
     title_ids: dict | None = None,
+    lf_parts: dict | None = None,
 ) -> None:
     """Write the demoted labels to every burn surface in lockstep: the flat
     pre-seed map (specificity-ladder gate + ``state.per_lf_ost_text``/``per_lf_titles`` for
@@ -1898,10 +1917,11 @@ def _apply_demoted_labels(
     state.per_lf_titles = kit.unique_titles(
         dict(per_lf_ost_text),
         bracket_route=getattr(state, "bracket_route", None),
-        published_titles=kit.published_titles(),
+        published_titles=kit.published_titles() | set(title_ids or {}),
         published_title_ids=title_ids,
         drive_project=_drive_project(state),
         lf_dates=getattr(state, "per_lf_recording_date", None),
+        lf_parts=lf_parts,
     )
 
 
@@ -2090,7 +2110,7 @@ def _approve_waypost_titles_before_encode(
         part = (
             (lf.part_index, lf.part_count) if (getattr(lf, "part_count", None) or 1) > 1 else None
         )
-        label = ost if part else state.per_lf_titles[lf_idx]
+        label = state.per_lf_titles[lf_idx]
         decision = approve_retained_title(
             label,
             route_ev,

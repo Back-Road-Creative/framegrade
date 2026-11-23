@@ -3003,3 +3003,14 @@ class TestBCTitleIsTheDatedBracketTitlePhaseDShips:
         state = SimpleNamespace(per_lf_ost_text={}, per_lf_titles={}, bracket_route=dict(self._REC))
         _apply_demoted_labels({1: "Ireland"}, {1: "old"}, {}, state, kit)
         assert state.per_lf_titles == {1: "Ireland"}
+
+    def test_demoted_label_preview_counts_the_channel_title_ids_like_every_other_site(self):
+        """The preview's published set includes the run's channel refresh (ids)."""
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _apply_demoted_labels
+        from gomoveshift.pipeline.title_builder import ensure_unique_titles
+
+        kit = SimpleNamespace(unique_titles=ensure_unique_titles, published_titles=lambda: set())
+        state = SimpleNamespace(per_lf_ost_text={}, per_lf_titles={}, bracket_route=None)
+        live = {"ireland in 4k": "vid123"}
+        with pytest.raises(Exception, match="vid123"):
+            _apply_demoted_labels({1: "Ireland"}, {1: "old"}, {}, state, kit, title_ids=live)

@@ -21,7 +21,7 @@ from ..final_text_record import build_final_text_review
 from ..location_evidence import refuse_unsupported_title
 from ..region_resolver import derive_region, is_us_region
 from ..route_profile import RouteProfile, build_lf_profile
-from ..title_builder import bracket_dated_title_inputs, ensure_unique_titles
+from ..title_builder import ensure_unique_titles, split_lf_parts
 
 # Use the phase_d logger name so existing log-capture tests + grep-trails
 # stay valid across the module split (tests assert on
@@ -306,26 +306,12 @@ def _build_metadata_per_lf(
     if per_lf_ost_text_state:
         from ..longform_metadata import known_channel_titles
 
-        # A split full_drive day's parts share a label by design and are told
-        # apart by the deliberate ``— Part k of K`` suffix applied below; the
-        # incidental ``(Part N of M)`` dedup must not stack a second one.
-        _split_idx = {
-            lf.index for lf in drive_plan.regular_lfs if (getattr(lf, "part_count", None) or 1) > 1
-        }
-        _title_map_input = {
-            int(k): v
-            for k, v in per_lf_ost_text_state.items()
-            if int(k) not in _split_idx and int(k) not in pre_render_decisions
-        }
-        # A country/state bracket label is the same bare string for every same-country
-        # drive: the title input carries this LF's measured date (the OST stays bare).
-        _title_map_input = bracket_dated_title_inputs(
-            _title_map_input,
-            getattr(state, "bracket_route", None),
-            state.per_lf_recording_date,
-        )
+        # ONE title map for every LF, built by the same call Phase BC confirms with:
+        # a country/state bracket label is dated with its LF's measured date, a split
+        # full_drive day's LFs carry their ``— Part k of K`` suffix after the dating,
+        # and uniqueness runs over all of them (pre-render decisions included).
         per_lf_titles_override = ensure_unique_titles(
-            _title_map_input,
+            {int(k): v for k, v in per_lf_ost_text_state.items()},
             published_titles=known_channel_titles(),
             drive_project=(
                 Path(str(state.source_dir)).stem.replace(" ", "_").lower()
@@ -333,9 +319,8 @@ def _build_metadata_per_lf(
                 else None
             ),
             lf_dates=state.per_lf_recording_date,
-        )
-        per_lf_titles_override.update(
-            {int(k): v for k, v in per_lf_ost_text_state.items() if int(k) in _split_idx}
+            bracket_route=getattr(state, "bracket_route", None),
+            lf_parts=split_lf_parts(drive_plan.regular_lfs),
         )
         per_lf_titles_override.update(
             {int(k): decision["input_label"] for k, decision in pre_render_decisions.items()}

@@ -1878,6 +1878,15 @@ def append_full_drive_part_suffix(
     return f"{base}{suffix}"
 
 
+def split_lf_parts(lfs) -> dict[int, tuple[int | None, int | None]]:
+    """``{lf.index: (part_index, part_count)}`` for the LFs of a split ``full_drive`` day."""
+    return {
+        int(lf.index): (getattr(lf, "part_index", None), lf.part_count)
+        for lf in lfs or ()
+        if (getattr(lf, "part_count", None) or 1) > 1
+    }
+
+
 # The `` (Mon D, YYYY)`` suffix ``_cross_drive_dated`` appends, and only that.
 _DRIVE_DATE_SUFFIX_RE = re.compile(
     r" \((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [1-9][0-9]?, [0-9]{4}\)$"
@@ -1955,6 +1964,7 @@ def ensure_unique_titles(
     lf_dates: dict[int, str] | None = None,
     video_projects: dict[str, str] | None = None,
     bracket_route: dict | None = None,
+    lf_parts: dict[int, tuple[int | None, int | None]] | None = None,
 ) -> dict[int, str]:
     """Post-process: append ``(Part N)`` to any duplicate titles.
 
@@ -2001,7 +2011,13 @@ def ensure_unique_titles(
     ``bracket_route`` (the ``state.bracket_route`` record): Phase BC passes it so its
     preview, audit hash and uniqueness check run on the SAME dated bracket title Phase D
     ships (``bracket_dated_title_inputs`` with ``lf_dates``) without importing this
-    module. Phase D dates its input itself and leaves it unset.
+    module. Phase D passes the same record, so BOTH sites build the final per-LF title
+    map through this one function.
+
+    ``lf_parts`` (``{lf: (part_index, part_count)}``, see :func:`split_lf_parts`): a split
+    ``full_drive`` day's LFs get the deliberate `` — Part k of K`` suffix HERE, after the
+    dating and before the uniqueness pass, so the title Phase BC confirms is the one
+    Phase D ships (the generator's own suffix step is then a no-op).
 
     Titles that are already unique (in-batch and vs the channel) are
     returned unchanged.
@@ -2010,6 +2026,11 @@ def ensure_unique_titles(
         return {}
     if bracket_route:
         lf_titles = bracket_dated_title_inputs(lf_titles, bracket_route, lf_dates)
+    if lf_parts:
+        lf_titles = {
+            k: append_full_drive_part_suffix(v, *lf_parts[k]) if k in lf_parts else v
+            for k, v in lf_titles.items()
+        }
     # Count occurrences
     from collections import Counter
 

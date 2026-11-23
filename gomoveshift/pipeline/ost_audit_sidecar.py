@@ -437,34 +437,44 @@ def lf_gate_or_raise(
     prior_hash = hash_map.get(date) or read_confirmed_hash(confirmed_file)
     stale = confirmation_is_stale(prior_hash, current_hash)
 
+    # A stale day is UNCONFIRMED for the CURRENT payload: the stored hash (and a
+    # hash-stamped marker bound to it) vouch for text that is no longer burned, so
+    # they never pass it on their own. Each route below judges the current payload
+    # and, on a pass, the code after it re-binds the stored hash to it.
     gate_passes = False
     reason = ""
-    if stale:
-        gate_passes = False  # explicit: a material label change reopens the gate
-    elif cli_confirmed:
+    if cli_confirmed:
         gate_passes = True
         reason = "--ost-audit-confirmed"
-    elif confirmed_file.exists():
+    elif confirmed_file.exists() and (
+        not stale or read_confirmed_hash(confirmed_file) == current_hash
+    ):
         gate_passes = True
         reason = f"{confirmed_file.name} on disk"
-    elif passed_map.get(date) is True and hash_map.get(date) == current_hash:
+    elif not stale and passed_map.get(date) is True and hash_map.get(date) == current_hash:
         gate_passes = True
         reason = "state['ost_audit_passed'] + matching hash"
-    else:
+    elif not stale:
+        # A system review never re-confirms a stale day: a label change after a
+        # pass needs a person even when the route claims re-agree on the new text.
         gate_passes, reason = system_review_passes(state, date, _payload_text(payload))
 
     if not gate_passes:
         sidecar_path = write_ost_audit(Path(output_dir), date, payload)
-        logger.info(
-            "OST audit sidecar written: %s. Review and create %s "
-            "(or pass --ost-audit-confirmed) to proceed.",
-            sidecar_path,
-            confirmed_file,
-        )
+        if stale:
+            how = (
+                "the burn text changed since it was confirmed, so the old confirmation "
+                f"no longer covers it: re-run with --ost-audit-confirmed, or write the "
+                f"current audit hash {current_hash} into {confirmed_file}"
+            )
+        else:
+            how = (
+                f"create {confirmed_file} (or re-run with --ost-audit-confirmed) before OST burn-in"
+            )
+        logger.info("OST audit sidecar written: %s. %s.", sidecar_path, how)
         raise OstAuditPendingError(
-            f"OST audit pending for day {date}: review {sidecar_path} "
-            f"and create {confirmed_file} (or re-run with "
-            f"--ost-audit-confirmed) before OST burn-in." + (f" {reason}." if reason else "")
+            f"OST audit pending for day {date}: review {sidecar_path} and {how}."
+            + (f" {reason}." if reason else "")
         )
     if reason.startswith("system review record"):
         write_system_review_copy(Path(output_dir), date, state)
