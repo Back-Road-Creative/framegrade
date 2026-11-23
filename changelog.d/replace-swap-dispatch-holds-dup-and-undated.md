@@ -12,3 +12,9 @@
   fresh, unpushed incident instead of being swallowed by a stale open one. One Short on several
   platforms files one incident (keyed `project:short_index`), and the cron summary line carries
   `held_record=N` when non-zero.
+- A `delivery_record_held` incident closes only when the record loader positively passed (returned the
+  Short's record, or parsed the project's plan with no duplicate): an unreadable or missing sidecar no
+  longer closes a hold still in force and re-pushes it. The resolve runs after the publish transition and
+  never aborts a drain on a malformed incident file (WARNING naming the key); a per-pass sweep closes an
+  incident whose rows are all terminal; the per-Short detail reads `<project> short <N>, every platform held`.
+- A shadow row (never selected, never published) no longer keeps a `delivery_record_held` incident open: the sweep counts only real rows.
