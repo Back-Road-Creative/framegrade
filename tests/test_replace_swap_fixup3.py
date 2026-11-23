@@ -9,7 +9,16 @@ from datetime import timedelta
 
 import pytest
 from test_replace_rebuild import DATE, NOW, PROJECT, World, _no
-from test_replace_swap_fixup import LATER, REAL, _attest, _drain, _open, _reasons, _state
+from test_replace_swap_fixup import (
+    LATER,
+    REAL,
+    _attest,
+    _confirmed_fields,
+    _drain,
+    _open,
+    _reasons,
+    _state,
+)
 from test_replace_swap_fixup2 import D2, LEASE, _crash, _rebuilt, _two_days
 
 from gomoveshift.cli.handlers.enqueue_plan import GateNotApprovedError, assert_gate_cd_approved
@@ -36,11 +45,7 @@ def _record(w, pos=0):
 
 def _confirm_with_plan(w):
     """A human confirmed Gate C/D while the swap's sidecar already existed (any run phase)."""
-    state = {"gate_cd_confirmed": True}
-    state["gate_cd_confirmation_hash"] = compute_gate_cd_hash(
-        state=PipelineState.from_dict(state), output_dir=w.out
-    )
-    _state(w, **state)
+    _state(w, **_confirmed_fields(w.out))
 
 
 def _edit(w, fn):
@@ -216,11 +221,7 @@ def test_a_confirmation_taken_with_the_sidecar_present_survives_every_rerun(w):
 
 def test_a_confirmation_taken_before_any_swap_survives_every_rerun(w):
     w.sidecar.unlink()  # a replace run emits no plan: the confirmation covers none
-    state = {"gate_cd_confirmed": True}
-    state["gate_cd_confirmation_hash"] = compute_gate_cd_hash(
-        state=PipelineState.from_dict(state), output_dir=w.out
-    )
-    _state(w, **state)
+    _state(w, **_confirmed_fields(w.out))
     w.row(1)
     w.row(2, lease_owner="x", lease_expires_at=LEASE())
     assert _rebuilt(w.run()) == [1]
@@ -255,23 +256,23 @@ def _gate_hash(w, **kw):
     return compute_gate_cd_hash(state=PipelineState.from_dict({}), output_dir=w.out, **kw)
 
 
-def test_the_gate_hash_ignores_the_swapped_fields_but_not_the_text(w):
+def test_the_swap_projection_ignores_the_swapped_fields_but_not_the_text(w):
     _plan(w)
-    base = _gate_hash(w)
+    base = _gate_hash(w, swap_projection=True)
+    whole = _gate_hash(w)
     _plan(w, media={"sha256": "b"}, reviewed_plan_hash="h2", consent_hash="c2")
-    assert _gate_hash(w) == base
+    assert _gate_hash(w, swap_projection=True) == base
+    assert _gate_hash(w) != whole  # the default hash covers the swapped fields
     _plan(w, payloads={"youtube": {"title": "t2"}})
-    assert _gate_hash(w) != base
+    assert _gate_hash(w, swap_projection=True) != base
     _plan(w, short_index=2)
-    assert _gate_hash(w) != base
+    assert _gate_hash(w, swap_projection=True) != base
 
 
-def test_a_confirmation_recorded_with_the_full_plan_hash_is_still_approved(w):
+def test_a_confirmation_recorded_with_the_full_plan_hash_is_approved_until_the_plan_changes(w):
     _plan(w)
-    legacy = _gate_hash(w, full_plans=True)
-    assert legacy != _gate_hash(w)
     state = PipelineState.from_dict(
-        {"gate_cd_confirmed": True, "gate_cd_confirmation_hash": legacy}
+        {"gate_cd_confirmed": True, "gate_cd_confirmation_hash": _gate_hash(w)}
     )
     assert_gate_cd_approved(state, w.out)
     _plan(w, payloads={"youtube": {"title": "t2"}})
@@ -395,8 +396,8 @@ def test_one_short_missing_its_date_key_is_refused_and_its_sibling_still_moves(w
     r = w.run()
     assert "no recording_date" in _reasons(r)[1] and _rebuilt(r) == [2]
     assert w.hash_of(a) == w.records[0].reviewed_plan_hash
-    assert w.hash_of(b) == _plan_hash(w) and _open(w, 1)  # the dropped Short leaves pos 0
-    load_publish_plan(w.sidecar)  # the written file still parses
+    assert w.hash_of(b) == _plan_hash(w, 1) and _open(w, 1)  # the refused Short keeps pos 0
+    load_publish_plan(w.sidecar)  # the written file still parses, with both indices
 
 
 # ---- the restore and the classifier keep their own filters ----

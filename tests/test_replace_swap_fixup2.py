@@ -16,6 +16,7 @@ from test_replace_swap_fixup import (
     LATER,
     REAL,
     _attest,
+    _confirmed_fields,
     _drain,
     _entry,
     _open,
@@ -24,8 +25,6 @@ from test_replace_swap_fixup import (
 )
 
 from gomoveshift.health.store import load_all
-from gomoveshift.pipeline.drive_state_model import PipelineState
-from gomoveshift.pipeline.review_gate import compute_gate_cd_hash
 from gomoveshift.publishing import dispatch
 from gomoveshift.publishing.dispatch import PRIVACY_REQUIRED_CLASSES
 from gomoveshift.publishing.plan_io import PublishPlanFormatError, load_publish_plan
@@ -66,11 +65,7 @@ def _crash(w, monkeypatch):
 def _confirm(w):
     """A human confirmed Gate C/D over the content as it is; a replace run wrote no plan yet."""
     w.sidecar.unlink()
-    state = {"gate_cd_confirmed": True}
-    state["gate_cd_confirmation_hash"] = compute_gate_cd_hash(
-        state=PipelineState.from_dict(state), output_dir=w.out
-    )
-    _state(w, **state)
+    _state(w, **_confirmed_fields(w.out))
 
 
 # ---- the restore undoes only an unfinished move ----
@@ -298,9 +293,13 @@ def test_a_short_missing_its_recording_date_key_is_refused_with_its_rows_held(w)
     del raw["shorts"][0]["recording_date"]
     w.old_sidecar.write_text(json.dumps(raw))
     did = w.row(1)
-    r = w.run()  # it cannot be written back (the plan parser needs the key): refused, not raised
+    r = w.run()  # refused, not raised; the old record is written back so the plan keeps its index
     assert "no recording_date" in _reasons(r)[1] and _open(w, 1)
     assert w.hash_of(did) == w.records[0].reviewed_plan_hash
+    for k in range(12):  # dispatch holds the stale bytes; the row is never burned by this cause
+        _drain(w, LATER + timedelta(minutes=k))
+    status = w.conn.execute("SELECT status FROM deliveries WHERE id=?", (did,)).fetchone()[0]
+    assert status in ("queued", "awaiting_manual") and _open(w, 1)
 
 
 def test_a_legacy_row_without_a_sidecar_path_is_served_from_the_plan_dispatch_reads(w):
