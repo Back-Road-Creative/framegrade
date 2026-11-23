@@ -20,6 +20,7 @@ and the row is resolved once the day passes."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -35,6 +36,8 @@ from ..health.store import (
     write_row,
 )
 from ..pipeline.blur_gate import SOURCE_FRAMES_SCHEMA, file_sha256, mask_identity
+
+logger = logging.getLogger(__name__)
 
 KIND = "mask_index_mismatch"
 REASON_UNKNOWN = "mask_frame_count_unknown"
@@ -116,6 +119,11 @@ def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
         return None
 
 
+def _has_finals(day_dir: Path) -> bool:
+    """True when the dir holds any rendered final (an LF, short or superlong part)."""
+    return any(any(day_dir.glob(f"{sub}/*.mp4")) for sub in ("regular_lfs", "shorts", "superlong"))
+
+
 def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
     """One row per rendered ``day_<date>`` stage dir (one holding any ``day_<date>_*`` file) that
     must not publish; ``[]`` when every such day agrees."""
@@ -125,7 +133,14 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
             continue
         date = day_dir.name[len("day_") :]
         if not any(day_dir.glob(f"day_{date}_*")):
-            continue  # no render artefacts (only shorts/work dirs): not a rendered day
+            if _has_finals(day_dir):
+                # Renders with no sidecar, mask or container to measure: unmeasured, so refused.
+                findings.append({"date": date, "reason": REASON_UNKNOWN,
+                                 "sidecar_frames": None, "container_frames": None})  # fmt: skip
+            else:
+                logger.warning("mask gate: %s holds no day_%s_* file and no finals; skipped",
+                               day_dir, date)  # fmt: skip
+            continue
         sidecar_n = sidecar_frame_count(day_dir / f"day_{date}_blur_regions.json")
         container_n = container_frame_count(day_dir, date)
         if container_n is None and not any(

@@ -86,7 +86,7 @@ def test_run_detects_and_writes_sidecar(tmp_path, monkeypatch):
     assert mask_calls == [ctx.blur_mask_path]
 
 
-def test_stage_path_persists_the_source_count_only_after_pairing_passes(tmp_path, monkeypatch):
+def test_stage_path_writes_no_source_count_proof(tmp_path, monkeypatch):
     monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 96)
     monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: 96)
     monkeypatch.setattr("gomoveshift.pipeline.stop_processor.compute_file_hash", lambda p: "HASH1")
@@ -106,10 +106,9 @@ def test_stage_path_persists_the_source_count_only_after_pairing_passes(tmp_path
     (tmp_path / "stages" / "proj_blur_regions.json").unlink()  # else the next run resumes it
     monkeypatch.setattr(blur_gate, "frame_pairing_error", lambda *a, **k: None)
     assert BlurDetectionStage().run(_ctx(tmp_path)).success
-    doc = json.loads(out.read_text())
-    assert doc["counts"] == {"container": 96, "mask": 96, "sidecar": 96}
-    assert doc["source_fingerprint"] == "HASH1"
-    assert doc["date"] == "proj" and doc["day_dir"] == "stages"
+    # The stage path is not a day (``proj`` in ``stages/``): the gate would never read a proof
+    # written here, so none is written.
+    assert not out.exists()
 
 
 def test_run_resumes_on_hash_match_without_redetecting(tmp_path, monkeypatch):
