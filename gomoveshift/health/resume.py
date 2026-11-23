@@ -5,6 +5,7 @@ never fail a drive: every function here swallows its own errors (logged as a war
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -40,17 +41,69 @@ def parse_recipe_path(lines: List[str]) -> Optional[str]:
     return found
 
 
+#: Destinations of the flags that are one run's own act, never a standing choice: ``fresh``
+#: discards state and ``ost_audit_confirmed`` is an operator's yes to the OST text they just
+#: reviewed. A recipe replayed by ``health heal`` must never re-issue either, so a changed burn
+#: stays unconfirmed. They are matched by DESTINATION against the drive parser, never by a
+#: spelling: argparse resolves any unique prefix (and ``name=value``) to the same option.
+_ONE_SHOT_DESTS = frozenset({"fresh", "ost_audit_confirmed"})
+
+
+@functools.lru_cache(maxsize=1)
+def _drive_options() -> Dict[str, str]:
+    """``{option string: dest}`` of the real ``drive`` subparser (``--`` options only)."""
+    import argparse
+
+    from ..cli.parser import _build_parser
+
+    parser = _build_parser()
+    drive = next(
+        a.choices["drive"]
+        for a in parser._actions
+        if isinstance(a, argparse._SubParsersAction) and "drive" in a.choices
+    )
+    return {
+        opt: action.dest
+        for action in drive._actions
+        for opt in action.option_strings
+        if opt.startswith("--")
+    }
+
+
+def _is_one_shot(token: str) -> bool:
+    """Whether the drive parser resolves ``token`` (exact, unique prefix or ``=value``) to a
+    one-shot flag. An ambiguous prefix counts when any candidate is one: fail closed."""
+    if not token.startswith("--"):
+        return False
+    key = token.split("=", 1)[0]
+    options = _drive_options()
+    if key in options:
+        return options[key] in _ONE_SHOT_DESTS
+    return any(dest in _ONE_SHOT_DESTS for opt, dest in options.items() if opt.startswith(key))
+
+
+def strip_one_shot(argv: List[str]) -> List[str]:
+    """``argv`` without any token that resolves to a one-shot flag."""
+    return [a for a in argv if not _is_one_shot(a)]
+
+
 def write_recipe(
     stages_dir: Path, argv: List[str], *, cwd: str, sha: Optional[str], now_iso: str
 ) -> Optional[Path]:
-    """Write the recipe: the drive's own CLI args (``argv`` excludes the program name) with
-    ``--fresh`` removed -- a resume must keep the prior state, not clear it -- plus the
-    ``RECIPE_ENV_KEYS`` set in this process's environment."""
+    """Write the recipe: the drive's own CLI args (``argv`` excludes the program name) with the
+    one-shot flags removed (see :func:`strip_one_shot`) -- a resume must keep the prior state,
+    and a confirmation is one run's, never replayed -- plus the ``RECIPE_ENV_KEYS`` set in
+    this process's environment. When the one-shot flags cannot be resolved nothing is written."""
     path = Path(stages_dir) / RECIPE_NAME
     try:
         body = {
             "schema": SCHEMA,
-            "argv": [sys.executable, "-m", "gomoveshift", *[a for a in argv if a != "--fresh"]],
+            "argv": [
+                sys.executable,
+                "-m",
+                "gomoveshift",
+                *strip_one_shot(argv),
+            ],
             "cwd": cwd,
             "env": {k: os.environ[k] for k in RECIPE_ENV_KEYS if os.environ.get(k)},
             "sha": sha,
@@ -61,7 +114,7 @@ def write_recipe(
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(body, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(path)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 -- never fail a drive; an unstrippable argv is unwritten
         logger.warning("could not write resume recipe %s: %s", path, exc)
         return None
     return path
@@ -84,6 +137,12 @@ def read_recipe(path: Path) -> Optional[Dict[str, Any]]:
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
         return None
     if not isinstance(data.get("cwd"), str):
+        return None
+    # A recipe written before the flag was one-shot may still carry it: never replay it.
+    try:
+        data["argv"] = strip_one_shot(argv)
+    except Exception as exc:  # noqa: BLE001 -- cannot tell what is one-shot: replay nothing
+        logger.warning("could not strip one-shot flags from recipe %s: %s", path, exc)
         return None
     return data
 

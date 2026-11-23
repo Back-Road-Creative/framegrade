@@ -2026,11 +2026,28 @@ def ensure_unique_titles(
         return {}
     if bracket_route:
         lf_titles = bracket_dated_title_inputs(lf_titles, bracket_route, lf_dates)
+    # LFs whose ``— Part k of K`` suffix is added HERE (the full-drive split), with the label
+    # they had before it: unlike a superlong title's own suffix, theirs is bumped, dated and
+    # refused on the BASE label, with the suffix re-applied after.
+    split_bases: dict[int, str] = {}
     if lf_parts:
-        lf_titles = {
-            k: append_full_drive_part_suffix(v, *lf_parts[k]) if k in lf_parts else v
-            for k, v in lf_titles.items()
-        }
+        suffixed = {}
+        for k, v in lf_titles.items():
+            if k in lf_parts:
+                out = append_full_drive_part_suffix(v, *lf_parts[k])
+                if out != v:
+                    split_bases[k] = v
+                v = out
+            suffixed[k] = v
+        lf_titles = suffixed
+
+    def _suffixed(lf_idx: int, label: str) -> str:
+        return (
+            append_full_drive_part_suffix(label, *lf_parts[lf_idx])
+            if lf_idx in split_bases
+            else label
+        )
+
     # Count occurrences
     from collections import Counter
 
@@ -2069,9 +2086,25 @@ def ensure_unique_titles(
     result: dict[int, str] = {}
     for lf_idx in sorted(lf_titles.keys()):
         title = lf_titles[lf_idx]
+        base = split_bases.get(lf_idx, title)
         total = counts[_final(title)]
-        is_superlong = bool(_SUPERLONG_PART_SUFFIX_RE.search(title))
-        if total > 1 and not is_superlong:
+        is_superlong = bool(_SUPERLONG_PART_SUFFIX_RE.search(title)) and lf_idx not in split_bases
+        if total > 1 and lf_idx in split_bases:
+            # Two split days under one label: the part suffix is already this title's own
+            # disambiguator, so a second ``(Part n of N)`` would garble it. Dedup on the BASE
+            # label with the measured drive date, then apply the part suffix once; with no
+            # date that makes it unique there is no honest title, so refuse.
+            dated = _drive_dated(base, (lf_dates or {}).get(lf_idx))
+            candidate = _suffixed(lf_idx, dated) if dated is not None else None
+            if candidate is None or _final(candidate) in published | used:
+                from .exceptions import PhaseBCExitContractError
+
+                raise PhaseBCExitContractError(
+                    f"Split-day title {title!r} (LF {lf_idx}) is shared by another split LF "
+                    "in this drive and no measured recording date makes it unique — refusing "
+                    "to stack a second part suffix; fix the LF labels or the recording dates."
+                )
+        elif total > 1 and not is_superlong:
             seen[_final(title)] = seen.get(_final(title), 0) + 1
             candidate = f"{title} (Part {seen[_final(title)]} of {total})"
         else:
@@ -2093,8 +2126,10 @@ def ensure_unique_titles(
                     live_catalog_title_ids().get(_final(candidate))
                 )
                 dated = _cross_drive_dated(
-                    title, lf_dates, lf_idx, drive_project, video_id, video_projects
+                    base, lf_dates, lf_idx, drive_project, video_id, video_projects
                 )
+                if dated is not None:
+                    dated = _suffixed(lf_idx, dated)
                 if dated is not None and _final(dated) not in published | used:
                     used.add(_final(dated))
                     result[lf_idx] = dated
@@ -2111,7 +2146,7 @@ def ensure_unique_titles(
         part = 1
         while _final(candidate) in published or _final(candidate) in used:
             part += 1
-            candidate = f"{title} (Part {part})"
+            candidate = _suffixed(lf_idx, f"{base} (Part {part})")
         used.add(_final(candidate))
         result[lf_idx] = candidate
     return result

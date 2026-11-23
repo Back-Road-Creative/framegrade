@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -86,7 +87,7 @@ def _resolve_ost_text(state, lf_index: int, location: str = "") -> str:
     return str(location or "")
 
 
-def confirmation_is_stale(prior_hash, current_hash) -> bool:
+def confirmation_is_stale(prior_hash, current_hash, legacy_hash=None) -> bool:
     """Whether a prior OST-audit confirmation no longer covers the live text.
 
     Returns ``True`` only when a ``prior_hash`` exists AND differs from the
@@ -96,10 +97,16 @@ def confirmation_is_stale(prior_hash, current_hash) -> bool:
     is NOT stale: there is nothing to invalidate. The hash already excludes
     ``generated_at`` (see :func:`compute_ost_audit_hash`), so wall-clock
     noise never marks a confirmation stale — only a real label change does.
+    ``legacy_hash`` (``compute_ost_audit_hash(payload, normalise=False)``) is the hash a
+    confirmation stored before title suffixes were normalised: it vouches for the same
+    burn, so it is not stale either; it may be one hash or an iterable of them (see
+    :func:`legacy_ost_audit_hashes`).
     """
     if not prior_hash:
         return False
-    return prior_hash != current_hash
+    if isinstance(legacy_hash, str) or legacy_hash is None:
+        legacy_hash = (legacy_hash,)
+    return prior_hash != current_hash and prior_hash not in legacy_hash
 
 
 def read_confirmed_hash(confirmed_file):
@@ -185,6 +192,9 @@ def format_ost_audit(
             "thumbnail_text": ost_text,
             "recording_date": str(recording.get(idx, "") or ""),
         }
+        part = title_part_suffix(entry["youtube_title"])
+        if part is not None:
+            entry["part_index"], entry["part_count"] = part
         if (inserts or {}).get(idx):
             entry["inserts"] = list(inserts[idx])
         lfs.append(entry)
@@ -333,17 +343,122 @@ def _strip_hash_excluded(entries) -> list:
     ]
 
 
-def compute_ost_audit_hash(payload: dict) -> str:
+_LEGACY_PART_SUFFIX_RE = re.compile(r"\s+\(Part\s+(\d+)\s+of\s+(\d+)\)\s*$")
+_DASH_PART_SUFFIX_RE = re.compile(r"\s+—\s+Part\s+(\d+)\s+of\s+(\d+)\s*$")
+_PART_ENTRY_KEYS = ("part_index", "part_count")
+
+
+def title_part_suffix(title: str):
+    """``(part_index, part_count)`` of a trailing ``— Part N of M`` (or the legacy dedup
+    ``(Part N of M)``) title suffix, else ``None``."""
+    m = _DASH_PART_SUFFIX_RE.search(title) or _LEGACY_PART_SUFFIX_RE.search(title)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _drive_date_suffix(raw_date) -> str:
+    """`` (Mon D, YYYY)`` for ``raw_date`` (``YYYY-MM-DD…``); ``""`` when missing or unparseable."""
+    import datetime as _dt
+
+    try:
+        day = _dt.date.fromisoformat(str(raw_date or "").strip()[:10])
+    except ValueError:
+        return ""
+    return f" ({day.strftime('%b')} {day.day}, {day.year})"
+
+
+def _normalised_title(entry: dict) -> str:
+    """The entry's ``youtube_title`` without a suffix that is not a burn input.
+
+    Strips the part suffix equal to the LF's own ``(part_index, part_count)`` and then the
+    `` (Mon D, YYYY)`` suffix ``title_builder._drive_dated`` builds from the LF's
+    ``recording_date``: re-deriving a title with only those suffixes changed must not
+    restale a confirmed day. The base label is kept whole, so a changed label still does.
+    The engine may not import ``title_builder`` (media boundary), so the suffix is built
+    here; ``tests/test_bracket_title_dated.py`` pins it equal to ``_drive_dated``'s.
+    """
+    title = str(entry.get("youtube_title") or "")
+    want = (entry.get("part_index"), entry.get("part_count"))
+    if title_part_suffix(title) == want:
+        title = (
+            _DASH_PART_SUFFIX_RE.sub("", title, 1)
+            if _DASH_PART_SUFFIX_RE.search(title)
+            else _LEGACY_PART_SUFFIX_RE.sub("", title, 1)
+        )
+    suffix = _drive_date_suffix(entry.get("recording_date"))
+    if suffix and title.endswith(suffix):
+        title = title[: -len(suffix)]
+    return title
+
+
+def _deployed_split_title(entry: dict) -> str:
+    """The title the DEPLOYED (pre-``— Part k of K``) code gave a split day's LF: the base
+    label with the in-batch dedup suffix `` (Part k of K)``. Only the LF's own part suffix is
+    rewritten; every other title is returned as is."""
+    title = str(entry.get("youtube_title") or "")
+    if title_part_suffix(title) == (entry.get("part_index"), entry.get("part_count")) and (
+        _DASH_PART_SUFFIX_RE.search(title)
+    ):
+        base = _DASH_PART_SUFFIX_RE.sub("", title, 1)
+        return f"{base} (Part {entry['part_index']} of {entry['part_count']})"
+    return title
+
+
+def _hash_entries(entries, normalise: bool, deployed_split: bool = False) -> list:
+    out = []
+    for e in _strip_hash_excluded(entries):
+        if normalise:
+            if "youtube_title" in e:
+                e["youtube_title"] = _normalised_title(e)
+        else:
+            if deployed_split and "youtube_title" in e:
+                e["youtube_title"] = _deployed_split_title(e)
+            e = {k: v for k, v in e.items() if k not in _PART_ENTRY_KEYS}
+        out.append(e)
+    return out
+
+
+def compute_ost_audit_hash(
+    payload: dict, normalise: bool = True, deployed_split: bool = False
+) -> str:
     """Return a stable hash of the audit content (excludes ``generated_at``).
 
     The hash IS the rebuild-detection signal: if the operator edits
     per-LF labels and re-runs phase_bc, the audit's LF list changes and
     the hash changes. ``generated_at`` is wall-clock noise that must NOT
     invalidate a confirmation, so it's excluded from the hash input.
+
+    ``normalise`` (default) hashes each LF's title without its drive-date and part
+    suffix (see :func:`_normalised_title`) and with the LF's part numbers, so a
+    title-only suffix change never restales a confirmed day while a changed burn text,
+    base label or part count does. ``normalise=False`` is the hash as stored before the
+    suffixes were normalised; :func:`lf_gate_or_raise` accepts it once for a confirmation
+    stored that way, then re-stamps the normalised hash. ``deployed_split`` (with
+    ``normalise=False``) also rewrites a split day's `` — Part k of K`` titles to the
+    `` (Part k of K)`` the deployed code gave them, i.e. the raw hash such a day stored.
     """
-    content = {"date": payload.get("date"), "lfs": _strip_hash_excluded(payload.get("lfs", []))}
+    content = {
+        "date": payload.get("date"),
+        "lfs": _hash_entries(payload.get("lfs", []), normalise, deployed_split),
+    }
     serialised = json.dumps(content, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()
+
+
+def legacy_ost_audit_hashes(payload: dict) -> tuple:
+    """Every hash a confirmation stored by earlier code may hold for ``payload``: the raw
+    (un-normalised) hash, and the raw hash of a split day under its deployed titles. Each
+    covers the same burn text and base label as ``payload`` (both are in the hashed content),
+    so a changed burn or label matches none of them."""
+    raw = compute_ost_audit_hash(payload, normalise=False)
+    split = compute_ost_audit_hash(payload, normalise=False, deployed_split=True)
+    return (raw,) if split == raw else (raw, split)
+
+
+def accepted_ost_audit_hashes(payload: dict) -> tuple:
+    """Every hash the gate accepts as covering ``payload``: the current (normalised) one
+    first, then :func:`legacy_ost_audit_hashes`. The one rule shared by
+    :func:`lf_gate_or_raise` and the resume drift check."""
+    return (compute_ost_audit_hash(payload), *legacy_ost_audit_hashes(payload))
 
 
 def compute_shorts_ost_audit_hash(payload: dict) -> str:
@@ -421,7 +536,10 @@ def lf_gate_or_raise(
         "per_lf_locations": _state_field(state, "per_lf_locations") or per_lf_locations or {},
     }
     payload = format_ost_audit(date, audit_state, lf_indices, location=location, inserts=inserts)
-    current_hash = compute_ost_audit_hash(payload)
+    current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload)
+    # The hashes a confirmation stored before suffixes were normalised: they vouch for the
+    # same burn, so they cover the current payload too (and are re-stamped normalised below).
+    covers = (current_hash, *legacy_hashes)
 
     passed_map = _state_field(state, "ost_audit_passed") or {}
     hash_map = _state_field(state, "ost_audit_hash") or {}
@@ -435,7 +553,7 @@ def lf_gate_or_raise(
     # Bind the ``.confirmed`` marker to the hash it confirmed so
     # ``exists()`` alone can't pass a materially changed, never-reviewed burn.
     prior_hash = hash_map.get(date) or read_confirmed_hash(confirmed_file)
-    stale = confirmation_is_stale(prior_hash, current_hash)
+    stale = confirmation_is_stale(prior_hash, current_hash, legacy_hashes)
 
     # A stale day is UNCONFIRMED for the CURRENT payload: the stored hash (and a
     # hash-stamped marker bound to it) vouch for text that is no longer burned, so
@@ -446,12 +564,10 @@ def lf_gate_or_raise(
     if cli_confirmed:
         gate_passes = True
         reason = "--ost-audit-confirmed"
-    elif confirmed_file.exists() and (
-        not stale or read_confirmed_hash(confirmed_file) == current_hash
-    ):
+    elif confirmed_file.exists() and (not stale or read_confirmed_hash(confirmed_file) in covers):
         gate_passes = True
         reason = f"{confirmed_file.name} on disk"
-    elif not stale and passed_map.get(date) is True and hash_map.get(date) == current_hash:
+    elif not stale and passed_map.get(date) is True and hash_map.get(date) in covers:
         gate_passes = True
         reason = "state['ost_audit_passed'] + matching hash"
     elif not stale:
@@ -463,9 +579,10 @@ def lf_gate_or_raise(
         sidecar_path = write_ost_audit(Path(output_dir), date, payload)
         if stale:
             how = (
-                "the burn text changed since it was confirmed, so the old confirmation "
-                f"no longer covers it: re-run with --ost-audit-confirmed, or write the "
-                f"current audit hash {current_hash} into {confirmed_file}"
+                f"the burn text of day {date} changed since it was confirmed, so the old "
+                "confirmation no longer covers it: review the changed day in that audit, "
+                f"then write its audit hash {current_hash} into {confirmed_file} "
+                "(an operator's own --ost-audit-confirmed run also confirms it)"
             )
         else:
             how = (
@@ -490,10 +607,30 @@ def lf_gate_or_raise(
             hm = {}
             state["ost_audit_hash"] = hm
         hm[date] = current_hash
+    rewrite_sidecar_to_match(Path(output_dir), date, payload, current_hash)
     # Bind the marker so a later changed burn reads a stale binding.
     if confirmed_file.exists():
         stamp_confirmed(confirmed_file, current_hash)
     logger.info("OST audit gate passed for day %s (%s).", date, reason)
+
+
+def rewrite_sidecar_to_match(output_dir: Path, date: str, payload: dict, current_hash: str):
+    """Make an existing ``ost_audit_<date>.json`` agree with the hash a pass just stamped.
+
+    A pass on a legacy hash re-stamps the normalised one, but the sidecar on disk is only
+    written on a refusal, so it would still hash to the OLD value and the next resume's drift
+    check would refuse the day the gate just passed. A sidecar that already hashes to
+    ``current_hash`` (or is absent: nothing to verify) is left alone."""
+    path = Path(output_dir) / f"ost_audit_{date}.json"
+    if not path.exists():
+        return
+    try:
+        on_disk = compute_ost_audit_hash(json.loads(path.read_text()))
+    except (OSError, ValueError, AttributeError, TypeError):
+        on_disk = None
+    if on_disk != current_hash:
+        write_ost_audit(output_dir, date, payload)
+        logger.info("OST audit sidecar %s rewritten to the hash the gate stamped.", path)
 
 
 def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:

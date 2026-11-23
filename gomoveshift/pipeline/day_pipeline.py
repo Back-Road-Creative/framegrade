@@ -105,12 +105,13 @@ from .ost_applier import MapInsetOverlay, apply_ost
 from .ost_audit_sidecar import (
     OstAuditPendingError,
     OstPostBurnError,
-    compute_ost_audit_hash,
+    accepted_ost_audit_hashes,
     confirmation_is_stale,
     format_ost_audit,
     lf_gate_or_raise,
     postburn_ost_gate_or_raise,
     read_confirmed_hash,
+    rewrite_sidecar_to_match,
     shorts_gate_or_raise,
     stamp_confirmed,
     superlong_gate_or_raise,
@@ -2613,7 +2614,7 @@ def run_day_pipeline(
             location=location,
             inserts=insert_records(inserts_by_lf or {}),
         )
-        current_hash = compute_ost_audit_hash(payload)
+        current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload)
         _gate_lf_text = {int(e["lf_index"]): e["ost_text"] for e in payload.get("lfs", [])}
 
         # PipelineState supports dict-protocol sugar — works on both dataclass + raw test dict.
@@ -2644,7 +2645,8 @@ def run_day_pipeline(
         # the prior hash, so ``exists()`` alone can't pass a materially changed,
         # never-reviewed burn text.
         _prior_hash = _hash_map.get(date) or read_confirmed_hash(confirmed_file)
-        _stale = confirmation_is_stale(_prior_hash, current_hash)
+        # A hash stored before title suffixes were normalised still covers an unchanged burn.
+        _stale = confirmation_is_stale(_prior_hash, current_hash, legacy_hashes)
 
         gate_passes = False
         reason = ""
@@ -2656,7 +2658,10 @@ def run_day_pipeline(
         elif confirmed_file.exists():
             gate_passes = True
             reason = f"{confirmed_file.name} on disk"
-        elif _passed_map.get(date) is True and _hash_map.get(date) == current_hash:
+        elif _passed_map.get(date) is True and _hash_map.get(date) in (
+            current_hash,
+            *legacy_hashes,
+        ):
             gate_passes = True
             reason = "state['ost_audit_passed'] + matching hash"
         else:
@@ -2665,16 +2670,22 @@ def run_day_pipeline(
 
         if not gate_passes:
             sidecar_path = write_ost_audit(Path(output_dir), date, payload)
-            logger.info(
-                "OST audit sidecar written: %s. Review and create %s "
-                "(or pass --ost-audit-confirmed) to proceed.",
-                sidecar_path,
-                confirmed_file,
-            )
+            if _stale:
+                how = (
+                    f"the burn text of day {date} changed since it was confirmed, so the "
+                    "old confirmation no longer covers it: review the changed day in that "
+                    f"audit, then write its audit hash {current_hash} into {confirmed_file} "
+                    "(an operator's own --ost-audit-confirmed run also confirms it)"
+                )
+            else:
+                how = (
+                    f"create {confirmed_file} (or re-run with --ost-audit-confirmed) "
+                    "before OST burn-in"
+                )
+            logger.info("OST audit sidecar written: %s. %s.", sidecar_path, how)
             raise OstAuditPendingError(
-                f"OST audit pending for day {date}: review {sidecar_path} "
-                f"and create {confirmed_file} (or re-run with "
-                f"--ost-audit-confirmed) before OST burn-in." + (f" {reason}." if reason else "")
+                f"OST audit pending for day {date}: review {sidecar_path} and {how}."
+                + (f" {reason}." if reason else "")
             )
         if reason.startswith("system review record"):
             write_system_review_copy(Path(output_dir), date, state)
@@ -2693,6 +2704,7 @@ def run_day_pipeline(
                 hash_map = {}
                 state["ost_audit_hash"] = hash_map
             hash_map[date] = current_hash
+        rewrite_sidecar_to_match(Path(output_dir), date, payload, current_hash)
         # Bind the marker to this audit hash so a later run whose burn
         # text changed reads a stale binding and reopens the gate.
         if confirmed_file.exists():
@@ -3632,9 +3644,10 @@ def run_all_days(
         raise OstAuditPendingError(
             "OST audit pending for day(s) "
             f"{sorted(str(d) for d in _pending_ost_days)}: review each "
-            "ost_audit_<date>.json sidecar and create the matching .confirmed "
-            "file (or re-run with --ost-audit-confirmed) before the first "
-            "master encode (front-load)."
+            "ost_audit_<date>.json sidecar (each says whether its day is unconfirmed or "
+            "its burn text changed since it was confirmed) and confirm it with the "
+            "matching .confirmed file, an operator's own --ost-audit-confirmed run or "
+            "the system review, before the first master encode (front-load)."
         )
 
     # Persist the OST audit hash markers the front-load gate just

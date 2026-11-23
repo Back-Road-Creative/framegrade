@@ -1024,7 +1024,7 @@ def _check_ost_audit_hash_drift(state: Any) -> None:
         return
 
     # Lazy import: ost_audit_sidecar pulls in day_pipeline machinery.
-    from .ost_audit_sidecar import compute_ost_audit_hash
+    from .ost_audit_sidecar import accepted_ost_audit_hashes
 
     output_base = Path(output_base)
     for date, was_passed in passed.items():
@@ -1048,15 +1048,18 @@ def _check_ost_audit_hash_drift(state: Any) -> None:
                 f"The confirmed OST-audit hash cannot be re-verified at "
                 f"resume, so the confirmation is treated as drift. "
                 f"To recover: re-open {sidecar_path}, verify/repair the LF "
-                f"text, then delete state['ost_audit_passed'][{date!r}] (or "
-                f"re-run with --ost-audit-confirmed) so the gate re-confirms "
-                f"against the on-disk content."
+                f"text, then delete state['ost_audit_passed'][{date!r}] so the gate "
+                f"re-confirms against the on-disk content (an operator's own "
+                f"confirmation run)."
             )
-        current_hash = compute_ost_audit_hash(payload)
         stored = stored_hashes.get(date)
         if stored is None:
             continue  # legacy confirmation pre-dating hash tracking
-        if stored != current_hash:
+        # The same hashes the gate accepts (one shared rule): a day an earlier code stored the
+        # raw hash for is not drift, or the gate would pass what resume refuses.
+        accepted = accepted_ost_audit_hashes(payload)
+        current_hash = accepted[0]
+        if stored not in accepted:
             _raise(
                 f"ost_audit_hash drift for day {date}: state stored "
                 f"{stored!r} but {sidecar_path.name} now hashes to "
@@ -1065,9 +1068,8 @@ def _check_ost_audit_hash_drift(state: Any) -> None:
                 f"OST audit was confirmed. "
                 f"To recover: re-open {sidecar_path}, verify the LF "
                 f"text is what you intend to burn, then delete "
-                f"state['ost_audit_passed'][{date!r}] (or re-run with "
-                f"--ost-audit-confirmed) so the gate re-confirms against "
-                f"the new content."
+                f"state['ost_audit_passed'][{date!r}] so the gate re-confirms "
+                f"against the new content (an operator's own confirmation run)."
             )
 
 
