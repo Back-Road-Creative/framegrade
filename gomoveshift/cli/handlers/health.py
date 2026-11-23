@@ -173,40 +173,48 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     acquire, release = launch.lease_fns(code_root)
     supersede = (args.supersede, args.reason) if args.supersede else None
     replace = bool(getattr(args, "replace_scheduled", False))
-    if supersede is None and not args.dry_run:
-        # a replace the last tick could not launch is retried here, with the heal backoff
-        due = launch.due_replace_retry(args.output_root, now)
-        if due:
-            supersede, replace = due, True
-    result = launch.run_backlog(
-        region=region, rows=rows, drives=drives, free_slots=slots, known_projects=known,
-        stages_root=args.stages_root, output_root=args.output_root,
-        sources_root=args.sources_root or args.output_root / "_sources", code_root=code_root,
-        jobs_dir=jobs_dir, mirror_sha=args.staging_sha or code_sha(code_root), now=now,
-        dry_run=args.dry_run, lease_acquire=acquire, lease_release=release,
-        drive_running=lambda: default_drive_running(jobs_dir),
-        preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
-        launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
-        supersede=supersede, replace_scheduled=replace,
-        live_status=launch.default_live_status() if replace else None,
-        replace_store=launch.default_replace_store(config),
-        horizon_h=launch.render_horizon_h(config),
-        latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
-        incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
-        release_list=stage_owners.release_list_path(root),
-        failed_relaunch=launch.FailedRelaunch(
-            incidents_dir, args.stages_root,
-            fingerprint_fn=launch.default_fingerprint_fn(config, code_root), now=now,
-            dry_run=args.dry_run,
-        ),
-        publish=publish.backlog_publisher(
-            config, region=region, stages_root=args.stages_root, code_root=code_root,
-            jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,
-        ),
+
+    def run(supersede, replace):
+        return launch.run_backlog(
+            region=region, rows=rows, drives=drives, free_slots=slots, known_projects=known,
+            stages_root=args.stages_root, output_root=args.output_root,
+            sources_root=args.sources_root or args.output_root / "_sources", code_root=code_root,
+            jobs_dir=jobs_dir, mirror_sha=args.staging_sha or code_sha(code_root), now=now,
+            dry_run=args.dry_run, lease_acquire=acquire, lease_release=release,
+            drive_running=lambda: default_drive_running(jobs_dir),
+            preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
+            launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
+            supersede=supersede, replace_scheduled=replace,
+            live_status=launch.default_live_status() if replace else None,
+            replace_store=launch.default_replace_store(config),
+            horizon_h=launch.render_horizon_h(config),
+            latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
+            incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
+            release_list=stage_owners.release_list_path(root),
+            failed_relaunch=launch.FailedRelaunch(
+                incidents_dir, args.stages_root,
+                fingerprint_fn=launch.default_fingerprint_fn(config, code_root), now=now,
+                dry_run=args.dry_run,
+            ),
+            publish=publish.backlog_publisher(
+                config, region=region, stages_root=args.stages_root, code_root=code_root,
+                jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,
+            ),
+        )  # fmt: skip
+
+    # a replace the last tick could not launch is retried first, with the heal backoff; whatever
+    # happens to its marker, the same tick then runs the plain backlog (``launch.run_tick``)
+    result = launch.run_tick(
+        output_root=args.output_root, now=now, region=region,
+        regions={r.project: r.region for r in rows}, dry_run=args.dry_run,
+        supersede=supersede, replace=replace, run=run,
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
     else:
+        if result.get("replace_retry"):
+            tried = result["replace_retry"]
+            print(f"replace retry {tried['project']}: {tried['outcome']}: {tried['reason']}")
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
         for bad in result.get("failed_audits", []):

@@ -61,8 +61,16 @@ upload, unchanged by the flag. The real reopen of the store row runs after prefl
 launch (a locked database is retried): a refusal or a failed launch puts the old run back (a failed launch
 also gives the row back `complete` from the set-aside receipts, else `retire_uploaded` closes it), writes
 `<output-root>/.replace-retry/<project>.json` and opens `reopen_refused` / `replace_retry` incidents.
-The next `health backlog` tick picks the marker up (`launch.due_replace_retry`, heal backoff) and repeats
-`--replace-scheduled` itself; a launch clears it. An LF whose slot is inside the 6 h margin is kept (its old
+The marker records its region and is written BEFORE the renames (a crash mid-replace still leaves it);
+`due_replace_retry` returns only a marker of the tick's region (a marker without one is read through the
+backlog row's region). The next `health backlog` tick picks it up (heal backoff) and repeats
+`--replace-scheduled` itself through `launch.run_tick`, which decides what happens to the marker: a launch
+clears it; a PERMANENT refusal (nothing to replace, every record public or kept inside the margin, the row
+gone from the backlog, no upload record) clears it and resolves the `replace_retry` incident with an
+`outcome` naming the reason; any other refusal is TRANSIENT and bumps it, so the backoff advances. Either
+way the same tick then runs the plain backlog, so one stuck marker never blocks the region's next row, its
+failed-drive relaunch or its failed-audit path. Audit lookups for a reopened row ignore jobs created before
+the plan's `created_at`, so the set-aside run's passed audit never publishes the fresh directory. An LF whose slot is inside the 6 h margin is kept (its old
 video publishes on its own; `margin_kept` incident) and the rest are replaced. A slot that passed is
 rebooked and RESERVED (ledger entry and Waypost row, `SlotTaken` searches again) before any YouTube call and
 re-verified on re-entry, so two LFs never share a date. A failed replace drive whose manifest row was removed

@@ -2340,6 +2340,7 @@ def test_a_failed_replace_whose_manifest_row_was_removed_is_not_given_up(tmp_pat
     rig.rows[:] = []  # the manifest row is gone: the drive is no longer listed
     res = rig.run()
     assert rig.publishes == [("day-a", False)] and "held" not in res  # retried, no GAVE_UP_HOLD
+    assert not res.get("held") and not list(rig.stages.rglob(launch.HOLD_NAME))  # no hold on disk
 
 
 def test_the_publish_backoff_counts_only_jobs_after_this_plans_creation(tmp_path):
@@ -2366,3 +2367,173 @@ def test_an_unfinished_replace_never_counts_as_uploaded(tmp_path):
     plan["progress"]["2"]["state"] = "done"
     (Path(out) / "replace_plan.json").write_text(json.dumps(plan))
     assert launch._uploaded(out) is True and launch.replace_unfinished(out) == {}
+
+
+# 2026-11-22 fixup 5: a retry marker never stalls a region. One wrapper (``launch.run_tick``) runs a
+# due marker as ``--supersede --replace-scheduled`` and decides: launched -> done; a permanent
+# refusal -> clear the marker and resolve its incident; any other -> bump it. Either way the same
+# tick then falls through to the plain backlog, so the region's own launch/relaunch/audit paths run.
+
+
+def _retry_tick(rig, *, dry_run=False):
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        return rig.run(dry_run=dry_run)
+
+    return launch.run_tick(
+        output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=dry_run,
+        supersede=None, replace=False, run=run,
+    )  # fmt: skip
+
+
+def _marker(rig, project="day-a", n=1, region="usa", age=timedelta(days=3)):
+    for _ in range(n):
+        launch.mark_replace_retry(rig.out, project, "blur mask was wrong", NOW - age, region=region)  # fmt: skip
+
+
+def _attempts(rig, project="day-a"):
+    return json.loads(launch._retry_marker(rig.out, project).read_text())["attempts"]
+
+
+def _retry_incidents():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    return [r for r in rows if r.get("kind") == "replace_scheduled_partial" and r.get("code") == "replace_retry"]  # fmt: skip
+
+
+def test_all_public_uploads_clear_the_marker_resolve_its_incident_and_the_row_launches(tmp_path):
+    rig = _replace_rig(tmp_path, {"1": _rec("a", PAST)})
+    _marker(rig)
+    launch.replace_scheduled_mod.record_incident("day-a", "replace_retry", "earlier failure")
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res  # same tick, no stall
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=30), "usa") is None
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+    (row,) = _retry_incidents()
+    assert row["resolved_at"] and "nothing to replace" in row["outcome"], row
+
+
+def test_a_transient_refusal_bumps_the_marker_and_the_plain_tick_still_launches(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    assert _attempts(rig) == 2  # bumped once (the refusal site and the wrapper never both bump)
+    assert launch.due_replace_retry(rig.out, NOW, "usa") is None  # backoff: not hot
+    later = NOW + timedelta(seconds=heal._retry_wait_s(2) + 1)
+    assert launch.due_replace_retry(rig.out, later, "usa") == ("day-a", "blur mask was wrong")
+
+
+def test_a_refusal_that_forgot_to_bump_is_bumped_by_the_wrapper(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.installed = "0.3.24"  # a stale pin: refused with no marker call of its own
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert res["action"] == "refused", res
+    assert _attempts(rig) == 2 and launch.due_replace_retry(rig.out, NOW, "usa") is None
+
+
+def test_one_stuck_marker_never_starves_the_next(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = ReopenStore(rig, refuse_dry="drifted")
+    _marker(rig, "day-a", age=timedelta(days=4))
+    _marker(rig, "ire-b", age=timedelta(days=3))
+    _retry_tick(rig)
+    assert launch.due_replace_retry(rig.out, NOW, "usa") == ("ire-b", "blur mask was wrong")
+
+
+def test_a_marker_for_another_region_does_not_hijack_the_tick(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig, "ire-a", region="ireland")
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res
+    assert rig.supersede is None and _attempts(rig, "ire-a") == 1  # untouched
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=30), "ireland") == ("ire-a", "blur mask was wrong")  # fmt: skip
+
+
+def test_a_marker_without_a_region_reads_as_its_manifest_regions(tmp_path):
+    launch.mark_replace_retry(tmp_path, "ire-a", "why", NOW)  # older code: no region
+    later = NOW + timedelta(days=30)
+    assert launch.due_replace_retry(tmp_path, later, "usa", {"ire-a": "ireland"}) is None
+    assert launch.due_replace_retry(tmp_path, later, "ireland", {"ire-a": "ireland"}) == ("ire-a", "why")  # fmt: skip
+    assert launch.due_replace_retry(tmp_path, later, "usa", {}) == ("ire-a", "why")  # unresolvable
+
+
+def test_a_crash_after_the_renames_leaves_a_marker_a_later_tick_finds(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.preflight_error = KeyboardInterrupt()  # not an Exception: the process dies mid-replace
+    with pytest.raises(KeyboardInterrupt):
+        rig.run()
+    assert (rig.out / launch.SUPERSEDED_DIR).exists()  # the run is set aside, the crash left it so
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2), "usa") == ("day-a", "blur mask was wrong")  # fmt: skip
+
+
+def test_a_passed_audit_older_than_the_plan_never_publishes_the_fresh_directory(tmp_path):
+    rig = Rig(tmp_path)
+    out = tmp_path / "fresh"
+    out.mkdir()
+    plan = {"schema": "replace-scheduled/1", "kept": {}, "created_at": NOW.timestamp() - 60,
+            "replace": {"2": {"video_id": "old2"}}}  # fmt: skip
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    rig.drives.append(drive("day-a", "auditing", output_dir=str(out)))
+    job(
+        rig, "old", "day-a", "succeeded", NOW.timestamp() - 9000, exit_code=0
+    )  # the OLD run's audit
+    rig.publish_result = {"action": "launched", "reason": "day-a for slot"}
+    res = rig.run()
+    assert rig.publishes == [], res
+    job(rig, "new", "day-a", "succeeded", NOW.timestamp() - 30, exit_code=0)  # this replace's own
+    rig.run()
+    assert rig.publishes == [("day-a", False)]
+
+
+class RaisingDryStore(ReopenStore):
+    def reopen_for_replace(self, project, **kw):
+        if kw.get("dry_run"):
+            self.calls.append({"project": project, **kw})
+            raise RuntimeError("database is locked")
+        return super().reopen_for_replace(project, **kw)
+
+
+def test_a_dry_reopen_that_raises_is_retried_then_bumps_the_marker_not_the_tick(tmp_path, monkeypatch):  # fmt: skip
+    monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = RaisingDryStore(rig)
+    res = rig.run()  # must return, never raise
+    assert res["action"] == "refused" and "database is locked" in res["reason"], res
+    assert len(rig.replace_store.calls) == 3  # retried like the real reopen
+    assert _attempts(rig) == 1 and (rig.stages / "day-a").is_dir()  # marker bumped, nothing moved
+
+
+def test_a_restore_that_cannot_finish_keeps_the_marker_for_the_next_tick(tmp_path, monkeypatch):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if launch.SUPERSEDED_DIR in str(self) and "_stages" not in str(self):
+            raise OSError("device busy")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    assert rig.run()["action"] == "refused"
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2), "usa") == ("day-a", "blur mask was wrong")  # fmt: skip
+
+
+def test_every_record_margin_kept_says_so_and_is_permanent():
+    soon = {"1": _rec("a", NOW + timedelta(hours=2))}
+    plan, why = launch.replace_scheduled_mod.classify_uploads(soon, NOW, lambda ids: {})
+    assert plan is None and "margin" in why and "already public" not in why, why
+    assert launch.refusal_is_permanent(why)
+    public, why2 = launch.replace_scheduled_mod.classify_uploads({"1": _rec("a", PAST)}, NOW, lambda ids: {})  # fmt: skip
+    assert public is None and "already public" in why2 and launch.refusal_is_permanent(why2)
+    assert not launch.refusal_is_permanent("cannot supersede day-a: the next eligible usa row is day-b")  # fmt: skip
+
+
+def test_a_dry_run_refusal_leaves_a_retry_marker(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
+    assert rig.run()["action"] == "refused"
+    assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2), "usa") == ("day-a", "blur mask was wrong")  # fmt: skip
