@@ -42,6 +42,7 @@ from .drive_state_model import PER_LF_OVERRIDE_MIRROR_FIELDS, PipelineState
 from .exceptions import PipelineValidationError
 from .flag_registry import apply_cli_to_state, merge_on_resume
 from .orchestrator_fingerprint import (
+    invalidate_phase_bc_if_lf_shortfall,
     invalidate_phase_bc_if_superlong_incomplete,
     invalidate_phase_d_if_outputs_missing,
     invalidate_phase_d_if_schedule_region_stale,
@@ -1490,6 +1491,11 @@ class DrivePipelineOrchestrator:
             # the day complete on LFs+shorts alone.
             resumed_phases = invalidate_phase_bc_if_superlong_incomplete(
                 state, resumed_phases, stages_completed, stages_dir=stages_dir
+            )
+            # ── LF-shortfall re-entry: a day recorded complete without a planned
+            # lf_NN.mp4 would be skipped for ever and fail phase_d SPLIT-BRAIN.
+            resumed_phases = invalidate_phase_bc_if_lf_shortfall(
+                state, resumed_phases, stages_completed, stages_dir=stages_dir, config=self.config
             )
             # ── Prevention: auto-populate per_day_completed from disk ──
             # If pipeline_state.json was wiped (or its per_day_completed field
