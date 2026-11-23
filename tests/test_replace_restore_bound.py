@@ -164,7 +164,7 @@ def test_a_running_job_since_the_attempt_defers_the_restore(tmp_path, monkeypatc
     rig = _replace_rig(tmp_path, _three_lfs())
     _marker(rig)
     _crashed(rig, monkeypatch)
-    job(rig, "fresh", "day-a", "running", NOW.timestamp() + 60)
+    job(rig, "fresh", "day-a", "running", NOW.timestamp() + 60, live=True)
     rig.preflight_error = RuntimeError("blocked")
     res = _tick(rig, NOW + timedelta(days=2), jobs_dir=rig.tmp / "jobs")
     assert res["replace_retry"]["outcome"] == "bumped", res
@@ -325,7 +325,7 @@ def test_a_finished_run_holding_the_name_is_never_restored_over(tmp_path, monkey
     _crashed(rig, monkeypatch)
     (rig.out / "day-a").mkdir()
     (rig.out / "day-a" / "youtube_uploads.json").write_text('{"2": {"video_id": "NEW"}}')
-    assert launch.restore_set_aside(rig.out, "day-a", NOW) == ""
+    assert launch.restore_set_aside(rig.out, "day-a", NOW, rig.stages) == ""
     assert len(_set_aside(rig)) == 1
 
 
@@ -389,7 +389,7 @@ def test_a_restore_that_hits_an_oserror_is_a_failure_the_tick_survives(tmp_path,
     _marker(rig)
     _crashed(rig, monkeypatch)
     monkeypatch.setattr(launch, "_unsupersede", lambda *a, **k: (_ for _ in ()).throw(OSError("EIO")))  # fmt: skip
-    assert "EIO" in launch.restore_set_aside(rig.out, "day-a", NOW)
+    assert "EIO" in launch.restore_set_aside(rig.out, "day-a", NOW, rig.stages)
     rig.preflight_error = RuntimeError("blocked")
     res = _tick(rig, NOW + timedelta(days=2))
     assert res["replace_retry"]["outcome"] == "bumped" and _marker_file(rig).exists()
@@ -404,7 +404,8 @@ def test_a_restore_over_a_malformed_record_is_a_failure_the_tick_survives(tmp_pa
     held = json.loads(rec.read_text())
     held["moves"] = [{"from": ["x"], "to": 5}, *held["moves"]]
     rec.write_text(json.dumps(held))
-    assert launch.restore_set_aside(rig.out, "day-a", NOW)
+    got = launch.restore_set_aside(rig.out, "day-a", NOW, rig.stages)
+    assert got and not got.startswith(launch.DEFERRED), got
     rig.slots = [(NOW + timedelta(days=41), "fri")]
     res = _tick(rig, NOW + timedelta(days=40))
     assert res["replace_retry"]["outcome"] == "bumped" and _marker_file(rig).exists()

@@ -221,14 +221,21 @@ def test_repeat_invocation_after_a_launch_is_a_noop(tmp_path):
     assert len(rig.launches) == 1
 
 
-def job(rig, run_id, project, state, created_at, exit_code=1, name=None, worker_pid=4242):
+def live_worker():
+    """The identity ``heal._proc_alive`` reads for a process that is alive: this test process."""
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    ticks = Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    return {"pid": os.getpid(), "boot_id": boot, "start_ticks": ticks}
+
+
+def job(rig, run_id, project, state, created_at, exit_code=1, name=None, worker_pid=4242, live=False):  # fmt: skip
     """A job-runner record for the backlog drive of ``project`` (``worker_pid=None``: jobrun's own
-    launch failure, the worker never started)."""
+    launch failure, the worker never started; ``live``: its worker is a process that is alive)."""
     d = rig.tmp / "jobs" / run_id
     d.mkdir(parents=True)
     result = {"state": state, "exit_code": None if state == "running" else exit_code}
     rec = {"schema": "job/1", "run_id": run_id, "name": name or f"gms-backlog-{project}",
-           "created_at": created_at, "worker": {"pid": worker_pid}, "result": result}  # fmt: skip
+           "created_at": created_at, "worker": live_worker() if live else {"pid": worker_pid}, "result": result}  # fmt: skip
     (d / "job.json").write_text(json.dumps(rec))
 
 
@@ -2386,6 +2393,7 @@ def _retry_tick(rig, *, dry_run=False):
         return rig.run(dry_run=dry_run)
 
     return launch.run_tick(
+        stages_root=rig.stages,
         output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=dry_run,
         supersede=None, replace=False, run=run,
     )  # fmt: skip
@@ -2605,7 +2613,7 @@ def test_a_crash_between_the_renames_and_the_plan_write_is_finished_by_the_next_
         rig.supersede, rig.replace_scheduled = sup, rep
         return launch.run_backlog(**{**rig.kwargs(), "now": later})
 
-    res = launch.run_tick(output_root=rig.out, now=later, region="usa", regions={}, dry_run=False,
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=later, region="usa", regions={}, dry_run=False,
                           supersede=None, replace=False, run=run)  # fmt: skip
     assert (res["action"], res["project"]) == ("launched", "day-a"), res
     assert not launch._retry_marker(rig.out, "day-a").exists()
@@ -2645,7 +2653,7 @@ def test_a_raise_after_the_replace_launched_never_remarks_or_falls_through(tmp_p
             raise OSError("stage_roots: disk hiccup after the launch")
         return out
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
                           supersede=None, replace=False, run=run)  # fmt: skip
     assert not launch._retry_marker(rig.out, "day-a").exists(), "a launched replace got its marker back"  # fmt: skip
     assert len(rig.launches) == 1 and calls == [("day-a", "blur mask was wrong")], calls
@@ -2662,7 +2670,7 @@ def test_a_raise_inside_the_marker_call_bumps_the_marker_and_never_crashes_the_t
         rig.supersede, rig.replace_scheduled = None, False
         return rig.run()
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
                           supersede=None, replace=False, run=run)  # fmt: skip
     assert (res["action"], res["project"]) == ("launched", "day-b"), res  # fell through
     assert res["replace_retry"]["outcome"] == "bumped" and "seo store exploded" in res["replace_retry"]["reason"]  # fmt: skip
@@ -2725,7 +2733,7 @@ def test_a_regionless_marker_whose_row_is_in_another_region_is_left_for_that_reg
         rig.supersede, rig.replace_scheduled = sup, rep
         return rig.run()
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={"ire-a": "ireland"}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={"ire-a": "ireland"}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
     assert (res["action"], res["project"]) == ("launched", "day-b"), res  # the plain tick ran
     held = json.loads(launch._retry_marker(rig.out, "ire-a").read_text())
     assert "region" not in held and held["attempts"] == 1  # untouched, never stamped
@@ -2740,7 +2748,7 @@ def _tick_at(rig, when, jobs_dir=None):
         rig.supersede, rig.replace_scheduled = sup, rep
         return launch.run_backlog(**{**rig.kwargs(), "now": when})
 
-    return launch.run_tick(output_root=rig.out, now=when, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run, jobs_dir=jobs_dir)  # fmt: skip
+    return launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=when, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run, jobs_dir=jobs_dir)  # fmt: skip
 
 
 def _crash_on_rename(monkeypatch, rig, *, after):
@@ -2832,7 +2840,7 @@ def test_a_regionless_marker_with_no_row_is_given_up_and_recorded_durably(tmp_pa
 def test_a_dry_run_never_gives_a_regionless_marker_up(tmp_path):
     rig = _replace_rig(tmp_path, _three_lfs())
     launch.mark_replace_retry(rig.out, "ghost-a", "why", NOW - timedelta(days=3))
-    launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=True, supersede=None, replace=False, run=lambda s, r: rig.run(dry_run=True))  # fmt: skip
+    launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=True, supersede=None, replace=False, run=lambda s, r: rig.run(dry_run=True))  # fmt: skip
     assert launch._retry_marker(rig.out, "ghost-a").exists()
 
 
@@ -2851,7 +2859,7 @@ def test_a_raise_after_another_drives_publish_never_remarks_or_falls_through(tmp
             raise OSError("stage_roots hiccup after day-c's publish")
         return out
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
     assert res["action"] == "launched" and res["project"] == "day-c" and "replace_retry" not in res
     assert rig.publishes == [("day-c", False)] and not rig.launches, (rig.publishes, rig.launches)
     assert _attempts(rig) == 1
@@ -2866,7 +2874,7 @@ def test_a_raise_after_the_launcher_returned_ok_never_re_marks_or_falls_through(
         out = rig.run()
         raise OSError("post-launch hiccup")
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
     assert res["action"] == "launched" and "replace_retry" not in res and len(rig.launches) == 1
 
 
@@ -2932,7 +2940,7 @@ def test_the_wrappers_own_clear_is_the_second_line_when_the_in_run_clear_did_not
 def test_a_same_project_launch_that_is_not_the_replace_leaves_the_marker(tmp_path):
     rig = _replace_rig(tmp_path, _three_lfs())
     _marker(rig)
-    out = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=lambda s, r: {"action": "launched", "project": "day-a", "skipped": [], "reason": "day-a published"})  # fmt: skip
+    out = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=lambda s, r: {"action": "launched", "project": "day-a", "skipped": [], "reason": "day-a published"})  # fmt: skip
     assert out["action"] == "launched" and "replace_retry" not in out
     assert _attempts(rig) == 1  # a publish of the same project is not the replace
 
@@ -3125,7 +3133,7 @@ def test_a_raise_after_the_launcher_ok_with_the_marker_left_never_falls_through(
         rig.run()
         raise OSError("post-launch hiccup")
 
-    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    res = launch.run_tick(stages_root=rig.stages, output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
     assert res["action"] == "launched" and res["project"] == "day-a" and "replace_retry" not in res
     assert len(rig.launches) == 1  # no plain tick behind the drive just launched
 
