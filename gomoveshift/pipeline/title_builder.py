@@ -2089,7 +2089,22 @@ def ensure_unique_titles(
         base = split_bases.get(lf_idx, title)
         total = counts[_final(title)]
         is_superlong = bool(_SUPERLONG_PART_SUFFIX_RE.search(title)) and lf_idx not in split_bases
-        if total > 1 and not is_superlong:
+        if total > 1 and lf_idx in split_bases:
+            # Two split days under one label: the part suffix is already this title's own
+            # disambiguator, so a second ``(Part n of N)`` would garble it. Dedup on the BASE
+            # label with the measured drive date, then apply the part suffix once; with no
+            # date that makes it unique there is no honest title, so refuse.
+            dated = _drive_dated(base, (lf_dates or {}).get(lf_idx))
+            candidate = _suffixed(lf_idx, dated) if dated is not None else None
+            if candidate is None or _final(candidate) in published | used:
+                from .exceptions import PhaseBCExitContractError
+
+                raise PhaseBCExitContractError(
+                    f"Split-day title {title!r} (LF {lf_idx}) is shared by another split LF "
+                    "in this drive and no measured recording date makes it unique — refusing "
+                    "to stack a second part suffix; fix the LF labels or the recording dates."
+                )
+        elif total > 1 and not is_superlong:
             seen[_final(title)] = seen.get(_final(title), 0) + 1
             candidate = f"{title} (Part {seen[_final(title)]} of {total})"
         else:

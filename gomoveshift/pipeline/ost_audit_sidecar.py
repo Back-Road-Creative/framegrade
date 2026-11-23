@@ -99,11 +99,14 @@ def confirmation_is_stale(prior_hash, current_hash, legacy_hash=None) -> bool:
     noise never marks a confirmation stale — only a real label change does.
     ``legacy_hash`` (``compute_ost_audit_hash(payload, normalise=False)``) is the hash a
     confirmation stored before title suffixes were normalised: it vouches for the same
-    burn, so it is not stale either.
+    burn, so it is not stale either; it may be one hash or an iterable of them (see
+    :func:`legacy_ost_audit_hashes`).
     """
     if not prior_hash:
         return False
-    return prior_hash != current_hash and prior_hash != legacy_hash
+    if isinstance(legacy_hash, str) or legacy_hash is None:
+        legacy_hash = (legacy_hash,)
+    return prior_hash != current_hash and prior_hash not in legacy_hash
 
 
 def read_confirmed_hash(confirmed_file):
@@ -387,19 +390,36 @@ def _normalised_title(entry: dict) -> str:
     return title
 
 
-def _hash_entries(entries, normalise: bool) -> list:
+def _deployed_split_title(entry: dict) -> str:
+    """The title the DEPLOYED (pre-``— Part k of K``) code gave a split day's LF: the base
+    label with the in-batch dedup suffix `` (Part k of K)``. Only the LF's own part suffix is
+    rewritten; every other title is returned as is."""
+    title = str(entry.get("youtube_title") or "")
+    if title_part_suffix(title) == (entry.get("part_index"), entry.get("part_count")) and (
+        _DASH_PART_SUFFIX_RE.search(title)
+    ):
+        base = _DASH_PART_SUFFIX_RE.sub("", title, 1)
+        return f"{base} (Part {entry['part_index']} of {entry['part_count']})"
+    return title
+
+
+def _hash_entries(entries, normalise: bool, deployed_split: bool = False) -> list:
     out = []
     for e in _strip_hash_excluded(entries):
         if normalise:
             if "youtube_title" in e:
                 e["youtube_title"] = _normalised_title(e)
         else:
+            if deployed_split and "youtube_title" in e:
+                e["youtube_title"] = _deployed_split_title(e)
             e = {k: v for k, v in e.items() if k not in _PART_ENTRY_KEYS}
         out.append(e)
     return out
 
 
-def compute_ost_audit_hash(payload: dict, normalise: bool = True) -> str:
+def compute_ost_audit_hash(
+    payload: dict, normalise: bool = True, deployed_split: bool = False
+) -> str:
     """Return a stable hash of the audit content (excludes ``generated_at``).
 
     The hash IS the rebuild-detection signal: if the operator edits
@@ -412,11 +432,33 @@ def compute_ost_audit_hash(payload: dict, normalise: bool = True) -> str:
     title-only suffix change never restales a confirmed day while a changed burn text,
     base label or part count does. ``normalise=False`` is the hash as stored before the
     suffixes were normalised; :func:`lf_gate_or_raise` accepts it once for a confirmation
-    stored that way, then re-stamps the normalised hash.
+    stored that way, then re-stamps the normalised hash. ``deployed_split`` (with
+    ``normalise=False``) also rewrites a split day's `` — Part k of K`` titles to the
+    `` (Part k of K)`` the deployed code gave them, i.e. the raw hash such a day stored.
     """
-    content = {"date": payload.get("date"), "lfs": _hash_entries(payload.get("lfs", []), normalise)}
+    content = {
+        "date": payload.get("date"),
+        "lfs": _hash_entries(payload.get("lfs", []), normalise, deployed_split),
+    }
     serialised = json.dumps(content, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialised).hexdigest()
+
+
+def legacy_ost_audit_hashes(payload: dict) -> tuple:
+    """Every hash a confirmation stored by earlier code may hold for ``payload``: the raw
+    (un-normalised) hash, and the raw hash of a split day under its deployed titles. Each
+    covers the same burn text and base label as ``payload`` (both are in the hashed content),
+    so a changed burn or label matches none of them."""
+    raw = compute_ost_audit_hash(payload, normalise=False)
+    split = compute_ost_audit_hash(payload, normalise=False, deployed_split=True)
+    return (raw,) if split == raw else (raw, split)
+
+
+def accepted_ost_audit_hashes(payload: dict) -> tuple:
+    """Every hash the gate accepts as covering ``payload``: the current (normalised) one
+    first, then :func:`legacy_ost_audit_hashes`. The one rule shared by
+    :func:`lf_gate_or_raise` and the resume drift check."""
+    return (compute_ost_audit_hash(payload), *legacy_ost_audit_hashes(payload))
 
 
 def compute_shorts_ost_audit_hash(payload: dict) -> str:
@@ -494,11 +536,10 @@ def lf_gate_or_raise(
         "per_lf_locations": _state_field(state, "per_lf_locations") or per_lf_locations or {},
     }
     payload = format_ost_audit(date, audit_state, lf_indices, location=location, inserts=inserts)
-    current_hash = compute_ost_audit_hash(payload)
-    # The hash a confirmation stored before suffixes were normalised: it vouches for the
-    # same burn, so it covers the current payload too (and is re-stamped normalised below).
-    legacy_hash = compute_ost_audit_hash(payload, normalise=False)
-    covers = (current_hash, legacy_hash)
+    current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload)
+    # The hashes a confirmation stored before suffixes were normalised: they vouch for the
+    # same burn, so they cover the current payload too (and are re-stamped normalised below).
+    covers = (current_hash, *legacy_hashes)
 
     passed_map = _state_field(state, "ost_audit_passed") or {}
     hash_map = _state_field(state, "ost_audit_hash") or {}
@@ -512,7 +553,7 @@ def lf_gate_or_raise(
     # Bind the ``.confirmed`` marker to the hash it confirmed so
     # ``exists()`` alone can't pass a materially changed, never-reviewed burn.
     prior_hash = hash_map.get(date) or read_confirmed_hash(confirmed_file)
-    stale = confirmation_is_stale(prior_hash, current_hash, legacy_hash)
+    stale = confirmation_is_stale(prior_hash, current_hash, legacy_hashes)
 
     # A stale day is UNCONFIRMED for the CURRENT payload: the stored hash (and a
     # hash-stamped marker bound to it) vouch for text that is no longer burned, so
@@ -566,10 +607,30 @@ def lf_gate_or_raise(
             hm = {}
             state["ost_audit_hash"] = hm
         hm[date] = current_hash
+    rewrite_sidecar_to_match(Path(output_dir), date, payload, current_hash)
     # Bind the marker so a later changed burn reads a stale binding.
     if confirmed_file.exists():
         stamp_confirmed(confirmed_file, current_hash)
     logger.info("OST audit gate passed for day %s (%s).", date, reason)
+
+
+def rewrite_sidecar_to_match(output_dir: Path, date: str, payload: dict, current_hash: str):
+    """Make an existing ``ost_audit_<date>.json`` agree with the hash a pass just stamped.
+
+    A pass on a legacy hash re-stamps the normalised one, but the sidecar on disk is only
+    written on a refusal, so it would still hash to the OLD value and the next resume's drift
+    check would refuse the day the gate just passed. A sidecar that already hashes to
+    ``current_hash`` (or is absent: nothing to verify) is left alone."""
+    path = Path(output_dir) / f"ost_audit_{date}.json"
+    if not path.exists():
+        return
+    try:
+        on_disk = compute_ost_audit_hash(json.loads(path.read_text()))
+    except (OSError, ValueError, AttributeError, TypeError):
+        on_disk = None
+    if on_disk != current_hash:
+        write_ost_audit(output_dir, date, payload)
+        logger.info("OST audit sidecar %s rewritten to the hash the gate stamped.", path)
 
 
 def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:

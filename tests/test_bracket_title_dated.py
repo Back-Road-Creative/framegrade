@@ -375,6 +375,12 @@ def _audit_hash(titles, ost=None, date=_DAY):
     return compute_ost_audit_hash(format_ost_audit(date, state, sorted(titles)))
 
 
+# The hash the DEPLOYED code stored for the day confirmed under ``_LEGACY_SPLIT`` titles. Frozen
+# from origin/main (02861d3f) running ``compute_ost_audit_hash(format_ost_audit(...))`` over that
+# day's state; no drive ever stored the normalised formula this branch added.
+_DEPLOYED_SPLIT_HASH = "3d42cc7f7fde5e5eb9bb113106a15de010177a8735a4f75c6bbaef9c7087548e"  # pragma: allowlist secret (sha256 of an OST audit payload)
+
+
 def _gate(tmp_path, state, date=_DAY, indices=(1, 2)):
     from gomoveshift.pipeline.ost_audit_sidecar import lf_gate_or_raise
 
@@ -463,10 +469,50 @@ def test_a_split_day_title_only_rerun_does_not_restale_a_confirmed_day(tmp_path)
 
     new = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts=_PARTS)
     assert new != _LEGACY_SPLIT
-    state = _gate_state(new, stored=_audit_hash(_LEGACY_SPLIT), review=True)
+    state = _gate_state(new, stored=_DEPLOYED_SPLIT_HASH, review=True)
     outcomes = {i: route_claim_outcome(i, _COUNTY, None, chosen=_COUNTY, reason="") for i in (1, 2)}
     osr.record_system_reviews(state, {_DAY: dict(state["per_lf_ost_text"])}, outcomes)
     _gate(tmp_path, state)  # no raise: the burn text is unchanged
+
+
+def test_the_frozen_deployed_hash_is_the_legacy_form_the_gate_derives_for_the_new_titles():
+    from gomoveshift.pipeline.ost_audit_sidecar import (
+        format_ost_audit,
+        legacy_ost_audit_hashes,
+    )
+
+    new = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts=_PARTS)
+    payload = format_ost_audit(_DAY, _gate_state(new), [1, 2])
+    assert _DEPLOYED_SPLIT_HASH in legacy_ost_audit_hashes(payload)
+
+
+def test_the_deployed_split_hash_never_covers_a_changed_burn_or_base_label(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    changed = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    with pytest.raises(OstAuditPendingError):
+        _gate(
+            tmp_path,
+            _gate_state(
+                ensure_unique_titles(dict(changed), lf_parts=_PARTS),
+                ost=changed,
+                stored=_DEPLOYED_SPLIT_HASH,
+            ),
+        )
+    relabelled = ensure_unique_titles({1: "Cork", 2: "Cork"}, lf_parts=_PARTS)
+    with pytest.raises(OstAuditPendingError):  # same burn text, a different base label
+        _gate(tmp_path, _gate_state(relabelled, stored=_DEPLOYED_SPLIT_HASH))
+
+
+def test_a_split_day_hash_of_the_new_titles_is_not_covered_by_the_deployed_form_of_another_day():
+    from gomoveshift.pipeline.ost_audit_sidecar import (
+        format_ost_audit,
+        legacy_ost_audit_hashes,
+    )
+
+    three = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts={1: (1, 3), 2: (2, 3)})
+    payload = format_ost_audit(_DAY, _gate_state(three), [1, 2])
+    assert _DEPLOYED_SPLIT_HASH not in legacy_ost_audit_hashes(payload)
 
 
 def test_an_in_flight_bracket_drive_is_not_reopened_by_the_added_drive_date(tmp_path):
@@ -562,6 +608,54 @@ def test_a_split_lf_exact_live_duplicate_is_dated_before_the_part_suffix():
     assert "(Part 2)" not in "".join(got.values())
 
 
+# ── two split days under one label never get a garbled double part suffix ──
+
+
+def test_two_split_days_with_one_undated_label_never_get_a_double_part_suffix():
+    """Unique titles need a date; with none there is no honest title: refuse (fail closed)."""
+    with pytest.raises(PhaseBCExitContractError):
+        ensure_unique_titles(
+            {1: _COUNTY, 2: _COUNTY, 3: _COUNTY, 4: _COUNTY},
+            lf_parts={1: (1, 2), 2: (2, 2), 3: (1, 2), 4: (2, 2)},
+        )
+
+
+def test_two_split_days_with_one_label_are_dated_on_the_base_and_suffixed_once():
+    got = ensure_unique_titles(
+        {1: _COUNTY, 2: _COUNTY, 3: _COUNTY, 4: _COUNTY},
+        lf_parts={1: (1, 2), 2: (2, 2), 3: (1, 2), 4: (2, 2)},
+        lf_dates={1: "2025-09-19", 2: "2025-09-19", 3: "2025-09-20", 4: "2025-09-20"},
+    )
+    assert got == {
+        1: f"{_COUNTY} (Sep 19, 2025) — Part 1 of 2",
+        2: f"{_COUNTY} (Sep 19, 2025) — Part 2 of 2",
+        3: f"{_COUNTY} (Sep 20, 2025) — Part 1 of 2",
+        4: f"{_COUNTY} (Sep 20, 2025) — Part 2 of 2",
+    }
+    assert all(t.count("Part") == 1 for t in got.values())
+    assert len(set(got.values())) == 4
+
+
+def test_two_split_days_on_one_date_cannot_be_made_unique_and_are_refused():
+    with pytest.raises(PhaseBCExitContractError):
+        ensure_unique_titles(
+            {1: _COUNTY, 2: _COUNTY, 3: _COUNTY, 4: _COUNTY},
+            lf_parts={1: (1, 2), 2: (2, 2), 3: (1, 2), 4: (2, 2)},
+            lf_dates={k: "2025-09-19" for k in (1, 2, 3, 4)},
+        )
+
+
+def test_a_split_day_beside_an_unsplit_one_with_the_same_label_is_unchanged():
+    got = ensure_unique_titles(
+        {1: _COUNTY, 2: _COUNTY, 3: _COUNTY}, lf_parts={1: (1, 2), 2: (2, 2)}
+    )
+    assert got == {
+        1: f"{_COUNTY} — Part 1 of 2",
+        2: f"{_COUNTY} — Part 2 of 2",
+        3: _COUNTY,
+    }
+
+
 # ── the per-day gate accepts a hash stored before suffixes were normalised ──
 
 
@@ -608,6 +702,27 @@ def test_the_per_day_gate_still_stops_a_real_burn_text_change(tmp_path):
     state["per_lf_ost_text"] = {1: "County Kerry, Ireland"}
     with pytest.raises(OstAuditPendingError):
         _per_day_run(tmp_path, state)
+
+
+def test_the_per_day_stale_message_names_the_changed_burn_not_the_flag(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    state["per_lf_ost_text"] = {1: "County Kerry, Ireland"}
+    with pytest.raises(OstAuditPendingError) as exc:
+        _per_day_run(tmp_path, state)
+    msg = str(exc.value)
+    assert "changed since it was confirmed" in msg
+    assert "re-run with --ost-audit-confirmed" not in msg
+
+
+def test_the_per_day_unconfirmed_message_still_names_the_flag(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    with pytest.raises(OstAuditPendingError) as exc:
+        _per_day_run(tmp_path, _per_day_state("Ireland", "Ireland (Sep 14, 2025)"))
+    assert "re-run with --ost-audit-confirmed" in str(exc.value)
 
 
 @pytest.mark.parametrize(
