@@ -126,7 +126,7 @@ def full_drive_comment_text(parent_lf_video_id: str) -> str:
     return f"🎬 Watch the full drive: https://youtu.be/{parent}"
 
 
-_FULL_DRIVE_SHAPE = re.compile(r"\A\W*Watch the full drive: https://youtu\.be/[\w-]+\Z")
+_FULL_DRIVE_SHAPE = re.compile(r"\A\W*Watch the full drive: https://youtu\.be/([\w-]+)\Z")
 
 
 def is_full_drive_comment(text: str) -> bool:
@@ -134,6 +134,14 @@ def is_full_drive_comment(text: str) -> bool:
     emoji, then ``Watch the full drive: https://youtu.be/<id>``): the only comment a removed row
     may adopt as its own."""
     return bool(_FULL_DRIVE_SHAPE.match((text or "").strip()))
+
+
+def full_drive_video_id(text: str) -> Optional[str]:
+    """The video id a full-drive comment (``is_full_drive_comment``) links to, whatever precedes
+    ``Watch`` (an emoji or none); ``None`` for any other text. Two comments naming the same id
+    are the same link."""
+    match = _FULL_DRIVE_SHAPE.match((text or "").strip())
+    return match.group(1) if match else None
 
 
 def _graph_body(response, permission: str, raise_for_error: Callable[[int, dict], None]) -> dict:

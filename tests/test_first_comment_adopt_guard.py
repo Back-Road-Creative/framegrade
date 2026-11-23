@@ -239,11 +239,11 @@ def test_a_gone_read_back_is_reposted_and_leaves_one_live_and_no_incident(conn, 
     _gone_on_read(graph, only={"new1"})
     res = _drain_as(conn, _fb(graph, "p"), inc)
     row = _meta_row(conn, did)
-    assert row["first_comment_posted_at"] is None and row["first_comment_live_id"] is None
-    assert row["first_comment_attempts"] == 1
+    # One gone read may be lag: recorded as posted, re-read next drain; a second gone reposts.
+    assert row["first_comment_live_id"] == "new1" and row["first_comment_attempts"] == 0
     assert any(f"delivery {did}" in e and "gone" in e for e in res.errors), res.errors
     kinds = {i["kind"] for i in _open_incidents(inc)}
-    assert kinds == {REPOST_KIND}  # surfaced, and not blamed on the id config
+    assert kinds == {OWN_ID_KIND}  # surfaced, with a detail that is not the id-config blame
     for _ in range(3):
         _drain_as(conn, _fb(graph, "p"), inc)
     assert graph.comments == {"new2": NEW}  # exactly one of ours live

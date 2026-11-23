@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Optional
 from .first_comment import (
     ReplacePostFailedError,
     full_drive_comment_text,
+    full_drive_video_id,
     is_full_drive_comment,
     parent_is_public_at,
 )
@@ -28,6 +29,7 @@ from .queue import (
     first_comment_prior_texts,
     mark_first_comment_removed,
     pending_first_comment_corrections,
+    queue_own_extra_deletes,
     registered_platform_id,
     removed_first_comment_ids,
     removed_first_comment_rows,
@@ -209,12 +211,13 @@ def raise_repost_incident(
     filename = f"{safe_name(_key(delivery_id, kind))}.json"
     where = f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
     if kind == REMOVED_KIND:
+        # The exact re-add text leads, so the length cap can never cut it.
         detail = (
-            f"{where}the comment was deleted and the row has no text to post ({cause}); no "
-            "comment is live. The pipeline watches for our comment and closes this incident "
-            "when it is live again: it reposts it once the row has text, and a hand re-add (by "
-            f"the channel account) is picked up on the next drain. The re-add must say exactly "
-            f"{_hand_re_add_text(conn, delivery_id)!r} and nothing else"
+            f"{where}a hand re-add (by the channel account) must say exactly "
+            f"{_hand_re_add_text(conn, delivery_id)!r} and nothing else. The comment was deleted "
+            f"and the row has no text to post ({cause}); no comment is live. The pipeline watches "
+            "for our comment and closes this incident when it is live again: it reposts once the "
+            "row has text, and a hand re-add is picked up on the next drain"
         )[:_DETAIL_MAX]
     elif kind == REPOST_KIND and cause.startswith(GONE):
         detail = (
@@ -222,6 +225,14 @@ def raise_repost_incident(
             "is not recorded as posted and the drain reposts it, up to "
             f"{FIRST_COMMENT_MAX_ATTEMPTS} tries; after that it stays unposted and this "
             "incident stays open"
+        )[:_DETAIL_MAX]
+    elif kind == OWN_ID_KIND and cause.startswith(GONE):
+        detail = (
+            f"{where}the comment we just posted was read back as gone ({cause[len(GONE) :]}); it "
+            "is recorded as posted, and the next drain re-reads it: it closes this incident when "
+            "it reads back as ours, and a second confirmed gone reposts it, up to "
+            f"{FIRST_COMMENT_MAX_ATTEMPTS} tries (then it stays unposted with a repost incident "
+            "open)"
         )[:_DETAIL_MAX]
     elif kind == OWN_ID_KIND:
         who = (
@@ -234,7 +245,8 @@ def raise_repost_incident(
             "wrong or Graph's from.id differs for this token (UNVERIFIED which). It is left "
             "alone, never deleted; until the id is right a lost answer can post a second copy. "
             "This incident closes by itself once a read-back shows our own id as its author, "
-            "or, when the comment reads gone, once the drain reposts it"
+            "or, when a later drain confirms the comment gone, when that drain routes the row "
+            "(reposts it, or marks it removed)"
         )[:_DETAIL_MAX]
     else:
         detail = (
@@ -313,20 +325,25 @@ def restore_removed(
                     conn, row["id"], "the comment text is back; the drain posts it", incidents_dir
                 )
         elif client_for is not None:
-            _adopt_hand_re_add(conn, row, client_for, result)
+            _adopt_hand_re_add(conn, row, client_for, result, incidents_dir)
 
 
 def _adopt_hand_re_add(
-    conn: sqlite3.Connection, row: Any, client_for: Callable[[str], object], result: Any
+    conn: sqlite3.Connection,
+    row: Any,
+    client_for: Callable[[str], object],
+    result: Any,
+    incidents_dir: Optional[Path] = None,
 ) -> None:
     """Adopt our own full-drive comment found live on a removed row's post (see
-    ``restore_removed``). Only OUR CURRENT link is adopted: a comment saying a text this relink
-    replaced (``first_comment_prior_text``) or with the id of the comment we deleted
-    (``first_comment_live_id``) is skipped. The row has no text here (the plan gave none), so
-    the current link cannot be compared; when more than one distinct candidate remains none is
-    adopted (listing order never decides) and the ids are named. Never raises; a failed or
-    cut-short listing, a refused adopt, an ambiguity or only-skipped candidates is an error
-    line."""
+    ``restore_removed``). Only OUR CURRENT link is adopted: a comment whose link names a video a
+    relink replaced (``first_comment_prior_text``, compared by video id) or the id of the comment
+    we deleted (``first_comment_live_id``) is skipped, and when the plan's sidecar names the
+    current video only a comment linking that video is taken. Comments that all name the same
+    video are the same link: the lowest comment id is adopted and the rest are queued as our own
+    extra deletes. Comments naming different videos, with the current one unknown, are ambiguous
+    and none is adopted (listing order never decides). Never raises; a failed or cut-short
+    listing, a refused adopt, an ambiguity or only-skipped candidates is an error line."""
     target = _target(row)
     problem = ""
     try:
@@ -337,7 +354,7 @@ def _adopt_hand_re_add(
             comments, complete = listing(target)
             if not complete:
                 problem = "too many comments to read them all"
-            problem = problem or _adopt_one(conn, row, comments)
+            problem = problem or _adopt_one(conn, row, comments, result, incidents_dir)
     except Exception as exc:  # noqa: BLE001 -- the row stays removed; said, never raised
         problem = (
             f"could not look for our removed comment ({str(exc).strip() or exc.__class__.__name__})"
@@ -351,45 +368,88 @@ def _adopt_hand_re_add(
             )
 
 
-def _adopt_one(conn: sqlite3.Connection, row: Any, comments: Iterable) -> str:
-    """Adopt the one eligible own comment of ``comments`` for removed ``row``; else why not
-    (``""`` when adopted)."""
+def _note(row: Any, result: Any, message: str) -> None:
+    """A said-not-silent note on an adopt that went through."""
+    logger.warning("first comment: delivery %s: removed-row adopt: %s", row["id"], message)
+    if result is not None:
+        result.errors.append(f"delivery {row['id']}: {message}")
+
+
+def _adopt_one(
+    conn: sqlite3.Connection,
+    row: Any,
+    comments: Iterable,
+    result: Any = None,
+    incidents_dir: Optional[Path] = None,
+) -> str:
+    """Adopt our current full-drive comment of ``comments`` (own comments only) for removed
+    ``row``; else why not (``""`` when adopted)."""
+    from . import enqueue_from_plan  # lazy: it imports the queue
+
     prior = {t.strip() for t in first_comment_prior_texts(row)}
+    prior_ids = {full_drive_video_id(t) for t in prior} - {None}
     deleted = str(row["first_comment_live_id"] or "")
-    eligible: dict = {}
+    try:
+        want = enqueue_from_plan.parent_video_id(row, {})
+    except Exception:  # noqa: BLE001 -- unknown current link: the other guards still apply
+        logger.exception("first comment: no parent video id for delivery %s", row["id"])
+        want = None
+    groups: dict = {}  # video id -> {comment id: text}
+    replaced: dict = {}  # our own copies of a replaced link
     skipped: list = []
+    wrong: list = []
     for comment_id, said in comments:
         if not (comment_id and is_full_drive_comment(said)):
             continue
-        cid = str(comment_id)
-        if said.strip() in prior or (deleted and cid == deleted):
+        cid, text = str(comment_id), said.strip()
+        vid = full_drive_video_id(text)
+        if text in prior or vid in prior_ids or (deleted and cid == deleted):
             skipped.append(cid)
+            if cid != deleted:
+                replaced[cid] = text
+        elif want and vid != want:
+            wrong.append(cid)
         else:
-            eligible[cid] = said.strip()
-    if len(eligible) > 1:
+            groups.setdefault(vid, {})[cid] = text
+    said_wrong = (
+        f"our comment {', '.join(wrong)} links a different video than the plan's current "
+        f"link ({want}); it is skipped"
+        if wrong
+        else ""
+    )
+    if len(groups) > 1:
+        ids = sorted(c for g in groups.values() for c in g)
         return (
-            f"more than one of our full-drive comments is live ({', '.join(sorted(eligible))}); "
-            "none is adopted, since which is the current link cannot be told"
+            f"our full-drive comments {', '.join(ids)} link different videos; none is adopted, "
+            "since which is the current link cannot be told"
+            + (f"; {said_wrong}" if said_wrong else "")
         )
-    if not eligible:
+    if not groups:
         if skipped:
             return (
                 f"our comment {', '.join(skipped)} is live but says a replaced link or is the "
-                "one we deleted; it is not adopted"
+                "one we deleted; it is not adopted" + (f"; {said_wrong}" if said_wrong else "")
             )
-        return ""
-    cid, text = next(iter(eligible.items()))
-    if not adopt_removed_first_comment(conn, row["id"], cid, text, _now_iso()):
+        return said_wrong
+    (same,) = groups.values()
+    cid = min(same)
+    if not adopt_removed_first_comment(conn, row["id"], cid, same[cid], _now_iso()):
         return (
             f"our comment {cid} is live but the row cannot take it (a correction is pending or "
             "the row changed meanwhile)"
         )
     logger.info("first comment: delivery %s: our comment %s is live again; adopted", row["id"], cid)
-    if skipped:
-        return (
-            f"our comment {cid} was adopted, but {', '.join(skipped)} (a replaced link) is "
-            "also live and is left alone"
+    extras = [(c, t) for c, t in same.items() if c != cid] + list(replaced.items())
+    if extras and queue_own_extra_deletes(conn, row["id"], extras):
+        _note(
+            row,
+            result,
+            f"our comment {cid} was adopted; our own extra copies "
+            f"{', '.join(c for c, _ in extras)} are queued for deletion",
         )
+        raise_stale_incident(conn, row["id"], incidents_dir)
+    if said_wrong:
+        _note(row, result, f"our comment {cid} was adopted; {said_wrong}")
     return ""
 
 
@@ -437,6 +497,8 @@ def recheck_own_id(
                     incident["resolved_at"] = _now_iso()
                     incident["resolution"] = note
                     write_row(directory, incident)
+                else:
+                    _say_unroutable(incident, row, result, directory)
             elif getattr(said, "author", None) == client.own_id():
                 incident["resolved_at"] = _now_iso()
                 write_row(directory, incident)
@@ -451,6 +513,28 @@ def recheck_own_id(
                     f"comment {row['first_comment_live_id']} ({str(exc).strip() or exc.__class__.__name__}); "
                     "the incident stays open and the next drain tries again"
                 )
+
+
+def _say_unroutable(incident: dict, row: Any, result: Any, directory: Path) -> None:
+    """The comment reads gone but ``_route_gone`` could not move the row (a correction is
+    pending, or the row changed meanwhile): say so, and keep the incident open with the reason in
+    its detail. The next drain tries again."""
+    from ..health.store import write_row
+
+    live_id = row["first_comment_live_id"]
+    why = (
+        f"comment {live_id} reads gone but the row cannot be reposted yet (a correction is "
+        "pending or the row changed meanwhile); the incident stays open and the next drain "
+        "tries again"
+    )
+    logger.warning("first comment: delivery %s: %s", incident.get("delivery_id"), why)
+    if result is not None:
+        result.errors.append(f"delivery {incident.get('delivery_id')}: {why}")
+    incident["detail"] = (
+        f"{incident.get('platform')}#{incident.get('delivery_id')} "
+        f"{incident.get('project') or ''}: {why}"
+    )[:_DETAIL_MAX]
+    write_row(directory, incident)
 
 
 def _route_gone(
