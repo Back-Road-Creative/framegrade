@@ -149,6 +149,7 @@ class TestPairedMaskPersistsItsSourceFrameCount:
         assert doc["sidecar_sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
         assert doc["mask"] == {"size": mask.stat().st_size, "mtime_ns": mask.stat().st_mtime_ns}
         assert doc["redactcam_commit"] == "abc123"
+        assert doc["date"] == "2026-02-24" and doc["day_dir"] == tmp_path.name
         assert doc["renderer"] == blur_gate.renderer_identity()
         assert "source_fingerprint" in doc
         assert not list(tmp_path.glob("*.tmp"))  # atomic write leaves no temp file

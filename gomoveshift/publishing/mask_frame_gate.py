@@ -20,6 +20,7 @@ and the row is resolved once the day passes."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -94,7 +95,9 @@ def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
     try:
         doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
         if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
-            return None
+            return None  # includes a v1 file, which named no day: fail closed
+        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
+            return None  # a proof copied from another day
         counts = doc["counts"]
         values = [counts["container"], counts["mask"], counts["sidecar"]]
         if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
@@ -126,7 +129,7 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
         sidecar_n = sidecar_frame_count(day_dir / f"day_{date}_blur_regions.json")
         container_n = container_frame_count(day_dir, date)
         if container_n is None and not any(
-            (day_dir / name.format(date=date)).exists() for name in _CONTAINER_NAMES
+            os.path.lexists(day_dir / name.format(date=date)) for name in _CONTAINER_NAMES
         ):
             container_n = persisted_source_count(day_dir, date)
         if sidecar_n is None or container_n is None:

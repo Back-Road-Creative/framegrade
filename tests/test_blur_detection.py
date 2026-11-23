@@ -109,6 +109,7 @@ def test_stage_path_persists_the_source_count_only_after_pairing_passes(tmp_path
     doc = json.loads(out.read_text())
     assert doc["counts"] == {"container": 96, "mask": 96, "sidecar": 96}
     assert doc["source_fingerprint"] == "HASH1"
+    assert doc["date"] == "proj" and doc["day_dir"] == "stages"
 
 
 def test_run_resumes_on_hash_match_without_redetecting(tmp_path, monkeypatch):

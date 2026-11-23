@@ -8,12 +8,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from gomoveshift.health import publish
+from gomoveshift.pipeline import blur_gate
 from gomoveshift.pipeline.drive_phases import phase_d
 from gomoveshift.publishing import mask_frame_gate as gate
 
@@ -120,6 +122,8 @@ def persist(day: Path, count=306377, *, date=DATE, **over) -> Path:
     sidecar = day / f"day_{date}_blur_regions.json"
     doc = {
         "schema": gate.SOURCE_FRAMES_SCHEMA,
+        "date": date,
+        "day_dir": day.name,
         "counts": {"container": count, "mask": count, "sidecar": count},
         "source_fingerprint": "fp",
         "sidecar_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
@@ -328,3 +332,155 @@ def test_tests_cannot_write_into_the_checkout_gms_dir(tmp_path, monkeypatch, inc
     assert len(rows(incidents)) == 1
     repo = Path(__file__).resolve().parents[1]
     assert not list((repo / "gms" / "incidents").glob("*isolation-probe*"))
+
+
+# ── the proof binds to its own day, survives no swap, never blocks ───────────
+
+
+def real_persist(day: Path, monkeypatch, n=306377, date=DATE):
+    """Drive the real ``persist_source_frames`` with only the frame probes patched."""
+    mask = day / f"day_{date}_blur_mask.mkv"
+    if not mask.exists():
+        mask.write_bytes(b"maskbytes")
+    sidecar = day / f"day_{date}_blur_regions.json"
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: n)
+    monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: n)
+    out = blur_gate.persist_source_frames(
+        day / f"day_{date}_raw.mp4", mask, sidecar, source_fingerprint="fp"
+    )
+    (day / f"day_{date}_raw.mp4").unlink(missing_ok=True)
+    return out
+
+
+def is_unknown(stages: Path) -> bool:
+    why = gate.mask_frame_refusal(stages, drive="kerry", record=False)
+    return bool(why) and "mask_frame_count_unknown" in why
+
+
+def test_real_persist_round_trips_through_the_gate(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    assert real_persist(day, monkeypatch) == day / f"day_{DATE}_source_frames.json"
+    doc = json.loads((day / f"day_{DATE}_source_frames.json").read_text())
+    assert doc["date"] == DATE and doc["day_dir"] == day.name
+    assert gate.mask_frame_refusal(tmp_path / "st", drive="kerry", record=False) is None
+
+
+def test_a_proof_copied_to_another_day_with_preserved_mtimes_is_unknown(tmp_path, monkeypatch):
+    src = make_day(tmp_path / "a", sidecar=306377)
+    real_persist(src, monkeypatch)
+    other = "2025-09-17"
+    dst = tmp_path / "st" / f"day_{other}"
+    dst.mkdir(parents=True)
+    for kind in ("blur_regions.json", "blur_mask.mkv", "source_frames.json"):
+        shutil.copy2(src / f"day_{DATE}_{kind}", dst / f"day_{other}_{kind}")
+    assert is_unknown(tmp_path / "st")
+
+
+def test_a_v1_proof_is_unknown(tmp_path):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day, schema="gomoveshift.source_frames/v1")
+    assert is_unknown(tmp_path / "st")
+
+
+def test_a_proof_naming_another_day_dir_is_unknown(tmp_path):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day, day_dir="elsewhere")
+    assert is_unknown(tmp_path / "st")
+
+
+def test_a_dangling_master_symlink_is_present_not_absent(tmp_path):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_master.mp4").symlink_to(tmp_path / "offline" / "master.mp4")
+    assert is_unknown(tmp_path / "st")
+
+
+def test_a_dangling_raw_symlink_is_present_not_absent(tmp_path):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_raw.mp4").symlink_to(tmp_path / "offline" / "raw.mp4")
+    assert is_unknown(tmp_path / "st")
+
+
+def test_a_master_that_is_a_directory_stays_unknown(tmp_path):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    persist(day)
+    (day / f"day_{DATE}_master.mp4").mkdir()
+    assert is_unknown(tmp_path / "st")
+
+
+def test_same_bytes_rewritten_mask_with_a_new_mtime_is_unknown(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    real_persist(day, monkeypatch)
+    mask = day / f"day_{DATE}_blur_mask.mkv"
+    st = mask.stat()
+    mask.write_bytes(mask.read_bytes())
+    os.utime(mask, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+    assert is_unknown(tmp_path / "st")
+
+
+def test_all_minus_one_counts_write_nothing(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    assert real_persist(day, monkeypatch, n=-1) is None
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+
+
+def test_positive_but_unequal_counts_write_nothing(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    (day / f"day_{DATE}_blur_mask.mkv").write_bytes(b"m")
+    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 306377)
+    monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: 306385)
+    sidecar = day / f"day_{DATE}_blur_regions.json"
+    out = blur_gate.persist_source_frames(
+        day / f"day_{DATE}_raw.mp4",
+        day / f"day_{DATE}_blur_mask.mkv",
+        sidecar,
+        source_fingerprint="fp",
+    )
+    assert out is None
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+
+
+def test_a_failed_replace_leaves_no_proof_and_does_not_raise(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(blur_gate.os, "replace", boom)
+    assert real_persist(day, monkeypatch) is None
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+    assert is_unknown(tmp_path / "st")
+
+
+def test_an_unexpected_error_in_persist_never_blocks(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+
+    def boom():
+        raise RuntimeError("metadata backend exploded")
+
+    monkeypatch.setattr(blur_gate, "renderer_identity", boom)
+    assert real_persist(day, monkeypatch) is None
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+
+
+def test_a_mask_swapped_while_counting_is_not_vouched_for(tmp_path, monkeypatch):
+    day = make_day(tmp_path / "st", sidecar=306377)
+    mask = day / f"day_{DATE}_blur_mask.mkv"
+    mask.write_bytes(b"maskbytes")
+
+    def count(p):
+        if Path(p) == mask:
+            mask.write_bytes(b"a different mask of other length")
+        return 306377
+
+    monkeypatch.setattr(blur_gate, "container_frame_count", count)
+    monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: 306377)
+    out = blur_gate.persist_source_frames(
+        day / f"day_{DATE}_raw.mp4",
+        mask,
+        day / f"day_{DATE}_blur_regions.json",
+        source_fingerprint="fp",
+    )
+    assert out is None
+    assert not (day / f"day_{DATE}_source_frames.json").exists()

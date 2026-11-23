@@ -492,7 +492,14 @@ the mask's size and mtime, the renderer identity and the redactcam commit (from 
 `null` when absent). The gate accepts it only while the sidecar's sha256 and the mask's size/mtime
 still equal what is on disk, and never when a raw or master exists (their live probe wins); a
 missing, unreadable, malformed, stale or unequal file leaves the day `mask_frame_count_unknown`, and
-counts that disagree with the sidecar refuse as a mismatch. A day rendered before this file existed
+counts that disagree with the sidecar refuse as a mismatch. The file (schema `v2`) also records the
+`date` and `day_dir` it was written for and the gate accepts it only for that day, so a proof copied
+into another day dir with preserved mtimes stays unknown; a `v1` file names no day, so it is unknown
+too (fail closed). A raw or master that is a dangling symlink counts as present (no fallback). Persist
+snapshots the sidecar sha256 and mask identity before and after counting and writes nothing if they
+moved; it is best-effort (any exception is logged and the encode goes on). `redactcam_commit` is the
+commit installed when the proof was written, not necessarily the one that rendered a cache-reused
+mask: no reader may treat it as the mask's renderer commit. A day rendered before this file existed
 has none, so it stays unknown until a re-render. Each refused day gets one `mask_index_mismatch` incident
 (`mask_index_mismatch_<drive>_<date>.json`, key `mask_index_mismatch:<drive>:<date>`), never one
 per tick; it is resolved once the counts agree. There is no override flag or variable: re-render

@@ -408,7 +408,7 @@ def renderer_identity() -> dict:
     }
 
 
-SOURCE_FRAMES_SCHEMA = "gomoveshift.source_frames/v1"
+SOURCE_FRAMES_SCHEMA = "gomoveshift.source_frames/v2"
 
 
 def source_frames_path(sidecar: Path) -> Path:
@@ -432,9 +432,24 @@ def mask_identity(mask: Path) -> dict:
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def source_frames_day(sidecar: Path) -> tuple:
+    """``(date, day_dir)`` a proof binds to: the sidecar stem sans ``day_`` / ``_blur_regions``
+    and the name of the directory holding it. The gate accepts the file only for that day."""
+    stem = Path(sidecar).stem.removesuffix("_blur_regions")
+    return stem.removeprefix("day_"), Path(sidecar).parent.name
+
+
+def _proof_snapshot(mask: Path, sidecar: Path) -> dict:
+    return {"sidecar_sha256": file_sha256(sidecar), "mask": mask_identity(mask)}
+
+
 def redactcam_commit() -> Optional[str]:
     """The installed redactcam's VCS commit from its ``direct_url.json`` (PEP 610), or ``None``
-    when it is absent (a wheel install, or not installed). Never guessed."""
+    when it is absent (a wheel install, or not installed). Never guessed.
+
+    Persisted as ``redactcam_commit``: the commit installed when the proof was written, NOT
+    necessarily the one that rendered a cache-reused mask. No reader may treat it as the mask's
+    renderer commit."""
     from importlib import metadata
 
     try:
@@ -455,11 +470,14 @@ def persist_source_frames(
     gate (``mask_frame_gate``) then reads this file, accepting it only while the sidecar's
     sha256 and the mask's size/mtime still match disk. Re-checks the three counts itself and
     writes nothing unless they are equal and positive. Atomic (tmp + rename). A failed write
-    is logged and returns ``None``: the gate then stays ``unknown`` (fail closed), and the
-    encode, which this file never gates, goes on."""
+    (any exception) is logged and returns ``None``: the gate then stays ``unknown`` (fail
+    closed), and the encode, which this file never gates, goes on. The sidecar sha256 and the
+    mask identity are snapshotted before and after the count probes; a change in between
+    writes nothing. The file records its ``date`` and ``day_dir`` so it vouches only for them."""
     if mask is None or sidecar is None:
         return None
     try:
+        before = _proof_snapshot(Path(mask), Path(sidecar))
         counts = {
             "container": container_frame_count(Path(video)),
             "mask": container_frame_count(Path(mask)),
@@ -469,12 +487,18 @@ def persist_source_frames(
             counts["container"] == counts["mask"] == counts["sidecar"]
         ):
             return None
+        if _proof_snapshot(Path(mask), Path(sidecar)) != before:
+            logger.warning("BLUR: the mask or sidecar changed while its frames were counted")
+            return None
+        date, day_dir = source_frames_day(Path(sidecar))
         doc = {
             "schema": SOURCE_FRAMES_SCHEMA,
+            "date": date,
+            "day_dir": day_dir,
             "counts": counts,
             "source_fingerprint": source_fingerprint,
-            "sidecar_sha256": file_sha256(Path(sidecar)),
-            "mask": mask_identity(Path(mask)),
+            "sidecar_sha256": before["sidecar_sha256"],
+            "mask": before["mask"],
             "renderer": renderer_identity(),
             "redactcam_commit": redactcam_commit(),
         }
@@ -483,8 +507,10 @@ def persist_source_frames(
         tmp.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
         os.replace(tmp, target)
         return target
-    except (OSError, ValueError) as exc:
-        logger.warning("BLUR: could not persist the source frame count (%s)", exc)
+    except Exception as exc:  # best-effort: never block the encode
+        logger.warning(
+            "BLUR: could not persist the source frame count (%s: %s)", type(exc).__name__, exc
+        )
         return None
 
 
