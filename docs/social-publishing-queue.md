@@ -822,7 +822,9 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   does not drop it (the platform may only be lagging), it is kept and re-read every drain for
   `REOPEN_LAG_WINDOW` (24 hours, 24 hourly drains; an assumption, no figure for the platforms'
   read lag is cited in the repo) after the reopen. Past that it is dropped with an error line and
-  a `first_comment_lag_delete_dropped` incident, never silently; an unmarked delete that reads
+  a `first_comment_lag_delete_dropped` incident, never silently (a later drop on the same row
+  joins the open incident, which names every id and is pushed again; the hand-delete advice is
+  appended whole, only the ids and reasons are length-capped); an unmarked delete that reads
   gone is still done. A held delete never blocks a repost or hides the repost incident. A row at
   the attempts cap with a held delete still lists the post each drain: the lowest id (numeric for
   Meta's `123_99` ids, text for YouTube's) that says the row's text is adopted, the rest are

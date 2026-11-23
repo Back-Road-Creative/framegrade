@@ -24,6 +24,7 @@ from tests.test_first_comment_meta_correction import _row as _meta_row
 
 LAG_DROP = "first_comment_lag_delete_dropped"
 NOW = "2026-08-23T00:06:00+00:00"
+FIXED = datetime(2026, 8, 23, 0, 6, tzinfo=timezone.utc)
 NEWER = "Watch the full drive: https://youtu.be/newer"
 HOURS = REOPEN_LAG_WINDOW.total_seconds() / 3600
 
@@ -49,8 +50,21 @@ def _drain(conn, graph, inc):
     )
 
 
-def _ago(hours):
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+class _FrozenDatetime(datetime):
+    """``datetime`` whose ``now()`` is ``FIXED``: what the queue's lag-window check reads."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return FIXED if tz is None else FIXED.astimezone(tz)
+
+
+@pytest.fixture(autouse=True)
+def frozen_queue_clock(monkeypatch):
+    monkeypatch.setattr(queue, "datetime", _FrozenDatetime)
+
+
+def _ago(hours, now=FIXED):
+    return (now - timedelta(hours=hours)).isoformat()
 
 
 def _extra(live_id, text=NEW, **more):

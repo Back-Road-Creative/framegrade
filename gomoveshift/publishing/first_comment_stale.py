@@ -60,6 +60,34 @@ UNVERIFIED = "unverified: "
 GONE = "gone: "
 _DETAIL_MAX = 500
 _LAG_DROP_DETAIL_MAX = 1500  # a drop names every id: room for a dozen full Meta ids
+#: The hand-delete advice of a ``LAG_DROP_KIND`` incident: appended whole, never inside the cap.
+_LAG_DROP_ADVICE = (
+    ". Delete by hand any comment named here that is live and is a second copy of ours: the "
+    "pipeline will not look again, and a copy that appears after the wait needs a hand delete"
+)
+
+
+def _lag_drop_cause(drops: list) -> str:
+    """One line for a drop: each reason once, the ids it covers leading it."""
+    reasons: dict = {}
+    for live_id, reason in drops:
+        reasons.setdefault(reason, []).append(live_id)
+    return "; ".join(
+        f"comments {', '.join(ids)}: {reason}; the deletes are dropped"
+        if len(ids) > 1
+        else f"comment {ids[0]}: {reason}; the delete is dropped"
+        for reason, ids in reasons.items()
+    )
+
+
+def _merge_drops(prior: Any, new: list) -> list:
+    """An open incident's drops plus this drain's, one entry per id, in first-seen order (a
+    repeated id keeps its place and takes the newer reason)."""
+    merged: dict = {}
+    for pair in [*(prior if isinstance(prior, list) else []), *new]:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            merged[str(pair[0])] = str(pair[1])
+    return [[live_id, reason] for live_id, reason in merged.items()]
 
 
 class CorrectionUnavailableError(Exception):
@@ -197,11 +225,14 @@ def raise_repost_incident(
     cause: str,
     incidents_dir: Optional[Path] = None,
     kind: str = REPOST_KIND,
+    drops: Optional[list] = None,
 ) -> None:
     """File (or refresh) the open incident for a row whose stale comment was deleted but whose
     replacement did not post: zero comments are live until the drain reposts. ``kind``
     ``REMOVED_KIND``: the comment was deleted and the row has no text to post (a private relink
-    left none); the drain restores it by itself once the row has text. Never fatal."""
+    left none); the drain restores it by itself once the row has text. ``kind`` ``LAG_DROP_KIND``
+    with ``drops`` (``[live_id, reason]`` pairs): an OPEN incident of the row keeps its earlier
+    drops, so one incident names every dropped id, and it is pushed again. Never fatal."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -218,6 +249,7 @@ def raise_repost_incident(
     directory = incidents_dir or default_incidents_dir(default_data_root())
     filename = f"{safe_name(_key(delivery_id, kind))}.json"
     where = f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
+    merged: Optional[list] = None
     if kind == REMOVED_KIND:
         # The exact re-add text leads, so the length cap can never cut it.
         detail = (
@@ -236,12 +268,14 @@ def raise_repost_incident(
             "lags, so a comment that only lagged is deleted, never left as a second copy"
         )[:_DETAIL_MAX]
     elif kind == LAG_DROP_KIND:
-        # The ids lead (and the cap is wider), so no real Meta id is ever cut off.
+        if drops is not None:
+            merged = _merge_drops(_open_prior(directory / filename).get("drops"), drops)
+            cause = _lag_drop_cause(merged)
+        # The ids lead, and only they are capped: the advice is appended whole, never cut.
         detail = (
-            f"{where}{cause}. Delete by hand any comment named here that is live and is a "
-            "second copy of ours: the pipeline will not look again, and a copy that appears "
-            "after the wait needs a hand delete"
-        )[:_LAG_DROP_DETAIL_MAX]
+            f"{where}{cause}"[: max(0, _LAG_DROP_DETAIL_MAX - len(_LAG_DROP_ADVICE))]
+            + _LAG_DROP_ADVICE
+        )
     elif kind == OWN_ID_KIND and cause.startswith(GONE):
         detail = (
             f"{where}the comment we just posted was read back as gone ({cause[len(GONE) :]}); it "
@@ -275,6 +309,8 @@ def raise_repost_incident(
         prior = json.loads(path.read_text()) if path.is_file() else None
         if isinstance(prior, dict) and not prior.get("resolved_at"):
             prior.update(detail=detail, error=cause)
+            if merged is not None:
+                prior.update(drops=merged, pushed=False, pushed_at=None)
             write_row(directory, prior)
             return
         write_row(
@@ -289,10 +325,20 @@ def raise_repost_incident(
                 project=row["project_name"],
                 error=cause,
                 detail=detail,
+                **({"drops": merged} if merged is not None else {}),
             ),
         )
     except (OSError, ValueError):
         logger.exception("first comment: could not write the repost incident %s", delivery_id)
+
+
+def _open_prior(path: Path) -> dict:
+    """The open incident at ``path``, or ``{}`` (none, resolved or unreadable)."""
+    try:
+        prior = json.loads(path.read_text()) if path.is_file() else None
+    except (OSError, ValueError):
+        return {}
+    return prior if isinstance(prior, dict) and not prior.get("resolved_at") else {}
 
 
 def _note_removed(
@@ -696,7 +742,7 @@ def run_corrections(
                         if left is not True:
                             resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                             if isinstance(left, _LagDropped):
-                                dropped.append(str(left))
+                                dropped.append([item["live_id"], left.reason])
                             if left:
                                 result.errors.append(
                                     f"delivery {row['id']}: second comment {item['live_id']} "
@@ -755,13 +801,12 @@ def run_corrections(
                     # Past its 24 hours a delete that still cannot run is dropped, never retried
                     # for ever: the read failed or the platform refuses it.
                     resolve_first_comment_correction(conn, row["id"], item, _now_iso())
-                    reason = (
-                        f"comment {item['live_id']}, queued for deletion when a gone read "
-                        f"reopened the row, could not be deleted within the wait (last "
-                        f"failure: {detail}); the delete is dropped"
+                    reason = f"could not be deleted within the wait (last failure: {detail})"
+                    dropped.append([item["live_id"], reason])
+                    result.errors.append(
+                        f"delivery {row['id']}: comment {item['live_id']}, queued for deletion "
+                        f"when a gone read reopened the row, {reason}; the delete is dropped"
                     )
-                    dropped.append(reason)
-                    result.errors.append(f"delivery {row['id']}: {reason}")
                     logger.warning("first comment: delivery %s: %s", row["id"], reason)
                     continue
                 result.stale += 1
@@ -785,7 +830,12 @@ def run_corrections(
                 _note_removed(conn, row["id"], result, incidents_dir)
         if dropped:
             raise_repost_incident(
-                conn, row["id"], "; ".join(dropped), incidents_dir, kind=LAG_DROP_KIND
+                conn,
+                row["id"],
+                _lag_drop_cause(dropped),
+                incidents_dir,
+                kind=LAG_DROP_KIND,
+                drops=dropped,
             )
     capped = capped_first_comment_corrections(conn, platforms)
     result.correction_capped += len(capped)
@@ -843,7 +893,10 @@ def _extra_check(client: object, item: dict, row: Any):
 
 
 class _LagDropped(str):
-    """The reason a reopen-queued delete was dropped after its lag window (an incident is filed)."""
+    """The reason a reopen-queued delete was dropped after its lag window (an incident is filed);
+    ``reason`` is the part that does not name the comment, for the incident's grouped line."""
+
+    reason: str = ""
 
 
 class _LagHeldError(CorrectionUnavailableError):
@@ -863,10 +916,12 @@ def _held_gone(item: dict) -> str:
             f"back by the platform); the delete is kept and re-read on the next drain for up to "
             f"{hours} hours after the reopen"
         )
-    return _LagDropped(
+    dropped = _LagDropped(
         f"comment {item['live_id']}, queued for deletion when a gone read reopened the row, "
         f"still reads gone {hours} hours later; the delete is dropped"
     )
+    dropped.reason = f"still reads gone {hours} hours after the reopen"
+    return dropped
 
 
 def settle_capped_reposts(
@@ -968,22 +1023,22 @@ def _drop_held(
     dropped = drop_reopened_deletes(conn, row["id"])
     if not dropped:
         return
-    reasons: dict = {}
+    pairs: list = []
     for item in dropped:
         reason = why(item)
-        reasons.setdefault(reason, []).append(item["live_id"])
+        pairs.append([item["live_id"], reason])
         result.errors.append(
             f"delivery {row['id']}: comment {item['live_id']}, queued for deletion when a gone "
             f"read reopened the row, is dropped after the wait: {reason}"
         )
-    # Every id leads, each reason once, so the length cap never cuts a real Meta id.
-    parts = [
-        f"comments {', '.join(ids)}: {reason}; the deletes are dropped"
-        if len(ids) > 1
-        else f"comment {ids[0]}: {reason}; the delete is dropped"
-        for reason, ids in reasons.items()
-    ]
-    raise_repost_incident(conn, row["id"], "; ".join(parts), incidents_dir, kind=LAG_DROP_KIND)
+    raise_repost_incident(
+        conn,
+        row["id"],
+        _lag_drop_cause(pairs),
+        incidents_dir,
+        kind=LAG_DROP_KIND,
+        drops=pairs,
+    )
 
 
 def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:
