@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -2354,6 +2355,9 @@ def test_the_publish_backoff_counts_only_jobs_after_this_plans_creation(tmp_path
         )
     plan["created_at"] = NOW.timestamp() - 86400
     (out / "replace_plan.json").write_text(json.dumps(plan))
+    job(
+        rig, "ok2", "day-a", "succeeded", NOW.timestamp() - 86000, exit_code=0
+    )  # this plan's own audit
     rig.run()
     assert rig.publishes == [("day-a", False)]  # only this plan's one job counts: its wait is over
 
@@ -2458,7 +2462,11 @@ def test_a_marker_without_a_region_reads_as_its_manifest_regions(tmp_path):
     later = NOW + timedelta(days=30)
     assert launch.due_replace_retry(tmp_path, later, "usa", {"ire-a": "ireland"}) is None
     assert launch.due_replace_retry(tmp_path, later, "ireland", {"ire-a": "ireland"}) == ("ire-a", "why")  # fmt: skip
-    assert launch.due_replace_retry(tmp_path, later, "usa", {}) == ("ire-a", "why")  # unresolvable
+    assert launch.due_replace_retry(tmp_path, later, "usa", {}) is None  # unresolvable: unclaimed
+    assert launch.due_replace_retry(tmp_path, later, None, {}) == (
+        "ire-a",
+        "why",
+    )  # no region filter
 
 
 def test_a_crash_after_the_renames_leaves_a_marker_a_later_tick_finds(tmp_path):
@@ -2537,3 +2545,595 @@ def test_a_dry_run_refusal_leaves_a_retry_marker(tmp_path):
     rig.replace_store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
     assert rig.run()["action"] == "refused"
     assert launch.due_replace_retry(rig.out, NOW + timedelta(days=2), "usa") == ("day-a", "blur mask was wrong")  # fmt: skip
+
+
+# 2026-11-22 fixup 6: only a replace's OWN launch clears its marker; a crash between the renames and
+# the plan write never becomes a permanent give-up; a project gone from the region's rows is the
+# permanent refusal even while another row is eligible; a raise after a launch never re-marks.
+
+
+def test_another_drives_publish_in_the_marker_attempt_never_clears_the_marker(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.rows.append(rig.row("day-c", 1))
+    rig.drives.append(drive("day-c", "auditing"))
+    job(rig, "c1", "day-c", "succeeded", NOW.timestamp() - 100, exit_code=0)
+    rig.publish_result = {"action": "launched", "reason": "day-c published"}
+    launch.replace_scheduled_mod.record_incident("day-a", "replace_retry", "earlier failure")
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-c"), res  # returned as is
+    assert "replace_retry" not in res and rig.publishes == [("day-c", False)]  # no fall-through
+    assert _attempts(rig) == 1 and not rig.launches and (rig.stages / "day-a").is_dir()
+    assert not _retry_incidents()[0].get("resolved_at")
+    rig.publish_result = None  # the next tick: day-c is published (complete), the replace launches
+    rig.drives[-1] = drive("day-c", "complete")
+    res2 = _retry_tick(rig)
+    assert res2["action"] == "launched" and res2.get("project") == "day-a", res2
+    assert not launch._retry_marker(rig.out, "day-a").exists() and len(rig.launches) == 1
+    assert _retry_incidents()[0].get("resolved_at")
+
+
+def test_a_marker_whose_row_left_the_manifest_is_permanent_even_beside_an_eligible_row(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.rows[:] = [r for r in rig.rows if r.project != "day-a"]  # day-b stays eligible
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert res["replace_retry"]["outcome"] == "cleared", res["replace_retry"]
+    assert "no usa row day-a in the backlog" in res["replace_retry"]["reason"]
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+
+
+def _crash_after_the_renames(rig, monkeypatch, exc):
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(launch.replace_scheduled_mod, "write_plan", boom)
+
+
+def test_a_crash_between_the_renames_and_the_plan_write_is_finished_by_the_next_tick(tmp_path, monkeypatch):  # fmt: skip
+    rig = _replace_rig(tmp_path, _three_lfs())
+    real = launch.replace_scheduled_mod.write_plan
+    _crash_after_the_renames(rig, monkeypatch, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        rig.run()
+    monkeypatch.setattr(launch.replace_scheduled_mod, "write_plan", real)
+    assert launch._retry_marker(rig.out, "day-a").exists() and not (rig.out / "day-a").exists()
+    later = NOW + timedelta(days=2)
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        return launch.run_backlog(**{**rig.kwargs(), "now": later})
+
+    res = launch.run_tick(output_root=rig.out, now=later, region="usa", regions={}, dry_run=False,
+                          supersede=None, replace=False, run=run)  # fmt: skip
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+    plan = json.loads((rig.out / "day-a" / "replace_plan.json").read_text())
+    assert set(plan["replace"]) == {"2", "3"}  # planned from the set-aside run's records
+
+
+def test_a_failing_supersede_is_put_back_and_retried_never_raised(tmp_path, monkeypatch):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _crash_after_the_renames(rig, monkeypatch, OSError("disk full"))
+    res = rig.run()  # must return, never raise
+    assert res["action"] == "refused" and "disk full" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches  # the old run is back
+    assert _attempts(rig) == 1 and not launch.refusal_is_permanent(res["reason"])
+
+
+def test_nothing_to_supersede_with_no_set_aside_run_is_permanent(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    shutil.rmtree(rig.stages / "day-a")
+    shutil.rmtree(rig.out / "day-a")  # no stages, no output, and nothing set aside
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert res["replace_retry"]["outcome"] == "cleared", res["replace_retry"]
+    assert "nothing to supersede" in res["replace_retry"]["reason"]
+
+
+def test_a_raise_after_the_replace_launched_never_remarks_or_falls_through(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    calls = []
+
+    def run(sup, rep):
+        calls.append(sup)
+        rig.supersede, rig.replace_scheduled = sup, rep
+        out = rig.run()
+        if sup and out.get("action") == "launched":
+            raise OSError("stage_roots: disk hiccup after the launch")
+        return out
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
+                          supersede=None, replace=False, run=run)  # fmt: skip
+    assert not launch._retry_marker(rig.out, "day-a").exists(), "a launched replace got its marker back"  # fmt: skip
+    assert len(rig.launches) == 1 and calls == [("day-a", "blur mask was wrong")], calls
+    assert res["action"] == "launched" and res["project"] == "day-a", res
+
+
+def test_a_raise_inside_the_marker_call_bumps_the_marker_and_never_crashes_the_tick(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+
+    def run(sup, rep):
+        if sup:
+            raise RuntimeError("seo store exploded")
+        rig.supersede, rig.replace_scheduled = None, False
+        return rig.run()
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False,
+                          supersede=None, replace=False, run=run)  # fmt: skip
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res  # fell through
+    assert res["replace_retry"]["outcome"] == "bumped" and "seo store exploded" in res["replace_retry"]["reason"]  # fmt: skip
+    assert _attempts(rig) == 2
+
+
+def test_one_call_bumps_the_marker_once_however_many_sites_ask(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False  # the pre-rename mark, then the refusal's retry_later: one bump total
+    _marker(rig)
+    assert _retry_tick(rig)["replace_retry"]["outcome"] == "bumped"
+    assert _attempts(rig) == 2
+
+
+def test_the_oldest_due_marker_runs_first_whatever_its_name(tmp_path):
+    launch.mark_replace_retry(tmp_path, "day-a", "why-a", NOW - timedelta(days=3), region="usa")
+    launch.mark_replace_retry(tmp_path, "ire-b", "why-b", NOW - timedelta(days=4), region="usa")
+    assert launch.due_replace_retry(tmp_path, NOW, "usa") == ("ire-b", "why-b")
+
+
+@pytest.mark.parametrize(
+    "why",
+    [
+        "cannot supersede day-a: nothing to supersede: no day-a under the stages or output root",
+        "cannot supersede day-a: no usa row day-a in the backlog",
+        "cannot supersede day-a: the schedule store row is complete and no upload record gives a replace plan; only Waypost can reopen it",  # fmt: skip
+        "every record is already public: nothing to replace",
+    ],
+)
+def test_the_permanent_refusals_are_permanent(why):
+    assert launch.refusal_is_permanent(why)
+
+
+def test_the_margin_refusals_say_exactly_which_case_it_is():
+    near = {"1": _rec("a", NOW + timedelta(hours=2))}
+    _, only = launch.replace_scheduled_mod.classify_uploads(near, NOW, lambda ids: {})
+    assert only == "every record is scheduled inside the 6 h margin (kept by design, each publishes on its own): nothing to replace"  # fmt: skip
+    _, mixed = launch.replace_scheduled_mod.classify_uploads({**near, "2": _rec("b", PAST)}, NOW, lambda ids: {})  # fmt: skip
+    assert mixed == "every record is public or inside the 6 h margin (kept by design): nothing to replace"  # fmt: skip
+
+
+def test_resolve_incidents_closes_only_the_named_codes():
+    mod = launch.replace_scheduled_mod
+    mod.record_incident("day-a", "replace_retry", "x")
+    mod.record_incident("day-a", "restore_failed", "y")
+    assert mod.resolve_incidents("day-a", drive_level=True, codes=("replace_retry",), outcome="given up: z") == 1  # fmt: skip
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    by = {r["code"]: r for r in rows if r.get("kind") == "replace_scheduled_partial"}
+    assert by["replace_retry"]["resolved_at"] and by["replace_retry"]["outcome"] == "given up: z"
+    assert not by["restore_failed"].get("resolved_at")
+
+
+def test_a_regionless_marker_whose_row_is_in_another_region_is_left_for_that_region(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    launch.mark_replace_retry(rig.out, "ire-a", "why", NOW - timedelta(days=3))  # no region
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        return rig.run()
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={"ire-a": "ireland"}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res  # the plain tick ran
+    held = json.loads(launch._retry_marker(rig.out, "ire-a").read_text())
+    assert "region" not in held and held["attempts"] == 1  # untouched, never stamped
+
+
+# Fixup 7: a set-aside run always carries its record, belongs to its own project, and a launched
+# replace never re-runs.
+
+
+def _tick_at(rig, when, jobs_dir=None):
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        return launch.run_backlog(**{**rig.kwargs(), "now": when})
+
+    return launch.run_tick(output_root=rig.out, now=when, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run, jobs_dir=jobs_dir)  # fmt: skip
+
+
+def _crash_on_rename(monkeypatch, rig, *, after):
+    """Die (not an ``Exception``: the process is gone) on the first rename into a ``_superseded``
+    dir under the output root, before it happens or right after it."""
+    real = Path.rename
+    aside = rig.out / launch.SUPERSEDED_DIR
+
+    def crash(self, target):
+        if aside in Path(target).parents:
+            if after:
+                real(self, target)
+            raise KeyboardInterrupt()
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", crash)
+    return real, aside
+
+
+def test_a_crash_right_after_the_out_rename_never_gives_the_replace_up(tmp_path, monkeypatch):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    real, aside = _crash_on_rename(monkeypatch, rig, after=True)
+    with pytest.raises(KeyboardInterrupt):
+        rig.run()
+    monkeypatch.setattr(Path, "rename", real)
+    moved = next(aside.glob("day-a-*"))
+    assert (moved / launch.SUPERSEDE_RECORD).exists()  # the record went in BEFORE the rename
+    assert launch._retry_marker(rig.out, "day-a").exists()
+    res = _tick_at(rig, NOW + timedelta(days=2))
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert not launch._retry_marker(rig.out, "day-a").exists() and len(rig.launches) == 1
+    assert set(json.loads((rig.out / "day-a" / "replace_plan.json").read_text())["replace"]) == {"2", "3"}  # fmt: skip
+
+
+def test_a_crash_after_the_record_write_before_the_rename_leaves_a_harmless_record(tmp_path, monkeypatch):  # fmt: skip
+    rig = _replace_rig(tmp_path, _three_lfs())
+    real, _aside = _crash_on_rename(monkeypatch, rig, after=False)
+    with pytest.raises(KeyboardInterrupt):
+        rig.run()
+    monkeypatch.setattr(Path, "rename", real)
+    stray = rig.out / "day-a" / launch.SUPERSEDE_RECORD  # written into the dir still in place
+    assert stray.exists() and launch._retry_marker(rig.out, "day-a").exists()
+    assert launch._superseded_uploads("day-a", rig.out / "day-a") is None  # ignored outside the set-aside dir  # fmt: skip
+    res = _tick_at(rig, NOW + timedelta(days=2))
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert not launch._retry_marker(rig.out, "day-a").exists() and len(rig.launches) == 1
+    assert not stray.exists()  # it went into the set-aside run with the dir
+
+
+def _aside(out, name, project, uploads):
+    d = out / launch.SUPERSEDED_DIR / name
+    d.mkdir(parents=True)
+    (d / launch.SUPERSEDE_RECORD).write_text(json.dumps({"schema": "backlog-supersede/2", "project": project}))  # fmt: skip
+    (d / "youtube_uploads.json").write_text(json.dumps(uploads))
+    return d
+
+
+def test_the_set_aside_fallback_never_reads_another_projects_run(tmp_path):
+    out = tmp_path / "out"
+    mine = _aside(out, "day-a-20261021T000000Z", "day-a", {"2": {"video_id": "mine"}})
+    _aside(out, "day-a-long-20261001T000000Z", "day-a-long", {"2": {"video_id": "OTHER"}})
+    _aside(out, "day-a-20261030T000000Z-failed-attempt-20261030T000000Z", "day-a", {"2": {"video_id": "X"}})  # fmt: skip
+    assert launch._superseded_uploads("day-a", out / "day-a") == mine / "youtube_uploads.json"
+    assert launch._superseded_uploads("day-a-long", out / "day-a-long").parent.name.startswith("day-a-long-")  # fmt: skip
+    assert launch._superseded_uploads("day", out / "day") is None
+
+
+def test_the_set_aside_fallback_needs_a_record_naming_its_own_project(tmp_path):
+    out = tmp_path / "out"
+    _aside(out, "day-a-20261021T000000Z", "someone-else", {"2": {"video_id": "OTHER"}})
+    assert launch._superseded_uploads("day-a", out / "day-a") is None
+
+
+def test_a_regionless_marker_with_no_row_is_given_up_and_recorded_durably(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    launch.mark_replace_retry(rig.out, "ghost-a", "why", NOW - timedelta(days=3))  # no region
+    res = _tick_at(rig, NOW)
+    assert (res["action"], res["project"]) == ("launched", "day-b"), res  # the plain tick ran
+    assert not launch._retry_marker(rig.out, "ghost-a").exists()
+    assert res["given_up_replace_retry"] == ["ghost-a"] and "unclaimed_replace_retry" not in res
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    ghost = [r for r in rows if r.get("drive") == "ghost-a" and r.get("code") == "replace_retry"]
+    assert len(ghost) == 1 and ghost[0]["resolved_at"], ghost
+    assert ghost[0]["outcome"] == "given up: no row in any region"
+
+
+def test_a_dry_run_never_gives_a_regionless_marker_up(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    launch.mark_replace_retry(rig.out, "ghost-a", "why", NOW - timedelta(days=3))
+    launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=True, supersede=None, replace=False, run=lambda s, r: rig.run(dry_run=True))  # fmt: skip
+    assert launch._retry_marker(rig.out, "ghost-a").exists()
+
+
+def test_a_raise_after_another_drives_publish_never_remarks_or_falls_through(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.rows.append(rig.row("day-c", 1))
+    rig.drives.append(drive("day-c", "auditing"))
+    job(rig, "c1", "day-c", "succeeded", NOW.timestamp() - 100, exit_code=0)
+    rig.publish_result = {"action": "launched", "reason": "day-c published"}
+    _marker(rig)
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        out = rig.run()
+        if sup and out.get("action") == "launched":
+            raise OSError("stage_roots hiccup after day-c's publish")
+        return out
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    assert res["action"] == "launched" and res["project"] == "day-c" and "replace_retry" not in res
+    assert rig.publishes == [("day-c", False)] and not rig.launches, (rig.publishes, rig.launches)
+    assert _attempts(rig) == 1
+
+
+def test_a_raise_after_the_launcher_returned_ok_never_re_marks_or_falls_through(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        out = rig.run()
+        raise OSError("post-launch hiccup")
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    assert res["action"] == "launched" and "replace_retry" not in res and len(rig.launches) == 1
+
+
+def test_a_crash_after_the_launch_before_the_clear_never_replaces_twice(tmp_path, monkeypatch):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    real = launch.clear_replace_retry
+
+    def die(*a, **k):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(launch, "clear_replace_retry", die)
+    with pytest.raises(KeyboardInterrupt):
+        _retry_tick(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", real)
+    assert len(rig.launches) == 1
+    held = json.loads(launch._retry_marker(rig.out, "day-a").read_text())
+    assert held["launching_at"] == NOW.timestamp()  # stamped BEFORE the launcher ran
+    job(rig, "new", "day-a", "running", NOW.timestamp() + 5)  # the launcher's job exists now
+    rig.running = True
+    res = _tick_at(rig, NOW + timedelta(days=5), jobs_dir=rig.tmp / "jobs")
+    assert len(rig.launches) == 1, "the marker replaced the fresh run a second time"
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+    assert res["replace_retry"]["outcome"] == "cleared", res
+
+
+def test_a_launch_stamp_with_no_job_since_it_is_retried_not_trusted(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    launch.stamp_replace_launch(rig.out, "day-a", NOW.timestamp())  # died before the launcher ran
+    job(rig, "old", "day-a", "succeeded", NOW.timestamp() - 9000, exit_code=0)  # the old run's
+    res = _tick_at(rig, NOW + timedelta(days=5), jobs_dir=rig.tmp / "jobs")
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert len(rig.launches) == 1 and not launch._retry_marker(rig.out, "day-a").exists()
+
+
+def test_a_failed_launcher_drops_the_launch_stamp(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False
+    _marker(rig)
+    _retry_tick(rig)
+    assert "launching_at" not in json.loads(launch._retry_marker(rig.out, "day-a").read_text())
+
+
+def test_the_wrappers_own_clear_is_the_second_line_when_the_in_run_clear_did_not_take(tmp_path, monkeypatch):  # fmt: skip
+    """``_run`` clears the marker on the replace's launch and the wrapper clears it again: the
+    second is not dead, it is what removes the marker when the first unlink failed."""
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    real, calls = launch.clear_replace_retry, []
+
+    def flaky(out, project):
+        calls.append(project)
+        if len(calls) > 1:
+            real(out, project)
+
+    monkeypatch.setattr(launch, "clear_replace_retry", flaky)
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert calls == ["day-a", "day-a"] and not launch._retry_marker(rig.out, "day-a").exists()
+
+
+def test_a_same_project_launch_that_is_not_the_replace_leaves_the_marker(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    out = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=lambda s, r: {"action": "launched", "project": "day-a", "skipped": [], "reason": "day-a published"})  # fmt: skip
+    assert out["action"] == "launched" and "replace_retry" not in out
+    assert _attempts(rig) == 1  # a publish of the same project is not the replace
+
+
+def test_a_replaced_rows_old_passed_audit_never_publishes_through_the_failed_loop(tmp_path):
+    rig = Rig(tmp_path)
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    plan = {"schema": "replace-scheduled/1", "kept": {}, "created_at": NOW.timestamp() - 60, "replace": {"2": {"video_id": "old2"}}}  # fmt: skip
+    (fresh / "replace_plan.json").write_text(json.dumps(plan))
+    rig.drives.append(drive("day-a", "failed", output_dir=str(fresh)))
+    job(rig, "old", "day-a", "succeeded", NOW.timestamp() - 9000, exit_code=0)  # the OLD run's
+    job(
+        rig, "pub", "day-a", "failed", NOW.timestamp() - 8000, name="gms-publish-day-a"
+    )  # before the plan: no backoff
+    rig.publish_result = {"action": "launched", "reason": "day-a for slot"}
+    rig.run()
+    assert rig.publishes == []
+
+
+def test_a_dropped_rows_old_failed_audit_never_retires_the_replaced_run(tmp_path):
+    rig = Rig(tmp_path)
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    plan = {"schema": "replace-scheduled/1", "kept": {}, "created_at": NOW.timestamp() - 60, "replace": {"2": {"video_id": "old2"}}}  # fmt: skip
+    (fresh / "replace_plan.json").write_text(json.dumps(plan))
+    rig.drives.append(drive("day-x", "auditing", output_dir=str(fresh)))  # no manifest row
+    job(rig, "old", "day-x", "failed", NOW.timestamp() - 9000)  # the set-aside run's
+    rig.run()
+    assert rig.retired == []
+
+
+# Fixup 8: a supersede that fails before its move never buries the live run, and a launched or
+# kept-margin replace leaves its record whatever dies.
+
+
+def _named(rig, project="day-a"):
+    return [a for a, _c, _e in rig.launches if f"gms-backlog-{project}" in a]
+
+
+def _launcher_writing_jobs(rig, created_at):
+    """The real job runner writes ``job.json`` (``gms-backlog-<project>``) before it returns."""
+    made = []
+
+    def launcher(argv, cwd, env):
+        rig.launches.append((argv, cwd, env))
+        made.append(1)
+        d = rig.tmp / "jobs" / f"run{len(made)}"
+        d.mkdir(parents=True)
+        rec = {"schema": "job/1", "run_id": f"run{len(made)}", "name": argv[argv.index("--name") + 1], "created_at": created_at(), "result": {"state": "running", "exit_code": None}}  # fmt: skip
+        (d / "job.json").write_text(json.dumps(rec))
+        return rig.launch_ok, "" if rig.launch_ok else "runner: TimeoutExpired"
+
+    rig.launcher = launcher
+
+
+def _first_record_write_fails(monkeypatch):
+    import errno
+
+    real, fired = Path.write_text, []
+
+    def full(self, *a, **k):
+        if self.name == launch.SUPERSEDE_RECORD and not fired:
+            fired.append(self)
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", full)
+    return lambda: monkeypatch.setattr(Path, "write_text", real)
+
+
+@pytest.mark.parametrize("prior_aside", [True, False])
+def test_a_record_write_failure_before_any_move_leaves_the_old_run_and_retries(tmp_path, monkeypatch, prior_aside):  # fmt: skip
+    from gomoveshift.pipeline.cleanup import _superseded_by_record
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    if prior_aside:  # an earlier supersede left set-aside runs: ``_superseded`` already exists
+        (rig.out / launch.SUPERSEDED_DIR / "older-20260101T000000Z").mkdir(parents=True)
+        (rig.stages / launch.SUPERSEDED_DIR / "older-20260101T000000Z").mkdir(parents=True)
+    _marker(rig)
+    restore = _first_record_write_fails(monkeypatch)
+    _retry_tick(rig)
+    restore()
+    live = rig.out / "day-a"
+    assert (live / "youtube_uploads.json").exists() and (live / "shorts" / "s01.mp4").exists()
+    assert (rig.stages / "day-a").is_dir() and not list((rig.out / launch.SUPERSEDED_DIR).glob("day-a-*"))  # fmt: skip
+    assert not (live / launch.SUPERSEDE_RECORD).exists() and not _superseded_by_record(live)
+    assert launch._retry_marker(rig.out, "day-a").exists()
+    for days in (2, 4):  # never "nothing to supersede", never given up
+        if not launch._retry_marker(rig.out, "day-a").exists():
+            break
+        res = _tick_at(rig, NOW + timedelta(days=days))
+        if res["action"] == "launched" and res["project"] == "day-a":
+            break
+    assert len(_named(rig)) == 1 and not launch._retry_marker(rig.out, "day-a").exists()
+
+
+def test_a_failed_supersede_after_the_first_move_still_puts_back_and_cleans_records(tmp_path, monkeypatch):  # fmt: skip
+    from gomoveshift.pipeline.cleanup import _superseded_by_record
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    real = Path.rename
+    hit = []
+
+    def die_on_out(self, target):
+        if self == rig.out / "day-a" and not hit:
+            hit.append(1)
+            raise OSError("EXDEV")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", die_on_out)
+    _retry_tick(rig)
+    monkeypatch.setattr(Path, "rename", real)
+    live = rig.out / "day-a"
+    assert (live / "youtube_uploads.json").exists() and (rig.stages / "day-a").is_dir()
+    assert not (live / launch.SUPERSEDE_RECORD).exists() and not _superseded_by_record(live)
+
+
+def test_a_crash_after_the_launch_before_the_clear_still_records_the_kept_margin(tmp_path, monkeypatch):  # fmt: skip
+    near = NOW + timedelta(hours=3)
+    rig = _replace_rig(tmp_path, {"1": _rec("a", near), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))})  # fmt: skip
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))  # fmt: skip
+    with pytest.raises(KeyboardInterrupt):
+        _retry_tick(rig)
+    kept = _kept_rows()
+    assert len(kept) == 1 and kept[0]["lf"] == 1, kept  # recorded BEFORE the clear that died
+
+
+def _kept_rows():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    return [r for r in rows if r.get("drive") == "day-a" and r.get("code") == "margin_kept"]
+
+
+def test_the_launch_stamp_branch_records_the_kept_margin_once(tmp_path, monkeypatch):
+    near = NOW + timedelta(hours=3)
+    rig = _replace_rig(tmp_path, {"1": _rec("a", near), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))})  # fmt: skip
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    real = launch.clear_replace_retry
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))  # fmt: skip
+    with pytest.raises(KeyboardInterrupt):
+        _retry_tick(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", real)
+    # the first path's record is lost with the crash: only the stamp branch is left
+    for f in _kept_files():
+        f.unlink()
+    assert not _kept_rows()
+    res = _tick_at(rig, NOW + timedelta(days=1), jobs_dir=rig.tmp / "jobs")
+    assert res["replace_retry"]["outcome"] == "cleared" and len(_named(rig)) == 1
+    assert len(_kept_rows()) == 1
+    _tick_at(rig, NOW + timedelta(days=2), jobs_dir=rig.tmp / "jobs")
+    assert len(_kept_rows()) == 1  # idempotent: never a duplicate
+
+
+def _kept_files():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir
+
+    return list(default_incidents_dir(default_data_root()).glob("*margin_kept*.json"))
+
+
+def test_a_launcher_timeout_after_its_job_was_written_never_replaces_twice(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False  # default_launcher: (False, TimeoutExpired) after the runner detached
+    _launcher_writing_jobs(rig, lambda: NOW.timestamp() + 3)
+    _marker(rig)
+    res = _retry_tick(rig)
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert not launch._retry_marker(rig.out, "day-a").exists()
+    # the fresh dir is in use, not put back
+    assert (rig.out / "day-a" / "replace_plan.json").exists()
+    assert not list((rig.out / "day-a").glob("youtube_uploads.json"))
+    rig.launch_ok = True
+    _tick_at(rig, NOW + timedelta(days=2), jobs_dir=rig.tmp / "jobs")
+    assert len(_named(rig)) == 1, [a[a.index("--name") + 1] for a, _c, _e in rig.launches]
+
+
+def test_a_raise_after_the_launcher_ok_with_the_marker_left_never_falls_through(tmp_path, monkeypatch):  # fmt: skip
+    """The launch sink alone must tell "launched" from "no launch": the marker is still there."""
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    monkeypatch.setattr(launch, "clear_replace_retry", lambda *a, **k: None)
+
+    def run(sup, rep):
+        rig.supersede, rig.replace_scheduled = sup, rep
+        rig.run()
+        raise OSError("post-launch hiccup")
+
+    res = launch.run_tick(output_root=rig.out, now=NOW, region="usa", regions={}, dry_run=False, supersede=None, replace=False, run=run)  # fmt: skip
+    assert res["action"] == "launched" and res["project"] == "day-a" and "replace_retry" not in res
+    assert len(rig.launches) == 1  # no plain tick behind the drive just launched
+
+
+def test_a_stamp_plus_another_projects_job_after_it_is_retried_not_cleared(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    _marker(rig)
+    launch.stamp_replace_launch(rig.out, "day-a", NOW.timestamp())  # died before the launcher ran
+    job(rig, "other", "day-b", "running", NOW.timestamp() + 5)  # ANOTHER project's job, later
+    res = _tick_at(rig, NOW + timedelta(days=5), jobs_dir=rig.tmp / "jobs")
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert res.get("replace_retry", {}).get("outcome") != "cleared" and len(_named(rig)) == 1

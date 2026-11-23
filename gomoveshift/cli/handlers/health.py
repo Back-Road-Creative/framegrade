@@ -207,7 +207,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     result = launch.run_tick(
         output_root=args.output_root, now=now, region=region,
         regions={r.project: r.region for r in rows}, dry_run=args.dry_run,
-        supersede=supersede, replace=replace, run=run,
+        supersede=supersede, replace=replace, run=run, jobs_dir=jobs_dir,
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -215,6 +215,8 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         if result.get("replace_retry"):
             tried = result["replace_retry"]
             print(f"replace retry {tried['project']}: {tried['outcome']}: {tried['reason']}")
+        for name in result.get("given_up_replace_retry", []):
+            print(f"replace retry {name}: given up: {launch.UNCLAIMED_OUTCOME}")
         for skip in result["skipped"]:
             print(f"skipped {skip['project']}: {skip['reason']}")
         for bad in result.get("failed_audits", []):

@@ -143,7 +143,7 @@ def test_a_due_replace_retry_is_run_by_the_plain_tick_with_the_replace_flag(tmp_
     from datetime import datetime, timezone
 
     wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
-    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc), region="usa")  # fmt: skip
     assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
     assert wired["supersede"] == ("ire-a", "blur fix") and wired["replace_scheduled"] is True
     assert callable(wired["live_status"])
@@ -260,3 +260,44 @@ def test_the_handler_gives_the_marker_lookup_the_ticks_region(tmp_path, monkeypa
     monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "noop", "reason": "covered", "skipped": []})  # fmt: skip
     assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
     assert calls == [(None, False)]  # an ireland marker never hijacks a usa tick
+
+
+def test_the_handler_hands_the_tick_each_rows_region_so_a_regionless_marker_resolves(tmp_path, monkeypatch):  # fmt: skip
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls, rows=[SimpleNamespace(project="ire-a", region="ireland")])  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "noop", "reason": "covered", "skipped": []})  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert calls == [(None, False)]  # its manifest region is ireland: a usa tick leaves it alone
+
+
+def test_the_handler_hands_an_ireland_tick_its_claimed_marker(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    calls = []
+    _marker_wired(monkeypatch, tmp_path, calls, rows=[SimpleNamespace(project="ire-a", region="ireland")])  # fmt: skip
+    monkeypatch.setattr(
+        launch, "load_inputs",
+        lambda config, region, ledger_path, now: ("ireland", [SimpleNamespace(project="ire-a", region="ireland")], [], [], set(), lambda **kw: None),
+    )  # fmt: skip
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: calls.append((kw["supersede"], kw["replace_scheduled"])) or {"action": "launched", "reason": "r", "skipped": [], "project": "ire-a", "supersede": {"moves": []}})  # fmt: skip
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # no region: the row's is ireland  # fmt: skip
+    assert health.cmd_health(_args(tmp_path, "--region", "ireland"), SimpleNamespace()) == 0
+    assert calls == [(("ire-a", "blur fix"), True)]  # claimed by the ireland tick, run once
+    assert not launch._retry_marker(tmp_path / "out", "ire-a").exists()
+
+
+def test_the_handler_hands_the_marker_tick_its_jobs_dir(tmp_path, wired, monkeypatch):
+    """``run_tick`` finds a launched replace's job in ``jobs_dir``: without it (``None``) a crash
+    after the launcher replaces the fresh run a second time."""
+    got = {}
+
+    def fake_tick(**kw):
+        got.update(kw)
+        return {"action": "would_launch", "reason": "r", "skipped": []}
+
+    monkeypatch.setattr(launch, "run_tick", fake_tick)
+    assert health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace()) == 0
+    assert got["jobs_dir"] == tmp_path / "logs" / "jobs"
