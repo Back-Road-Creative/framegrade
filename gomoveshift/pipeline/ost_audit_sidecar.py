@@ -405,15 +405,41 @@ def _deployed_split_title(entry: dict) -> str:
     return title
 
 
-def deployed_part_numbering(titles, recording) -> dict:
+# The via-road clause the deployed dedup's key dropped: ``longform_metadata._VIA_ROAD_RE`` (kept
+# in step with it, unchanged since 02861d3; the engine may not import that module).
+_VIA_ROAD_RE = re.compile(r"\s+via\s+[^,]+", re.IGNORECASE)
+
+
+def _deployed_label(entry: dict) -> str:
+    """The raw label the DEPLOYED code titled an LF with: the normalised title, with the
+    surrounding whitespace the burn text kept (``"Ireland "``): a dated title is built from
+    the stripped label, the deployed title kept it raw. Only a burn text equal to the title
+    up to surrounding whitespace is used, so a changed label is never rewritten."""
+    title = _normalised_title(entry)
+    text = str(entry.get("ost_text") or "")
+    return text if text != title and text.strip() == title.strip() else title
+
+
+def _deployed_group_key(label: str) -> str:
+    """The key the deployed ``ensure_unique_titles`` grouped labels on:
+    ``assemble_final_title(label).strip().lower()`` (02861d3 ``title_builder`` ~1913-2010). That
+    final title drops the via-road clause (``longform_metadata._front_loaded_title``), so
+    ``"Ireland via N71"`` and ``"Ireland"`` shared one key. Only that clause is mirrored; a label
+    the final title reshapes otherwise (a leading verb, a state abbr) keys apart and is numbered
+    by its own part keys or refused, never accepted on a guess."""
+    return _VIA_ROAD_RE.sub("", label).strip().lower()
+
+
+def deployed_part_numbering(titles, recording, texts=None) -> dict:
     """``{lf_index: (k, N)}``: the `` (Part k of N)`` the DEPLOYED code gave each LF.
 
     Deployed ``ensure_unique_titles`` deduped drive-wide: every LF sharing a base label (the
     title without its drive date and part suffix) got `` (Part k of N)``, k its place in LF
     order and N the number of LFs holding that label across the WHOLE drive. ``titles`` and
-    ``recording`` are the drive-wide ``per_lf_titles`` / ``per_lf_recording_date`` maps. A label
-    held by one LF has no entry (the deployed code left it bare). Labels are grouped
-    case-insensitively and trimmed, as the deployed dedup compared them. A label whose split
+    ``recording`` / ``texts`` are the drive-wide ``per_lf_titles`` / ``per_lf_recording_date`` /
+    ``per_lf_ost_text`` maps (the one rule the gate and the resume drift check share). A label
+    held by one LF has no entry (the deployed code left it bare). Labels are grouped on
+    :func:`_deployed_group_key`, as the deployed dedup compared them. A label whose split
     LFs disagree with their own part keys (a ``— Part k of K`` set on one day that is not
     exactly parts 1..K) is left unnumbered, so its part count stays bound to its title."""
     groups: dict = {}
@@ -421,10 +447,11 @@ def deployed_part_numbering(titles, recording) -> dict:
         title = str((titles or {})[raw_idx] or "")
         date = str((recording or {}).get(raw_idx, "") or "")
         entry = {"youtube_title": title, "recording_date": date}
+        entry["ost_text"] = str((texts or {}).get(raw_idx, "") or "")
         part = title_part_suffix(title)
         if part is not None:
             entry["part_index"], entry["part_count"] = part
-        key = _normalised_title(entry).strip().lower()
+        key = _deployed_group_key(_deployed_label(entry))
         groups.setdefault(key, []).append((int(raw_idx), date, part))
     numbering: dict = {}
     for members in groups.values():
@@ -447,7 +474,7 @@ def _deployed_base_title(entry: dict, numbering=None) -> str:
     ``numbering`` (:func:`deployed_part_numbering`) is the drive-wide k and N; an LF it does not
     number (a caller with no drive-wide titles) falls back to its own part keys. Burn text, base
     label and part count all stay bound: they are the same inputs the normalised hash covers."""
-    title = _normalised_title(entry)
+    title = _deployed_label(entry)
     k_n = (numbering or {}).get(entry.get("lf_index"))
     if k_n is None and entry.get("part_index") is not None and entry.get("part_count") is not None:
         k_n = (entry["part_index"], entry["part_count"])
@@ -578,8 +605,9 @@ def write_surface_review_copy(output_base: Path, surface: str, date: str, state)
 
 
 def _stamped_this_run(state) -> dict:
-    """``{date: hash}`` this run's gate passes stamped: never persisted (a dict state carries it
-    as a plain key, a ``PipelineState`` as a non-field attribute ``to_dict`` does not write)."""
+    """``{date: hash}`` this run's gate passes stamped. Not persisted for a ``PipelineState`` (a
+    non-field attribute ``to_dict`` does not write). A dict state carries it as a plain key that
+    ``_serialize_state`` may write, but a reload drops it (``PipelineState.from_dict``)."""
     if state is None:
         return {}
     stamped = _state_field(state, "ost_audit_stamped_this_run")
@@ -627,7 +655,9 @@ def lf_gate_or_raise(
     }
     payload = format_ost_audit(date, audit_state, lf_indices, location=location, inserts=inserts)
     numbering = deployed_part_numbering(
-        audit_state["per_lf_titles"], audit_state["per_lf_recording_date"]
+        audit_state["per_lf_titles"],
+        audit_state["per_lf_recording_date"],
+        audit_state["per_lf_ost_text"],
     )
     current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload, numbering)
     # The hashes a confirmation stored before suffixes were normalised: they vouch for the

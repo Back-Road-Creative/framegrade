@@ -219,7 +219,7 @@ def test_the_per_day_gate_hash_covers_the_inserts(tmp_path):
         ost_audit_passed={day: True},
         ost_audit_hash={day: hash_of(None)},
     )
-    with pytest.raises(OstAuditPendingError):
+    with pytest.raises(OstAuditPendingError, match="changed since"):
         _run_day(tmp_path, ins, state=stale)
     # The operator's own confirm on THIS run passes the stale day (the one gate's route order,
     # same as the front-load) and re-binds the stored hash to the payload that now covers the
