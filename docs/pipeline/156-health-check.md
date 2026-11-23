@@ -360,11 +360,11 @@ exit code; the text output prints `failed audit <project>: <reason>`), and goes 
 or a passed one is handled as below, and when every `auditing` row is failed the next eligible
 backlog row launches (exit 0). Only `--supersede` of another row still stops at a failed audit
 (`refused`); superseding the failed row itself is unchanged (below).
-A failed drive whose publish job failed after a passed audit is published again each tick; if
-`health publish` refuses it (anything but a launch, a dry run, a noop or a `no claim:` slot wait;
-for example a mask-frame or duplicate-title gate) it stays unpublished, is logged at WARNING, is
+A failed drive whose publish job failed after a passed audit is published again each tick, and an
+`auditing` drive whose audit passed is published too; if `health publish` refuses either (any
+refusal: anything but a launch, a dry run, a noop or a `no claim:` slot wait) it stays unpublished, is logged at WARNING, is
 listed under `failed_publishes` (project, reason), printed as `failed publish <project>: <reason>`
-in the text output, and is skipped by the row loop in that tick, and the next eligible row launches. A refused drive never holds its region.
+in the text output, and is skipped by the row loop in that tick, and the next eligible row launches. A refused drive never holds its region. A replace backoff (a replace that has not finished, retried with the heal backoff) does not hold the region either: the tick goes on to the next row.
 An audit whose newest job stopped at the OST audit gate (exit 5, `DRIVE WAITING:`; every
 placeless drive does, since a no-GPS LF gets no system review) is not failed: it is a `noop`
 naming each `ost_audit_<date>.json` sidecar under its stages and the `.confirmed` marker to
