@@ -1007,24 +1007,37 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
 
     A day with no blur sidecar is refused by the publish gate whatever the master holds, so it
     never keeps one. Otherwise the master goes only once the gate can measure the day without
-    it (``mask_frame_gate.can_measure_without_master``). When it cannot, a proof is written
-    from the master itself (the count the gate would trust from it) and the gate's rule is asked
-    again; if it still says no, the master is kept and a WARNING says so."""
+    it (``mask_frame_gate.can_measure_without_master``). When it cannot: the pairing check
+    ``persist_source_frames`` requires runs first (a refusal keeps the master); a proof is then
+    written from the master itself; and if a stray day concat intermediate (``day_<date>_raw.mp4``,
+    the file the encoder's Step 3 unlinks after the master encode) still blocks the proof, it is
+    removed once that proof validates. The gate's rule is asked again, and the master is kept
+    with a WARNING naming the reason whenever the answer is still no."""
     if not (day_dir / f"day_{date}_blur_regions.json").exists():
         return True
-    from ..publishing.mask_frame_gate import can_measure_without_master
+    from ..publishing.mask_frame_gate import (
+        can_measure_without_master,
+        persisted_source_count,
+    )
     from . import blur_gate
+    from .day_master_encoder import master_fingerprint
 
     if can_measure_without_master(day_dir, date):
         return True
     master = day_dir / f"day_{date}_master.mp4"
+    mask = day_dir / f"day_{date}_blur_mask.mkv"
+    sidecar = day_dir / f"day_{date}_blur_regions.json"
     try:
-        fingerprint = f"master:{master.stat().st_size}:{master.stat().st_mtime_ns}"
+        pairing_error = blur_gate.frame_pairing_error(master, mask, sidecar)
+        if pairing_error:
+            logger.warning(
+                "  master-drop: day %s: keeping the master, no proof written (%s)",
+                date,
+                pairing_error,
+            )
+            return False
         blur_gate.persist_source_frames(
-            master,
-            day_dir / f"day_{date}_blur_mask.mkv",
-            day_dir / f"day_{date}_blur_regions.json",
-            source_fingerprint=fingerprint,
+            master, mask, sidecar, source_fingerprint=f"master:{master_fingerprint(master)}"
         )
     except Exception as exc:  # never block cleanup; the master simply stays
         logger.warning(
@@ -1032,10 +1045,35 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
         )
     if can_measure_without_master(day_dir, date):
         return True
+    raw = day_dir / f"day_{date}_raw.mp4"
+    if not persisted_source_count(day_dir, date):
+        reason = "no source frame proof validates"
+    elif not os.path.lexists(raw):
+        reason = "no raw blocks it, yet the gate still cannot measure the day"
+    elif raw.is_dir():
+        reason = f"the raw {raw} is a directory, left in place"
+    elif not (raw.is_file() or raw.is_symlink()):
+        reason = f"the raw {raw} is not a regular file, left in place"
+    else:
+        try:
+            raw.unlink()
+        except OSError as exc:
+            reason = f"the stray raw {raw} could not be removed ({exc})"
+        else:
+            logger.warning(
+                "  master-drop: day %s: removed the stray day concat %s (0-byte, unprobeable "
+                "or dangling); the proof written from the master now vouches for the day",
+                date,
+                raw,
+            )
+            if can_measure_without_master(day_dir, date):
+                return True
+            reason = f"the gate still cannot measure the day after removing {raw}"
     logger.warning(
         "  master-drop: day %s: the publish gate cannot measure the day without its master "
-        "(no probeable raw, no proof that validates) — keeping the master",
+        "(%s) — keeping the master",
         date,
+        reason,
     )
     return False
 

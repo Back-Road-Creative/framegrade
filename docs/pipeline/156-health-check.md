@@ -511,9 +511,14 @@ mask: no reader may treat it as the mask's renderer commit. Every skipped proof 
 `day_<date>` dir, so nothing would read it). Cleanup (`drop_day_master`) drops the day master only
 once the gate can measure the day without it (`mask_frame_gate.can_measure_without_master`: the raw
 is a regular file that probes to a positive frame count, else no raw exists and the persisted proof
-validates). With no such proof it writes one from the master (`persist_source_frames`), asks the
-same rule again, and keeps the master with a WARNING if the answer is still no; a 0-byte, unprobeable
-or dangling raw never counts. A mask changed after the drop still leaves that day
+validates). With no such proof it first runs the pairing check `persist_source_frames` requires
+(`blur_gate.frame_pairing_error`; a refusal, e.g. a pending repair swap, keeps the master with a
+WARNING and writes no proof), then writes a proof from the master and asks the same rule again. A
+stray `day_<date>_raw.mp4` (the pipeline's own concat intermediate, which the encoder unlinks after
+the master encode) that is 0-byte, unprobeable or a dangling symlink is removed, with a WARNING
+naming it, once that proof validates, so the master can then drop. A directory or any other raw is
+never removed and keeps the master with a WARNING, as does a proof that does not validate or an
+unlink that fails. A mask changed after the drop still leaves that day
 `mask_frame_count_unknown` (fail closed). A day with no blur sidecar is unaffected. A
 `day_<date>` dir holding no `day_<date>_*` file is `mask_frame_count_unknown` when it holds finals
 (`regular_lfs`, `shorts`, `superlong`), else skipped with a WARNING. A day rendered before this file existed

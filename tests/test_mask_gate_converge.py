@@ -4,11 +4,14 @@ writes that proof from the master when none validates. Fail closed when it canno
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
 
-from gomoveshift.pipeline import blur_gate
+import pytest
+
+from gomoveshift.pipeline import blur_gate, day_master_encoder
 from gomoveshift.publishing import mask_frame_gate as gate
 
 from tests.test_mask_frame_gate import DATE, is_unknown, make_day, persist
@@ -33,43 +36,143 @@ def _day(tmp_path, *, raw=False) -> Path:
 
 
 def _master_probe(monkeypatch, n=N):
-    """Only the master probes: the gate and blur_gate both see ``n`` frames for it."""
+    """Answer by file name: the master (and its mask) count ``n``, anything else, the raw
+    included, is unreadable. A proof measured from any path but the master is never written."""
     monkeypatch.setattr(
         gate, "probe_frames", lambda p: n if Path(p).name.endswith("_master.mp4") else None
     )
-    monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: n)
+    monkeypatch.setattr(
+        blur_gate,
+        "container_frame_count",
+        lambda p: n if Path(p).name.endswith(("_master.mp4", "_blur_mask.mkv")) else -1,
+    )
     monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: n)
 
 
 # ── MINOR-1: a present raw is not a measurable raw ───────────────────────────
 
 
-def test_zero_byte_raw_keeps_the_master(tmp_path, monkeypatch):
+def test_zero_byte_raw_is_cleared_and_the_master_drops(tmp_path, monkeypatch, caplog):
+    """The 0-byte raw is the pipeline's own day concat intermediate (Step 3 meant to unlink it):
+    once a proof written from the master validates, it goes and the master can drop."""
     day = make_day(tmp_path / "st", sidecar=N, raw=True)  # raw is 0 bytes
     (day / f"day_{DATE}_blur_mask.mkv").write_bytes(b"mask")
     _finals(day)
     master = day / f"day_{DATE}_master.mp4"
     master.write_bytes(b"master")
-    monkeypatch.setattr(
-        gate, "probe_frames", lambda p: N if Path(p).name.endswith("_master.mp4") else None
-    )
+    _master_probe(monkeypatch)
     assert not is_unknown(tmp_path / "st")
-    assert _drop(day)["dropped"] is False
-    assert master.exists()
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is True
+    assert not master.exists()
+    assert not (day / f"day_{DATE}_raw.mp4").exists()
+    assert gate.persisted_source_count(day, DATE) == N
+    assert any("raw.mp4" in m for m in _warnings(caplog))
     assert not is_unknown(tmp_path / "st")
+    assert gate.mask_frame_refusal(tmp_path / "st", drive="k", record=False) is None
 
 
-def test_dangling_raw_symlink_keeps_the_master(tmp_path, monkeypatch):
+def test_dangling_raw_symlink_is_cleared_and_the_master_drops(tmp_path, monkeypatch):
     day = _day(tmp_path)
     (day / f"day_{DATE}_raw.mp4").symlink_to(tmp_path / "offline" / "raw.mp4")
-    monkeypatch.setattr(gate, "probe_frames", lambda p: N)
-    assert _drop(day)["dropped"] is False
-    assert (day / f"day_{DATE}_master.mp4").exists()
+    _master_probe(monkeypatch)
+    assert _drop(day)["dropped"] is True
+    assert not os.path.lexists(day / f"day_{DATE}_raw.mp4")
+    assert not (day / f"day_{DATE}_master.mp4").exists()
     assert not is_unknown(tmp_path / "st")
+
+
+def test_directory_raw_is_never_unlinked_and_keeps_the_master(tmp_path, monkeypatch, caplog):
+    day = _day(tmp_path)
+    raw = day / f"day_{DATE}_raw.mp4"
+    raw.mkdir()
+    (raw / "keep.txt").write_text("x")
+    _master_probe(monkeypatch)
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is False
+    assert (raw / "keep.txt").exists()
+    assert (day / f"day_{DATE}_master.mp4").exists()
+    assert any("raw.mp4" in m and "directory" in m for m in _warnings(caplog))
+    assert not is_unknown(tmp_path / "st")
+
+
+def test_mismatched_master_count_unlinks_nothing_and_keeps_the_master(
+    tmp_path, monkeypatch, caplog
+):
+    day = _day(tmp_path)
+    raw = day / f"day_{DATE}_raw.mp4"
+    raw.write_bytes(b"")
+    _master_probe(monkeypatch)
+    monkeypatch.setattr(
+        blur_gate,
+        "container_frame_count",
+        lambda p: N - 8 if Path(p).name.endswith("_master.mp4") else N,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is False
+    assert raw.exists()
+    assert (day / f"day_{DATE}_master.mp4").exists()
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+    assert any(DATE in m and "master" in m for m in _warnings(caplog))
+
+
+def test_raw_stays_when_the_proof_does_not_validate(tmp_path, monkeypatch, caplog):
+    day = _day(tmp_path)
+    raw = day / f"day_{DATE}_raw.mp4"
+    raw.write_bytes(b"")
+    _master_probe(monkeypatch)
+    monkeypatch.setattr(blur_gate, "persist_source_frames", lambda *a, **k: None)
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is False
+    assert raw.exists() and (day / f"day_{DATE}_master.mp4").exists()
+    assert any(DATE in m and "no source frame proof" in m for m in _warnings(caplog))
+
+
+def test_unlink_failure_keeps_the_master_with_a_warning(tmp_path, monkeypatch, caplog):
+    day = _day(tmp_path)
+    raw = day / f"day_{DATE}_raw.mp4"
+    raw.write_bytes(b"")
+    _master_probe(monkeypatch)
+    real_unlink = Path.unlink
+
+    def deny(self, *a, **k):
+        if self == raw:
+            raise PermissionError("denied")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", deny)
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is False
+    assert raw.exists() and (day / f"day_{DATE}_master.mp4").exists()
+    assert any("raw.mp4" in m and "denied" in m for m in _warnings(caplog))
+
+
+def test_cleanup_writes_no_proof_while_a_repair_swap_is_pending(tmp_path, monkeypatch, caplog):
+    """persist_source_frames may only follow a clean frame_pairing_error."""
+    day = _day(tmp_path)
+    _master_probe(monkeypatch)
+    sidecar = day / f"day_{DATE}_blur_regions.json"
+    blur_gate.repair_swap_pending_path(sidecar).write_text("{}")
+    with caplog.at_level(logging.WARNING):
+        assert _drop(day)["dropped"] is False
+    assert (day / f"day_{DATE}_master.mp4").exists()
+    assert not (day / f"day_{DATE}_source_frames.json").exists()
+    assert any(DATE in m and "repair swap" in m for m in _warnings(caplog))
+
+
+def test_the_proof_fingerprint_names_the_master(tmp_path, monkeypatch):
+    day = _day(tmp_path)
+    _master_probe(monkeypatch)
+    master = day / f"day_{DATE}_master.mp4"
+    expected = "master:" + day_master_encoder.master_fingerprint(master)
+    assert _drop(day)["dropped"] is True
+    doc = json.loads((day / f"day_{DATE}_source_frames.json").read_text())
+    assert doc["source_fingerprint"] == expected
 
 
 def test_unprobeable_raw_with_a_valid_proof_keeps_the_master(tmp_path, monkeypatch):
-    """The gate never reads the proof while a raw exists, so the proof cannot vouch."""
+    """The gate never reads the proof while a raw exists, so the proof cannot vouch; with the
+    master itself unmeasurable here nothing can be re-proved, so nothing is removed."""
     day = _day(tmp_path)
     persist(day)
     (day / f"day_{DATE}_raw.mp4").write_bytes(b"raw")
@@ -86,6 +189,22 @@ def test_probeable_raw_lets_the_master_go_and_the_day_stays_measured(tmp_path, m
     monkeypatch.setattr(gate, "probe_frames", lambda p: N)
     assert _drop(day)["dropped"] is True
     assert not is_unknown(tmp_path / "st")
+
+
+@pytest.mark.parametrize("raw_kind", ["dangling", "dir"])
+def test_helper_refuses_a_present_raw_even_with_a_valid_proof(tmp_path, raw_kind):
+    """The gate skips the proof fallback while any raw name exists, so the helper must too."""
+    day = _day(tmp_path)
+    persist(day)
+    raw = day / f"day_{DATE}_raw.mp4"
+    if raw_kind == "dir":
+        raw.mkdir()
+    else:
+        raw.symlink_to(tmp_path / "offline" / "raw.mp4")
+    assert gate.persisted_source_count(day, DATE) == N
+    assert gate.can_measure_without_master(day, DATE) is False
+    (day / f"day_{DATE}_master.mp4").unlink()
+    assert is_unknown(tmp_path / "st")  # the gate agrees
 
 
 def test_helper_is_the_single_rule(tmp_path, monkeypatch):
