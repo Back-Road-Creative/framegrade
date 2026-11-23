@@ -734,13 +734,17 @@ refused, a terminal one is left. A day whose Shorts are all finished is judged b
 attestation beside the plan, so a reclaimed stage copy never holds the other Shorts. A Short with no
 `recording_date` key is refused and written back with a null date, so it keeps its `short_index` and
 dispatch holds its stale bytes (rows stay queued, never burned); it is never settled while the date is
-missing. Dispatch holds those rows itself: `SidecarRecordLoader` raises `TransientMediaError` (row
-stays queued, never burned, visible in the row's error and the media-stall incident) for a record with
-a null `recording_date`, because the privacy attestation is per run and would otherwise pass its
+missing. Dispatch holds those rows itself: `SidecarRecordLoader` raises `RecordHeldError` for a record with
+a null `recording_date`: a HOLD like the privacy hold, so the drain writes no attempt, no backoff and no
+status change (only `error_class`/`error_detail` on the row, lease released), and one `delivery_record_held`
+incident names the Short, because the privacy attestation is per run and would otherwise pass its
 unchanged bytes. A plan that lists one `short_index` more than once is refused by `load_publish_plan` itself
 (`DuplicateShortIndexError`, a `PublishPlanFormatError`), so EVERY reader refuses it; dispatch turns
-that into the same hold for every row of the project (the last record would upload another Short's
-video). The rebuild refuses every position of that index with one incident and writes both records
+that into the same `RecordHeldError` hold for every row of the project (the last record would upload
+another Short's video), with one `delivery_record_held` incident per project naming the index and that
+every row is held. Both incidents stay open until resolved through the health incident store (as
+`delivery_held_past_slot` does); reruns never duplicate them, and a row released by a fixed plan still
+has its whole `max_attempts` budget. The rebuild refuses every position of that index with one incident and writes both records
 back verbatim (the only caller that validates with `allow_duplicate_index=True`); fixing the plan and
 rerunning converges with no hand step. A confirmation whose swap hash is the legacy single string is
 refused by the replace gate with "re-confirm Gate C/D" (a re-confirmation records it per plan). A Short whose rows are all terminal (cancelled, published) has nothing left to swap and its

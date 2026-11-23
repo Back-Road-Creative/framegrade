@@ -117,7 +117,7 @@ def test_a_duplicate_index_never_uploads_another_shorts_video_and_converges(w):
     calls, res = _drain(w, LATER)
     assert calls == [] and res.succeeded == 0 and res.errors  # held, with a reason
     row = _row(w, did)
-    assert row["status"] == "queued" and row["error_class"] == "TransientMediaError"
+    assert row["status"] == "queued" and row["error_class"] == "RecordHeldError"
     assert _open(w, 1)
     _undup(w, raw)  # the duplicate is fixed
     r = w.run(privacy_fn=REAL, now=LATER)
@@ -157,7 +157,7 @@ def test_an_undated_short_with_unchanged_bytes_is_held_in_dispatch(w):
     calls, res = _drain(w, LATER)
     assert not any(c.name == "short_01.mp4" for c in calls)  # the incident told the truth
     row = _row(w, did1)
-    assert row["status"] == "queued" and row["error_class"] == "TransientMediaError"
+    assert row["status"] == "queued" and row["error_class"] == "RecordHeldError"
     assert "recording_date" in row["error_detail"]
     assert _open(w, 1)
     assert _row(w, did2)["status"] != "failed_permanent"

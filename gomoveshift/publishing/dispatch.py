@@ -97,6 +97,9 @@ def media_stall_attempts(
 
 MEDIA_STALL_ATTEMPTS = media_stall_attempts()
 MEDIA_STALL_KIND = "delivery_media_stalled"
+#: One incident per held plan problem (see :class:`RecordHeldError`): a duplicated index holds the
+#: whole project (keyed on the project), an undated Short holds one row (keyed on the delivery).
+RECORD_HELD_KIND = "delivery_record_held"
 
 #: A throttled delivery waits this long regardless of `attempt_count`.
 #: Six hours is well inside the daily publishing cadence (slots are
@@ -264,6 +267,22 @@ class TransientMediaError(Exception):
     not a shutoff."""
 
 
+class RecordHeldError(TransientMediaError):
+    """Raise from the record loader when the PLAN, not the platform or the drive, makes a row's
+    record unusable (a duplicated ``short_index``, an undated Short): the row is HELD.
+
+    Like the privacy hold, a hold is not a failure: ``drain_queue`` writes no attempt, no
+    backoff and no status change for it (only the visible error and a released lease), so the row
+    still has its whole ``max_attempts`` budget once the plan is fixed. Subclasses
+    :class:`TransientMediaError` only so older ``except`` sites keep reading it as "retry later";
+    the drain tests for this class first. ``project_wide`` is True when every row of the project
+    is held."""
+
+    def __init__(self, message: str, *, project_wide: bool = False):
+        super().__init__(message)
+        self.project_wide = project_wide
+
+
 @dataclass
 class DrainResult:
     """One ``drain_queue`` pass's outcome. Empty/all-skipped is success."""
@@ -291,6 +310,9 @@ class DrainResult:
     #: names a problem on their (platform, project). Same contract as the
     #: privacy hold: no lease, no transition, no attempt charged.
     held_validate: int = 0
+    #: Rows whose record the plan makes unusable (:class:`RecordHeldError`): no attempt, no
+    #: transition, lease released, one incident per hold.
+    held_record: int = 0
     #: YouTube Shorts moved to the next free slot because another Short already
     #: held that clock hour (this pass or the queue).
     moved_same_hour: int = 0
@@ -832,6 +854,55 @@ def _raise_held_incident(
         logger.exception("dispatch: could not write held-past-slot incident for %s", row["id"])
 
 
+def _raise_record_held_incident(
+    row: Dict[str, Any], now: str, exc: "RecordHeldError", incidents_dir: Optional[Path]
+) -> None:
+    """One open incident per held plan problem, however often the drain re-reads it: keyed on the
+    project when the whole project is held, else on the delivery. Never fatal. It stays open
+    until resolved through the health incident store, as the held-past-slot incident does."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    scope = row["project_name"] if exc.project_wide else row["id"]
+    key = f"{RECORD_HELD_KIND}:{scope}"
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    filename = f"{safe_name(key)}.json"
+    try:
+        existing = directory / filename
+        if existing.is_file() and json.loads(existing.read_text()).get("resolved_at") is None:
+            return
+        who = (
+            f"every row of project {row['project_name']}"
+            if exc.project_wide
+            else f"{row['platform']}#{row['id']} {row['project_name']} short {row['short_index']}"
+        )
+        scoped = (
+            {}
+            if exc.project_wide
+            else {"delivery_id": row["id"], "short_index": row["short_index"]}
+        )
+        write_row(
+            directory,
+            new_incident(
+                RECORD_HELD_KIND,
+                key,
+                filename,
+                now,
+                platform=row["platform"],
+                project=row["project_name"],
+                **scoped,
+                detail=f"{who} is held, not failed (no attempt counted): {exc}"[:500],
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("dispatch: could not write record-held incident for %s", row["id"])
+
+
 def _stall_done(conn, delivery_id) -> bool:
     """A stalled row is finished when it uploaded, went terminal or no longer exists."""
     found = conn.execute(
@@ -1120,6 +1191,21 @@ def drain_queue(
                 else None
             )
             new_attempt_count = (live["attempt_count"] if live is not None else 0) + 1
+            if isinstance(exc, RecordHeldError):
+                # A hold, like the privacy hold: no transition, no attempt bump, no backoff.
+                # Only the error is made visible and this pass's lease dropped.
+                result.attempted -= 1
+                result.held_record += 1
+                result.errors.append(f"{platform}#{delivery_id}: record hold: {exc}")
+                if live_status is not None:
+                    with conn:
+                        conn.execute(
+                            "UPDATE deliveries SET error_class=?, error_detail=?, lease_owner=NULL, "
+                            "lease_expires_at=NULL WHERE id=? AND lease_owner=?",
+                            (type(exc).__name__, _detail(exc), delivery_id, owner),
+                        )
+                _raise_record_held_incident(row, now, exc, incidents_dir)
+                continue
             if isinstance(exc, PermanentDeliveryError) and not _facebook_unknown(live):
                 recorded = live_status is not None and transition(
                     conn,

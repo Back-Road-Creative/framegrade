@@ -31,6 +31,7 @@ from ...config import ConfigError
 from ...console import notify
 from ...publishing.dispatch import (
     PRIVACY_ATTESTATION_GLOB,
+    RecordHeldError,
     TransientMediaError,
     drain_queue,
     merge_privacy_attestations,
@@ -124,9 +125,10 @@ class SidecarRecordLoader:
             except DuplicateShortIndexError as exc:
                 # Which record is the Short's cannot be known, and the last would upload another
                 # Short's video under this row: hold the whole project, unburned, until fixed.
-                raise TransientMediaError(
+                raise RecordHeldError(
                     f"{exc}; every row of {project_name!r} is held until the plan names each "
-                    "Short once"
+                    "Short once",
+                    project_wide=True,
                 ) from exc
             self._cache[project_name] = {s.short_index: s for s in plan.shorts}
         return self._cache[project_name]
@@ -143,7 +145,7 @@ class SidecarRecordLoader:
         if not record.recording_date:
             # The privacy attestation is per run, not per Short's day, so an undated Short's
             # unchanged bytes would pass it: hold the row (never burned) until the day is known.
-            raise TransientMediaError(
+            raise RecordHeldError(
                 f"short {short_index} of {project_name!r} has no recording_date: its privacy "
                 "day is unknown, so its row is held"
             )
