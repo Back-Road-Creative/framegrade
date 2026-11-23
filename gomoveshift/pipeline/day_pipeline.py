@@ -3607,8 +3607,9 @@ def run_all_days(
             the clip stays on the drive's first day) and gated only for the
             days in `day_batches`. Omitted: `day_batches` is the whole drive.
         failed_days: Optional dict the caller passes in; each day that raised
-            or returned None is recorded as ``{date: cause}`` so the caller's
-            "incomplete" error can name it.
+            or returned None, or whose score bounds cannot be derived, is
+            recorded as ``{date: cause}`` so the caller's "incomplete" error can
+            name it.
 
     Returns:
         List of `DayArtifacts`, one per successful day.
@@ -3714,6 +3715,8 @@ def run_all_days(
                 "run_all_days: day %s has no score bounds, skipping",
                 day_batch.date,
             )
+            if failed_days is not None:
+                failed_days[day_batch.date] = "no score bounds (episodes not in the scored files)"
             continue
         day_start, day_end = bounds
         day_scores = slice_scores_for_day(drive_scores, day_start, day_end)
