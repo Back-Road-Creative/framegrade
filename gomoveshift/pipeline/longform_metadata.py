@@ -614,7 +614,7 @@ def _resolve_gone_lfs(drive: str, expected: dict[int, set[str]], incidents_dir: 
             resolve_incidents(drive, lf=lf, codes=(ORPHAN_UPLOAD_CODE,), incidents_dir=incidents_dir, outcome="the drive's checkpoint no longer has this LF")  # fmt: skip
 
 
-def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callable[[], object]]) -> Optional[str]:  # fmt: skip
+def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callable[[], object]], note: Optional[str] = None) -> Optional[str]:  # fmt: skip
     """``None`` when the local snapshot was fetched after ``since`` (refreshed through ``refresh``
     first when it was not), else why the publish waits: the next tick tries again."""
     fetched = live_catalog_fetched_at()
@@ -631,7 +631,8 @@ def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callab
             if fetched is not None and fetched > since:
                 return None
             why = "the refresh wrote no newer snapshot"
-    return (f"{drive}: an earlier publish failed (ended {since.isoformat()}) and the live-catalog "
+    lead = note.format(drive=drive) if note else f"{drive}: an earlier publish failed (ended {since.isoformat()})"  # fmt: skip
+    return (f"{lead} and the live-catalog "
             f"snapshot (fetched {fetched.isoformat() if fetched else 'never'}) predates it, so an "
             f"upload it left cannot be ruled out ({why}); nothing was changed, the next tick "
             "retries")  # fmt: skip
@@ -649,6 +650,8 @@ def orphan_upload_refusal(
     first_attempt: Optional[datetime] = None,
     fresh_since: Optional[datetime] = None,
     refresh: Optional[Callable[[], object]] = None,
+    attribution: Optional[dict] = None,
+    fresh_note: Optional[str] = None,
 ) -> Optional[str]:
     """``None`` when no live-catalog video is an unbooked upload of this drive, else the reason
     its publish must wait. A publish that died after the YouTube upload left such a video; the
@@ -659,10 +662,14 @@ def orphan_upload_refusal(
     exact titles, ``other_forms`` the titles other drives derive and ``first_attempt`` this drive's
     first publish job (:func:`expected_lf_titles`, :func:`orphan_uploads`). ``fresh_since`` is set
     after a failed publish: the snapshot must have been fetched after it, ``refresh`` is called to
-    get one, and without one the publish waits for the next tick. ``record`` opens one
+    get one (``fresh_note``, ``{drive}`` formatted, replaces the "ended" lead of the refusal when
+    the anchor is not a job's own end stamp), and without one the publish waits for the next tick. ``record`` opens one
     ``orphan_upload`` incident per LF (a rerun leaves it as it is), resolves the LF's row once the
     catalog no longer holds the video and closes rows of LFs the checkpoint dropped; a dry run
-    passes False. A drive with no checkpoint or no snapshot has nothing to match; an unreadable or
+    passes False. ``attribution`` (``{"own": windows, "others": {drive: {"titles", "windows"}}}``,
+    :func:`_attributed_to`) lets a match on a title another drive derives too be proven that other
+    drive's alone: then only that drive is refused, never this one. Without positive evidence for
+    exactly one other drive the match refuses every drive sharing the title. A drive with no checkpoint or no snapshot has nothing to match; an unreadable or
     missing ledger refuses.
     """
     from .replace_scheduled import ORPHAN_UPLOAD_CODE, record_incident, resolve_incidents
@@ -680,7 +687,7 @@ def orphan_upload_refusal(
     if not expected and not shared:
         return None
     if fresh_since is not None:
-        stale = _stale_snapshot_reason(drive, fresh_since, refresh)
+        stale = _stale_snapshot_reason(drive, fresh_since, refresh, fresh_note)
         if stale:
             return stale
     videos = _live_catalog_videos()
@@ -694,6 +701,9 @@ def orphan_upload_refusal(
     for o in orphan_uploads(shared, videos, known, first_attempt=first_attempt):
         if (o["lf"], o["video_id"]) not in sure and not _uploaded_before(videos[o["video_id"]], first_attempt):  # fmt: skip
             others = _sharing_drives(other_forms, shared[o["lf"]], o["title"])
+            owner = _attributed_to(drive, videos[o["video_id"]], o["title"], others, attribution)
+            if owner is not None and owner != drive:
+                continue  # proven another drive's upload: its own gate refuses it, this one passes
             candidates.append({**o, "shared_with": others})
     if ledger_ids is None:
         if not candidates:
@@ -723,6 +733,33 @@ def _uploaded_before(video: dict, first_attempt: Optional[datetime]) -> bool:
     not this drive's upload. Unknown upload time or no attempt: cannot be ruled out."""
     went_up = _parse_utc(video.get("published_at")) if isinstance(video, dict) else None
     return bool(first_attempt and went_up and went_up < first_attempt)
+
+
+def _covers(window: tuple, went_up: datetime, *, open_ok: bool) -> bool:
+    """``window`` is ``(created, ended or None)`` of one publish job: the upload fell inside it. A
+    job with no end stamp covers only when ``open_ok`` (this drive: fail closed), else it proves
+    nothing."""
+    created, ended = window
+    if ended is None:
+        return open_ok and created <= went_up
+    return created <= went_up <= ended
+
+
+def _attributed_to(drive: str, video: dict, title: str, sharers: str, attribution: Optional[dict]) -> Optional[str]:  # fmt: skip
+    """The one drive positive evidence ties a shared-title upload to, else ``None``. Evidence for
+    another drive: its Phase D sidecar names this exact title, or its publish job window covers the
+    video's ``published_at``. Evidence for this drive: its own publish job window covers it. More
+    than one drive with evidence, or none, is ``None``: the match refuses every sharing drive."""
+    if not isinstance(attribution, dict):
+        return None
+    went_up = _parse_utc(video.get("published_at")) if isinstance(video, dict) else None
+    names = {title.lower(), _part_base(title).lower()}
+    named = set(sharers.split(", "))
+    hit = {drive} if went_up and any(_covers(w, went_up, open_ok=True) for w in attribution.get("own") or ()) else set()  # fmt: skip
+    for other, ev in (attribution.get("others") or {}).items():
+        if names & set(ev.get("titles") or ()) or (went_up and other in named and any(_covers(w, went_up, open_ok=False) for w in ev.get("windows") or ())):  # fmt: skip
+            hit.add(other)
+    return next(iter(hit)) if len(hit) == 1 else None
 
 
 def _sharing_drives(other_forms: Any, forms: set[str], title: str) -> str:

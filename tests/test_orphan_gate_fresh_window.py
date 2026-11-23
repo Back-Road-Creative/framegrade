@@ -7,12 +7,14 @@ from __future__ import annotations
 import json
 import os
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from gomoveshift.config import get_config
 from gomoveshift.health import launch, publish
+from gomoveshift.health.heal import _STALL_S
 from gomoveshift.publishing.live_catalog import live_catalog_snapshot_path
 from tests.test_orphan_upload_incident import (
     ORPHAN,
@@ -329,3 +331,191 @@ def test_an_open_orphan_row_stays_open_when_another_drive_starts_sharing_the_tit
     assert res["action"] == "refused" and "vidKerry" in res["reason"], res
     assert row["resolved_at"] is None
     assert "no longer has this LF" not in json.dumps(row)
+
+
+def test_an_open_orphan_row_is_never_rewritten_when_another_drive_starts_sharing(
+    tmp_path, monkeypatch
+):
+    """A close-then-reopen in one call ends in the same shape; every write stamps the clock, so a
+    stamp that moves after the first run means the row was rewritten."""
+    from gomoveshift.health import store as health_store
+
+    rig = rig_with_state(tmp_path)
+    catalog({"vidKerry": ORPHAN})
+    assert rig.run()["action"] == "refused"
+    (first,) = rows(_inc())
+    ticks = iter(f"2030-01-01T00:00:{n:02d}+00:00" for n in range(60))
+    monkeypatch.setattr(health_store, "utc_iso", lambda: next(ticks))
+    _other_ireland(rig, date="2025-09-16")
+    assert rig.run()["action"] == "refused"
+    (row,) = rows(_inc())
+    assert row == first, (first, row)
+    assert next(ticks) == "2030-01-01T00:00:00+00:00"  # the second run stamped nothing
+
+
+# ── MINOR 1 (rr49): a shared-title orphan blocks only the drive it is proven to belong to ──────
+
+UP = datetime(2026, 11, 19, 17, 32, 49, tzinfo=timezone.utc).timestamp()  # ORPHAN published_at
+SHARED = {**ORPHAN, "title": "Ireland in 4K"}
+
+
+def _shared_pair(rig):
+    _other_ireland(rig)
+    catalog({"vidB": SHARED}, fetched_at=iso(UP + 7200))
+
+
+def _publish_as(rig, project):
+    return rig.run(project)
+
+
+def test_the_drive_whose_job_window_covers_the_upload_is_the_only_one_refused(tmp_path):
+    rig = rig_with_state(tmp_path)  # day-a: no job, no sidecar
+    _shared_pair(rig)
+    job(rig, created_at=UP - 600, state="failed", exit_code=1, ended_at=UP + 600, name="gms-publish-day-b")  # fmt: skip
+    refused = _publish_as(rig, "day-b")
+    assert refused["action"] == "refused" and "vidB" in refused["reason"], refused
+    assert "day-b" in refused["reason"]
+    assert _publish_as(rig, "day-a")["action"] == "launched"
+
+
+def test_both_windows_covering_the_upload_refuses_both_drives(tmp_path):
+    rig = rig_with_state(tmp_path)
+    _shared_pair(rig)
+    for name in ("gms-publish-day-a", "gms-publish-day-b"):
+        job(rig, created_at=UP - 600, state="failed", exit_code=1, ended_at=UP + 600, name=name)
+    for project in ("day-a", "day-b"):
+        res = _publish_as(rig, project)
+        assert res["action"] == "refused" and "vidB" in res["reason"], (project, res)
+
+
+def test_an_upload_no_window_and_no_sidecar_accounts_for_refuses_both_drives(tmp_path):
+    rig = rig_with_state(tmp_path)
+    _shared_pair(rig)
+    for project in ("day-a", "day-b"):
+        res = _publish_as(rig, project)
+        assert res["action"] == "refused" and "vidB" in res["reason"], (project, res)
+
+
+def test_an_open_ended_other_window_attributes_nothing(tmp_path):
+    rig = rig_with_state(tmp_path)
+    _shared_pair(rig)
+    job(rig, created_at=UP - 600, state="running", name="gms-publish-day-b")  # no end: unmeasured
+    for project in ("day-a",):
+        res = _publish_as(rig, project)
+        assert res["action"] == "refused" and "vidB" in res["reason"], (project, res)
+
+
+def test_the_other_drives_sidecar_naming_the_title_attributes_it_to_that_drive(tmp_path):
+    rig = rig_with_state(tmp_path)
+    _shared_pair(rig)
+    out = rig.out / "day-b"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "day-b_lf01_youtube.json").write_text(json.dumps({"title": "Ireland in 4K"}))
+    refused = _publish_as(rig, "day-b")
+    assert refused["action"] == "refused" and "vidB" in refused["reason"], refused
+    assert _publish_as(rig, "day-a")["action"] == "launched"
+
+
+# ── MINOR 2 (rr49): a dead job with no end stamp anchors on a stable time, never on now ──────
+
+
+def _ticks(rig, hours=3):
+    calls: list = []
+    results = []
+    for hour in range(hours):
+        now = NOW + timedelta(hours=hour)
+
+        def refresh(now=now):
+            calls.append(1)
+            catalog({"vidKerry": ORPHAN}, fetched_at=(now + timedelta(seconds=5)).isoformat())
+
+        results.append(
+            publish.run_publish(
+                project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+                code_root=rig.tmp, jobs_dir=rig.jobs, now=now, dry_run=False,
+                drive_running=lambda jobs: False, launcher=rig.launcher, refresh_catalog=refresh,
+            )["action"]
+        )  # fmt: skip
+    return calls, results
+
+
+def test_a_dead_job_with_no_end_stamp_fetches_once_across_ticks(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=NOW.timestamp() - 3 * 86400, state="cancelled")  # hand/legacy: no ended_at
+    calls, results = _ticks(rig)
+    assert results == ["refused"] * 3 and len(calls) == 1, (calls, results)
+
+
+def test_a_dead_job_with_no_end_stamp_ends_when_its_record_was_last_written(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=UP - 3600, state="cancelled")
+    (path,) = rig.jobs.glob("*/job.json")
+    body = json.loads(path.read_text())
+    path.write_text(json.dumps({**body, "run_id": path.parent.name}))
+    os.utime(path, (UP + 90, UP + 90))
+    _first, ended, _how = publish.publish_job_times(rig.jobs, "day-a")
+    assert ended == datetime.fromtimestamp(UP + 90, timezone.utc)
+
+
+def test_a_dead_job_whose_record_cannot_be_stat_ed_ends_at_creation_plus_the_stall_window(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=UP - 3600, state="cancelled")  # no run_id: no path to stat
+    _first, ended, _how = publish.publish_job_times(rig.jobs, "day-a")
+    assert ended == datetime.fromtimestamp(UP - 3600 + float(_STALL_S), timezone.utc)
+
+
+# ── MINOR 3 (rr49): one refresher serves the whole backlog tick ──────────────────────────────
+
+
+def test_a_replace_retry_tick_fetches_the_catalog_at_most_once(tmp_path, monkeypatch):
+    from gomoveshift.cli.handlers import health as handler
+
+    fetches: list = []
+    monkeypatch.setattr(publish, "catalog_refresher", lambda config: lambda: fetches.append(1))
+    monkeypatch.setattr(publish, "open_schedule_store", lambda config: (object(), object()))
+    monkeypatch.setattr(publish, "run_publish", lambda **kw: kw["refresh_catalog"]() or {"action": "refused", "reason": "x", "steps": []})  # fmt: skip
+    monkeypatch.setattr(launch, "load_inputs", lambda *a: ("usa", [], [], [], set(), None))
+    monkeypatch.setattr(launch, "lease_fns", lambda root: (None, None))
+    monkeypatch.setattr(launch, "run_backlog", lambda **kw: kw["publish"]("day-a", False) or {"action": "noop"})  # fmt: skip
+    monkeypatch.setattr(launch, "run_tick", lambda **kw: (kw["run"](None, True), kw["run"](None, False))[1])  # fmt: skip
+    args = Namespace(
+        supersede=False, reason=None, replace_scheduled=False, region="usa", ledger_path=None,
+        code_root=str(tmp_path), stages_root=tmp_path, output_root=tmp_path, sources_root=None,
+        staging_sha="abc1234", dry_run=True, json=True,
+    )  # fmt: skip
+    handler._cmd_backlog(args, get_config(), tmp_path, tmp_path / "jobs", tmp_path / "inc")
+    assert len(fetches) == 1, fetches
+
+
+# ── MINOR 4 (rr49): the refusal names the anchor it really used ─────────────────────────────
+
+
+def _stale_reason(rig):
+    catalog({"v": {"title": "Cork in 4K"}}, fetched_at="2001-01-01T00:00:00+00:00")
+    return run_with(rig, None)["reason"]
+
+
+def test_the_refusal_says_ended_only_for_a_stamped_end(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=T0, state="failed", exit_code=1, ended_at=T0 + 60)
+    assert "(ended " in _stale_reason(rig)
+
+
+def test_the_refusal_names_the_record_write_when_the_job_has_no_end_stamp(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=T0, state="cancelled")
+    (path,) = rig.jobs.glob("*/job.json")
+    path.write_text(json.dumps({**json.loads(path.read_text()), "run_id": path.parent.name}))
+    reason = _stale_reason(rig)
+    assert "no end stamp; its job record was last written" in reason and "(ended " not in reason
+
+
+def test_the_refusal_names_the_stall_window_when_nothing_else_anchors_the_job(tmp_path):
+    rig = failed_drive(tmp_path)
+    job(rig, created_at=T0, state="cancelled")
+    assert "its creation plus the stall window" in _stale_reason(rig)
+
+
+def test_the_refusal_names_a_reopen_with_no_job_record(tmp_path):
+    reason = _stale_reason(failed_drive(tmp_path))
+    assert "reopened from failed with no publish job record" in reason and "(ended " not in reason
