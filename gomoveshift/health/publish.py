@@ -139,6 +139,12 @@ def run_publish(
     masks = mask_frame_refusal(recipe_path.parent, drive=project, record=not dry_run)
     if masks:
         return _refuse(res, f"{project} blur mask does not match its source: {masks}")
+    from ..pipeline.longform_metadata import orphan_upload_refusal
+
+    booked = {vid for r in store.all_drives() for vid, _at in upload_receipts(r.output_dir).values()}  # fmt: skip
+    orphans = orphan_upload_refusal(project, recipe_path.parent, receipt_ids=booked, record=not dry_run)  # fmt: skip
+    if orphans:
+        return _refuse(res, orphans)
     lf_count = rendered_lf_count(recipe_path)
     if lf_count is None:
         return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip

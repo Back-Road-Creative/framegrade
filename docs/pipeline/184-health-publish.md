@@ -18,6 +18,16 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
    version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing
    prerequisite only after the slot is booked), else `refused` naming the phases: re-audit it;
+   no live-catalog video may be an unbooked upload of this drive (`longform_metadata.
+   orphan_upload_refusal`): a publish that died after `videos().insert` leaves a scheduled video with no
+   receipt and no ledger row, and the only key tying it to the drive is its expected title (each LF's
+   `per_lf_ost_text` label from `pipeline_state.json`, bare and dated ` (Mon D, YYYY)`, assembled).
+   A catalog video with such a title whose id no ledger row and no drive's receipt names is `refused`
+   naming its id, title, privacy and `publish_at`, and opens one `orphan_upload` incident per LF
+   (`replace_scheduled_partial` kind, never duplicated by a rerun, resolved once a snapshot that lists
+   other videos no longer holds it; a dry run records none). The refusal writes nothing to the store, counts no attempt, and
+   touches no other drive; nothing on YouTube is deleted, unlisted or adopted: delete or adopt the
+   video in Studio. An unreadable ledger refuses too; no checkpoint or no snapshot has nothing to match;
    and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
    the oldest ready drive of the region, never a named one. An older `ready` drive that already
    holds an upload receipt with `publish_at` (uploaded outside a claim) does not block: it is

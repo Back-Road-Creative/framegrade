@@ -438,6 +438,129 @@ def ledger_video_projects() -> dict[str, str]:
     return {e.video_id: e.project_name for e in entries if e.video_id and e.project_name}
 
 
+#: The incident ``code`` (under ``replace_scheduled.INCIDENT_KIND``, one row per drive and LF) for a
+#: live-catalog video that carries a drive's expected title but has no ledger row.
+ORPHAN_UPLOAD_CODE = "orphan_upload"
+
+
+def ledger_video_ids() -> Optional[set[str]]:
+    """Every video id the content ledger holds a row for, or ``None`` when the ledger cannot be
+    read (the caller must then fail closed: an empty guess would call every match an orphan
+    only by accident, and a half-read one could miss a real row)."""
+    from .content_ledger import ContentLedger
+
+    try:
+        return {e.video_id for e in ContentLedger.load().entries if e.video_id}
+    except Exception:  # noqa: BLE001 - the caller refuses on None
+        return None
+
+
+def expected_lf_titles(state: dict) -> dict[int, set[str]]:
+    """``{lf_index: {lowercased final title, ...}}`` a drive's own checkpoint says it will upload.
+
+    Each LF's label (``per_lf_ost_text``, else ``per_lf_titles``) assembled bare, and dated
+    (`` (Mon D, YYYY)`` from ``per_lf_recording_date``): the form ``ensure_unique_titles`` falls
+    back to when the bare title is another drive's. An LF with no label contributes nothing.
+    """
+    labels = state.get("per_lf_ost_text") or state.get("per_lf_titles") or {}
+    dates = state.get("per_lf_recording_date") or {}
+    out: dict[int, set[str]] = {}
+    if not isinstance(labels, dict):
+        return out
+    for key, label in labels.items():
+        try:
+            idx = int(key)
+        except (TypeError, ValueError):
+            continue
+        label = str(label or "").strip()
+        if not label:
+            continue
+        forms = {label}
+        raw = str((dates.get(key) if isinstance(dates, dict) else None) or "").strip()
+        try:
+            day = datetime.fromisoformat(raw[:10])
+            forms.add(f"{label} ({day.strftime('%b')} {day.day}, {day.year})")
+        except ValueError:
+            pass
+        out[idx] = {assemble_final_title(f).strip().lower() for f in forms}
+    return out
+
+
+def orphan_uploads(expected: dict[int, set[str]], videos: dict, known_ids: set[str]) -> list[dict]:
+    """Catalog videos whose title is one of a drive's expected titles and whose id no ledger row
+    or receipt knows: ``[{lf, video_id, title, privacy, publish_at}]``, in LF then id order.
+
+    Without a receipt the title is the only key that ties an upload to a drive; a video the ledger
+    or a receipt already names is a booked one, never an orphan.
+    """
+    found: list[dict] = []
+    for idx in sorted(expected):
+        for video_id in sorted(videos):
+            video = videos[video_id]
+            title = (video.get("title") or "").strip() if isinstance(video, dict) else ""
+            if video_id in known_ids or title.lower() not in expected[idx]:
+                continue
+            found.append({"lf": idx, "video_id": video_id, "title": title,
+                          "privacy": video.get("privacy"), "publish_at": video.get("publish_at")})  # fmt: skip
+    return found
+
+
+def orphan_upload_refusal(
+    drive: str,
+    stages_dir: Path,
+    *,
+    receipt_ids: Optional[set[str]] = None,
+    record: bool = True,
+    incidents_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """``None`` when no live-catalog video is an unbooked upload of this drive, else the reason
+    its publish must wait. A publish that died after the YouTube upload left such a video; the
+    next run would book a second one. Never deletes, unlists or adopts it: JP decides in Studio.
+
+    ``receipt_ids`` are the video ids any drive's receipts name (never an orphan). ``record``
+    opens one ``orphan_upload`` incident per LF (a rerun leaves it as it is) and resolves the
+    LF's row once the catalog no longer holds the video; a dry run passes False. Reads only the
+    drive's checkpoint, the local catalog snapshot and the ledger. A drive with no checkpoint
+    or no snapshot has nothing to match; an unreadable ledger refuses.
+    """
+    from ..pipeline.replace_scheduled import record_incident, resolve_incidents
+
+    try:
+        saved = json.loads((Path(stages_dir) / "pipeline_state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    expected = expected_lf_titles(saved) if isinstance(saved, dict) else {}
+    videos = _live_catalog_videos()
+    if not expected or not videos:
+        return None
+    ledger_ids = ledger_video_ids()
+    candidates = orphan_uploads(expected, videos, set(receipt_ids or ()))
+    if ledger_ids is None:
+        if not candidates:
+            return None
+        return (f"{drive}: the content ledger is unreadable, so a live video titled "
+                f"{candidates[0]['title']!r} ({candidates[0]['video_id']}) cannot be told from an "
+                "orphan upload; fix the ledger, then retry")  # fmt: skip
+    found = [o for o in candidates if o["video_id"] not in ledger_ids]
+    if record:
+        for idx in sorted(expected):
+            mine = [o for o in found if o["lf"] == idx]
+            if mine:
+                record_incident(drive, ORPHAN_UPLOAD_CODE, _orphan_text(drive, mine), lf=idx, incidents_dir=incidents_dir)  # fmt: skip
+            else:
+                resolve_incidents(drive, lf=idx, codes=(ORPHAN_UPLOAD_CODE,), incidents_dir=incidents_dir, outcome="the live catalog holds no unbooked upload with this title")  # fmt: skip
+    return "; ".join(_orphan_text(drive, [o]) for o in found) or None
+
+
+def _orphan_text(drive: str, orphans: list[dict]) -> str:
+    return "; ".join(
+        f"orphan upload: {drive} LF {o['lf']} title {o['title']!r} is already on YouTube as "
+        f"{o['video_id']} (privacy {o['privacy']}, publish_at {o['publish_at']}) with no ledger "
+        "row or receipt; delete or adopt it in Studio, then retry (nothing was changed on YouTube)"
+        for o in orphans
+    )
+
+
 def known_channel_titles() -> set[str]:
     """Every title either source knows is live: the analytics ledger
     (:func:`load_published_titles`) unioned with the live-catalog snapshot
