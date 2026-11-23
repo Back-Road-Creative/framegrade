@@ -743,9 +743,15 @@ unchanged bytes. A plan that lists one `short_index` more than once is refused b
 that into the same `RecordHeldError` hold for every row of the project (the last record would upload
 another Short's video), with one `delivery_record_held` incident per project naming the index and that
 every row is held. The Short's incident is keyed `project:short_index`, so one Short routed to several platforms files one.
-Both incidents close themselves: when a row's record loader passes (its handler returns, or fails on
-something other than a hold) the drain sets `resolved_at` on that Short's incident and on its project's
-(the loader passing proves no duplicate); a later hold files a fresh, unpushed incident. While open, reruns
+Both incidents close themselves, only on a positive pass: `SidecarRecordLoader` records each Short it
+actually returned a record for (and each project whose plan parsed with no duplicate), and when the row's
+handler then returns or fails, the drain sets `resolved_at` on that Short's incident (its record loaded)
+and on its project's (the plan parsed clean). A loader failure of any other kind (an unreadable or
+missing sidecar, a transient media error) proves nothing, so the incident stays open and unpushed again.
+The resolve runs after the row's published/waiting transition and never aborts a drain (a malformed
+incident file logs a WARNING naming its key). A per-pass sweep (`sync_record_held_incidents`, run beside
+the media-stall sweep) also closes an incident whose Short (or project) has no non-terminal row left, so
+rows cancelled by hand do not leave it open. A later hold files a fresh, unpushed incident. While open, reruns
 never duplicate them (`detected_at` and `pushed` do not change), the cron summary line carries
 `held_record=N` when non-zero, and a row released by a fixed plan still has its whole `max_attempts` budget. The rebuild refuses every position of that index with one incident and writes both records
 back verbatim (the only caller that validates with `allow_duplicate_index=True`); fixing the plan and

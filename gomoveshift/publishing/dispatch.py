@@ -14,6 +14,7 @@ never silently discard a publishable short.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -861,12 +862,42 @@ def _record_held_key(row: Dict[str, Any], project_wide: bool) -> str:
     return f"{RECORD_HELD_KIND}:{scope}"
 
 
+#: What the record loader positively returned during the handler call now running: ``("short",
+#: project, index)`` once it returned that Short's record, ``("project", project)`` once the
+#: project's plan parsed with no duplicate index. ``None`` outside a drain row.
+_RECORD_PASSES: contextvars.ContextVar[Optional[set]] = contextvars.ContextVar(
+    "record_passes", default=None
+)
+
+
+def note_project_clean(project: str) -> None:
+    """The record loader parsed ``project``'s plan and it names each Short once."""
+    passes = _RECORD_PASSES.get()
+    if passes is not None:
+        passes.add(("project", project))
+
+
+def note_record_pass(project: str, short_index: int) -> None:
+    """The record loader returned the record for this Short (so its project is clean too). The
+    only signal that closes a record-held incident: an exception from inside the loader never
+    does."""
+    passes = _RECORD_PASSES.get()
+    if passes is not None:
+        passes.add(("project", project))
+        passes.add(("short", project, short_index))
+
+
 def _resolve_record_held_incidents(
-    row: Dict[str, Any], now: str, incidents_dir: Optional[Path]
+    row: Dict[str, Any], now: str, incidents_dir: Optional[Path], passes: Optional[set] = None
 ) -> None:
-    """The record loader passed for this row, so the Short is not held and (the duplicate check
-    being project-wide) its project has no duplicate: close both open incidents. A later hold
-    files a fresh, unpushed one. Never fatal."""
+    """Close an open ``delivery_record_held`` incident only on a positive pass: the Short's
+    incident when the loader returned this Short's record, the project's when it parsed the
+    project's plan with no duplicate (``passes``, from :func:`note_record_pass` /
+    :func:`note_project_clean`). A loader failure of any other kind (an unreadable or missing
+    sidecar) proves nothing, so the hold stays open. A later hold files a fresh, unpushed one.
+    Never fatal and never touches ``pushed``/``detected_at``."""
+    passes = passes or set()
+    project, index = row["project_name"], row["short_index"]
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -874,26 +905,43 @@ def _resolve_record_held_incidents(
         write_row,
     )
 
-    try:
-        directory = incidents_dir or default_incidents_dir(default_data_root())
-        for wide in (False, True):
-            path = directory / f"{safe_name(_record_held_key(row, wide))}.json"
+    for wide, passed in (
+        (False, ("short", project, index) in passes),
+        (True, ("project", project) in passes),
+    ):
+        if not passed:
+            continue
+        key = _record_held_key(row, wide)
+        try:
+            directory = incidents_dir or default_incidents_dir(default_data_root())
+            path = directory / f"{safe_name(key)}.json"
             if not path.is_file():
                 continue
             doc = json.loads(path.read_text())
+            if not isinstance(doc, dict):
+                logger.warning("dispatch: record-held incident %s is not an object; left", key)
+                continue
             if doc.get("resolved_at") is None:
                 doc["resolved_at"] = now
                 write_row(directory, doc)
-    except (OSError, ValueError):
-        logger.exception("dispatch: could not resolve record-held incidents for %s", row["id"])
+        except Exception:  # noqa: BLE001 -- never fatal: a publish may already have happened
+            logger.warning(
+                "dispatch: could not resolve record-held incident %s for %s",
+                key,
+                row["id"],
+                exc_info=True,
+            )
 
 
 def _raise_record_held_incident(
     row: Dict[str, Any], now: str, exc: "RecordHeldError", incidents_dir: Optional[Path]
 ) -> None:
     """One open incident per held plan problem, however often the drain re-reads it: keyed on the
-    project when the whole project is held, else on the delivery. Never fatal. It stays open
-    until resolved through the health incident store, as the held-past-slot incident does."""
+    project when the whole project is held, else on the Short (``project:short_index``, however
+    many platforms route it). Never fatal. It closes in :func:`_resolve_record_held_incidents`
+    when the loader positively passes the Short (or project), or in
+    :func:`sync_record_held_incidents` when none of its rows is left in the queue; a loader
+    failure of another kind leaves it open."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -912,7 +960,7 @@ def _raise_record_held_incident(
         who = (
             f"every row of project {row['project_name']}"
             if exc.project_wide
-            else f"{row['platform']}#{row['id']} {row['project_name']} short {row['short_index']}"
+            else f"{row['project_name']} short {row['short_index']}, every platform held"
         )
         scoped = (
             {}
@@ -934,6 +982,44 @@ def _raise_record_held_incident(
         )
     except (OSError, ValueError):
         logger.exception("dispatch: could not write record-held incident for %s", row["id"])
+
+
+def sync_record_held_incidents(
+    conn, now: str, incidents_dir: Optional[Path] = None
+) -> Optional[str]:
+    """Close every open ``delivery_record_held`` incident whose Short (or, for a project-wide
+    hold, project) has no non-terminal row left in the queue: its rows were cancelled or went
+    terminal, so nothing selects them and no pass would ever resolve it. Keeps ``pushed`` and
+    ``detected_at``. Never fatal; returns ``None`` or the error text (logged)."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        load_all,
+        write_row,
+    )
+
+    terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
+    try:
+        directory = incidents_dir or default_incidents_dir(default_data_root())
+        rows, _ = load_all(directory)
+        for inc in rows:
+            if inc.get("kind") != RECORD_HELD_KIND or inc.get("resolved_at"):
+                continue
+            where, args = "project_name = ?", [inc.get("project")]
+            if inc.get("short_index") is not None:
+                where += " AND short_index = ?"
+                args.append(inc["short_index"])
+            live = conn.execute(
+                f"SELECT 1 FROM deliveries WHERE {where} AND status NOT IN ({terminal}) LIMIT 1",  # noqa: S608
+                (*args, *TERMINAL_STATUSES),
+            ).fetchone()
+            if live is None:
+                inc["resolved_at"] = now
+                write_row(directory, inc)
+        return None
+    except Exception as exc:  # noqa: BLE001 -- never fatal
+        logger.warning("dispatch: record-held incident sweep failed", exc_info=True)
+        return f"record-held incident sweep failed: {_detail(exc)}"
 
 
 def _stall_done(conn, delivery_id) -> bool:
@@ -1200,6 +1286,8 @@ def drain_queue(
             continue
 
         result.attempted += 1
+        passes: set = set()
+        token = _RECORD_PASSES.set(passes)
         try:
             row = _checkpoint_facebook_upload(conn, row)
             if row is None or row["status"] in TERMINAL_STATUSES:
@@ -1224,9 +1312,12 @@ def drain_queue(
                 else None
             )
             new_attempt_count = (live["attempt_count"] if live is not None else 0) + 1
+            _RECORD_PASSES.reset(token)
+            token = None
             if not isinstance(exc, RecordHeldError):
-                # The loader passed (a hold is raised by it, before the handler's work).
-                _resolve_record_held_incidents(row, now, incidents_dir)
+                # Only a loader that actually returned a record counts; any exception from
+                # inside the loader (unreadable sidecar, duplicate) leaves its hold in force.
+                _resolve_record_held_incidents(row, now, incidents_dir, passes)
             if isinstance(exc, RecordHeldError):
                 # A hold, like the privacy hold: no transition, no attempt bump, no backoff.
                 # Only the error is made visible and this pass's lease dropped.
@@ -1358,7 +1449,6 @@ def drain_queue(
             # lease expired into an "interrupted attempt" whose retry time
             # un-parked the draft, and the next pass read the handler's early
             # return for it as a publish.
-            _resolve_record_held_incidents(row, now, incidents_dir)
             live = _live_row(conn, delivery_id)
             if live is not None and live["status"] == STATUS_MISSING_REMOTE:
                 # U-R1: the handler uploaded, then found YouTube does not
@@ -1369,6 +1459,7 @@ def drain_queue(
                     f"{platform}#{delivery_id}: missing_remote: uploaded but YouTube "
                     "returns no such video; not re-uploaded"
                 )
+                _resolve_record_held_incidents(row, now, incidents_dir, passes)
                 continue
             if live is not None and live["status"] in _WAITING_STATUSES:
                 _release_own_lease(conn, delivery_id, owner)
@@ -1377,9 +1468,14 @@ def drain_queue(
                     delivery_id,
                     live["status"],
                 )
+                _resolve_record_held_incidents(row, now, incidents_dir, passes)
                 continue
             transition(conn, delivery_id, status, "published", published_at_source=CONFIRMED)
             result.succeeded += 1
+            _resolve_record_held_incidents(row, now, incidents_dir, passes)
+        finally:
+            if token is not None:
+                _RECORD_PASSES.reset(token)
 
     stall_error = sync_media_stall_incidents(
         conn,
@@ -1390,6 +1486,9 @@ def drain_queue(
     )
     if stall_error:
         result.errors.append(stall_error)
+    held_error = sync_record_held_incidents(conn, now, incidents_dir)
+    if held_error:
+        result.errors.append(held_error)
     return result
 
 

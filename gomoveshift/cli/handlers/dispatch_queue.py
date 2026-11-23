@@ -35,6 +35,8 @@ from ...publishing.dispatch import (
     TransientMediaError,
     drain_queue,
     merge_privacy_attestations,
+    note_project_clean,
+    note_record_pass,
     reconcile_awaiting_ig,
     reconcile_awaiting_manual,
 )
@@ -131,6 +133,7 @@ class SidecarRecordLoader:
                     project_wide=True,
                 ) from exc
             self._cache[project_name] = {s.short_index: s for s in plan.shorts}
+        note_project_clean(project_name)  # parsed, no duplicate: a positive project pass
         return self._cache[project_name]
 
     def __call__(self, project_name: str, short_index: int) -> ShortPublishRecord:
@@ -149,6 +152,7 @@ class SidecarRecordLoader:
                 f"short {short_index} of {project_name!r} has no recording_date: its privacy "
                 "day is unknown, so its row is held"
             )
+        note_record_pass(project_name, short_index)
         return record
 
 
