@@ -555,3 +555,54 @@ def test_a_start_date_refusal_names_start_date_not_lf_publish_date(
     assert rc == 2 and not ran
     err = capsys.readouterr().err
     assert "--start-date" in err and "--lf-publish-date" not in err
+
+
+# -- a replace launch anchors on its kept (past) LF1 ---------------------------------------
+
+
+def _replace_plan(out: Path, lf1_publish_at: str) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "replace_plan.json").write_text(
+        json.dumps(
+            {
+                "schema": "replace-scheduled/1",
+                "kept": {"1": {"video_id": "a", "publish_at": lf1_publish_at}},
+                "replace": {"2": {"video_id": "b", "publish_at": "2031-01-10T20:00:00+00:00"}},
+            }
+        )
+    )
+
+
+def test_a_past_anchor_is_accepted_when_the_plan_keeps_that_dates_lf1(
+    tmp_path, monkeypatch, restore_schedule_module
+):
+    # 2026-09-25 15:00 ET is 19:00Z: the local date matches the anchor
+    _replace_plan(tmp_path / "out", "2026-09-25T19:00:00+00:00")
+    rc, ran, _ = _launch(tmp_path, monkeypatch, lf_day="fri", lf_publish_date="2026-09-25")
+    assert rc != 2 and ran
+
+
+def test_a_past_anchor_without_a_plan_is_still_refused(
+    tmp_path, monkeypatch, restore_schedule_module, capsys
+):
+    rc, ran, _ = _launch(tmp_path, monkeypatch, lf_day="fri", lf_publish_date="2026-09-25")
+    assert rc == 2 and not ran
+    assert "past" in capsys.readouterr().err
+
+
+def test_a_past_anchor_with_a_plan_for_another_date_is_refused(
+    tmp_path, monkeypatch, restore_schedule_module, capsys
+):
+    _replace_plan(tmp_path / "out", "2026-09-18T19:00:00+00:00")
+    rc, ran, _ = _launch(tmp_path, monkeypatch, lf_day="fri", lf_publish_date="2026-09-25")
+    assert rc == 2 and not ran
+    assert "past" in capsys.readouterr().err
+
+
+def test_a_matching_plan_still_checks_the_weekday(
+    tmp_path, monkeypatch, restore_schedule_module, capsys
+):
+    _replace_plan(tmp_path / "out", "2026-09-25T19:00:00+00:00")
+    rc, ran, _ = _launch(tmp_path, monkeypatch, lf_day="tue", lf_publish_date="2026-09-25")
+    assert rc == 2 and not ran
+    assert "weekday" in capsys.readouterr().err

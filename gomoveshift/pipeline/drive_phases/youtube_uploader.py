@@ -701,6 +701,19 @@ class YouTubeUploader:
         )
         logger.info(f"Updated privacy for {video_id} -> {status['privacyStatus']}")
 
+    def video_states(self, video_ids: list[str]) -> dict[str, str]:
+        """``{video_id: privacy}`` (``"scheduled"`` = private with a future ``publishAt``); an id
+        YouTube does not return is absent. Read-only."""
+        from ..playlist_reconciler import fetch_video_privacy
+
+        return fetch_video_privacy(self._build_service(), video_ids)
+
+    def delete_video(self, video_id: str) -> None:
+        """Delete one video (``videos.delete``). Irreversible: callers verify first."""
+        service = self._build_service()
+        self._execute_with_retry(service.videos().delete(id=video_id))
+        logger.info(f"Deleted video {video_id}")
+
     # ----------------------------------------------------------- playlist op
 
     # ------------------------------------------------------------- end-screen

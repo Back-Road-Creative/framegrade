@@ -141,7 +141,7 @@ def _superseded_by_record(project_dir: Path) -> bool:
             continue
         if (
             isinstance(record, dict)
-            and record.get("schema") == "backlog-supersede/1"
+            and record.get("schema") in ("backlog-supersede/1", "backlog-supersede/2")
             and record.get("project") == project_dir.name
         ):
             return True

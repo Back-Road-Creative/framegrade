@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from seo_manager.analytics.final_text_surfaces import compose_description, compose_tags
 
 from ...config import Config
+from .. import replace_scheduled
 from ..drive_text_adapter import attach_drive_text
 from ..exceptions import YouTubeQuotaError
 from ..final_text_record import FinalTextReviewError, build_final_text_review, reviewed_text
@@ -882,6 +883,12 @@ def _upload_lfs_to_youtube(
     if state.youtube_uploads is None:
         state.youtube_uploads = youtube_uploads or {}
     youtube_uploads = state.youtube_uploads
+    # ``health backlog --replace-scheduled``: a kept (public) LF is put back as uploaded, so
+    # ``upload_if_needed`` skips it; a replaced LF is handled in the loop below.
+    replace_plan = replace_scheduled.load_plan(output_base)
+    replace_plan_dir = Path(output_base)
+    replace_kept = set(replace_scheduled.apply_kept(state, replace_plan))
+    replace_old = {replace_scheduled._lf(k): v for k, v in (replace_plan.get("replace") or {}).items()}  # fmt: skip
 
     # Refuse before the FIRST upload of a batch this run cannot
     # complete within the configured daily quota, rather than discovering
@@ -914,6 +921,16 @@ def _upload_lfs_to_youtube(
     )
 
     for i, (lf, lf_path) in enumerate(zip(drive_plan.regular_lfs, regular_lf_paths)):
+        if lf.index in replace_kept:
+            continue
+        old = replace_old.get(lf.index)
+        if old and (youtube_uploads.get(lf.index) or {}).get("video_id") in (None, old["video_id"]):
+            if not replace_scheduled.old_still_scheduled(yt.video_states, old):
+                # gone public (or unreadable) since the plan: keep it, upload nothing
+                youtube_uploads[lf.index] = dict(old)
+                replace_scheduled.note_kept_live(replace_plan_dir, lf.index, "no longer scheduled")
+                save_state(state)
+                continue
         meta = metadata_per_lf.get(lf.index)
         if not meta or not meta.get("title"):
             raise ValueError(
@@ -928,6 +945,10 @@ def _upload_lfs_to_youtube(
         description = meta.get("description", "")
         tags = meta.get("tags", [])
         publish_at = schedule_dates[i] if i < len(schedule_dates) else None
+        replacing = bool(old) and not (youtube_uploads.get(lf.index) or {}).get("video_id")
+        if replacing:  # the new video takes the old one's slot and title
+            publish_at = datetime.fromisoformat(old["publish_at"])
+            title = old.get("title") or title
         if publish_at is not None and not (youtube_uploads.get(lf.index) or {}).get("video_id"):
             # A past ``publishAt`` cannot be taken back once inserted: check the
             # slot against the clock here, as late as the loop allows.
@@ -1025,6 +1046,11 @@ def _upload_lfs_to_youtube(
             project_base=project_base,
             lf_index=lf.index,
         )
+        if replacing:  # only now, with the new video live and booked, does the old one go
+            replace_scheduled.finish_replacement(
+                yt, old=old, new_id=record["video_id"], plan_dir=replace_plan_dir,
+                ledger_path=Path(config.seo.storage_path) / ".content_ledger.json",
+            )  # fmt: skip
 
     # Parts are excluded from lf_plans/drive_plan — reachable only here.
     _upload_superlong_parts_to_youtube(
