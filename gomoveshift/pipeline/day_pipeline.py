@@ -2644,7 +2644,9 @@ def run_day_pipeline(
         # the prior hash, so ``exists()`` alone can't pass a materially changed,
         # never-reviewed burn text.
         _prior_hash = _hash_map.get(date) or read_confirmed_hash(confirmed_file)
-        _stale = confirmation_is_stale(_prior_hash, current_hash)
+        # A hash stored before title suffixes were normalised still covers an unchanged burn.
+        legacy_hash = compute_ost_audit_hash(payload, normalise=False)
+        _stale = confirmation_is_stale(_prior_hash, current_hash, legacy_hash)
 
         gate_passes = False
         reason = ""
@@ -2656,7 +2658,7 @@ def run_day_pipeline(
         elif confirmed_file.exists():
             gate_passes = True
             reason = f"{confirmed_file.name} on disk"
-        elif _passed_map.get(date) is True and _hash_map.get(date) == current_hash:
+        elif _passed_map.get(date) is True and _hash_map.get(date) in (current_hash, legacy_hash):
             gate_passes = True
             reason = "state['ost_audit_passed'] + matching hash"
         else:

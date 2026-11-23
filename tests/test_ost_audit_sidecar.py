@@ -232,6 +232,13 @@ def _stale_state(title="Ireland (Sep 16, 2025)", stored=None, cli=None):
 
 
 def _old_hash():
+    """The hash confirmed for an OLDER base label ("Eire"): a real change, so the day is stale."""
+    old = _stale_state(title="Eire")
+    return compute_ost_audit_hash(format_ost_audit(_STALE_DATE, old, [1]))
+
+
+def _undated_title_hash():
+    """The hash confirmed for the same label before its drive date was added: not a change."""
     old = _stale_state(title="Ireland")
     return compute_ost_audit_hash(format_ost_audit(_STALE_DATE, old, [1]))
 
@@ -296,7 +303,7 @@ def test_a_marker_stamped_with_the_current_hash_passes_a_stale_day_and_rebinds(t
 
 
 def test_an_unchanged_payload_still_passes_without_a_flag(tmp_path):
-    state = _stale_state(title="Ireland", stored=_old_hash())
+    state = _stale_state(title="Ireland", stored=_undated_title_hash())
     sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
 
 

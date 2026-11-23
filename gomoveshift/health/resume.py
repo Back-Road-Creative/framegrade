@@ -40,17 +40,29 @@ def parse_recipe_path(lines: List[str]) -> Optional[str]:
     return found
 
 
+#: Flags that are one run's own act, never a standing choice: ``--fresh`` discards state and
+#: ``--ost-audit-confirmed`` is an operator's yes to the OST text they just reviewed. A recipe
+#: replayed by ``health heal`` must never re-issue either, so a changed burn stays unconfirmed.
+_ONE_SHOT_CONFIRM = "--ost-audit-confirmed"
+
+
 def write_recipe(
     stages_dir: Path, argv: List[str], *, cwd: str, sha: Optional[str], now_iso: str
 ) -> Optional[Path]:
     """Write the recipe: the drive's own CLI args (``argv`` excludes the program name) with
-    ``--fresh`` removed -- a resume must keep the prior state, not clear it -- plus the
+    ``--fresh`` removed -- a resume must keep the prior state, not clear it -- and
+    ``--ost-audit-confirmed`` removed -- a confirmation is one run's, never replayed -- plus the
     ``RECIPE_ENV_KEYS`` set in this process's environment."""
     path = Path(stages_dir) / RECIPE_NAME
     try:
         body = {
             "schema": SCHEMA,
-            "argv": [sys.executable, "-m", "gomoveshift", *[a for a in argv if a != "--fresh"]],
+            "argv": [
+                sys.executable,
+                "-m",
+                "gomoveshift",
+                *[a for a in argv if a not in ("--fresh", _ONE_SHOT_CONFIRM)],
+            ],
             "cwd": cwd,
             "env": {k: os.environ[k] for k in RECIPE_ENV_KEYS if os.environ.get(k)},
             "sha": sha,
@@ -85,6 +97,8 @@ def read_recipe(path: Path) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(data.get("cwd"), str):
         return None
+    # A recipe written before the flag was one-shot may still carry it: never replay it.
+    data["argv"] = [a for a in argv if a != _ONE_SHOT_CONFIRM]
     return data
 
 

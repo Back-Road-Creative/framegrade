@@ -344,3 +344,278 @@ def test_a_pre_render_decision_lf_is_counted_in_phase_ds_uniqueness_like_bc(tmp_
     plans, gen = _split_run_with_state(tmp_path, state, ost)
     assert _titles(gen) == ["decided label", "Ireland (Sep 16, 2025) (Part 2 of 2)"]
     assert _bc_titles(ost, dates, plans)[2] == "Ireland (Sep 16, 2025) (Part 2 of 2)"
+
+
+# ── a confirm flag is one-shot; a title-only suffix change never restales a day ──
+
+_DAY = "2025-09-20"
+_COUNTY = "County Cork, Ireland"
+_PARTS = {1: (1, 2), 2: (2, 2)}
+_LEGACY_SPLIT = {1: f"{_COUNTY} (Part 1 of 2)", 2: f"{_COUNTY} (Part 2 of 2)"}
+
+
+def _gate_state(titles, ost=None, stored=None, cli=None, review=None, date=_DAY):
+    ost = ost or {1: _COUNTY, 2: _COUNTY}
+    return {
+        "per_lf_ost_text": dict(ost),
+        "per_lf_titles": dict(titles),
+        "per_lf_recording_date": {k: date for k in ost},
+        "per_lf_locations": {},
+        "ost_audit_passed": {date: True} if stored else {},
+        "ost_audit_hash": {date: stored} if stored else {},
+        "ost_audit_confirmed_this_run": cli,
+        "ost_system_review_this_run": review,
+    }
+
+
+def _audit_hash(titles, ost=None, date=_DAY):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    state = _gate_state(titles, ost, date=date)
+    return compute_ost_audit_hash(format_ost_audit(date, state, sorted(titles)))
+
+
+def _gate(tmp_path, state, date=_DAY, indices=(1, 2)):
+    from gomoveshift.pipeline.ost_audit_sidecar import lf_gate_or_raise
+
+    lf_gate_or_raise(tmp_path, date, list(indices), state)
+
+
+def test_the_resume_recipe_never_carries_the_one_shot_confirm_flag(tmp_path):
+    from gomoveshift.health.resume import read_recipe, write_recipe
+
+    argv = ["drive", "/src", "--ost-system-review", "--ost-audit-confirmed", "--fresh"]
+    path = write_recipe(tmp_path, argv, cwd=str(tmp_path), sha="x", now_iso="2026-11-23T00:00:00")
+    replayed = read_recipe(path)["argv"]
+    assert "--ost-audit-confirmed" not in replayed
+    assert "--fresh" not in replayed
+    assert "--ost-system-review" in replayed  # only the one-shot confirm is dropped
+
+
+def test_the_recipe_file_itself_never_stores_the_one_shot_confirm_flag(tmp_path):
+    import json
+
+    from gomoveshift.health.resume import write_recipe
+
+    argv = ["drive", "/src", "--ost-audit-confirmed"]
+    path = write_recipe(tmp_path, argv, cwd=str(tmp_path), sha="x", now_iso="2026-11-23T00:00:00")
+    assert "--ost-audit-confirmed" not in json.loads(path.read_text(encoding="utf-8"))["argv"]
+
+
+def test_a_recipe_already_on_disk_with_the_confirm_flag_replays_without_it(tmp_path):
+    import json
+
+    from gomoveshift.health.resume import RECIPE_NAME, read_recipe
+
+    path = tmp_path / RECIPE_NAME
+    argv = ["py", "-m", "gomoveshift", "drive", "/src", "--ost-audit-confirmed", "--no-review"]
+    path.write_text(json.dumps({"argv": argv, "cwd": str(tmp_path)}), encoding="utf-8")
+    assert read_recipe(path)["argv"] == [a for a in argv if a != "--ost-audit-confirmed"]
+
+
+def test_a_recipe_relaunch_cannot_autopass_a_day_whose_burn_text_changed(tmp_path):
+    from gomoveshift.health.resume import read_recipe, write_recipe
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    argv = ["drive", "/src", "--ost-system-review", "--ost-audit-confirmed"]
+    path = write_recipe(tmp_path, argv, cwd=str(tmp_path), sha="x", now_iso="2026-11-23T00:00:00")
+    relaunch_confirmed = "--ost-audit-confirmed" in read_recipe(path)["argv"]
+    old = {1: _COUNTY, 2: _COUNTY}
+    new = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    state = _gate_state(
+        new, ost=new, stored=_audit_hash(old), cli=True if relaunch_confirmed else None
+    )
+    with pytest.raises(OstAuditPendingError):
+        _gate(tmp_path, state)
+    assert state["ost_audit_hash"][_DAY] == _audit_hash(old)  # nothing was re-stamped
+
+
+def test_an_operator_confirm_binds_to_the_hash_it_confirmed_only(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    old = {1: _COUNTY, 2: _COUNTY}
+    new = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    state = _gate_state(new, ost=new, stored=_audit_hash(old), cli=True)
+    _gate(tmp_path, state)  # the operator's own run confirms what they reviewed
+    assert state["ost_audit_hash"][_DAY] == _audit_hash(new, new)
+    later = {1: "County Clare, Ireland", 2: "County Clare, Ireland"}
+    again = _gate_state(later, ost=later, stored=state["ost_audit_hash"][_DAY])
+    with pytest.raises(OstAuditPendingError):  # a later burn-text change stales it again
+        _gate(tmp_path, again)
+
+
+def test_the_stale_message_names_the_day_and_the_review_step_not_the_flag(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    new = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    state = _gate_state(new, ost=new, stored=_audit_hash({1: _COUNTY, 2: _COUNTY}))
+    with pytest.raises(OstAuditPendingError) as exc:
+        _gate(tmp_path, state)
+    msg = str(exc.value)
+    assert _DAY in msg and "ost_audit_2025-09-20.json" in msg
+    assert "changed since it was confirmed" in msg
+    assert "re-run with --ost-audit-confirmed" not in msg
+
+
+def test_a_split_day_title_only_rerun_does_not_restale_a_confirmed_day(tmp_path):
+    from gomoveshift.pipeline import ost_system_review as osr
+    from gomoveshift.pipeline.route_claims import route_claim_outcome
+
+    new = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts=_PARTS)
+    assert new != _LEGACY_SPLIT
+    state = _gate_state(new, stored=_audit_hash(_LEGACY_SPLIT), review=True)
+    outcomes = {i: route_claim_outcome(i, _COUNTY, None, chosen=_COUNTY, reason="") for i in (1, 2)}
+    osr.record_system_reviews(state, {_DAY: dict(state["per_lf_ost_text"])}, outcomes)
+    _gate(tmp_path, state)  # no raise: the burn text is unchanged
+
+
+def test_an_in_flight_bracket_drive_is_not_reopened_by_the_added_drive_date(tmp_path):
+    undated = _audit_hash({1: "Ireland"}, ost={1: "Ireland"}, date="2025-09-16")
+    state = _gate_state(
+        {1: "Ireland (Sep 16, 2025)"}, ost={1: "Ireland"}, stored=undated, date="2025-09-16"
+    )
+    _gate(tmp_path, state, date="2025-09-16", indices=(1,))
+
+
+def test_a_stored_hash_of_the_dated_title_still_covers_it(tmp_path):
+    """kerry-to-cork stored the hash of its already-dated title: not restaled."""
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    state = {
+        "per_lf_ost_text": {1: "Ireland"},
+        "per_lf_titles": {1: "Ireland (Sep 16, 2025)"},
+        "per_lf_recording_date": {1: "2025-09-16"},
+        "per_lf_locations": {1: "Ireland"},
+    }
+    stored = compute_ost_audit_hash(format_ost_audit("2025-09-16", state, [1]), normalise=False)
+    assert stored.startswith("6343391fddc6")
+    state["ost_audit_passed"] = {"2025-09-16": True}
+    state["ost_audit_hash"] = {"2025-09-16": stored}
+    _gate(tmp_path, state, date="2025-09-16", indices=(1,))
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"},  # burn text
+    ],
+)
+def test_a_burn_text_change_still_stales_a_split_day(tmp_path, changed):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    stored = _audit_hash(ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts=_PARTS))
+    new = ensure_unique_titles(dict(changed), lf_parts=_PARTS)
+    with pytest.raises(OstAuditPendingError):
+        _gate(tmp_path, _gate_state(new, ost=changed, stored=stored))
+
+
+def test_a_changed_base_label_or_part_count_still_stales_the_day(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    base = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts=_PARTS)
+    stored = _audit_hash(base)
+    relabelled = ensure_unique_titles({1: "Cork", 2: "Cork"}, lf_parts=_PARTS)
+    with pytest.raises(OstAuditPendingError):  # same burn text, a different base label
+        _gate(tmp_path, _gate_state(relabelled, stored=stored))
+    three = ensure_unique_titles({1: _COUNTY, 2: _COUNTY}, lf_parts={1: (1, 3), 2: (2, 3)})
+    with pytest.raises(OstAuditPendingError):  # the day was re-split into three
+        _gate(tmp_path, _gate_state(three, stored=stored))
+
+
+def test_an_unsplit_undated_lfs_hash_is_the_unnormalised_hash():
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    state = _gate_state({1: "Foo to Bar, NC"}, ost={1: "Foo to Bar, NC"})
+    payload = format_ost_audit(_DAY, state, [1])
+    assert compute_ost_audit_hash(payload) == compute_ost_audit_hash(payload, normalise=False)
+
+
+# ── a split LF that exactly matches a live title ──
+
+_LIVE_PART1 = {f"{_COUNTY} in 4K — Part 1 of 2"}
+
+
+def test_a_split_lf_exact_live_duplicate_is_refused_like_an_unsplit_one():
+    with pytest.raises(PhaseBCExitContractError):
+        ensure_unique_titles(
+            {1: _COUNTY, 2: _COUNTY}, published_titles=_LIVE_PART1, lf_parts=_PARTS
+        )
+
+
+def test_a_split_lf_exact_live_duplicate_is_dated_before_the_part_suffix():
+    from gomoveshift.pipeline.longform_metadata import assemble_final_title
+    from gomoveshift.pipeline.title_builder import append_full_drive_part_suffix
+
+    got = ensure_unique_titles(
+        {1: _COUNTY, 2: _COUNTY},
+        published_titles=_LIVE_PART1,
+        published_title_ids={f"{_COUNTY} in 4K — Part 1 of 2".lower(): "VIDX"},
+        drive_project="ireland-2025-09-19-old-head",
+        lf_dates={1: "2025-09-19", 2: "2025-09-19"},
+        video_projects={"VIDX": "ireland-2025-09-17-baltimore"},
+        lf_parts=_PARTS,
+    )
+    assert got[1] == f"{_COUNTY} (Sep 19, 2025) — Part 1 of 2"
+    assert got[2] == f"{_COUNTY} — Part 2 of 2"
+    shipped = append_full_drive_part_suffix(assemble_final_title(got[1]), 1, 2)
+    assert shipped == f"{_COUNTY} (Sep 19, 2025) in 4K — Part 1 of 2"
+    assert "(Part 2)" not in "".join(got.values())
+
+
+# ── the per-day gate accepts a hash stored before suffixes were normalised ──
+
+
+def _per_day_state(ost, title):
+    date = "2025-09-14"
+    return {
+        "per_lf_ost_text": {1: ost},
+        "per_lf_titles": {1: title},
+        "per_lf_recording_date": {1: date},
+        "per_lf_locations": {1: "County Kerry"},
+    }
+
+
+def _per_day_run(tmp_path, state):
+    from test_day_pipeline_ost_audit_gate import _run
+
+    out = tmp_path / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "shorts_ost_audit_2025-09-14.confirmed").write_text("ok")
+    return _run(tmp_path, state)
+
+
+def _store_legacy(state):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    payload = format_ost_audit("2025-09-14", state, [1])
+    state["ost_audit_passed"] = {"2025-09-14": True}
+    state["ost_audit_hash"] = {"2025-09-14": compute_ost_audit_hash(payload, normalise=False)}
+
+
+def test_the_per_day_gate_passes_a_day_holding_an_old_raw_hash_with_unchanged_titles(tmp_path):
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    result, apply_mock, _ = _per_day_run(tmp_path, state)
+    assert result is not None
+    assert apply_mock.call_count == 1
+
+
+def test_the_per_day_gate_still_stops_a_real_burn_text_change(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    state["per_lf_ost_text"] = {1: "County Kerry, Ireland"}
+    with pytest.raises(OstAuditPendingError):
+        _per_day_run(tmp_path, state)
+
+
+@pytest.mark.parametrize(
+    "raw", ["2025-09-16", "2025-09-05T10:00:00", "", None, "garbage", "2025-13-40"]
+)
+def test_the_sidecars_drive_date_suffix_is_the_one_title_builder_dates_with(raw):
+    """The sidecar (engine) may not import ``title_builder``, so it builds the suffix itself."""
+    from gomoveshift.pipeline.ost_audit_sidecar import _drive_date_suffix
+    from gomoveshift.pipeline.title_builder import _drive_dated
+
+    assert _drive_date_suffix(raw) == (_drive_dated("", raw) or "")
