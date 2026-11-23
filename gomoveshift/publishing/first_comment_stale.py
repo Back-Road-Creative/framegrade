@@ -59,6 +59,7 @@ UNVERIFIED = "unverified: "
 #: Prefix of the cause when a read-back CONFIRMED (against the post's listing) that the comment is gone.
 GONE = "gone: "
 _DETAIL_MAX = 500
+_LAG_DROP_DETAIL_MAX = 1500  # a drop names every id: room for a dozen full Meta ids
 
 
 class CorrectionUnavailableError(Exception):
@@ -235,11 +236,12 @@ def raise_repost_incident(
             "lags, so a comment that only lagged is deleted, never left as a second copy"
         )[:_DETAIL_MAX]
     elif kind == LAG_DROP_KIND:
+        # The ids lead (and the cap is wider), so no real Meta id is ever cut off.
         detail = (
-            f"{where}delete by hand any comment named here that is live and is a second copy of "
-            "ours: the pipeline will not look again, and a copy that appears after the wait "
-            f"needs a hand delete. {cause}"
-        )[:_DETAIL_MAX]
+            f"{where}{cause}. Delete by hand any comment named here that is live and is a "
+            "second copy of ours: the pipeline will not look again, and a copy that appears "
+            "after the wait needs a hand delete"
+        )[:_LAG_DROP_DETAIL_MAX]
     elif kind == OWN_ID_KIND and cause.startswith(GONE):
         detail = (
             f"{where}the comment we just posted was read back as gone ({cause[len(GONE) :]}); it "
@@ -646,6 +648,7 @@ def run_corrections(
     for row, reopened_only in _correction_passes(conn, platforms):
         keep = first_comment_intended_texts(row)
         unposted = False
+        dropped: list = []  # reopened deletes dropped past their deadline: ONE incident per row
         for item in first_comment_corrections(row):
             if bool(item.get("reopened")) != reopened_only:
                 continue  # a reopened delete runs in its own pass, ahead of and outside the cap
@@ -693,9 +696,7 @@ def run_corrections(
                         if left is not True:
                             resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                             if isinstance(left, _LagDropped):
-                                raise_repost_incident(
-                                    conn, row["id"], str(left), incidents_dir, kind=LAG_DROP_KIND
-                                )
+                                dropped.append(str(left))
                             if left:
                                 result.errors.append(
                                     f"delivery {row['id']}: second comment {item['live_id']} "
@@ -750,6 +751,19 @@ def run_corrections(
                     and not isinstance(exc, CorrectionUnavailableError)
                     and not reopened_only,  # outside the cap: never counted toward it
                 )
+                if reopened_only and reopen_lag_expired(item):
+                    # Past its 24 hours a delete that still cannot run is dropped, never retried
+                    # for ever: the read failed or the platform refuses it.
+                    resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                    reason = (
+                        f"comment {item['live_id']}, queued for deletion when a gone read "
+                        f"reopened the row, could not be deleted within the wait (last "
+                        f"failure: {detail}); the delete is dropped"
+                    )
+                    dropped.append(reason)
+                    result.errors.append(f"delivery {row['id']}: {reason}")
+                    logger.warning("first comment: delivery %s: %s", row["id"], reason)
+                    continue
                 result.stale += 1
                 result.errors.append(f"delivery {row['id']}: stale comment not corrected: {detail}")
                 logger.warning(
@@ -769,6 +783,10 @@ def run_corrections(
             result.corrected += 1
             if item["action"] == "delete":
                 _note_removed(conn, row["id"], result, incidents_dir)
+        if dropped:
+            raise_repost_incident(
+                conn, row["id"], "; ".join(dropped), incidents_dir, kind=LAG_DROP_KIND
+            )
     capped = capped_first_comment_corrections(conn, platforms)
     result.correction_capped += len(capped)
     for row in capped:
@@ -948,16 +966,24 @@ def _drop_held(
     """Every reopened delete of a capped row is past its deadline: drop them, an error line each
     and ONE ``LAG_DROP_KIND`` incident naming every dropped id and why."""
     dropped = drop_reopened_deletes(conn, row["id"])
-    parts = []
+    if not dropped:
+        return
+    reasons: dict = {}
     for item in dropped:
-        part = (
-            f"comment {item['live_id']}, queued for deletion when a gone read reopened the row, "
-            f"is dropped after the wait: {why(item)}"
+        reason = why(item)
+        reasons.setdefault(reason, []).append(item["live_id"])
+        result.errors.append(
+            f"delivery {row['id']}: comment {item['live_id']}, queued for deletion when a gone "
+            f"read reopened the row, is dropped after the wait: {reason}"
         )
-        parts.append(part)
-        result.errors.append(f"delivery {row['id']}: {part}")
-    if parts:
-        raise_repost_incident(conn, row["id"], "; ".join(parts), incidents_dir, kind=LAG_DROP_KIND)
+    # Every id leads, each reason once, so the length cap never cuts a real Meta id.
+    parts = [
+        f"comments {', '.join(ids)}: {reason}; the deletes are dropped"
+        if len(ids) > 1
+        else f"comment {ids[0]}: {reason}; the delete is dropped"
+        for reason, ids in reasons.items()
+    ]
+    raise_repost_incident(conn, row["id"], "; ".join(parts), incidents_dir, kind=LAG_DROP_KIND)
 
 
 def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:

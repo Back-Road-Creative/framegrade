@@ -10,3 +10,8 @@
   copy with other text is never deleted; a copy appearing later needs a hand delete).
 - Adopting a capped row resets its correction attempts; a held reopened delete no longer delays
   restoring a removed row.
+- A reopened delete past its 24-hour deadline whose read fails or whose delete the platform
+  refuses is dropped with an error line and a `first_comment_lag_delete_dropped` incident naming
+  the id and the last failure, instead of being retried every drain for ever. Several expired
+  held deletes on one row raise one incident naming every id, and the incident detail leads with
+  the ids so a real Meta id is never cut off.

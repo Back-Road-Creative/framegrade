@@ -829,7 +829,9 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   queued as our own extra deletes, so exactly one copy stays live and the row records it. A
   reopened delete runs first in its row's correction pass and outside the correction cap (a row
   at the cap, or with a failing sibling item, never strands it; a failure there counts no
-  attempt); its only bound is the 24-hour wait. That wait always ends visibly: a failing
+  attempt). Its bounds: a held delete waits up to 24 hours after the reopen; past that, a read
+  that fails or a delete the platform refuses drops it with an error line and an incident naming
+  the id and the last failure, never retried for ever. That wait always ends visibly: a failing
   listing past the deadline, a listing cut short, a copy of ours that says other text (kept,
   never deleted) and a plain "not listed" each drop with an error line and ONE incident naming
   every id and the reason. **By design:** a copy that appears after the 24-hour drop is not
