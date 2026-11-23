@@ -818,7 +818,15 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   text is unposted (`reopen_gone_first_comment`, one try counted, and the old id queued as our
   own extra delete so a comment that only lagged is deleted, never left as a second live copy)
   under a `first_comment_repost_failed` incident and the drain reposts it; a row with no text is
-  marked removed instead. Before any repost the dedupe listing still runs, so an earlier own id
+  marked removed instead. That queued delete is marked `reopened`: a read that still says gone
+  does not drop it (the platform may only be lagging), it is kept and re-read every drain for
+  `REOPEN_LAG_WINDOW` (24 hours, 24 hourly drains; an assumption, no figure for the platforms'
+  read lag is cited in the repo) after the reopen. Past that it is dropped with an error line and
+  a `first_comment_lag_delete_dropped` incident, never silently; an unmarked delete that reads
+  gone is still done. A held delete never blocks a repost or hides the repost incident. A row at
+  the attempts cap with a held delete still lists the post each drain: the lowest id (numeric for
+  Meta's `123_99` ids, text for YouTube's) that says the row's text is adopted, the rest are
+  queued as our own extra deletes, so exactly one copy stays live and the row records it. Before any repost the dedupe listing still runs, so an earlier own id
   that reappears is adopted, not posted again. A comment gone after every repost stops at
   `FIRST_COMMENT_MAX_ATTEMPTS` and the repost incident stays open. When the row cannot move (a
   correction is pending) the recheck adds an error line and a WARNING, and the incident stays
