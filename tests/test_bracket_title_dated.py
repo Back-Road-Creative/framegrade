@@ -6,6 +6,7 @@ LF's measured drive date, so same-country drives never collide on a bare title.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -789,3 +790,169 @@ def test_a_split_decision_lf_is_checked_without_its_part_suffix(tmp_path, monkey
         tmp_path, state, {1: _COUNTY}, {1: (1, 2)}, published={f"{_COUNTY} in 4K"}
     )
     assert _titles(gen) == [label]
+
+
+# ── a bracket-dated day confirmed by DEPLOYED code still covers its unchanged burn ──
+# The deployed code stored the raw hash over ``<label> (Part k of K)`` titles; a country or
+# state bracket day is now titled ``<label> (Mon D, YYYY) — Part k of K`` (or, unsplit,
+# ``<label> (Mon D, YYYY) (Part k of K)``), which none of the other legacy forms reproduces.
+
+_BDAY = "2025-09-16"
+# Frozen from ``git archive origin/main`` (02861d3f): ``compute_ost_audit_hash(format_ost_audit(
+# ...))`` over ``ensure_unique_titles({1: L, 2: L})`` = ``{k: "L (Part k of 2)"}``, date 2025-09-16.
+_DEPLOYED_IRELAND_SPLIT = "dc8c7437d155af0cbfb19d366f0e29ee29ce498f1fbfc6f15d63bf777ca121b8"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_DEPLOYED_NC_SPLIT = "29be16a82c39e8184356bc230b21546cbde2d9df9563340860cef6877de21f42"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_DEPLOYED_IRELAND_SINGLE = "96751a950f084c12e7d805bc72555858066f39dd87e3d21f595eabcb6611b4ca"  # pragma: allowlist secret (sha256 of an OST audit payload)
+
+
+def _bracket_titles(label, level, lf_parts=_PARTS, n=2):
+    labels = {k: label for k in range(1, n + 1)}
+    kw = {"lf_dates": {k: _BDAY for k in labels}, "bracket_route": {"label": label, "level": level}}
+    if lf_parts:
+        kw["lf_parts"] = lf_parts
+    return labels, ensure_unique_titles(dict(labels), **kw)
+
+
+def _bracket_gate(tmp_path, titles, ost, stored):
+    state = _gate_state(titles, ost=ost, stored=stored, date=_BDAY)
+    _gate(tmp_path, state, date=_BDAY, indices=sorted(titles))
+    return state
+
+
+@pytest.mark.parametrize(
+    "label,level,deployed",
+    [
+        ("Ireland", "country", _DEPLOYED_IRELAND_SPLIT),
+        ("North Carolina", "state", _DEPLOYED_NC_SPLIT),
+    ],
+)
+def test_a_bracket_dated_split_day_confirmed_by_deployed_code_stays_confirmed(
+    tmp_path, label, level, deployed
+):
+    ost, titles = _bracket_titles(label, level)
+    assert titles[1] == f"{label} (Sep 16, 2025) — Part 1 of 2"
+    state = _bracket_gate(tmp_path, titles, ost, deployed)  # no raise: the burn is unchanged
+    assert state["ost_audit_hash"][_BDAY] != deployed  # re-stamped with the normalised hash
+    _bracket_gate(tmp_path, titles, ost, state["ost_audit_hash"][_BDAY])  # and stays passed
+
+
+def test_two_same_label_bracket_lfs_without_lf_parts_stay_confirmed(tmp_path):
+    ost, titles = _bracket_titles("Ireland", "country", lf_parts=None)
+    assert titles[1] == "Ireland (Sep 16, 2025) (Part 1 of 2)"
+    _bracket_gate(tmp_path, titles, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_a_bracket_dated_single_lf_day_confirmed_by_deployed_code_stays_confirmed(tmp_path):
+    ost, titles = _bracket_titles("Ireland", "country", lf_parts=None, n=1)
+    assert titles == {1: "Ireland (Sep 16, 2025)"}
+    _bracket_gate(tmp_path, titles, ost, _DEPLOYED_IRELAND_SINGLE)
+
+
+def test_the_deployed_base_form_is_one_of_the_legacy_hashes_the_gate_derives():
+    from gomoveshift.pipeline.ost_audit_sidecar import format_ost_audit, legacy_ost_audit_hashes
+
+    ost, titles = _bracket_titles("Ireland", "country")
+    payload = format_ost_audit(_BDAY, _gate_state(titles, ost=ost, date=_BDAY), [1, 2])
+    assert _DEPLOYED_IRELAND_SPLIT in legacy_ost_audit_hashes(payload)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_burn(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost, titles = _bracket_titles("Ireland", "country")
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, titles, {1: "Ireland", 2: "Cork"}, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_part_count(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost, three = _bracket_titles("Ireland", "country", lf_parts={1: (1, 3), 2: (2, 3)})
+    assert three[1] == "Ireland (Sep 16, 2025) — Part 1 of 3"
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, three, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_base_label(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost = {1: "Ireland", 2: "Ireland"}  # the burn is unchanged; only the title's label differs
+    _, relabelled = _bracket_titles("Cork", "country")
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, relabelled, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+# ── the stale wording, and the per-day gate's routes, match lf_gate_or_raise ──
+
+_PD = "2025-09-14"
+
+
+def _per_day_stale(tmp_path, **marker):
+    """A per-day run whose stored hash is for ``Ireland`` while the burn is now County Kerry."""
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    state["per_lf_ost_text"] = {1: "County Kerry, Ireland"}
+    state.update(marker)
+    return state
+
+
+def _current_per_day_hash(state):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    return compute_ost_audit_hash(format_ost_audit(_PD, state, [1]))
+
+
+def test_both_stale_messages_say_the_audit_burn_text_or_title_changed(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    wording = "its OST audit (burn text or title) changed since it was confirmed"
+    new = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    with pytest.raises(OstAuditPendingError) as front:
+        _gate(tmp_path, _gate_state(new, ost=new, stored=_audit_hash({1: _COUNTY, 2: _COUNTY})))
+    assert wording in str(front.value)
+    with pytest.raises(OstAuditPendingError) as per_day:
+        _per_day_run(tmp_path, _per_day_stale(tmp_path))
+    assert wording in str(per_day.value)
+
+
+def test_a_stale_day_the_operator_confirms_this_run_passes_the_per_day_gate_too(tmp_path):
+    state = _per_day_stale(tmp_path, ost_audit_confirmed_this_run=True)
+    result, apply_mock, _ = _per_day_run(tmp_path, state)
+    assert result is not None and apply_mock.call_count == 1
+    assert state["ost_audit_hash"][_PD] == _current_per_day_hash(state)  # re-bound to what ran
+
+
+def test_a_stale_day_with_a_marker_stamped_with_the_current_hash_passes_the_per_day_gate(tmp_path):
+    state = _per_day_stale(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    (out / f"ost_audit_{_PD}.confirmed").write_text(_current_per_day_hash(state))
+    result, apply_mock, _ = _per_day_run(tmp_path, state)
+    assert result is not None and apply_mock.call_count == 1
+
+
+@pytest.mark.parametrize("marker_text", ["", "0" * 64])
+def test_a_stale_day_with_an_unstamped_or_old_marker_still_stops_the_per_day_gate(
+    tmp_path, marker_text
+):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    state = _per_day_stale(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    (out / f"ost_audit_{_PD}.confirmed").write_text(marker_text)
+    with pytest.raises(OstAuditPendingError):
+        _per_day_run(tmp_path, state)
+
+
+def test_a_legacy_pass_at_the_per_day_gate_rewrites_the_sidecar_to_the_stamped_hash(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash
+
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    sidecar = out / f"ost_audit_{_PD}.json"
+    sidecar.write_text(json.dumps({"date": _PD, "lfs": [{"lf_index": 1, "stale": True}]}))
+    _per_day_run(tmp_path, state)
+    assert compute_ost_audit_hash(json.loads(sidecar.read_text())) == state["ost_audit_hash"][_PD]

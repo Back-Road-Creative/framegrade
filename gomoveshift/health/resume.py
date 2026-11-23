@@ -83,8 +83,16 @@ def _is_one_shot(token: str) -> bool:
 
 
 def strip_one_shot(argv: List[str]) -> List[str]:
-    """``argv`` without any token that resolves to a one-shot flag."""
-    return [a for a in argv if not _is_one_shot(a)]
+    """``argv`` without any token that resolves to a one-shot flag. A bare ``--`` ends the
+    options: it is kept, and nothing after it is an option (so nothing after it is stripped)."""
+    out: List[str] = []
+    for i, a in enumerate(argv):
+        if a == "--":
+            out.extend(argv[i:])
+            break
+        if not _is_one_shot(a):
+            out.append(a)
+    return out
 
 
 def write_recipe(
@@ -93,7 +101,8 @@ def write_recipe(
     """Write the recipe: the drive's own CLI args (``argv`` excludes the program name) with the
     one-shot flags removed (see :func:`strip_one_shot`) -- a resume must keep the prior state,
     and a confirmation is one run's, never replayed -- plus the ``RECIPE_ENV_KEYS`` set in
-    this process's environment. When the one-shot flags cannot be resolved nothing is written."""
+    this process's environment. When the one-shot flags cannot be resolved, or the write fails,
+    nothing is written and any recipe an earlier run left is removed (heal then finds none)."""
     path = Path(stages_dir) / RECIPE_NAME
     try:
         body = {
@@ -116,6 +125,12 @@ def write_recipe(
         tmp.replace(path)
     except Exception as exc:  # noqa: BLE001 -- never fail a drive; an unstrippable argv is unwritten
         logger.warning("could not write resume recipe %s: %s", path, exc)
+        # A recipe an earlier run left would replay THAT run's argv: no readable recipe is safer.
+        for stale in (path, path.with_name(path.name + ".tmp")):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove stale resume recipe %s", stale)
         return None
     return path
 
