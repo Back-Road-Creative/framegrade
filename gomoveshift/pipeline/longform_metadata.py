@@ -20,9 +20,9 @@ analytics so the optimizer has fresh performance data to learn from.
 import json
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from seo_manager.core.locality import dedupe_places
 
@@ -381,21 +381,40 @@ def load_published_titles() -> set[str]:
     return set(titles)
 
 
-def _live_catalog_videos() -> dict:
-    """The ``videos`` map of the local live-catalog snapshot that
-    ``catalog-fetch --known-ids-from-queue`` writes beside the queue DB
-    (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``). Never fetches; a
-    missing or unreadable snapshot is ``{}``."""
+def _live_catalog_snapshot() -> dict:
+    """The local live-catalog snapshot that ``catalog-fetch --known-ids-from-queue`` writes beside
+    the queue DB (``<DEFAULT_SEO_STORAGE>/live_catalog.latest.json``). Never fetches; a missing or
+    unreadable snapshot is ``{}``."""
     from ..publishing.live_catalog import live_catalog_snapshot_path
 
     try:
         catalog = json.loads(
             live_catalog_snapshot_path(DEFAULT_SEO_STORAGE).read_text(encoding="utf-8")
         )
-        videos = catalog.get("videos") or {}
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         return {}
+    return catalog if isinstance(catalog, dict) else {}
+
+
+def _live_catalog_videos() -> dict:
+    """The ``videos`` map of :func:`_live_catalog_snapshot` (``{}`` when there is none)."""
+    videos = _live_catalog_snapshot().get("videos") or {}
     return videos if isinstance(videos, dict) else {}
+
+
+def _parse_utc(text: object) -> Optional[datetime]:
+    """An ISO timestamp as an aware UTC datetime (naive reads as UTC); ``None`` if unparseable."""
+    try:
+        when = datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def live_catalog_fetched_at() -> Optional[datetime]:
+    """When the local live-catalog snapshot was fetched (its ``fetched_at``); ``None`` when there
+    is no snapshot or it carries no readable stamp."""
+    return _parse_utc(_live_catalog_snapshot().get("fetched_at"))
 
 
 def _live_catalog_titles() -> list[tuple[str, str]]:
@@ -438,57 +457,107 @@ def ledger_video_projects() -> dict[str, str]:
     return {e.video_id: e.project_name for e in entries if e.video_id and e.project_name}
 
 
-#: The incident ``code`` (under ``replace_scheduled.INCIDENT_KIND``, one row per drive and LF) for a
-#: live-catalog video that carries a drive's expected title but has no ledger row.
-ORPHAN_UPLOAD_CODE = "orphan_upload"
-
-
 def ledger_video_ids() -> Optional[set[str]]:
     """Every video id the content ledger holds a row for, or ``None`` when the ledger cannot be
-    read (the caller must then fail closed: an empty guess would call every match an orphan
-    only by accident, and a half-read one could miss a real row)."""
-    from .content_ledger import ContentLedger
+    read or does not exist (the caller must then fail closed: an empty guess would call every
+    match an orphan only by accident, and a missing file is not a ledger that holds no rows)."""
+    from .content_ledger import ContentLedger, _default_ledger_path
 
     try:
+        if not _default_ledger_path().is_file():
+            return None
         return {e.video_id for e in ContentLedger.load().entries if e.video_id}
     except Exception:  # noqa: BLE001 - the caller refuses on None
         return None
 
 
-def expected_lf_titles(state: dict) -> dict[int, set[str]]:
+_SPLIT_PART_RE = re.compile(r"\s+[\u2014\u2013-]\s+Part \d+ of \d+\s*$", re.IGNORECASE)
+
+
+def _part_base(title: str) -> str:
+    """``title`` without a trailing `` — Part N of M`` (split full_drive) or ``(Part k [of N])``
+    (dedup) suffix."""
+    return _PART_SUFFIX_RE.sub("", _SPLIT_PART_RE.sub("", title)).strip()
+
+
+def phase_d_titles(output_dir: Optional[str]) -> dict[int, str]:
+    """``{lf_index: lowercased title}`` Phase D wrote to ``<output_dir>/<project>_lfNN_youtube.json``:
+    the exact title that LF uploads under. An unreadable or title-less sidecar is left out."""
+    out: dict[int, str] = {}
+    for path in sorted(Path(output_dir).glob("*_lf*_youtube.json")) if output_dir else ():
+        match = re.search(r"_lf(\d+)_youtube\.json$", path.name)
+        try:
+            title = json.loads(path.read_text(encoding="utf-8")).get("title")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if match and isinstance(title, str) and title.strip():
+            out[int(match.group(1))] = title.strip().lower()
+    return out
+
+
+def expected_lf_titles(
+    state: dict, output_dir: Optional[str] = None, other_forms: Optional[set[str]] = None
+) -> dict[int, set[str]]:
     """``{lf_index: {lowercased final title, ...}}`` a drive's own checkpoint says it will upload.
 
-    Each LF's label (``per_lf_ost_text``, else ``per_lf_titles``) assembled bare, and dated
-    (`` (Mon D, YYYY)`` from ``per_lf_recording_date``): the form ``ensure_unique_titles`` falls
-    back to when the bare title is another drive's. An LF with no label contributes nothing.
+    An LF whose exact title Phase D already wrote (:func:`phase_d_titles`) expects just that. The
+    fallback is derived: each label (``per_lf_ost_text``, else ``per_lf_titles``, and the
+    ``input_label`` of ``per_lf_pre_render_title_decisions``) assembled bare, and dated
+    (`` (Mon D, YYYY)`` from ``per_lf_recording_date``), the form ``ensure_unique_titles`` falls
+    back to when the bare title is another drive's; a part suffix is stripped from the catalog
+    title when matching (:func:`orphan_uploads`). ``other_forms`` (what other drives derive) are
+    dropped from the fallback: that title cannot be told from theirs. No label, no entry.
     """
     labels = state.get("per_lf_ost_text") or state.get("per_lf_titles") or {}
     dates = state.get("per_lf_recording_date") or {}
+    decisions = state.get("per_lf_pre_render_title_decisions") or {}
+    labels = labels if isinstance(labels, dict) else {}
+    decisions = decisions if isinstance(decisions, dict) else {}
     out: dict[int, set[str]] = {}
-    if not isinstance(labels, dict):
-        return out
-    for key, label in labels.items():
+    for key in {*labels, *decisions}:
         try:
             idx = int(key)
         except (TypeError, ValueError):
             continue
-        label = str(label or "").strip()
-        if not label:
-            continue
-        forms = {label}
+        decision = decisions.get(key)
+        names = [labels.get(key), decision.get("input_label") if isinstance(decision, dict) else None]  # fmt: skip
         raw = str((dates.get(key) if isinstance(dates, dict) else None) or "").strip()
-        try:
-            day = datetime.fromisoformat(raw[:10])
-            forms.add(f"{label} ({day.strftime('%b')} {day.day}, {day.year})")
-        except ValueError:
-            pass
-        out[idx] = {assemble_final_title(f).strip().lower() for f in forms}
+        forms: set[str] = set()
+        for label in {str(n or "").strip() for n in names} - {""}:
+            forms.add(label)
+            try:
+                day = datetime.fromisoformat(raw[:10])
+                forms.add(f"{label} ({day.strftime('%b')} {day.day}, {day.year})")
+            except ValueError:
+                pass
+        derived = {assemble_final_title(f).strip().lower() for f in forms} - set(other_forms or ())
+        if derived:
+            out[idx] = derived
+    for idx, title in phase_d_titles(output_dir).items():
+        out[idx] = {title}  # the exact title beats every derived form of the LF
     return out
 
 
-def orphan_uploads(expected: dict[int, set[str]], videos: dict, known_ids: set[str]) -> list[dict]:
-    """Catalog videos whose title is one of a drive's expected titles and whose id no ledger row
-    or receipt knows: ``[{lf, video_id, title, privacy, publish_at}]``, in LF then id order.
+def _drive_could_have_uploaded(video: dict, first_attempt: Optional[datetime]) -> bool:
+    """A private, unlisted or privacy-unknown video, or a public one that went live after the
+    drive's first publish attempt. A public video that predates it is history (or another
+    drive's), never an orphan of this drive."""
+    if video.get("privacy") != "public":
+        return True
+    went_live = _parse_utc(video.get("published_at") or video.get("publish_at"))
+    return bool(first_attempt and went_live and went_live > first_attempt)
+
+
+def orphan_uploads(
+    expected: dict[int, set[str]],
+    videos: dict,
+    known_ids: set[str],
+    *,
+    first_attempt: Optional[datetime] = None,
+) -> list[dict]:
+    """Catalog videos whose title (part suffix stripped) is one of a drive's expected titles, that
+    this drive could have uploaded, and whose id no ledger row, receipt or replace plan knows:
+    ``[{lf, video_id, title, privacy, publish_at}]``, in LF then id order.
 
     Without a receipt the title is the only key that ties an upload to a drive; a video the ledger
     or a receipt already names is a booked one, never an orphan.
@@ -498,11 +567,51 @@ def orphan_uploads(expected: dict[int, set[str]], videos: dict, known_ids: set[s
         for video_id in sorted(videos):
             video = videos[video_id]
             title = (video.get("title") or "").strip() if isinstance(video, dict) else ""
-            if video_id in known_ids or title.lower() not in expected[idx]:
+            if video_id in known_ids or not _drive_could_have_uploaded(video, first_attempt):
+                continue
+            if title.lower() not in expected[idx] and _part_base(title).lower() not in expected[idx]:  # fmt: skip
                 continue
             found.append({"lf": idx, "video_id": video_id, "title": title,
                           "privacy": video.get("privacy"), "publish_at": video.get("publish_at")})  # fmt: skip
     return found
+
+
+def _resolve_gone_lfs(drive: str, expected: dict[int, set[str]], incidents_dir: Optional[Path]) -> None:  # fmt: skip
+    """Close this drive's open orphan rows for an LF its checkpoint no longer has."""
+    from ..health.store import default_data_root, default_incidents_dir, safe_name
+    from .replace_scheduled import INCIDENT_KIND, ORPHAN_UPLOAD_CODE, resolve_incidents
+
+    inc = Path(incidents_dir) if incidents_dir else default_incidents_dir(default_data_root())
+    for path in sorted(inc.glob(f"{INCIDENT_KIND}_{safe_name(drive)}_{ORPHAN_UPLOAD_CODE}_lf*.json")):  # fmt: skip
+        try:
+            lf = json.loads(path.read_text(encoding="utf-8")).get("lf")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(lf, int) and lf not in expected:
+            resolve_incidents(drive, lf=lf, codes=(ORPHAN_UPLOAD_CODE,), incidents_dir=incidents_dir, outcome="the drive's checkpoint no longer has this LF")  # fmt: skip
+
+
+def _stale_snapshot_reason(drive: str, since: datetime, refresh: Optional[Callable[[], object]]) -> Optional[str]:  # fmt: skip
+    """``None`` when the local snapshot was fetched after ``since`` (refreshed through ``refresh``
+    first when it was not), else why the publish waits: the next tick tries again."""
+    fetched = live_catalog_fetched_at()
+    if fetched is not None and fetched > since:
+        return None
+    why = "no refresh was possible here"
+    if refresh is not None:
+        try:
+            refresh()
+        except Exception as exc:  # noqa: BLE001 - a failed fetch is a wait, never a launch
+            why = f"the refresh failed ({type(exc).__name__}: {exc})"
+        else:
+            fetched = live_catalog_fetched_at()
+            if fetched is not None and fetched > since:
+                return None
+            why = "the refresh wrote no newer snapshot"
+    return (f"{drive}: an earlier publish failed (started {since.isoformat()}) and the live-catalog "
+            f"snapshot (fetched {fetched.isoformat() if fetched else 'never'}) predates it, so an "
+            f"upload it left cannot be ruled out ({why}); nothing was changed, the next tick "
+            "retries")  # fmt: skip
 
 
 def orphan_upload_refusal(
@@ -512,29 +621,47 @@ def orphan_upload_refusal(
     receipt_ids: Optional[set[str]] = None,
     record: bool = True,
     incidents_dir: Optional[Path] = None,
+    output_dir: Optional[str] = None,
+    other_forms: Optional[set[str]] = None,
+    first_attempt: Optional[datetime] = None,
+    fresh_since: Optional[datetime] = None,
+    refresh: Optional[Callable[[], object]] = None,
 ) -> Optional[str]:
     """``None`` when no live-catalog video is an unbooked upload of this drive, else the reason
     its publish must wait. A publish that died after the YouTube upload left such a video; the
-    next run would book a second one. Never deletes, unlists or adopts it: JP decides in Studio.
+    next run would book a second one. Never deletes, unlists or books it: JP decides in Studio.
 
-    ``receipt_ids`` are the video ids any drive's receipts name (never an orphan). ``record``
-    opens one ``orphan_upload`` incident per LF (a rerun leaves it as it is) and resolves the
-    LF's row once the catalog no longer holds the video; a dry run passes False. Reads only the
-    drive's checkpoint, the local catalog snapshot and the ledger. A drive with no checkpoint
-    or no snapshot has nothing to match; an unreadable ledger refuses.
+    ``receipt_ids`` are the video ids this drive or any other knows (receipts of any
+    ``publish_at``, replace plans, superseded runs): never an orphan. ``output_dir`` holds Phase D's
+    exact titles, ``other_forms`` the titles other drives derive and ``first_attempt`` this drive's
+    first publish job (:func:`expected_lf_titles`, :func:`orphan_uploads`). ``fresh_since`` is set
+    after a failed publish: the snapshot must have been fetched after it, ``refresh`` is called to
+    get one, and without one the publish waits for the next tick. ``record`` opens one
+    ``orphan_upload`` incident per LF (a rerun leaves it as it is), resolves the LF's row once the
+    catalog no longer holds the video and closes rows of LFs the checkpoint dropped; a dry run
+    passes False. A drive with no checkpoint or no snapshot has nothing to match; an unreadable or
+    missing ledger refuses.
     """
-    from ..pipeline.replace_scheduled import record_incident, resolve_incidents
+    from .replace_scheduled import ORPHAN_UPLOAD_CODE, record_incident, resolve_incidents
 
     try:
         saved = json.loads((Path(stages_dir) / "pipeline_state.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    expected = expected_lf_titles(saved) if isinstance(saved, dict) else {}
+    expected = expected_lf_titles(saved, output_dir, other_forms) if isinstance(saved, dict) else {}
+    if record and isinstance(saved, dict):
+        _resolve_gone_lfs(drive, expected, incidents_dir)
+    if not expected:
+        return None
+    if fresh_since is not None:
+        stale = _stale_snapshot_reason(drive, fresh_since, refresh)
+        if stale:
+            return stale
     videos = _live_catalog_videos()
-    if not expected or not videos:
+    if not videos:
         return None
     ledger_ids = ledger_video_ids()
-    candidates = orphan_uploads(expected, videos, set(receipt_ids or ()))
+    candidates = orphan_uploads(expected, videos, set(receipt_ids or ()), first_attempt=first_attempt)  # fmt: skip
     if ledger_ids is None:
         if not candidates:
             return None
@@ -556,7 +683,8 @@ def _orphan_text(drive: str, orphans: list[dict]) -> str:
     return "; ".join(
         f"orphan upload: {drive} LF {o['lf']} title {o['title']!r} is already on YouTube as "
         f"{o['video_id']} (privacy {o['privacy']}, publish_at {o['publish_at']}) with no ledger "
-        "row or receipt; delete or adopt it in Studio, then retry (nothing was changed on YouTube)"
+        "row or receipt; verify which drive uploaded it, then delete it in YouTube Studio or book "
+        "it into the ledger, then retry (nothing was changed on YouTube)"
         for o in orphans
     )
 

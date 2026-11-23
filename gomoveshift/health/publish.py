@@ -20,7 +20,7 @@ and retires each ``ready`` drive that is already uploaded."""
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,6 +33,7 @@ from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
 from .launch import (
+    SUPERSEDED_DIR,
     _uploaded,
     default_launcher,
     plan_total_lfs,
@@ -85,6 +86,80 @@ def rendered_lf_count(recipe_path: Path) -> Optional[int]:
     return len(lfs) if isinstance(lfs, list) and lfs else None
 
 
+def known_video_ids(drives: Any) -> set:
+    """Every video id any drive's own files name, whatever its ``publish_at``: its
+    ``youtube_uploads.json`` receipts (a replace's new upload is saved with none), the ids in its
+    ``replace_plan.json`` (``replace`` / ``kept`` ``video_id``, ``progress`` ``old_id`` /
+    ``new_id``) and the receipts of its superseded runs. None of them is an orphan."""
+    ids: set = set()
+    for d in drives:
+        if not d.output_dir:
+            continue
+        out = Path(d.output_dir)
+        files = [out / "youtube_uploads.json", *sorted(out.glob("*/youtube_uploads.json")),
+                 *sorted((out.parent / SUPERSEDED_DIR).glob(f"{d.project}-*/youtube_uploads.json"))]  # fmt: skip
+        for path in files:
+            try:
+                held = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            ids.update(r["video_id"] for r in (held.values() if isinstance(held, dict) else ()) if isinstance(r, dict) and r.get("video_id"))  # fmt: skip
+        plan = read_replace_plan(out)
+        for part in ("replace", "kept"):
+            ids.update(r["video_id"] for r in (plan.get(part) or {}).values() if isinstance(r, dict) and r.get("video_id"))  # fmt: skip
+        ids.update(i for p in (plan.get("progress") or {}).values() if isinstance(p, dict) for i in (p.get("old_id"), p.get("new_id")) if i)  # fmt: skip
+    return ids
+
+
+def publish_job_times(jobs_dir: Path, project: str) -> tuple:
+    """``(first attempt, newest failed attempt)`` of ``gms-publish-<project>`` jobs as aware UTC
+    datetimes (``None`` for none): the window a catalog snapshot must cover."""
+    made, failed = [], []
+    for r in _job_records(Path(jobs_dir)):
+        if r.get("name") != f"{JOB_PREFIX}{project}":
+            continue
+        at = float(r.get("created_at") or 0)
+        made.append(at)
+        res = r.get("result") or {}
+        if res.get("state") == "failed" or (res.get("state") not in (None, "running", "succeeded") and res.get("exit_code") not in (None, 0)):  # fmt: skip
+            failed.append(at)
+    stamp = lambda t: datetime.fromtimestamp(t, timezone.utc)  # noqa: E731
+    return (stamp(min(made)) if made else None, stamp(max(failed)) if failed else None)
+
+
+def catalog_refresher(config: Any) -> Callable[[], None]:
+    """``refresh()`` that runs ``catalog-fetch --known-ids-from-queue`` (a read-only YouTube pull)
+    and so rewrites ``live_catalog.latest.json``; raises when it fails."""
+
+    def refresh() -> None:
+        import argparse
+
+        from ..cli.handlers.catalog_fetch import cmd_catalog_fetch
+
+        out = Path(config.seo.storage_path) / "live_catalog.json"
+        ns = argparse.Namespace(known_ids=None, known_ids_from_queue=True, out=str(out))
+        if cmd_catalog_fetch(ns, config):
+            raise RuntimeError("catalog-fetch failed")
+
+    return refresh
+
+
+def _other_forms(store: Any, project: str, stages_root: Path) -> set:
+    """The titles every OTHER drive derives from its checkpoint (``expected_lf_titles``)."""
+    from ..pipeline.longform_metadata import expected_lf_titles
+
+    forms: set = set()
+    for other in store.all_drives():
+        recipe = find_recipe(stages_root, other.project) if other.project != project else None
+        try:
+            saved = json.loads((recipe.parent / "pipeline_state.json").read_text()) if recipe else None  # fmt: skip
+        except (OSError, ValueError):
+            continue
+        if isinstance(saved, dict):
+            forms.update(t for ts in expected_lf_titles(saved).values() for t in ts)
+    return forms
+
+
 def _refuse(res: Dict[str, Any], reason: str) -> Dict[str, Any]:
     return {**res, "action": "refused", "reason": reason}
 
@@ -111,6 +186,7 @@ def run_publish(
     launcher: Callable[..., Any] = default_launcher,
     lead_hours: Optional[int] = None,
     expect_sha: Optional[str] = None,
+    refresh_catalog: Optional[Callable[[], Any]] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"project": project, "region": region, "action": "noop", "steps": []}
     d = store.drive(project)
@@ -141,8 +217,15 @@ def run_publish(
         return _refuse(res, f"{project} blur mask does not match its source: {masks}")
     from ..pipeline.longform_metadata import orphan_upload_refusal
 
-    booked = {vid for r in store.all_drives() for vid, _at in upload_receipts(r.output_dir).values()}  # fmt: skip
-    orphans = orphan_upload_refusal(project, recipe_path.parent, receipt_ids=booked, record=not dry_run)  # fmt: skip
+    first_try, last_failed = publish_job_times(jobs_dir, project)
+    orphans = orphan_upload_refusal(
+        project, recipe_path.parent, receipt_ids=known_video_ids(store.all_drives()),
+        record=not dry_run, output_dir=d.output_dir, other_forms=_other_forms(store, project, stages_root),
+        first_attempt=first_try,
+        # a failed publish may have died after the upload: only a snapshot fetched since sees it
+        fresh_since=last_failed or (datetime.fromtimestamp(0, timezone.utc) if reopen else None),
+        refresh=None if dry_run else refresh_catalog,
+    )  # fmt: skip
     if orphans:
         return _refuse(res, orphans)
     lf_count = rendered_lf_count(recipe_path)
@@ -303,7 +386,7 @@ def backlog_publisher(
         return run_publish(
             project=project, region=region, store=store, cadence=cadence, stages_root=stages_root,
             code_root=code_root, jobs_dir=jobs_dir, now=now, dry_run=dry_run,
-            drive_running=drive_running,
+            drive_running=drive_running, refresh_catalog=catalog_refresher(config),
         )  # fmt: skip
 
     return publish

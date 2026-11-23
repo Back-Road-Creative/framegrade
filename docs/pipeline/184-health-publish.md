@@ -20,14 +20,27 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    prerequisite only after the slot is booked), else `refused` naming the phases: re-audit it;
    no live-catalog video may be an unbooked upload of this drive (`longform_metadata.
    orphan_upload_refusal`): a publish that died after `videos().insert` leaves a scheduled video with no
-   receipt and no ledger row, and the only key tying it to the drive is its expected title (each LF's
-   `per_lf_ost_text` label from `pipeline_state.json`, bare and dated ` (Mon D, YYYY)`, assembled).
-   A catalog video with such a title whose id no ledger row and no drive's receipt names is `refused`
-   naming its id, title, privacy and `publish_at`, and opens one `orphan_upload` incident per LF
-   (`replace_scheduled_partial` kind, never duplicated by a rerun, resolved once a snapshot that lists
-   other videos no longer holds it; a dry run records none). The refusal writes nothing to the store, counts no attempt, and
-   touches no other drive; nothing on YouTube is deleted, unlisted or adopted: delete or adopt the
-   video in Studio. An unreadable ledger refuses too; no checkpoint or no snapshot has nothing to match;
+   receipt and no ledger row, and the only key tying it to the drive is its title. Each LF expects the
+   exact title Phase D wrote to `<output>/<project>_lfNN_youtube.json`; with none, the derived forms
+   (each `per_lf_ost_text` label and each `per_lf_pre_render_title_decisions[...]["input_label"]`,
+   assembled, bare and dated ` (Mon D, YYYY)`, with a ` — Part N of M` / `(Part k [of N])` suffix
+   stripped from the catalog title), minus any form another drive derives too. Never a known id: any
+   drive's receipt whatever its `publish_at` (a replace's new upload is saved with none), any drive's
+   `replace_plan.json` id (`replace`/`kept` `video_id`, `progress` `old_id`/`new_id`) and any
+   superseded run's receipt. Only a private/unlisted (or privacy-unknown) video, or a public one that
+   went live after this drive's first `gms-publish-<project>` job, counts: a public historic video
+   with the title does not block. A match is `refused` naming its id, title, privacy and
+   `publish_at` (verify which drive uploaded it, then delete it in YouTube Studio or book it into the
+   ledger) and opens one `orphan_upload` incident per LF (`replace_scheduled_partial` kind, never
+   duplicated by a rerun and never closed by the replace flow's LF-done resolve; closed once a snapshot
+   that lists other videos no longer holds it, or when the checkpoint drops the LF; a dry run records
+   none). After a failed publish (a failed job, or a `failed` drive) the snapshot must have been fetched
+   after that job started: `backlog_publisher` runs `catalog-fetch --known-ids-from-queue` first
+   (`catalog_refresher`; `health publish` passes none), and a snapshot still older, or a failed fetch,
+   refuses with a reason saying the next tick retries. A clean first publish needs no fresh snapshot.
+   The refusal writes nothing to the store, counts no attempt and touches no other drive; nothing on
+   YouTube is deleted or unlisted. An unreadable or missing ledger refuses too; no checkpoint or no
+   snapshot has nothing to match;
    and no older `ready` drive may sit ahead of it, because `claim_or_reason` claims
    the oldest ready drive of the region, never a named one. An older `ready` drive that already
    holds an upload receipt with `publish_at` (uploaded outside a claim) does not block: it is

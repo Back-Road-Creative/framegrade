@@ -20,7 +20,8 @@ from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.pipeline.content_ledger import ContentEntry, ContentLedger
 from gomoveshift.publishing.live_catalog import live_catalog_snapshot_path
 
-from tests.test_publish_command import Rig
+from gomoveshift.health import publish
+from tests.test_publish_command import CAD, NOW, Rig
 
 TITLE = "Ireland (Sep 16, 2025) in 4K"
 ORPHAN = {
@@ -41,10 +42,11 @@ def rows(incidents):
     return [json.loads(p.read_text()) for p in sorted(incidents.glob("*orphan_upload*.json"))]
 
 
-def catalog(videos):
+def catalog(videos, fetched_at=None):
     path = live_catalog_snapshot_path(lm.DEFAULT_SEO_STORAGE)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"videos": videos}), encoding="utf-8")
+    body = {"videos": videos, **({"fetched_at": fetched_at} if fetched_at else {})}
+    path.write_text(json.dumps(body), encoding="utf-8")
 
 
 def state(rig, project="day-a", label="Ireland", date="2025-09-16"):
@@ -75,6 +77,7 @@ def rig_with_state(tmp_path, project="day-a"):
     rig = Rig(tmp_path)
     rig.audit(project)
     state(rig, project)
+    ContentLedger.load().save()  # a ledger that exists and holds no rows (a missing one refuses)
     return rig
 
 
@@ -155,8 +158,12 @@ def test_other_drives_are_not_blocked(tmp_path):
     rig.audit("day-b", status="auditing")  # a second, unrelated drive with a different title
     state(rig, "day-b", label="Galway", date="2025-09-20")
     catalog({"vidKerry": ORPHAN})
+    before = rig.snapshot()
     assert rig.run("day-a")["action"] == "refused"
-    assert rig.run("day-b")["action"] != "refused" or "vidKerry" not in rig.run("day-b")["reason"]
+    assert rig.snapshot() == before
+    res = rig.run("day-b")
+    assert res["action"] == "launched", res
+    assert rig.store.drive("day-b").status == "claimed"
 
 
 def test_a_catalog_with_no_match_changes_nothing(tmp_path, incidents):
@@ -214,3 +221,289 @@ def test_no_state_file_means_no_expected_title_and_no_block(tmp_path):
     rig.audit()
     catalog({"vidKerry": ORPHAN})
     assert rig.run()["action"] == "launched"
+
+
+# ── a replace's own upload is known (BLOCKER 1) ──────────────────────────────
+
+
+def _replace_rig(tmp_path, *, receipt=True, state_name="uploaded"):
+    rig = rig_with_state(tmp_path)
+    out = rig.out / "day-a"
+    out.mkdir(parents=True, exist_ok=True)
+    old = {"video_id": "vidOld", "publish_at": "2026-12-20T19:00:00+00:00", "title": TITLE}
+    plan = {"schema": "replace-scheduled/1", "kept": {}, "replace": {"1": old},
+            "progress": {"1": {"old_id": "vidOld", "new_id": "vidNew", "state": state_name}}}  # fmt: skip
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    if receipt:  # the sidecar save_state wrote at insert: the replacement went up unscheduled
+        (out / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "vidNew", "publish_at": None}}))  # fmt: skip
+    ledger_row("vidOld", project="day-a")  # the ledger names the OLD id until the swap
+    catalog({"vidOld": {**ORPHAN, "publish_at": "2026-12-20T19:00:00Z"},
+             "vidNew": {"title": TITLE, "privacy": "private", "publish_at": None}})  # fmt: skip
+    return rig
+
+
+@pytest.mark.parametrize("state_name", ["uploaded", "old_deleted"])
+def test_a_half_finished_replace_does_not_call_its_own_upload_an_orphan(
+    tmp_path, incidents, state_name
+):
+    rig = _replace_rig(tmp_path, state_name=state_name)
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert rows(incidents) == []
+
+
+def test_the_replace_plan_alone_names_the_new_upload(tmp_path):
+    rig = _replace_rig(tmp_path, receipt=False)  # the receipt is not written yet: the plan is
+    assert rig.run()["action"] == "launched"
+
+
+def test_a_receipt_with_no_publish_at_is_a_known_id(tmp_path):
+    rig = rig_with_state(tmp_path)
+    other = rig.audit("day-b", recipe=False)  # another drive's receipt, saved with no publish_at
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "vidKerry", "publish_at": None}}))  # fmt: skip
+    catalog({"vidKerry": ORPHAN})
+    assert rig.run()["action"] == "launched"
+
+
+def test_a_superseded_runs_receipt_is_a_known_id(tmp_path):
+    rig = rig_with_state(tmp_path)
+    old = rig.out / "_superseded" / "day-a-20261101T000000Z"
+    old.mkdir(parents=True)
+    (old / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "vidKerry", "publish_at": None}}))  # fmt: skip
+    catalog({"vidKerry": ORPHAN})
+    assert rig.run()["action"] == "launched"
+
+
+# ── Phase D's exact title, then every derived form (MAJOR 2) ─────────────────
+
+
+def test_the_exact_title_phase_d_wrote_is_what_ties_a_video_to_the_lf(tmp_path):
+    rig = rig_with_state(tmp_path)
+    (rig.out / "day-a").mkdir(parents=True, exist_ok=True)
+    (rig.out / "day-a" / "day-a_lf01_youtube.json").write_text(json.dumps({"title": "Kerry Coast Run in 4K"}))  # fmt: skip
+    catalog({"vidX": {**ORPHAN, "title": "Kerry Coast Run in 4K"}})
+    res = rig.run()
+    assert res["action"] == "refused" and "vidX" in res["reason"], res
+
+
+def test_a_derived_title_is_only_a_fallback_when_phase_d_wrote_one(tmp_path):
+    rig = rig_with_state(tmp_path)
+    (rig.out / "day-a").mkdir(parents=True, exist_ok=True)
+    (rig.out / "day-a" / "day-a_lf01_youtube.json").write_text(json.dumps({"title": "Kerry Coast Run in 4K"}))  # fmt: skip
+    catalog({"vidX": {**ORPHAN, "title": "Ireland in 4K"}})
+    assert rig.run()["action"] == "launched"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Ireland in 4K — Part 1 of 2",
+        "Ireland (Sep 16, 2025) in 4K — Part 2 of 3",
+        "Ireland in 4K (Part 1 of 2)",
+        "Ireland in 4K (Part 2)",
+    ],
+)
+def test_a_part_suffixed_title_ties_to_the_drive(tmp_path, title):
+    rig = rig_with_state(tmp_path)
+    catalog({"vidP": {**ORPHAN, "title": title}})
+    res = rig.run()
+    assert res["action"] == "refused" and "vidP" in res["reason"], res
+
+
+def test_the_assembled_in_batch_part_title_ties_to_the_drive(tmp_path):
+    rig = rig_with_state(tmp_path)
+    catalog({"vidP": {**ORPHAN, "title": lm.assemble_final_title("Ireland (Part 1 of 2)")}})
+    assert rig.run()["action"] == "refused"
+
+
+def test_the_pre_render_decision_label_ties_to_the_drive(tmp_path):
+    rig = rig_with_state(tmp_path)
+    stages = rig.stages / "day-a" / "day-a" / "_stages"
+    body = json.loads((stages / "pipeline_state.json").read_text())
+    body["per_lf_pre_render_title_decisions"] = {"1": {"input_label": "Ring of Kerry"}}
+    (stages / "pipeline_state.json").write_text(json.dumps(body))
+    catalog({"vidR": {**ORPHAN, "title": lm.assemble_final_title("Ring of Kerry")}})
+    res = rig.run()
+    assert res["action"] == "refused" and "vidR" in res["reason"], res
+
+
+# ── only a video this drive could have uploaded (MAJOR 4) ────────────────────
+
+
+def test_a_public_historic_video_with_the_title_does_not_block(tmp_path, incidents):
+    rig = rig_with_state(tmp_path)
+    catalog({"vidOld": {"title": "Ireland in 4K", "privacy": "public", "publish_at": None,
+                        "published_at": "2024-05-01T12:00:00Z"}})  # fmt: skip
+    assert rig.run()["action"] == "launched"
+    assert rows(incidents) == []
+
+
+def test_the_refusal_says_verify_the_drive_and_never_adopt(tmp_path):
+    rig = rig_with_state(tmp_path)
+    catalog({"vidKerry": ORPHAN})
+    reason = rig.run()["reason"]
+    assert "verify which drive uploaded it" in reason and "YouTube Studio" in reason
+    assert "book it into the ledger" in reason and "adopt" not in reason
+
+
+@pytest.mark.parametrize(
+    ("published_at", "action"), [(1_799_999_000.0, "launched"), (1_800_000_100.0, "refused")]
+)
+def test_a_public_video_blocks_only_if_published_after_the_first_attempt(
+    tmp_path, published_at, action
+):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+    public = {"title": TITLE, "privacy": "public", "publish_at": None, "published_at": iso(published_at)}  # fmt: skip
+    catalog({"vidPub": public}, fetched_at=iso(1_900_000_000.0))
+    res = rig.run()
+    assert res["action"] == action, res
+    assert action == "launched" or "vidPub" in res["reason"]
+
+
+def test_another_drives_same_title_upload_is_not_attributed_to_this_drive(tmp_path):
+    rig = rig_with_state(tmp_path, "day-a")
+    rig.audit("day-b", status="auditing")
+    state(rig, "day-b", label="Ireland", date="2025-09-20")
+    catalog({"vidB": {**ORPHAN, "title": "Ireland in 4K"}})  # the bare title both drives expect
+    res = rig.run("day-a")
+    assert res["action"] == "launched", res
+    catalog(
+        {"vidB": {**ORPHAN, "title": "Ireland (Sep 16, 2025) in 4K"}}
+    )  # day-a's own dated title
+    assert rig.run("day-a")["action"] == "refused"
+
+
+# ── a failed publish needs a catalog fetched after it (MAJOR 3) ──────────────
+
+
+def iso(epoch):
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def failed_job(rig, *, created_at, state="failed", name="gms-publish-day-a"):
+    path = rig.jobs / f"{name}-{int(created_at)}" / "job.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": "job/1", "name": name, "created_at": created_at,
+                                "result": {"state": state, "exit_code": 1}}))  # fmt: skip
+
+
+def run_with(rig, refresh):
+    return publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=False,
+        drive_running=lambda jobs: False, launcher=rig.launcher, refresh_catalog=refresh,
+    )  # fmt: skip
+
+
+def test_a_failed_publish_with_a_stale_snapshot_refreshes_before_deciding(tmp_path):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+    catalog({"v": {"title": "Cork in 4K"}}, fetched_at=iso(1_700_000_000.0))
+    calls = []
+
+    def refresh():
+        calls.append(1)
+        catalog({"vidKerry": ORPHAN}, fetched_at=iso(1_900_000_000.0))
+
+    res = run_with(rig, refresh)
+    assert calls == [1] and res["action"] == "refused" and "vidKerry" in res["reason"], res
+    assert not rig.launches
+
+
+def test_a_failed_publish_launches_once_a_refreshed_catalog_is_clean(tmp_path):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+    rig.store.set_status("day-a", "failed")
+    res = run_with(rig, lambda: catalog({"v": {"title": "Cork in 4K"}}, fetched_at=iso(1_900_000_000.0)))  # fmt: skip
+    assert res["action"] == "launched", res
+
+
+@pytest.mark.parametrize("refresh", [None, "raises", "no_write"])
+def test_a_failed_publish_that_cannot_get_a_fresh_snapshot_refuses_until_the_next_tick(
+    tmp_path, refresh
+):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+
+    # no snapshot at all, as after a restore: nothing proves the dead upload is absent
+    def boom():
+        raise RuntimeError("quota")
+
+    res = run_with(rig, {"raises": boom, "no_write": lambda: None}.get(refresh))
+    assert res["action"] == "refused" and "next tick" in res["reason"], res
+    assert not rig.launches and rig.store.drive("day-a").status == "auditing"
+
+
+def test_a_fresh_snapshot_after_the_failed_publish_needs_no_refresh(tmp_path):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+    catalog({"v": {"title": "Cork in 4K"}}, fetched_at=iso(1_900_000_000.0))
+
+    def refresh():
+        raise AssertionError("a fresh snapshot is never refetched")
+
+    assert run_with(rig, refresh)["action"] == "launched"
+
+
+def test_a_clean_first_publish_needs_no_fresh_snapshot(tmp_path):
+    rig = rig_with_state(tmp_path)
+    catalog({"v": {"title": "Cork in 4K"}})  # no fetched_at, no failed job: stays open
+    assert rig.run()["action"] == "launched"
+
+
+def test_a_dry_run_never_refreshes_the_catalog(tmp_path):
+    rig = rig_with_state(tmp_path)
+    failed_job(rig, created_at=1_800_000_000.0)
+    catalog({"v": {"title": "Cork in 4K"}}, fetched_at=iso(1_700_000_000.0))
+
+    def refresh():
+        raise AssertionError("a dry run changes nothing")
+
+    res = publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=True,
+        drive_running=lambda jobs: False, launcher=rig.launcher, refresh_catalog=refresh,
+    )  # fmt: skip
+    assert res["action"] == "refused" and "next tick" in res["reason"]
+
+
+# ── incident bookkeeping (MINOR 5, 6, 7) ─────────────────────────────────────
+
+
+def test_the_replace_flows_lf_done_resolve_leaves_the_orphan_row_open(tmp_path, incidents):
+    from gomoveshift.pipeline import replace_scheduled
+
+    rig = rig_with_state(tmp_path)
+    catalog({"vidKerry": ORPHAN})
+    assert rig.run()["action"] == "refused"
+    replace_scheduled.resolve_incidents("day-a", lf=1)  # what advance() calls when an LF is DONE
+    replace_scheduled.resolve_incidents("day-a", lf=1, keep=replace_scheduled._KEEP_OPEN_ON_ABANDON)  # fmt: skip
+    (row,) = rows(incidents)
+    assert row["resolved_at"] is None
+
+
+def test_a_missing_ledger_file_blocks_fail_closed(tmp_path):
+    rig = rig_with_state(tmp_path)
+    (Path(get_config().seo.storage_path) / ".content_ledger.json").unlink()
+    catalog({"vidKerry": ORPHAN})
+    res = rig.run()
+    assert res["action"] == "refused" and "ledger is unreadable" in res["reason"], res
+    assert not rig.launches
+
+
+def test_a_row_for_an_lf_the_drive_no_longer_has_is_resolved(tmp_path, incidents):
+    rig = rig_with_state(tmp_path)
+    stages = rig.stages / "day-a" / "day-a" / "_stages"
+    catalog({"vidKerry": ORPHAN})
+    assert lm.orphan_upload_refusal("day-a", stages)
+    from gomoveshift.pipeline.replace_scheduled import record_incident
+
+    record_incident("day-a", "orphan_upload", "LF 2 orphan", lf=2)
+    assert len(rows(incidents)) == 2
+    assert lm.orphan_upload_refusal("day-a", stages)  # LF 2 is not in the checkpoint's labels
+    by_lf = {r["lf"]: r["resolved_at"] for r in rows(incidents)}
+    assert by_lf[1] is None and by_lf[2]
