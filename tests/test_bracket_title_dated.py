@@ -6,6 +6,8 @@ LF's measured drive date, so same-country drives never collide on a bare title.
 
 from __future__ import annotations
 
+import copy
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -789,3 +791,534 @@ def test_a_split_decision_lf_is_checked_without_its_part_suffix(tmp_path, monkey
         tmp_path, state, {1: _COUNTY}, {1: (1, 2)}, published={f"{_COUNTY} in 4K"}
     )
     assert _titles(gen) == [label]
+
+
+# ── a bracket-dated day confirmed by DEPLOYED code still covers its unchanged burn ──
+# The deployed code stored the raw hash over ``<label> (Part k of K)`` titles; a country or
+# state bracket day is now titled ``<label> (Mon D, YYYY) — Part k of K`` (or, unsplit,
+# ``<label> (Mon D, YYYY) (Part k of K)``), which none of the other legacy forms reproduces.
+
+_BDAY = "2025-09-16"
+# Frozen from ``git archive origin/main`` (02861d3f): ``compute_ost_audit_hash(format_ost_audit(
+# ...))`` over ``ensure_unique_titles({1: L, 2: L})`` = ``{k: "L (Part k of 2)"}``, date 2025-09-16.
+_DEPLOYED_IRELAND_SPLIT = "dc8c7437d155af0cbfb19d366f0e29ee29ce498f1fbfc6f15d63bf777ca121b8"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_DEPLOYED_NC_SPLIT = "29be16a82c39e8184356bc230b21546cbde2d9df9563340860cef6877de21f42"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_DEPLOYED_IRELAND_SINGLE = "96751a950f084c12e7d805bc72555858066f39dd87e3d21f595eabcb6611b4ca"  # pragma: allowlist secret (sha256 of an OST audit payload)
+
+
+def _bracket_titles(label, level, lf_parts=_PARTS, n=2):
+    labels = {k: label for k in range(1, n + 1)}
+    kw = {"lf_dates": {k: _BDAY for k in labels}, "bracket_route": {"label": label, "level": level}}
+    if lf_parts:
+        kw["lf_parts"] = lf_parts
+    return labels, ensure_unique_titles(dict(labels), **kw)
+
+
+def _bracket_gate(tmp_path, titles, ost, stored):
+    state = _gate_state(titles, ost=ost, stored=stored, date=_BDAY)
+    _gate(tmp_path, state, date=_BDAY, indices=sorted(titles))
+    return state
+
+
+@pytest.mark.parametrize(
+    "label,level,deployed",
+    [
+        ("Ireland", "country", _DEPLOYED_IRELAND_SPLIT),
+        ("North Carolina", "state", _DEPLOYED_NC_SPLIT),
+    ],
+)
+def test_a_bracket_dated_split_day_confirmed_by_deployed_code_stays_confirmed(
+    tmp_path, label, level, deployed
+):
+    ost, titles = _bracket_titles(label, level)
+    assert titles[1] == f"{label} (Sep 16, 2025) — Part 1 of 2"
+    state = _bracket_gate(tmp_path, titles, ost, deployed)  # no raise: the burn is unchanged
+    assert state["ost_audit_hash"][_BDAY] != deployed  # re-stamped with the normalised hash
+    _bracket_gate(tmp_path, titles, ost, state["ost_audit_hash"][_BDAY])  # and stays passed
+
+
+def test_two_same_label_bracket_lfs_without_lf_parts_stay_confirmed(tmp_path):
+    ost, titles = _bracket_titles("Ireland", "country", lf_parts=None)
+    assert titles[1] == "Ireland (Sep 16, 2025) (Part 1 of 2)"
+    _bracket_gate(tmp_path, titles, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_a_bracket_dated_single_lf_day_confirmed_by_deployed_code_stays_confirmed(tmp_path):
+    ost, titles = _bracket_titles("Ireland", "country", lf_parts=None, n=1)
+    assert titles == {1: "Ireland (Sep 16, 2025)"}
+    _bracket_gate(tmp_path, titles, ost, _DEPLOYED_IRELAND_SINGLE)
+
+
+def test_the_deployed_base_form_is_one_of_the_legacy_hashes_the_gate_derives():
+    from gomoveshift.pipeline.ost_audit_sidecar import format_ost_audit, legacy_ost_audit_hashes
+
+    ost, titles = _bracket_titles("Ireland", "country")
+    payload = format_ost_audit(_BDAY, _gate_state(titles, ost=ost, date=_BDAY), [1, 2])
+    assert _DEPLOYED_IRELAND_SPLIT in legacy_ost_audit_hashes(payload)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_burn(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost, titles = _bracket_titles("Ireland", "country")
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, titles, {1: "Ireland", 2: "Cork"}, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_part_count(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost, three = _bracket_titles("Ireland", "country", lf_parts={1: (1, 3), 2: (2, 3)})
+    assert three[1] == "Ireland (Sep 16, 2025) — Part 1 of 3"
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, three, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+def test_the_deployed_base_form_never_covers_a_changed_base_label(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    ost = {1: "Ireland", 2: "Ireland"}  # the burn is unchanged; only the title's label differs
+    _, relabelled = _bracket_titles("Cork", "country")
+    with pytest.raises(OstAuditPendingError):
+        _bracket_gate(tmp_path, relabelled, ost, _DEPLOYED_IRELAND_SPLIT)
+
+
+# ── the stale wording, and the per-day gate's routes, match lf_gate_or_raise ──
+
+_PD = "2025-09-14"
+
+
+def _per_day_stale(tmp_path, **marker):
+    """A per-day run whose stored hash is for ``Ireland`` while the burn is now County Kerry."""
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    state["per_lf_ost_text"] = {1: "County Kerry, Ireland"}
+    state.update(marker)
+    return state
+
+
+def _current_per_day_hash(state):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    return compute_ost_audit_hash(format_ost_audit(_PD, state, [1]))
+
+
+def test_both_stale_messages_say_the_audit_burn_text_or_title_changed(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    wording = "its OST audit (burn text or title) changed since it was confirmed"
+    new = {1: "County Kerry, Ireland", 2: "County Kerry, Ireland"}
+    with pytest.raises(OstAuditPendingError) as front:
+        _gate(tmp_path, _gate_state(new, ost=new, stored=_audit_hash({1: _COUNTY, 2: _COUNTY})))
+    assert wording in str(front.value)
+    with pytest.raises(OstAuditPendingError) as per_day:
+        _per_day_run(tmp_path, _per_day_stale(tmp_path))
+    assert wording in str(per_day.value)
+
+
+def test_a_stale_day_the_operator_confirms_this_run_passes_the_per_day_gate_too(tmp_path):
+    state = _per_day_stale(tmp_path, ost_audit_confirmed_this_run=True)
+    result, apply_mock, _ = _per_day_run(tmp_path, state)
+    assert result is not None and apply_mock.call_count == 1
+    assert state["ost_audit_hash"][_PD] == _current_per_day_hash(state)  # re-bound to what ran
+
+
+def test_a_stale_day_with_a_marker_stamped_with_the_current_hash_passes_the_per_day_gate(tmp_path):
+    state = _per_day_stale(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    (out / f"ost_audit_{_PD}.confirmed").write_text(_current_per_day_hash(state))
+    result, apply_mock, _ = _per_day_run(tmp_path, state)
+    assert result is not None and apply_mock.call_count == 1
+
+
+@pytest.mark.parametrize("marker_text", ["", "0" * 64])
+def test_a_stale_day_with_an_unstamped_or_old_marker_still_stops_the_per_day_gate(
+    tmp_path, marker_text
+):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError
+
+    state = _per_day_stale(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    (out / f"ost_audit_{_PD}.confirmed").write_text(marker_text)
+    with pytest.raises(OstAuditPendingError):
+        _per_day_run(tmp_path, state)
+
+
+def test_a_legacy_pass_at_the_per_day_gate_rewrites_the_sidecar_to_the_stamped_hash(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash
+
+    state = _per_day_state("Ireland", "Ireland (Sep 14, 2025)")
+    _store_legacy(state)
+    out = tmp_path / "out"
+    out.mkdir(parents=True)
+    sidecar = out / f"ost_audit_{_PD}.json"
+    sidecar.write_text(json.dumps({"date": _PD, "lfs": [{"lf_index": 1, "stale": True}]}))
+    _per_day_run(tmp_path, state)
+    assert compute_ost_audit_hash(json.loads(sidecar.read_text())) == state["ost_audit_hash"][_PD]
+
+
+# ── a multi-day country/state bracket drive confirmed by DEPLOYED code stays confirmed ──
+# Deployed code (02861d3) deduped titles drive-wide: every same-label LF in the drive was
+# titled ``<label> (Part k of N)`` with k and N counted across the whole drive in LF order.
+# The hashes below are the deployed hash formula over those titles, computed on a
+# ``git archive 02861d3`` export (title_builder.ensure_unique_titles + ost_audit_sidecar
+# compute_ost_audit_hash on the deployed code, one call per day over that day's LFs, two-day drives).
+
+_MD_D1, _MD_D2, _MD_D3 = "2025-09-16", "2025-09-17", "2025-09-18"
+_MD_ROUTE = {"label": "Ireland", "level": "country"}
+_MD_ONE_EACH = {  # LF1 on D1, LF2 on D2: "Ireland (Part 1 of 2)", "Ireland (Part 2 of 2)"
+    _MD_D1: "5562d29274c969729b4f97fe1c0453ccfd917701c429aacfc4fcf85cf33d8041",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D2: "cf0d5f9e643dc64a2717db7c0ef27a1dc2f16870053b14ba6aab1ec1b4aaf2e2",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_MD_SPLIT_PLUS = {  # LF1+LF2 (a split LF) on D1, LF3 on D2: "Ireland (Part k of 3)"
+    _MD_D1: "3d38fc47778317be137fa67e083e756f9238ceab3bc385a2e0daae18558104f7",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D2: "f59d6234605fea6193db4bdf6520e175bd24b38248e81bad1b276b966e71fe79",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_MD_ONE_DAY_SPLIT = "dc8c7437d155af0cbfb19d366f0e29ee29ce498f1fbfc6f15d63bf777ca121b8"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_MD_NC_ONE_DAY_SPLIT = "29be16a82c39e8184356bc230b21546cbde2d9df9563340860cef6877de21f42"  # pragma: allowlist secret (sha256 of an OST audit payload)
+_MD_DRIVES = {
+    "one_each": (
+        {1: "Ireland", 2: "Ireland"},
+        {1: _MD_D1, 2: _MD_D2},
+        None,
+        {_MD_D1: [1], _MD_D2: [2]},
+        _MD_ONE_EACH,
+    ),
+    "split_plus": (
+        {1: "Ireland", 2: "Ireland", 3: "Ireland"},
+        {1: _MD_D1, 2: _MD_D1, 3: _MD_D2},
+        {1: (1, 2), 2: (2, 2)},
+        {_MD_D1: [1, 2], _MD_D2: [3]},
+        _MD_SPLIT_PLUS,
+    ),
+}
+
+
+def _md_titles(labels, dates, parts=None, route=_MD_ROUTE):
+    kw = {"lf_dates": dates, "bracket_route": route}
+    if parts:
+        kw["lf_parts"] = parts
+    return ensure_unique_titles(dict(labels), **kw)
+
+
+def _md_state(titles, ost, dates, stored=None, **extra):
+    state = {
+        "per_lf_ost_text": dict(ost),
+        "per_lf_titles": dict(titles),
+        "per_lf_recording_date": dict(dates),
+        "per_lf_locations": {},
+        "ost_audit_passed": {d: True for d in (stored or {})},
+        "ost_audit_hash": dict(stored or {}),
+    }
+    state.update(extra)
+    return state
+
+
+def _md_gate(tmp_path, date, idx, state, **kw):
+    from gomoveshift.pipeline.ost_audit_sidecar import OstAuditPendingError, lf_gate_or_raise
+
+    try:
+        return "PASS", lf_gate_or_raise(tmp_path, date, idx, state, **kw)
+    except OstAuditPendingError as exc:
+        return "REFUSED", str(exc)
+
+
+@pytest.mark.parametrize("drive", sorted(_MD_DRIVES))
+def test_a_multi_day_bracket_day_confirmed_by_deployed_code_stays_confirmed(tmp_path, drive):
+    labels, dates, parts, days, deployed = _MD_DRIVES[drive]
+    titles = _md_titles(labels, dates, parts)
+    for date, idx in days.items():
+        state = _md_state(titles, labels, dates, stored={date: deployed[date]})
+        outcome, got = _md_gate(tmp_path / date, date, idx, state)
+        assert outcome == "PASS", got
+        assert got == {i: "Ireland" for i in idx}
+        assert state["ost_audit_hash"][date] != deployed[date]  # re-stamped to the normalised hash
+
+
+@pytest.mark.parametrize("drive", sorted(_MD_DRIVES))
+def test_a_changed_burn_still_reopens_a_multi_day_deployed_day(tmp_path, drive):
+    labels, dates, parts, days, deployed = _MD_DRIVES[drive]
+    titles = _md_titles(labels, dates, parts)
+    date, idx = next(iter(days.items()))
+    ost = dict(labels)
+    ost[idx[0]] = "Kerry, Ireland"
+    state = _md_state(titles, ost, dates, stored={date: deployed[date]})
+    outcome, msg = _md_gate(tmp_path, date, idx, state)
+    assert outcome == "REFUSED" and "changed since it was confirmed" in msg
+
+
+def test_a_changed_part_count_still_reopens_a_multi_day_deployed_day(tmp_path):
+    # Day 1 of the two-LF drive was confirmed as "Ireland (Part 1 of 2)"; a third Ireland LF
+    # on a later day makes it "Part 1 of 3": the part count N is bound, so the day reopens.
+    labels = {1: "Ireland", 2: "Ireland", 3: "Ireland"}
+    dates = {1: _MD_D1, 2: _MD_D2, 3: _MD_D3}
+    state = _md_state(
+        _md_titles(labels, dates), labels, dates, stored={_MD_D1: _MD_ONE_EACH[_MD_D1]}
+    )
+    outcome, msg = _md_gate(tmp_path, _MD_D1, [1], state)
+    assert outcome == "REFUSED" and "changed since it was confirmed" in msg
+
+
+def test_a_changed_base_label_still_reopens_a_multi_day_deployed_day(tmp_path):
+    labels = {1: "Ireland", 2: "Ireland"}
+    dates = {1: _MD_D1, 2: _MD_D2}
+    route = {"label": "Wales", "level": "country"}
+    titles = _md_titles({1: "Wales", 2: "Wales"}, dates, route=route)
+    state = _md_state(
+        titles, {1: "Ireland", 2: "Ireland"}, dates, stored={_MD_D1: _MD_ONE_EACH[_MD_D1]}
+    )
+    assert _md_gate(tmp_path, _MD_D1, [1], state)[0] == "REFUSED"
+
+
+@pytest.mark.parametrize(
+    "label,level,deployed",
+    [
+        ("Ireland", "country", _MD_ONE_DAY_SPLIT),
+        ("North Carolina", "state", _MD_NC_ONE_DAY_SPLIT),
+    ],
+)
+def test_a_single_day_split_confirmed_by_deployed_code_stays_confirmed(
+    tmp_path, label, level, deployed
+):
+    labels = {1: label, 2: label}
+    dates = {1: _MD_D1, 2: _MD_D1}
+    titles = _md_titles(labels, dates, {1: (1, 2), 2: (2, 2)}, {"label": label, "level": level})
+    state = _md_state(titles, labels, dates, stored={_MD_D1: deployed})
+    assert _md_gate(tmp_path, _MD_D1, [1, 2], state)[0] == "PASS"
+    assert state["ost_audit_hash"][_MD_D1] != deployed
+
+
+def test_a_single_day_deployed_day_still_refuses_a_changed_burn_label_or_count(tmp_path):
+    labels = {1: "Ireland", 2: "Ireland"}
+    dates = {1: _MD_D1, 2: _MD_D1}
+    split = {1: (1, 2), 2: (2, 2)}
+    titles = _md_titles(labels, dates, split)
+    changed = _md_state(
+        titles, {1: "Ireland", 2: "Kerry, Ireland"}, dates, stored={_MD_D1: _MD_ONE_DAY_SPLIT}
+    )
+    assert _md_gate(tmp_path / "burn", _MD_D1, [1, 2], changed)[0] == "REFUSED"
+    nc = {"label": "North Carolina", "level": "state"}
+    nc_labels = {1: "North Carolina", 2: "North Carolina"}
+    relabelled = _md_state(
+        _md_titles(nc_labels, dates, split, nc),
+        nc_labels,
+        dates,
+        stored={_MD_D1: _MD_ONE_DAY_SPLIT},
+    )
+    assert _md_gate(tmp_path / "label", _MD_D1, [1, 2], relabelled)[0] == "REFUSED"
+    three = {1: "Ireland", 2: "Ireland", 3: "Ireland"}
+    counted = _md_state(
+        _md_titles(three, {k: _MD_D1 for k in three}, {1: (1, 3), 2: (2, 3), 3: (3, 3)}),
+        three,
+        {k: _MD_D1 for k in three},
+        stored={_MD_D1: _MD_ONE_DAY_SPLIT},
+    )
+    assert _md_gate(tmp_path / "count", _MD_D1, [1, 2, 3], counted)[0] == "REFUSED"
+
+
+# ── a this-run confirm covers only the payload this run showed ──
+
+
+def _tr_state(title, ost, stored):
+    return _md_state(
+        {1: title},
+        {1: ost},
+        {1: _MD_D1},
+        stored={_MD_D1: stored},
+        ost_audit_confirmed_this_run=True,
+    )
+
+
+def test_a_this_run_confirm_does_not_pass_a_payload_other_than_the_one_it_stamped(tmp_path):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    state = _tr_state("Ireland", "Ireland", "f" * 64)
+    assert _md_gate(tmp_path, _MD_D1, [1], state)[0] == "PASS"  # the front-load run: confirm stamps
+    shown = state["ost_audit_hash"][_MD_D1]
+    state["per_lf_ost_text"] = {1: "Kerry, Ireland"}  # the payload changes before the burn
+    outcome, msg = _md_gate(tmp_path, _MD_D1, [1], state)
+    assert outcome == "REFUSED"
+    burn = compute_ost_audit_hash(format_ost_audit(_MD_D1, state, [1]))
+    assert shown in msg and burn in msg and "between the front-load and the burn" in msg
+    assert state["ost_audit_hash"][_MD_D1] == shown  # nothing re-stamped
+
+
+def test_a_this_run_confirm_still_passes_the_payload_it_stamped_and_a_per_day_only_run(tmp_path):
+    state = _tr_state("Ireland", "Ireland", "f" * 64)
+    assert _md_gate(tmp_path / "a", _MD_D1, [1], state)[0] == "PASS"
+    assert _md_gate(tmp_path / "a", _MD_D1, [1], state)[0] == "PASS"  # same payload, per-day call
+    fresh = _tr_state("Ireland", "Ireland", "f" * 64)  # no front-load stamp: per-day only
+    assert _md_gate(tmp_path / "b", _MD_D1, [1], fresh)[0] == "PASS"
+    assert fresh["ost_audit_hash"][_MD_D1] != "f" * 64
+
+
+def test_a_persisted_only_confirm_never_passes_a_stale_day(tmp_path):
+    state = _md_state(
+        {1: "Ireland"},
+        {1: "Ireland"},
+        {1: _MD_D1},
+        stored={_MD_D1: "f" * 64},
+        ost_audit_confirmed=True,
+    )
+    assert _md_gate(tmp_path, _MD_D1, [1], state)[0] == "REFUSED"
+
+
+def test_the_stale_message_frames_the_flag_as_an_operators_reviewed_act(tmp_path):
+    state = _md_state({1: "Ireland"}, {1: "Ireland"}, {1: _MD_D1}, stored={_MD_D1: "f" * 64})
+    _, msg = _md_gate(tmp_path, _MD_D1, [1], state)
+    assert "operator's own --ost-audit-confirmed run" in msg and "after reviewing" in msg
+    assert f"ost_audit_{_MD_D1}.confirmed" in msg
+
+
+# ── the resume drift check accepts what the gate accepts; deployed grouping is the deployed one ──
+# Hashes below: ``git archive 02861d3`` export, ``title_builder.ensure_unique_titles`` +
+# ``ost_audit_sidecar.compute_ost_audit_hash`` on the deployed code, one call per day over that
+# day's LFs (shapes: rr55 ``scripts/shapes.py``). Deployed grouped labels on
+# ``assemble_final_title(label).strip().lower()`` and kept the raw label in the title text.
+
+_DEP_CASE = {  # "Ireland (Part 1 of 2)", "ireland (Part 2 of 2)"
+    _MD_D1: "5562d29274c969729b4f97fe1c0453ccfd917701c429aacfc4fcf85cf33d8041",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D2: "f15bd26c51d646518378277931ea96c4d45ceb78bcc3bedd17a32bc9305b67c4",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_DEP_MIXED = {  # "Ireland (Part 1 of 2)", "County Kerry, Ireland" (bare), "Ireland (Part 2 of 2)"
+    _MD_D1: "448cd7d09e0066a599e95c401800fa1d230a245fdf4bd8aa59d1146e717a3d68",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D2: "eff27d77dae7bb239c4e45434c621e34feada55d96ded75b1f40312c4f53060a",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_DEP_THREE_DAY = {  # "Ireland (Part k of 3)"
+    _MD_D1: "3ea1255c1ee56d99512bbc45879a02246f15e7bf6acad1b4b3d5cdcd7717740f",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D2: "fa46357cf9da427791cd0bc4b54ee050809e87c44b2b97687a6d4527af5609c0",  # pragma: allowlist secret (sha256 of an OST audit payload)
+    _MD_D3: "869d23f9c200c3b0f846be6085db5e7866d945232256ddf8e238f82dfe7d8dfe",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_DEP_VIA = {  # "Ireland (Part 1 of 2)", "Ireland via N71 (Part 2 of 2)": one final title "ireland in 4k"
+    _MD_D1: _MD_ONE_EACH[_MD_D1],
+    _MD_D2: "d20f3f3719ab56f8e18ceecdd2f4bbb62af9d58b142682b9b6c15cfeace8cd62",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_DEP_SPACE = {  # "Ireland (Part 1 of 2)", "Ireland  (Part 2 of 2)" (the raw label's trailing space)
+    _MD_D1: _MD_ONE_EACH[_MD_D1],
+    _MD_D2: "ee41085491a5ef06b602c3db8ac45d3ff31ef8ea769b0ce4a6573a3286169f5a",  # pragma: allowlist secret (sha256 of an OST audit payload)
+}
+_DAY2 = {_MD_D1: [1], _MD_D2: [2]}
+_MORE_DRIVES = {
+    "case_variant": ({1: "Ireland", 2: "ireland"}, {1: _MD_D1, 2: _MD_D2}, _DAY2, _DEP_CASE),
+    "mixed_labels": (
+        {1: "Ireland", 2: "County Kerry, Ireland", 3: "Ireland"},
+        {1: _MD_D1, 2: _MD_D1, 3: _MD_D2},
+        {_MD_D1: [1, 2], _MD_D2: [3]},
+        _DEP_MIXED,
+    ),
+    "three_day": (
+        {1: "Ireland", 2: "Ireland", 3: "Ireland"},
+        {1: _MD_D1, 2: _MD_D2, 3: _MD_D3},
+        {_MD_D1: [1], _MD_D2: [2], _MD_D3: [3]},
+        _DEP_THREE_DAY,
+    ),
+    "via_collapse": (
+        {1: "Ireland", 2: "Ireland via N71"},
+        {1: _MD_D1, 2: _MD_D2},
+        _DAY2,
+        _DEP_VIA,
+    ),
+    "trailing_space": (
+        {1: "Ireland", 2: "Ireland "},
+        {1: _MD_D1, 2: _MD_D2},
+        _DAY2,
+        _DEP_SPACE,
+    ),
+}
+_MORE_CASES = [(n, d) for n in sorted(_MORE_DRIVES) for d in _MORE_DRIVES[n][2]]
+
+
+@pytest.mark.parametrize("drive,date", _MORE_CASES)
+def test_a_deployed_day_is_grouped_and_titled_as_the_deployed_code_did(tmp_path, drive, date):
+    labels, dates, days, deployed = _MORE_DRIVES[drive]
+    state = _md_state(_md_titles(labels, dates), labels, dates, stored={date: deployed[date]})
+    outcome, got = _md_gate(tmp_path, date, days[date], state)
+    assert outcome == "PASS", got
+    assert got == {i: labels[i] for i in days[date]}
+
+
+@pytest.mark.parametrize("drive", ["via_collapse", "trailing_space"])
+def test_a_changed_burn_label_or_count_still_reopens_a_collapsed_label_day(tmp_path, drive):
+    labels, dates, days, deployed = _MORE_DRIVES[drive]
+    titles = _md_titles(labels, dates)
+    stored = {_MD_D2: deployed[_MD_D2]}
+    burn = dict(labels)
+    burn[2] = "Kerry, " + labels[2]
+    assert _md_gate(tmp_path / "b", _MD_D2, [2], _md_state(titles, burn, dates, stored))[0] == (
+        "REFUSED"
+    )
+    other = _md_titles(
+        {1: "Ireland", 2: "Wales"}, dates, route={"label": "Wales", "level": "state"}
+    )
+    relabelled = _md_state(other, labels, dates, stored)
+    assert _md_gate(tmp_path / "l", _MD_D2, [2], relabelled)[0] == "REFUSED"
+    three = {**labels, 3: "Ireland"}
+    counted = _md_state(
+        _md_titles(three, {**dates, 3: _MD_D3}), three, {**dates, 3: _MD_D3}, stored
+    )
+    assert _md_gate(tmp_path / "n", _MD_D2, [2], counted)[0] == "REFUSED"
+
+
+def test_going_from_one_to_two_by_adding_a_same_label_lf_on_another_day_is_accepted(tmp_path):
+    # A one-LF drive confirmed under the dated title: its stored hash is the normalised one.
+    # LF2 arriving on another day leaves LF1's own title ("Ireland (Sep 16, 2025)") unchanged,
+    # so the day stays confirmed (N binds the DEPLOYED titles, not a dated title's own hash).
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash, format_ost_audit
+
+    one = _md_state(_md_titles({1: "Ireland"}, {1: _MD_D1}), {1: "Ireland"}, {1: _MD_D1})
+    stored = compute_ost_audit_hash(format_ost_audit(_MD_D1, one, [1]))
+    two = {1: "Ireland", 2: "Ireland"}
+    dates = {1: _MD_D1, 2: _MD_D2}
+    state = _md_state(_md_titles(two, dates), two, dates, stored={_MD_D1: stored})
+    assert _md_gate(tmp_path, _MD_D1, [1], state)[0] == "PASS"
+
+
+# The deployed (02861d3) sidecar for the two-day one-each drive, as the deployed code wrote it.
+_DEP_SIDECARS = {
+    _MD_D1: {"lf_index": 1, "ost_text": "Ireland", "youtube_title": "Ireland (Part 1 of 2)"},
+    _MD_D2: {"lf_index": 2, "ost_text": "Ireland", "youtube_title": "Ireland (Part 2 of 2)"},
+}
+
+
+def _drift_setup(tmp_path, date, burn="Ireland"):
+    from gomoveshift.pipeline.ost_audit_sidecar import compute_ost_audit_hash
+
+    entry = {**_DEP_SIDECARS[date], "ost_text": burn, "recording_date": date}
+    entry["thumbnail_text"] = burn
+    payload = {"date": date, "generated_at": "2026-11-23T00:00:00+00:00", "lfs": [entry]}
+    assert (
+        compute_ost_audit_hash(payload, normalise=False) == _MD_ONE_EACH[date] or burn != "Ireland"
+    )
+    (tmp_path / f"ost_audit_{date}.json").write_text(json.dumps(payload))
+    labels = {1: "Ireland", 2: "Ireland"}
+    dates = {1: _MD_D1, 2: _MD_D2}
+    return _md_state(_md_titles(labels, dates), labels, dates, stored={date: _MD_ONE_EACH[date]})
+
+
+@pytest.mark.parametrize("date", [_MD_D1, _MD_D2])
+def test_resume_accepts_a_day_the_gate_rewrote_when_the_state_was_never_saved(tmp_path, date):
+    from gomoveshift.pipeline.state_invariants import _check_ost_audit_hash_drift
+
+    working = _drift_setup(tmp_path, date)
+    persisted = copy.deepcopy(working)  # the save after the gate never landed
+    assert _md_gate(tmp_path, date, _DAY2[date], working)[0] == "PASS"
+    _check_ost_audit_hash_drift({**persisted, "output_base": str(tmp_path)})  # no drift
+
+
+@pytest.mark.parametrize("date", [_MD_D1, _MD_D2])
+def test_resume_accepts_an_untouched_deployed_sidecar(tmp_path, date):
+    from gomoveshift.pipeline.state_invariants import _check_ost_audit_hash_drift
+
+    state = _drift_setup(tmp_path, date)
+    _check_ost_audit_hash_drift({**state, "output_base": str(tmp_path)})
+
+
+def test_resume_still_refuses_a_sidecar_whose_burn_changed_since_confirmation(tmp_path):
+    from gomoveshift.pipeline.exceptions import StateInvariantError
+    from gomoveshift.pipeline.state_invariants import _check_ost_audit_hash_drift
+
+    state = _drift_setup(tmp_path, _MD_D1, burn="Kerry, Ireland")
+    with pytest.raises(StateInvariantError, match="drift"):
+        _check_ost_audit_hash_drift({**state, "output_base": str(tmp_path)})

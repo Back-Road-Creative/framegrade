@@ -167,3 +167,69 @@ def test_the_drift_message_does_not_tell_an_unattended_run_to_pass_the_flag(tmp_
     with pytest.raises(Exception, match="drift") as exc:
         si._check_ost_audit_hash_drift(st)
     assert CONFIRM not in str(exc.value)
+
+
+# ── the end-of-options separator, ambiguous prefixes, and a refused write ──
+
+
+def test_a_bare_double_dash_is_never_stripped_and_ends_option_parsing():
+    from gomoveshift.health.resume import strip_one_shot
+
+    assert strip_one_shot(["drive", "--", "-odd-dir"]) == ["drive", "--", "-odd-dir"]
+    # nothing after the first ``--`` is an option, so a positional spelled like a flag stays
+    assert strip_one_shot(["drive", "--", "--fresh"]) == ["drive", "--", "--fresh"]
+    assert strip_one_shot(["drive", CONFIRM, "--", "--fresh"]) == ["drive", "--", "--fresh"]
+
+
+@pytest.mark.parametrize("prefix", ["--ost", "--os"])
+def test_an_ambiguous_prefix_that_could_be_a_one_shot_flag_is_stripped(prefix):
+    from gomoveshift.health.resume import strip_one_shot
+
+    # grounding: --ost-audit-confirmed (one-shot) and --ost-system-review share the prefix
+    assert _parse(["drive", "/src", prefix]) is None  # argparse: ambiguous
+    assert strip_one_shot(["drive", "/src", prefix, "--ost-system-review"]) == [
+        "drive",
+        "/src",
+        "--ost-system-review",
+    ]
+    assert strip_one_shot(["drive", "/src", prefix + "=1"]) == ["drive", "/src"]
+
+
+def test_a_refused_recipe_write_removes_the_previous_runs_recipe(tmp_path, monkeypatch):
+    from gomoveshift.health import resume
+
+    first = write_recipe(tmp_path, ["drive", "/old-src"], cwd="/", sha=None, now_iso="x")
+    assert first is not None and read_recipe(first) is not None
+
+    def boom():
+        raise RuntimeError("no parser")
+
+    monkeypatch.setattr(resume, "_drive_options", boom)
+    refused = write_recipe(
+        tmp_path, ["drive", "/new-src", "--location", "X"], cwd="/", sha=None, now_iso="y"
+    )
+    assert refused is None
+    assert not first.exists()  # heal finds no recipe, never the earlier run's argv
+    assert read_recipe(first) is None
+
+
+def test_a_refused_recipe_write_removes_a_leftover_tmp_file(tmp_path, monkeypatch):
+    from gomoveshift.health import resume
+
+    tmp = tmp_path / (resume.RECIPE_NAME + ".tmp")
+    tmp.write_text("{}")  # an earlier run's half-written recipe
+    keep = tmp_path / "keep.json"
+    keep.write_text("{}")
+
+    def boom():
+        raise RuntimeError("no parser")
+
+    monkeypatch.setattr(resume, "_drive_options", boom)
+    assert (
+        write_recipe(
+            tmp_path, ["drive", "/new-src", "--location", "X"], cwd="/", sha=None, now_iso="y"
+        )
+        is None
+    )
+    assert not tmp.exists()  # a replay can never pick up the leftover
+    assert keep.exists()

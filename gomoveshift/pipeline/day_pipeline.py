@@ -105,20 +105,11 @@ from .ost_applier import MapInsetOverlay, apply_ost
 from .ost_audit_sidecar import (
     OstAuditPendingError,
     OstPostBurnError,
-    accepted_ost_audit_hashes,
-    confirmation_is_stale,
-    format_ost_audit,
     lf_gate_or_raise,
     postburn_ost_gate_or_raise,
-    read_confirmed_hash,
-    rewrite_sidecar_to_match,
     shorts_gate_or_raise,
-    stamp_confirmed,
     superlong_gate_or_raise,
-    system_review_passes,
-    write_ost_audit,
     write_shorts_ost_audit,
-    write_system_review_copy,
 )
 from .ost_system_review import record_surface_reviews, unmeasured_place_source
 from .ost_validator import validate_ost
@@ -2573,11 +2564,14 @@ def run_day_pipeline(
     # Operator confirms via:
     #   1. ``<output_dir>/ost_audit_<date>.confirmed`` file, or
     #   2. ``state["ost_audit_passed"][date] = True`` (resume marker), or
-    #   3. ``--ost-audit-confirmed`` CLI flag → state["ost_audit_confirmed"].
+    #   3. ``--ost-audit-confirmed`` CLI flag → state["ost_audit_confirmed_this_run"].
     #
     # Hash mismatch (operator edits per-LF labels and re-runs phase_bc)
     # re-prompts: the stored hash no longer matches the just-computed
-    # one, so OstAuditPendingError fires again.
+    # one, so OstAuditPendingError fires again, unless this run's own
+    # confirm passes it. That confirm covers only the payload this run showed:
+    # when this run's front-load already stamped the day, a per-day payload that
+    # hashes to something else refuses (``lf_gate_or_raise``).
     #
     _gate_lf_indices = [int(getattr(plan, "index", i + 1)) for i, plan in enumerate(lf_plans or [])]
     # Burn-loop-consumes-gate-return (fix): the burn loop below reads its
@@ -2588,128 +2582,22 @@ def run_day_pipeline(
     # operator reviewed.
     _gate_lf_text: dict = {}
     if _gate_lf_indices:
-        # PipelineState supports dict-protocol sugar (state.get / state["x"])
-        # — both shapes (dataclass + raw test dict) flow through this gate.
-        if state is None:
-            _ost_audit_state = {}
-            _ost_audit_state.setdefault("per_lf_ost_text", per_lf_ost_text or {})
-            _ost_audit_state.setdefault("per_lf_locations", per_lf_locations or {})
-            _ost_audit_state.setdefault("per_lf_titles", {})
-        else:
-            _ost_audit_state = {
-                "per_lf_ost_text": state.get("per_lf_ost_text") or per_lf_ost_text or {},
-                "per_lf_titles": state.get("per_lf_titles") or {},
-                "per_lf_recording_date": state.get("per_lf_recording_date") or {},
-                "per_lf_locations": state.get("per_lf_locations") or per_lf_locations or {},
-            }
-            _ost_audit_state.setdefault("per_lf_recording_date", {})
-        # Pass drive-wide ``location`` so the audited text equals the
-        # per-LF burn loop's resolved ``lf_location`` — review-text
-        # == burn-text even for a GPS-less drive whose only label is
-        # ``--location``.
-        payload = format_ost_audit(
+        # The one gate: ``lf_gate_or_raise`` (also run UPFRONT by ``run_all_days``) builds the
+        # same audit payload from ``state`` and the per-LF maps, applies the one route order
+        # and message, re-binds the stored hash and sidecar on a pass, and returns the audited
+        # ``{lf_index: ost_text}``. Pass drive-wide ``location`` so the audited text equals the
+        # per-LF burn loop's resolved ``lf_location``: review-text == burn-text even for a
+        # GPS-less drive whose only label is ``--location``.
+        _gate_lf_text = lf_gate_or_raise(
+            Path(output_dir),
             date,
-            _ost_audit_state,
             _gate_lf_indices,
+            state,
             location=location,
+            per_lf_ost_text=per_lf_ost_text,
+            per_lf_locations=per_lf_locations,
             inserts=insert_records(inserts_by_lf or {}),
         )
-        current_hash, *legacy_hashes = accepted_ost_audit_hashes(payload)
-        _gate_lf_text = {int(e["lf_index"]): e["ost_text"] for e in payload.get("lfs", [])}
-
-        # PipelineState supports dict-protocol sugar — works on both dataclass + raw test dict.
-        if state is None:
-            _passed_map: dict = {}
-            _hash_map: dict = {}
-            _cli_confirmed = False
-        else:
-            _passed_map = state.get("ost_audit_passed") or {}
-            _hash_map = state.get("ost_audit_hash") or {}
-            # Only a THIS-run confirmation bypasses without a stored hash; a
-            # persisted flag no longer auto-passes a changed burn after a kill.
-            _cli_confirmed = bool(state.get("ost_audit_confirmed_this_run"))
-        confirmed_file = Path(output_dir) / f"ost_audit_{date}.confirmed"
-
-        # A stale confirmation — ``.confirmed`` on disk OR
-        # ``--ost-audit-confirmed`` — is INSUFFICIENT when the resolved
-        # label changed materially since the prior confirmed run. The
-        # prior confirmed hash is ``_hash_map[date]``; ``confirmation_is_stale``
-        # is False on a first-ever confirmation (no prior hash) so the
-        # non-interactive bypass still works on a clean run. The
-        # state-marker path already required a matching hash; this extends
-        # the same binding to the two bypass signals (tightens, never
-        # weakens, the three confirmation signals).
-        # Bind the ``.confirmed`` marker to the audit hash it confirmed.
-        # ``--fresh`` wipes ``_hash_map`` (and purges the marker), but on any
-        # path where the state hash is absent a stamped marker still supplies
-        # the prior hash, so ``exists()`` alone can't pass a materially changed,
-        # never-reviewed burn text.
-        _prior_hash = _hash_map.get(date) or read_confirmed_hash(confirmed_file)
-        # A hash stored before title suffixes were normalised still covers an unchanged burn.
-        _stale = confirmation_is_stale(_prior_hash, current_hash, legacy_hashes)
-
-        gate_passes = False
-        reason = ""
-        if _stale:
-            gate_passes = False  # explicit: a material label change reopens the gate
-        elif _cli_confirmed:
-            gate_passes = True
-            reason = "--ost-audit-confirmed"
-        elif confirmed_file.exists():
-            gate_passes = True
-            reason = f"{confirmed_file.name} on disk"
-        elif _passed_map.get(date) is True and _hash_map.get(date) in (
-            current_hash,
-            *legacy_hashes,
-        ):
-            gate_passes = True
-            reason = "state['ost_audit_passed'] + matching hash"
-        else:
-            # The opt-in system review (``ost_system_review``).
-            gate_passes, reason = system_review_passes(state, date, _gate_lf_text)
-
-        if not gate_passes:
-            sidecar_path = write_ost_audit(Path(output_dir), date, payload)
-            if _stale:
-                how = (
-                    f"the burn text of day {date} changed since it was confirmed, so the "
-                    "old confirmation no longer covers it: review the changed day in that "
-                    f"audit, then write its audit hash {current_hash} into {confirmed_file} "
-                    "(an operator's own --ost-audit-confirmed run also confirms it)"
-                )
-            else:
-                how = (
-                    f"create {confirmed_file} (or re-run with --ost-audit-confirmed) "
-                    "before OST burn-in"
-                )
-            logger.info("OST audit sidecar written: %s. %s.", sidecar_path, how)
-            raise OstAuditPendingError(
-                f"OST audit pending for day {date}: review {sidecar_path} and {how}."
-                + (f" {reason}." if reason else "")
-            )
-        if reason.startswith("system review record"):
-            write_system_review_copy(Path(output_dir), date, state)
-
-        # Persist the pass marker and hash so later invocations skip the
-        # file/CLI check via the state path; both are ``PipelineState``
-        # fields (``ost_audit_passed`` / ``ost_audit_hash``).
-        if state is not None:
-            passed_map = state.get("ost_audit_passed")
-            if passed_map is None:
-                passed_map = {}
-                state["ost_audit_passed"] = passed_map
-            passed_map[date] = True
-            hash_map = state.get("ost_audit_hash")
-            if hash_map is None:
-                hash_map = {}
-                state["ost_audit_hash"] = hash_map
-            hash_map[date] = current_hash
-        rewrite_sidecar_to_match(Path(output_dir), date, payload, current_hash)
-        # Bind the marker to this audit hash so a later run whose burn
-        # text changed reads a stale binding and reopens the gate.
-        if confirmed_file.exists():
-            stamp_confirmed(confirmed_file, current_hash)
-        logger.info("OST audit gate passed for day %s (%s).", date, reason)
 
     # Phase D reads each final's render-time picture verdict where this is true.
     from . import quality as _quality
@@ -3645,7 +3533,7 @@ def run_all_days(
             "OST audit pending for day(s) "
             f"{sorted(str(d) for d in _pending_ost_days)}: review each "
             "ost_audit_<date>.json sidecar (each says whether its day is unconfirmed or "
-            "its burn text changed since it was confirmed) and confirm it with the "
+            "its OST audit (burn text or title) changed since it was confirmed) and confirm it with the "
             "matching .confirmed file, an operator's own --ost-audit-confirmed run or "
             "the system review, before the first master encode (front-load)."
         )

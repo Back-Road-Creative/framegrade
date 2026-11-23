@@ -1024,9 +1024,15 @@ def _check_ost_audit_hash_drift(state: Any) -> None:
         return
 
     # Lazy import: ost_audit_sidecar pulls in day_pipeline machinery.
-    from .ost_audit_sidecar import accepted_ost_audit_hashes
+    from .ost_audit_sidecar import accepted_ost_audit_hashes, deployed_part_numbering
 
     output_base = Path(output_base)
+    # The drive-wide numbering the gate uses (one shared rule), from the per-LF maps the state holds.
+    numbering = deployed_part_numbering(
+        _state_get(state, "per_lf_titles"),
+        _state_get(state, "per_lf_recording_date"),
+        _state_get(state, "per_lf_ost_text"),
+    )
     for date, was_passed in passed.items():
         if not was_passed:
             continue
@@ -1057,7 +1063,7 @@ def _check_ost_audit_hash_drift(state: Any) -> None:
             continue  # legacy confirmation pre-dating hash tracking
         # The same hashes the gate accepts (one shared rule): a day an earlier code stored the
         # raw hash for is not drift, or the gate would pass what resume refuses.
-        accepted = accepted_ost_audit_hashes(payload)
+        accepted = accepted_ost_audit_hashes(payload, numbering)
         current_hash = accepted[0]
         if stored not in accepted:
             _raise(

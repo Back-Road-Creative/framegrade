@@ -210,11 +210,30 @@ def test_the_per_day_gate_hash_covers_the_inserts(tmp_path):
         return compute_ost_audit_hash(payload)
 
     assert hash_of(None) != hash_of(ins_mod.insert_records(ins))
-    stale = make_state(ost_audit_confirmed=True, ost_audit_hash={day: hash_of(None)})
-    with pytest.raises(OstAuditPendingError):
+    # A persisted confirmation (no --ost-audit-confirmed on THIS run) hashed without the
+    # inserts is stale once they exist: the per-day gate refuses it.
+    # ``ost_audit_passed`` is set so the refusal is the STALE hash, not "no route passes".
+    stale = make_state(
+        ost_audit_confirmed=True,
+        ost_audit_confirmed_this_run=None,
+        ost_audit_passed={day: True},
+        ost_audit_hash={day: hash_of(None)},
+    )
+    with pytest.raises(OstAuditPendingError, match="changed since"):
         _run_day(tmp_path, ins, state=stale)
+    # The operator's own confirm on THIS run passes the stale day (the one gate's route order,
+    # same as the front-load) and re-binds the stored hash to the payload that now covers the
+    # inserts, so the next run without the flag fast-passes.
+    stale_confirmed_now = make_state(ost_audit_confirmed=True, ost_audit_hash={day: hash_of(None)})
+    art, _, _, _ = _run_day(tmp_path / "now", ins, state=stale_confirmed_now)
+    assert art is not None
+    assert stale_confirmed_now.ost_audit_hash[day] == hash_of(ins_mod.insert_records(ins))
+    # No this-run confirm: the fresh half passes on the hash alone.
     fresh = make_state(
-        ost_audit_confirmed=True, ost_audit_hash={day: hash_of(ins_mod.insert_records(ins))}
+        ost_audit_confirmed=True,
+        ost_audit_confirmed_this_run=None,
+        ost_audit_passed={day: True},
+        ost_audit_hash={day: hash_of(ins_mod.insert_records(ins))},
     )
     art, _, _, _ = _run_day(tmp_path / "ok", ins, state=fresh)
     assert art is not None
