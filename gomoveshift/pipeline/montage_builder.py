@@ -608,29 +608,23 @@ def prepend_montage(
     # Stall-detecting runner, not a fixed wall clock: a 38 GB `-c copy
     # +faststart` concat on a slow volume ran past the old `timeout=1800` while
     # still writing (Galley Head 2026-11). It is killed only when ffmpeg stops
-    # reporting progress, with the moov-rewrite window sized from the output
-    # actually on disk (`_moov_rewrite_stall_timeout`). On a stall, a non-zero
-    # exit or a start failure it deletes the partial output: a truncated concat
-    # left on disk is worse than none, since a resume would ship a half-length
-    # long-form. The failure is reported as None with its cause.
-    from .ffmpeg_runner import MOOV_REWRITE_MIN_BYTES_PER_SEC, run_ffmpeg_encode
-
-    # The wall-clock ceiling backstops a run whose stats keep advancing for ever. It is
-    # sized from the input bytes at the runner's own throughput floor
-    # (MOOV_REWRITE_MIN_BYTES_PER_SEC), once for the copy pass and once for the
-    # +faststart rewrite, and never below the old fixed 1800 s.
-    try:
-        input_bytes = built.stat().st_size + raw_lf_path.stat().st_size
-    except OSError:
-        input_bytes = 0
-    max_timeout = max(1800, 2 * -(-input_bytes // MOOV_REWRITE_MIN_BYTES_PER_SEC))
+    # reporting progress (a frozen stats line counts as a stall), with the
+    # moov-rewrite window sized from the output actually on disk
+    # (`_moov_rewrite_stall_timeout`). It passes NO `max_timeout`: the runner's
+    # default 86400 s ceiling stands, because a size-based ceiling at the
+    # runner's 20 MB/s floor (3884 s for Galley LF1, which measured ~21.6 MB/s)
+    # killed a concat that was still advancing whenever the volume was slower
+    # than the floor, on every retry. On a stall, a non-zero exit or a start
+    # failure it deletes the partial output: a truncated concat left on disk is
+    # worse than none, since a resume would ship a half-length long-form. The
+    # failure is reported as None with its cause.
+    from .ffmpeg_runner import run_ffmpeg_encode
 
     result = run_ffmpeg_encode(
         cmd,
         output_path=output_path,
         expected_duration=0.0,
         description="prepend_montage concat",
-        max_timeout=max_timeout,
     )
     if not result.success:
         cause = (
