@@ -65,8 +65,9 @@ class World:
         self.out = tmp_path / "out"
         self.old_dir = tmp_path / "_superseded" / "p-1"
         self.stages = tmp_path / "stages"
+        self.old_stages = tmp_path / "old_stages"  # the set-aside run's stage dir
         self.incidents = tmp_path / "incidents"
-        for d in (self.out, self.old_dir, self.stages):
+        for d in (self.out, self.old_dir, self.stages, self.old_stages):
             d.mkdir(parents=True)
         self.sidecar = self.out / f"{PROJECT}_publish_plan.json"
         self.old_sidecar = self.old_dir / f"{PROJECT}_publish_plan.json"
@@ -105,7 +106,9 @@ class World:
             )
         self.old_sidecar.write_text(_serialize_publish_plan(PublishPlan(shorts=tuple(shorts))))
         self.sidecar.write_text("{}")  # the new run emitted none: a replace plan skips it
-        (self.stages / f"shorts_ost_audit_{DATE}.json").write_text(json.dumps({"shorts": entries}))
+        for stages in (self.stages, self.old_stages):  # same footage in both runs
+            (stages / f"shorts_ost_audit_{DATE}.json").write_text(json.dumps({"shorts": entries}))
+        (self.stages / "pipeline_state.json").write_text("{}")  # an unreviewed run (Gate C/D)
         self.conn = open_queue_db(tmp_path / "q")
         self.records = shorts
 
@@ -135,6 +138,7 @@ class World:
             new_sidecar=self.sidecar,
             project=PROJECT,
             stages_dir=self.stages,
+            old_stages_dir=self.old_stages,
             now=NOW,
             incidents_dir=self.incidents,
             fingerprint_fn=_probe,
@@ -255,12 +259,13 @@ def test_untouched_rows_listed_and_never_changed(w):
     assert {d: w.hash_of(d) for d in before} == before
 
 
-def test_lead_time_refusal_holds_the_row(w):
+def test_lead_time_defers_the_row_visibly(w):
     near = w.row(1, scheduled_at=(NOW + timedelta(hours=2)).isoformat())
     old_hash = w.hash_of(near)
     result = w.run()
     assert w.hash_of(near) == old_hash
-    assert any("lead time" in r.reason for r in result.refused)
+    assert any("lead time" in d.reason for d in result.deferred)
+    assert not any("lead time" in r.reason for r in result.refused)
     assert w.incidents_open()
 
 
