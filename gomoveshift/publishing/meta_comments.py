@@ -25,16 +25,20 @@ from .first_comment import (
     PriorCommentLiveError,
 )
 from .first_comment_stale import (
+    GONE,
     OWN_ID_KIND,
     UNVERIFIED,
+    _now_iso,
     raise_repost_incident,
     recheck_own_id,
     run_corrections,
 )
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
+    FIRST_COMMENT_MAX_ATTEMPTS,
     first_comment_prior_texts,
     first_comment_still_current,
+    reopen_gone_first_comment,
     select_due_first_comments,
 )
 from .youtube_comments import (
@@ -68,7 +72,7 @@ def _author_mismatch(adapter: object, posted_id: object, object_id: str = "") ->
         logger.warning("first comment: could not read back comment %s: %s", posted_id, exc)
         return f"{UNVERIFIED}the read-back failed: {str(exc).strip() or exc.__class__.__name__}"
     if said is None:
-        return f"{UNVERIFIED}the read-back answered that the comment is gone"
+        return f"{GONE}the read-back answered that the comment is gone"
     author = getattr(said, "author", None)
     return None if author == own else (author or "no author")
 
@@ -110,7 +114,7 @@ def drain_meta_first_comments(
         result.errors.append(f"stale-comment corrections failed: {detail}")
 
     try:
-        recheck_own_id(conn, tuple(adapter_factories), adapter_for, incidents_dir)
+        recheck_own_id(conn, tuple(adapter_factories), adapter_for, incidents_dir, result)
     except Exception:  # noqa: BLE001 -- a recheck failing never stops the posting
         logger.exception("drain_meta_first_comments: the own-id recheck failed")
 
@@ -164,6 +168,18 @@ def drain_meta_first_comments(
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
         mismatch = _author_mismatch(adapter_for(platform), posted_id, row["comment_target_id"])
+        if mismatch and mismatch.startswith(GONE):
+            # Confirmed gone right after the post: zero of ours live. Not recorded as posted; the
+            # next drain reposts (each try counts toward FIRST_COMMENT_MAX_ATTEMPTS).
+            why = mismatch[len(GONE) :]
+            reopen_gone_first_comment(conn, row["id"], "", _now_iso(), why)
+            result.errors.append(
+                f"delivery {row['id']}: comment {posted_id} posted, but {why}; it is not "
+                f"recorded as posted and the drain reposts it (up to {FIRST_COMMENT_MAX_ATTEMPTS} tries)"
+            )
+            logger.warning("first comment: delivery %s: read-back gone: %s", row["id"], why)
+            raise_repost_incident(conn, row["id"], mismatch, incidents_dir)
+            continue
         if mismatch:
             result.errors.append(
                 f"delivery {row['id']}: comment {posted_id} posted, but "

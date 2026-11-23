@@ -83,9 +83,19 @@ class FakeGraph:
         after = int((params or {}).get("after") or 0)
         items = list(self.comments.items())
         chunk = items[after : after + self.page]
+        asked = ((params or {}).get("fields") or "id,{},from".format(self.field)).split(",")
         body = {
-            "data": [{"id": i, self.field: t, "from": {"id": self.authors[i]}} for i, t in chunk]
-        }
+            "data": [
+                {
+                    k: v
+                    for k, v in {
+                        "id": i, self.field: t, "from": {"id": self.authors[i]},
+                    }.items()
+                    if k in asked
+                }
+                for i, t in chunk
+            ]
+        }  # fmt: skip
         if after + self.page < len(items):
             body["paging"] = {"cursors": {"after": str(after + self.page)}, "next": "n"}
         self.log.append("list")

@@ -459,11 +459,13 @@ def backfill_first_comment_text(conn: sqlite3.Connection) -> BackfillResult:
     return BackfillResult(filled=filled, skipped=skipped)
 
 
-def _backfill_text(row, cache: dict) -> Optional[str]:
-    label = f"delivery {row['id']} ({row['project_name']} #{row['short_index']})"
+def _sidecar_record(row, cache: dict, label: str, *, quiet: bool = False) -> Optional[dict]:
+    """The row's short in its sidecar (``cache`` memoizes the file), or ``None`` (warned about
+    unless ``quiet``)."""
     sidecar = row["sidecar_path"]
     if not sidecar:
-        logger.warning("first-comment backfill: %s has no sidecar_path; skipped", label)
+        if not quiet:
+            logger.warning("first-comment backfill: %s has no sidecar_path; skipped", label)
         return None
     if sidecar not in cache:
         try:
@@ -473,25 +475,42 @@ def _backfill_text(row, cache: dict) -> Optional[str]:
                 raise TypeError("'shorts' is not a list")
             cache[sidecar] = [r for r in shorts if isinstance(r, dict)]
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            logger.warning("first-comment backfill: sidecar %s unreadable (%s)", sidecar, exc)
+            if not quiet:
+                logger.warning("first-comment backfill: sidecar %s unreadable (%s)", sidecar, exc)
             cache[sidecar] = None
-    records = cache[sidecar]
-    if records is None:
+    if cache[sidecar] is None:
         return None
-    for record in records:
+    for record in cache[sidecar]:
         if (
             record.get("short_index") == row["short_index"]
             and record.get("project_name") == row["project_name"]
         ):
-            if not parent_is_public_at(row["scheduled_at"], record.get("parent_lf_publish_at")):
-                logger.warning(
-                    "first-comment backfill: %s goes out before its full drive is public; skipped",
-                    label,
-                )
-                return None
-            try:
-                return full_drive_comment_text(record.get("parent_lf_video_id") or "")
-            except ValueError:
-                break
+            return record
+    if not quiet:
+        logger.warning("first-comment backfill: %s has no parent_lf_video_id; skipped", label)
+    return None
+
+
+def parent_video_id(row, cache: dict) -> Optional[str]:
+    """The full drive's video id the row's sidecar names (public yet or not), or ``None``."""
+    label = f"delivery {row['id']} ({row['project_name']} #{row['short_index']})"
+    record = _sidecar_record(row, cache, label, quiet=True)
+    return str((record or {}).get("parent_lf_video_id") or "").strip() or None
+
+
+def _backfill_text(row, cache: dict) -> Optional[str]:
+    label = f"delivery {row['id']} ({row['project_name']} #{row['short_index']})"
+    record = _sidecar_record(row, cache, label)
+    if record is None:
+        return None
+    if not parent_is_public_at(row["scheduled_at"], record.get("parent_lf_publish_at")):
+        logger.warning(
+            "first-comment backfill: %s goes out before its full drive is public; skipped", label
+        )
+        return None
+    try:
+        return full_drive_comment_text(record.get("parent_lf_video_id") or "")
+    except ValueError:
+        pass
     logger.warning("first-comment backfill: %s has no parent_lf_video_id; skipped", label)
     return None

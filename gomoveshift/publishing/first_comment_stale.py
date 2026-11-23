@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from .first_comment import ReplacePostFailedError, is_full_drive_comment, parent_is_public_at
+from .first_comment import (
+    ReplacePostFailedError,
+    full_drive_comment_text,
+    is_full_drive_comment,
+    parent_is_public_at,
+)
 from .queue import (
     FIRST_COMMENT_MAX_ATTEMPTS,
     adopt_removed_first_comment,
@@ -20,11 +25,13 @@ from .queue import (
     first_comment_correction_ids,
     first_comment_corrections,
     first_comment_intended_texts,
+    first_comment_prior_texts,
     mark_first_comment_removed,
     pending_first_comment_corrections,
     registered_platform_id,
     removed_first_comment_ids,
     removed_first_comment_rows,
+    reopen_gone_first_comment,
     resolve_first_comment_correction,
     unpost_first_comment_for_repost,
     unpost_removed_first_comment,
@@ -40,6 +47,8 @@ REMOVED_KIND = "first_comment_removed"
 OWN_ID_KIND = "first_comment_own_id_mismatch"
 #: Prefix of an own-id incident cause when the read-back itself failed (nothing was compared).
 UNVERIFIED = "unverified: "
+#: Prefix of the cause when a read-back CONFIRMED (against the post's listing) that the comment is gone.
+GONE = "gone: "
 _DETAIL_MAX = 500
 
 
@@ -154,6 +163,24 @@ def raise_stale_incident(
         )
 
 
+def _hand_re_add_text(conn: sqlite3.Connection, delivery_id: int) -> str:
+    """The exact text a hand re-add must say: the full-drive comment of the row's parent video
+    (the plan's sidecar names it), else the shape with the id left to fill in."""
+    from . import enqueue_from_plan  # lazy: it imports the queue
+
+    row = conn.execute(
+        "SELECT id, project_name, short_index, sidecar_path FROM deliveries WHERE id=?",
+        (delivery_id,),
+    ).fetchone()
+    try:
+        video_id = enqueue_from_plan.parent_video_id(row, {}) if row is not None else None
+        if video_id:
+            return full_drive_comment_text(video_id)
+    except Exception:  # noqa: BLE001 -- the shape below is the fallback; never fatal
+        logger.exception("first comment: no parent video id for delivery %s", delivery_id)
+    return "\U0001f3ac Watch the full drive: https://youtu.be/<the full drive's video id>"
+
+
 def raise_repost_incident(
     conn: sqlite3.Connection,
     delivery_id: int,
@@ -186,7 +213,15 @@ def raise_repost_incident(
             f"{where}the comment was deleted and the row has no text to post ({cause}); no "
             "comment is live. The pipeline watches for our comment and closes this incident "
             "when it is live again: it reposts it once the row has text, and a hand re-add (by "
-            "the channel account) is picked up on the next drain"
+            f"the channel account) is picked up on the next drain. The re-add must say exactly "
+            f"{_hand_re_add_text(conn, delivery_id)!r} and nothing else"
+        )[:_DETAIL_MAX]
+    elif kind == REPOST_KIND and cause.startswith(GONE):
+        detail = (
+            f"{where}the comment we just posted was read back as gone ({cause[len(GONE) :]}); it "
+            "is not recorded as posted and the drain reposts it, up to "
+            f"{FIRST_COMMENT_MAX_ATTEMPTS} tries; after that it stays unposted and this "
+            "incident stays open"
         )[:_DETAIL_MAX]
     elif kind == OWN_ID_KIND:
         who = (
@@ -198,7 +233,8 @@ def raise_repost_incident(
             f"{where}the comment we just posted {who}; the configured page_id / ig_user_id is "
             "wrong or Graph's from.id differs for this token (UNVERIFIED which). It is left "
             "alone, never deleted; until the id is right a lost answer can post a second copy. "
-            "This incident closes by itself once a read-back shows our own id as its author"
+            "This incident closes by itself once a read-back shows our own id as its author, "
+            "or, when the comment reads gone, once the drain reposts it"
         )[:_DETAIL_MAX]
     else:
         detail = (
@@ -284,7 +320,13 @@ def _adopt_hand_re_add(
     conn: sqlite3.Connection, row: Any, client_for: Callable[[str], object], result: Any
 ) -> None:
     """Adopt our own full-drive comment found live on a removed row's post (see
-    ``restore_removed``). Never raises; a failed or cut-short listing is an error line."""
+    ``restore_removed``). Only OUR CURRENT link is adopted: a comment saying a text this relink
+    replaced (``first_comment_prior_text``) or with the id of the comment we deleted
+    (``first_comment_live_id``) is skipped. The row has no text here (the plan gave none), so
+    the current link cannot be compared; when more than one distinct candidate remains none is
+    adopted (listing order never decides) and the ids are named. Never raises; a failed or
+    cut-short listing, a refused adopt, an ambiguity or only-skipped candidates is an error
+    line."""
     target = _target(row)
     problem = ""
     try:
@@ -295,25 +337,60 @@ def _adopt_hand_re_add(
             comments, complete = listing(target)
             if not complete:
                 problem = "too many comments to read them all"
-            for comment_id, said in () if problem else comments:
-                if comment_id and is_full_drive_comment(said):
-                    if adopt_removed_first_comment(
-                        conn, row["id"], str(comment_id), said.strip(), _now_iso()
-                    ):
-                        logger.info(
-                            "first comment: delivery %s: our comment %s is live again; adopted",
-                            row["id"], comment_id,
-                        )  # fmt: skip
-                    return
+            problem = problem or _adopt_one(conn, row, comments)
     except Exception as exc:  # noqa: BLE001 -- the row stays removed; said, never raised
-        problem = str(exc).strip() or exc.__class__.__name__
+        problem = (
+            f"could not look for our removed comment ({str(exc).strip() or exc.__class__.__name__})"
+        )
     if problem:
-        logger.warning("first comment: delivery %s: removed-row listing: %s", row["id"], problem)
+        logger.warning("first comment: delivery %s: removed-row adopt: %s", row["id"], problem)
         if result is not None:
             result.errors.append(
-                f"delivery {row['id']}: could not look for our removed comment ({problem}); "
-                "it stays removed and the incident open until a later drain can"
+                f"delivery {row['id']}: {problem}; it stays removed and the incident open until "
+                "a later drain can"
             )
+
+
+def _adopt_one(conn: sqlite3.Connection, row: Any, comments: Iterable) -> str:
+    """Adopt the one eligible own comment of ``comments`` for removed ``row``; else why not
+    (``""`` when adopted)."""
+    prior = {t.strip() for t in first_comment_prior_texts(row)}
+    deleted = str(row["first_comment_live_id"] or "")
+    eligible: dict = {}
+    skipped: list = []
+    for comment_id, said in comments:
+        if not (comment_id and is_full_drive_comment(said)):
+            continue
+        cid = str(comment_id)
+        if said.strip() in prior or (deleted and cid == deleted):
+            skipped.append(cid)
+        else:
+            eligible[cid] = said.strip()
+    if len(eligible) > 1:
+        return (
+            f"more than one of our full-drive comments is live ({', '.join(sorted(eligible))}); "
+            "none is adopted, since which is the current link cannot be told"
+        )
+    if not eligible:
+        if skipped:
+            return (
+                f"our comment {', '.join(skipped)} is live but says a replaced link or is the "
+                "one we deleted; it is not adopted"
+            )
+        return ""
+    cid, text = next(iter(eligible.items()))
+    if not adopt_removed_first_comment(conn, row["id"], cid, text, _now_iso()):
+        return (
+            f"our comment {cid} is live but the row cannot take it (a correction is pending or "
+            "the row changed meanwhile)"
+        )
+    logger.info("first comment: delivery %s: our comment %s is live again; adopted", row["id"], cid)
+    if skipped:
+        return (
+            f"our comment {cid} was adopted, but {', '.join(skipped)} (a replaced link) is "
+            "also live and is left alone"
+        )
+    return ""
 
 
 def recheck_own_id(
@@ -321,10 +398,13 @@ def recheck_own_id(
     platforms: Iterable[str],
     client_for: Callable[[str], object],
     incidents_dir: Optional[Path],
+    result: Any = None,
 ) -> None:
     """Close each open own-id incident whose row's recorded comment now reads back with our own
-    id as its author (``client.read_comment`` / ``own_id``). A read that fails, a comment that
-    is gone or another author leaves it open. Never raises."""
+    id as its author (``client.read_comment`` / ``own_id``). A comment the read CONFIRMS gone
+    (against the post's listing) is no longer ours to wait on: the incident is resolved with a
+    note and the row goes the removed / repost way (``_route_gone``). A read that fails (an error
+    line on ``result``) or another author leaves it open. Never raises."""
     from ..health.store import default_data_root, default_incidents_dir, load_all, write_row
 
     wanted = set(platforms)
@@ -351,8 +431,13 @@ def recheck_own_id(
         try:
             client = client_for(row["platform"])
             said = client.read_comment(row["first_comment_live_id"], object_id=_target(row))
-            ours = said is not None and getattr(said, "author", None) == client.own_id()
-            if ours:
+            if said is None:
+                note = _route_gone(conn, incident, row, incidents_dir, result)
+                if note:
+                    incident["resolved_at"] = _now_iso()
+                    incident["resolution"] = note
+                    write_row(directory, incident)
+            elif getattr(said, "author", None) == client.own_id():
                 incident["resolved_at"] = _now_iso()
                 write_row(directory, incident)
         except Exception as exc:  # noqa: BLE001 -- it stays open; tried again next drain
@@ -360,6 +445,36 @@ def recheck_own_id(
                 "first comment: own-id recheck of delivery %s failed: %s",
                 incident.get("delivery_id"), exc,
             )  # fmt: skip
+            if result is not None:
+                result.errors.append(
+                    f"delivery {incident.get('delivery_id')}: the own-id recheck could not read "
+                    f"comment {row['first_comment_live_id']} ({str(exc).strip() or exc.__class__.__name__}); "
+                    "the incident stays open and the next drain tries again"
+                )
+
+
+def _route_gone(
+    conn: sqlite3.Connection, incident: dict, row: Any, incidents_dir: Optional[Path], result: Any
+) -> str:
+    """The row's recorded comment is confirmed gone: a row with text is unposted so the drain
+    reposts it (``reopen_gone_first_comment`` counts the try, so a comment gone after every
+    repost stops at ``FIRST_COMMENT_MAX_ATTEMPTS`` and stays surfaced); a row with no text is
+    marked removed. Returns the note to resolve the own-id incident with, ``""`` when the row
+    moved (a pending correction) and nothing was done."""
+    delivery_id = incident.get("delivery_id")
+    live_id = str(row["first_comment_live_id"])
+    why = f"comment {live_id} reads gone (confirmed against the post's listing)"
+    if reopen_gone_first_comment(conn, delivery_id, live_id, _now_iso(), why):
+        raise_repost_incident(conn, delivery_id, GONE + why, incidents_dir)
+        note = f"{why}; the row is unposted and the drain reposts it"
+    elif mark_first_comment_removed(conn, delivery_id, _now_iso()):
+        raise_repost_incident(conn, delivery_id, why, incidents_dir, kind=REMOVED_KIND)
+        note = f"{why}; the row has no text, so it is marked removed"
+    else:
+        return ""
+    if result is not None:
+        result.errors.append(f"delivery {delivery_id}: {note}")
+    return note
 
 
 def _resolve_incidents(

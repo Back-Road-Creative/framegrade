@@ -273,7 +273,7 @@ def test_a_wrong_own_id_whose_read_back_fails_is_reported_and_nothing_deleted(co
     assert [i for i in _open_incidents(inc) if i["kind"] == OWN_ID_KIND]
 
 
-def test_a_read_back_that_answers_gone_is_reported(conn, inc):
+def test_a_read_back_that_answers_gone_is_reported_and_reposted(conn, inc):
     did = _meta_relinked(conn, "facebook")
     graph = FakeGraph("facebook", [])
     real = graph.get
@@ -285,7 +285,8 @@ def test_a_read_back_that_answers_gone_is_reported(conn, inc):
 
     graph.get = get
     res = _drain_as(conn, _fb(graph, "p"), inc)
-    assert _meta_row(conn, did)["first_comment_posted_at"]
+    # Confirmed gone: not recorded as posted (the next drain reposts it), and it is said.
+    assert not _meta_row(conn, did)["first_comment_posted_at"]
     assert any(f"delivery {did}" in e for e in res.errors), res.errors
 
 

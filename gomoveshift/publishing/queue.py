@@ -1715,7 +1715,8 @@ def removed_first_comment_rows(conn: sqlite3.Connection, platforms: Iterable[str
     marks = ",".join("?" for _ in wanted)
     return conn.execute(
         "SELECT id, project_name, short_index, sidecar_path, scheduled_at, first_comment_text, "  # noqa: S608
-        "platform, platform_upload_id, platform_post_id "
+        "first_comment_prior_text, first_comment_live_id, platform, platform_upload_id, "
+        "platform_post_id "
         "FROM deliveries WHERE first_comment_posted_at IS NOT NULL "
         f"AND first_comment_removed_at IS NOT NULL AND platform IN ({marks}) ORDER BY id",
         wanted,
@@ -1763,8 +1764,19 @@ def adopt_removed_first_comment(
 ) -> bool:
     """A removed row (posted, no text, no correction pending) found OUR comment live again
     (``comment_id`` saying ``text``): record it as the row's live comment and clear
-    ``removed_at``. ``posted_at`` stays; nothing is reposted."""
+    ``removed_at``. ``posted_at`` stays; nothing is reposted. Never a text a relink replaced
+    (``first_comment_prior_text``) nor the id of the comment the row recorded as deleted: the
+    row's prior texts are re-read and compare-and-set in the UPDATE, so a concurrent relink
+    cannot slip one in."""
     with conn:
+        row = conn.execute(
+            "SELECT first_comment_prior_text, first_comment_live_id FROM deliveries WHERE id=?",
+            (delivery_id,),
+        ).fetchone()
+        if row is None or comment_id == (row["first_comment_live_id"] or None):
+            return False
+        if text.strip() in {t.strip() for t in first_comment_prior_texts(row)}:
+            return False
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
@@ -1772,8 +1784,38 @@ def adopt_removed_first_comment(
                 "first_comment_attempts=0, updated_at=? WHERE id=? "
                 "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
                 "AND first_comment_correction IS NULL "
-                "AND (first_comment_text IS NULL OR first_comment_text='')",
-                (text, comment_id, now, delivery_id),
+                "AND (first_comment_text IS NULL OR first_comment_text='') "
+                "AND first_comment_prior_text IS ? AND first_comment_live_id IS ?",
+                (
+                    text,
+                    comment_id,
+                    now,
+                    delivery_id,
+                    row["first_comment_prior_text"],
+                    row["first_comment_live_id"],
+                ),
+            ).rowcount
+        )
+
+
+def reopen_gone_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, live_id: str, now: str, error: str
+) -> bool:
+    """A read confirmed our comment gone (``live_id``, or one just posted: ``live_id`` ``""``):
+    unpost the row with its own text, so the drain reposts it, and count the try
+    (``first_comment_attempts``): a comment that is gone again after every repost stops at
+    ``FIRST_COMMENT_MAX_ATTEMPTS`` instead of reposting forever. Only a row with text, no
+    pending correction and still recording that ``live_id``; ``False`` (nothing written) else."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_posted_at=NULL, first_comment_live_id=NULL, "
+                "first_comment_error=?, first_comment_attempts=first_comment_attempts+1, "
+                "updated_at=? WHERE id=? AND first_comment_correction IS NULL "
+                "AND first_comment_removed_at IS NULL "
+                "AND first_comment_text IS NOT NULL AND first_comment_text <> '' "
+                "AND COALESCE(first_comment_live_id, '')=?",
+                (error[:500], now, delivery_id, live_id),
             ).rowcount
         )
 

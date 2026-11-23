@@ -792,8 +792,24 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   (`first_comment.is_full_drive_comment`): it becomes `first_comment_live_id`, `removed_at`
   clears and the `first_comment_removed` incident closes in that drain. So the pipeline watches
   for our comment and closes the incident when it is live again; a hand re-add (by the channel
-  account) is picked up on the next drain. A viewer's or authorless copy is never adopted; a
-  failed or cut-short listing leaves the row removed and the incident open, with an error line.
+  account) is picked up on the next drain. The re-add must say exactly
+  `🎬 Watch the full drive: https://youtu.be/<id>` (the full drive's real video id, which the
+  `first_comment_removed` incident prints) and nothing else. Only our CURRENT link is adopted
+  (`_adopt_one`, mirrored in the `adopt_removed_first_comment` UPDATE): a comment saying a text
+  a relink replaced (`first_comment_prior_text`) or carrying the id of the comment we deleted
+  (`first_comment_live_id`) is skipped, and when more than one distinct candidate remains none
+  is adopted and the error line names the ids (listing order never decides). A viewer's or
+  authorless copy is never adopted; a failed or cut-short listing, a refused adopt (a pending
+  correction) or an ambiguity leaves the row removed and the incident open, with an error line.
+- **A comment read back gone is reposted.** When the read-back right after a Meta post, or the
+  own-id recheck, CONFIRMS the comment gone (against the post's listing), it is not an own-id
+  mismatch: a post-time gone leaves the row unposted (`reopen_gone_first_comment`, one try
+  counted) under a `first_comment_repost_failed` incident and the drain reposts it; an open
+  own-id incident whose comment reads gone is resolved with a note and the row is unposted the
+  same way (a row with no text is marked removed instead). A comment gone after every repost
+  stops at `FIRST_COMMENT_MAX_ATTEMPTS` and the repost incident stays open. A read-back by
+  another author, or a read that failed, stays an own-id incident (the recheck's failed read
+  adds an error line).
 - **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
   replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
   (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on
