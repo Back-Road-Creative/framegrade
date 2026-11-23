@@ -336,17 +336,20 @@ def run_ffmpeg_encode(
             if in_moov_rewrite and io_mode:
                 io_total = _read_io_counters(getattr(proc, "pid", None))
                 if io_total is None:
-                    io_mode = False
-                    effective_stall_timeout = _moov_rewrite_fallback_timeout(
-                        _output_size(output_path), stall_timeout, now - start_time
-                    )
-                    logger.warning(
-                        "⚠ ffmpeg_runner: %s: ffmpeg's I/O counters became unreadable during the "
-                        "moov rewrite; stall window is now %ss (max of the size window and 2x "
-                        "elapsed)",
-                        description,
-                        effective_stall_timeout,
-                    )
+                    # An exited, not-yet-reaped child's /proc/<pid>/io is unreadable too: that is
+                    # an exit (the drain and poll below end the loop), not a counters failure.
+                    if proc.poll() is None:
+                        io_mode = False
+                        effective_stall_timeout = _moov_rewrite_fallback_timeout(
+                            _output_size(output_path), stall_timeout, now - start_time
+                        )
+                        logger.warning(
+                            "⚠ ffmpeg_runner: %s: ffmpeg's I/O counters became unreadable during "
+                            "the moov rewrite; stall window is now %ss (max of the size window "
+                            "and 2x elapsed)",
+                            description,
+                            effective_stall_timeout,
+                        )
                 elif last_io_total is None or io_total > last_io_total:
                     last_io_total = io_total
                     last_progress_time = now
