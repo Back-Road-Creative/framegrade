@@ -180,6 +180,7 @@ def _stall_kill_reason(
 # headroom on the rewrite).
 MOOV_REWRITE_MIN_STALL_S = 1800
 MOOV_REWRITE_MIN_BYTES_PER_SEC = 20_000_000
+_IO_UNREADABLE_READS = 3  # consecutive loop passes (>= 0.5 s real) before the fallback
 
 
 def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> int:
@@ -211,6 +212,29 @@ def _read_io_counters(pid, proc_root: str = "/proc") -> Optional[int]:
         return int(fields["rchar"]) + int(fields["wchar"])
     except (OSError, ValueError, KeyError):
         return None
+
+
+_PF_EXITING = 0x00000004  # include/linux/sched.h: the task is in do_exit()
+
+
+def _child_exiting(pid, proc_root: str = "/proc") -> bool:
+    """True when ``<proc_root>/<pid>/stat`` shows *pid* exiting: state Z or X, or PF_EXITING set.
+
+    An ffmpeg that has begun to exit drops its I/O counters (``/proc/<pid>/io`` turns
+    unreadable) before ``waitpid`` can report the exit, for as long as its teardown takes: a
+    flush of a large output to a slow disk held that gap for 2.4-7.0 s (rr33). Fields are
+    read after the LAST ``)``, since the command name may hold spaces and parentheses. An
+    unreadable or unparseable stat is not proof of an exit: False.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    try:
+        with open(f"{proc_root}/{pid}/stat") as fh:
+            rest = fh.read().rsplit(")", 1)[1].split()
+        state, flags = rest[0], int(rest[6])
+    except (OSError, ValueError, IndexError):
+        return False
+    return state in ("Z", "X") or bool(flags & _PF_EXITING)
 
 
 _STATS_TIME_RE = re.compile(r"time=\s*(\S+)")
@@ -297,6 +321,7 @@ def run_ffmpeg_encode(
     effective_stall_timeout = stall_timeout
     io_mode = False  # in a moov rewrite: True = follow the child's I/O counters
     last_io_total: Optional[int] = None
+    io_unreadable_reads = 0
 
     logger.info(f"  {description}: starting (stall={stall_timeout}s, max={max_timeout}s)")
 
@@ -336,9 +361,16 @@ def run_ffmpeg_encode(
             if in_moov_rewrite and io_mode:
                 io_total = _read_io_counters(getattr(proc, "pid", None))
                 if io_total is None:
-                    # An exited, not-yet-reaped child's /proc/<pid>/io is unreadable too: that is
-                    # an exit (the drain and poll below end the loop), not a counters failure.
-                    if proc.poll() is None:
+                    # An exiting child's /proc/<pid>/io turns unreadable (its mm is gone) before
+                    # waitpid can report the exit, for as long as its teardown takes (2.4-7.0 s
+                    # flushing a large output, rr33). A child /proc/<pid>/stat shows exiting is
+                    # not a counters failure; otherwise only a run of unreadable reads is.
+                    io_unreadable_reads += 1
+                    if (
+                        io_unreadable_reads >= _IO_UNREADABLE_READS
+                        and proc.poll() is None
+                        and not _child_exiting(getattr(proc, "pid", None))
+                    ):
                         io_mode = False
                         effective_stall_timeout = _moov_rewrite_fallback_timeout(
                             _output_size(output_path), stall_timeout, now - start_time
@@ -350,7 +382,9 @@ def run_ffmpeg_encode(
                             description,
                             effective_stall_timeout,
                         )
-                elif last_io_total is None or io_total > last_io_total:
+                else:
+                    io_unreadable_reads = 0
+                if io_total is not None and (last_io_total is None or io_total > last_io_total):
                     last_io_total = io_total
                     last_progress_time = now
 

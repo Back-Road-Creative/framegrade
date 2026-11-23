@@ -17,6 +17,7 @@ import pytest
 
 from gomoveshift.pipeline.ffmpeg_runner import (
     MOOV_REWRITE_MIN_STALL_S,
+    _child_exiting,
     _moov_rewrite_fallback_timeout,
     _moov_rewrite_stall_timeout,
     _read_io_counters,
@@ -762,6 +763,25 @@ _REAL_REWRITE_CHILD = textwrap.dedent(
 )
 
 
+_SLOW_EXIT_REWRITE_CHILD = textwrap.dedent(
+    """\
+    import os, sys, threading, time
+    out, mib = sys.argv[1], int(sys.argv[2])
+    e = sys.stderr
+    e.write("frame=   10 fps=1 q=-1.0 size=     256KiB time=00:00:01.00 bitrate=N/A speed=1x\\n")
+    e.write("[mp4 @ 0x1] Starting second pass: moving the moov atom to the beginning of the file\\n")
+    e.flush()
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    buf = b"x" * (1 << 20)
+    for _ in range(mib):
+        os.write(fd, buf)
+    threading.Thread(target=os.fsync, args=(fd,)).start()  # the exit waits on this flush
+    time.sleep(0.01)
+    os._exit(0)
+    """
+)
+
+
 class TestMoovRewriteFollowsOwnProgress:
     """The silent +faststart rewrite is timed by its own progress, not a fixed speed floor.
 
@@ -868,6 +888,63 @@ class TestMoovRewriteFollowsOwnProgress:
         warned = [r for r in caplog.records if "became unreadable" in r.getMessage()]
         assert len(warned) == 1 and warned[0].levelname == "WARNING"
 
+    @pytest.mark.parametrize(
+        "pattern",
+        [
+            pytest.param([None], id="one-unreadable-read"),
+            pytest.param([None, None], id="two-unreadable-reads"),
+            pytest.param([None, 1, None, 1, None, 1, None, 1], id="flapping"),
+        ],
+    )
+    def test_a_short_run_of_unreadable_reads_while_alive_is_not_a_counters_failure(
+        self, tmp_path, monkeypatch, caplog, pattern
+    ):
+        """An exiting ffmpeg's /proc/<pid>/io turns unreadable (its mm is gone) up to ~1.2 ms
+        before waitpid reports the exit (rr33: 40/40 exits), so a read inside that gap sees
+        poll() None. Fewer than three unreadable reads in a row is not a counters failure: no
+        false "became unreadable" WARNING, and the stall clock keeps following the counters."""
+        reads = {"n": 0}
+
+        def io(proc):
+            if proc.moov_at is None or proc.clock.t - proc.moov_at < 60:
+                return proc.io
+            k = reads["n"]
+            reads["n"] += 1
+            if k < len(pattern) and pattern[k] is None:
+                return None
+            return proc.io
+
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=True, io_fn=io, tick=30.0, copy_s=600.0,
+                rewrite_s=3000.0, size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and result.killed_reason is None and proc.terminated is False
+        assert reads["n"] > len(pattern)  # every scripted read was taken during the rewrite
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warned) == 1 and "own I/O counters" in warned[0], warned
+
+    def test_three_unreadable_reads_in_a_row_while_alive_take_the_fallback_once(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        reads = {"n": 0}
+
+        def io(proc):
+            if proc.moov_at is None or proc.clock.t - proc.moov_at < 60:
+                return proc.io
+            reads["n"] += 1
+            return None if reads["n"] <= 3 else proc.io
+
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=True, io_fn=io, tick=30.0, copy_s=1797.0,
+                rewrite_s=2516.0, size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and proc.terminated is False
+        fell_back = [r for r in caplog.records if "became unreadable" in r.getMessage()]
+        assert len(fell_back) == 1 and fell_back[0].levelname == "WARNING"
+        assert reads["n"] == 3  # io mode ended at the third unreadable read: no more reads
+
     def test_io_mode_logs_exactly_one_warning_naming_the_mode(self, tmp_path, monkeypatch, caplog):
         with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
             result, proc, _, _ = _run_concat(
@@ -876,7 +953,7 @@ class TestMoovRewriteFollowsOwnProgress:
             )  # fmt: skip
         assert result.success and proc.terminated is False
         warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warned) == 1 and "I/O counters" in warned[0], warned
+        assert len(warned) == 1 and "own I/O counters" in warned[0], warned
 
     def test_fallback_window_is_exactly_twice_the_elapsed_run_when_that_is_larger(
         self, tmp_path, monkeypatch
@@ -930,7 +1007,74 @@ class TestMoovRewriteFollowsOwnProgress:
                 )
             assert result.success, result
             warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-            assert len(warned) == 1 and "I/O counters" in warned[0], warned
+            assert len(warned) == 1 and "own I/O counters" in warned[0], warned
+
+    @pytest.mark.skipif(
+        not os.path.exists(f"/proc/{os.getpid()}/stat"), reason="needs /proc/<pid>/stat (Linux)"
+    )
+    def test_a_real_rewrite_whose_exit_waits_on_a_flush_never_logs_a_false_fallback(
+        self, tmp_path, caplog
+    ):
+        """rr33: an ffmpeg flushing a large output to a slow disk as it exits keeps
+        /proc/<pid>/io unreadable for 2.4-7.0 s while poll() is still None (6/6 runs). That
+        child is exiting (PF_EXITING or a zombie leader in /proc/<pid>/stat), not a counters
+        failure, so a successful run logs only the io-mode WARNING."""
+        child = tmp_path / "slow_exit.py"
+        child.write_text(_SLOW_EXIT_REWRITE_CHILD)
+        for i in range(2):  # rr33 saw the false fallback on 6/6 runs; 2 keep the suite fast
+            out = tmp_path / f"s{i}.mp4"
+            caplog.clear()
+            try:
+                with caplog.at_level(logging.WARNING, logger="gomoveshift.pipeline.ffmpeg_runner"):
+                    result = run_ffmpeg_encode(
+                        [sys.executable, "-I", str(child), str(out), "300"],
+                        out,
+                        expected_duration=0.0,
+                        description="slow exit",
+                    )
+            finally:
+                out.unlink(missing_ok=True)  # 300 MiB: never left past the tmp_path budget
+            assert result.success, result
+            warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warned) == 1 and "own I/O counters" in warned[0], warned
+
+
+class TestChildExiting:
+    """``_child_exiting`` reads /proc/<pid>/stat: state Z/X or the PF_EXITING (0x4) flag."""
+
+    @staticmethod
+    def _stat(tmp_path, pid, comm, state, flags):
+        (tmp_path / str(pid)).mkdir()
+        rest = [state, "1", "2", "3", "0", "-1", str(flags)] + ["0"] * 44
+        (tmp_path / str(pid) / "stat").write_text(f"{pid} ({comm}) " + " ".join(rest) + "\n")
+
+    @pytest.mark.parametrize(
+        ("state", "flags", "expected"),
+        [
+            ("R", 0x400100, False),
+            ("D", 0x400100, False),
+            ("S", 0x400104, True),  # PF_EXITING with other flags set
+            ("D", 0x4, True),
+            ("Z", 0x400100, True),
+            ("X", 0, True),
+        ],
+    )
+    def test_state_and_flags(self, tmp_path, state, flags, expected):
+        self._stat(tmp_path, 41, "ffmpeg", state, flags)
+        assert _child_exiting(41, proc_root=str(tmp_path)) is expected
+
+    def test_a_comm_with_spaces_and_parens_is_parsed_after_the_last_paren(self, tmp_path):
+        self._stat(tmp_path, 42, "a) Z 9 (b", "R", 0x400100)
+        assert _child_exiting(42, proc_root=str(tmp_path)) is False
+
+    @pytest.mark.parametrize("content", ["", "garbage", "43 (x) R 1 2", "43 (x) R 1 2 3 0 -1 zz"])
+    def test_unreadable_or_unparseable_stat_is_not_proof_of_exit(self, tmp_path, content):
+        (tmp_path / "43").mkdir()
+        (tmp_path / "43" / "stat").write_text(content)
+        assert _child_exiting(43, proc_root=str(tmp_path)) is False
+        assert _child_exiting(44, proc_root=str(tmp_path)) is False  # no such pid
+        assert _child_exiting(None, proc_root=str(tmp_path)) is False
+        assert _child_exiting(True, proc_root=str(tmp_path)) is False
 
 
 class TestReadIoCounters:
