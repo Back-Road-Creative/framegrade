@@ -180,7 +180,7 @@ def _stall_kill_reason(
 # headroom on the rewrite).
 MOOV_REWRITE_MIN_STALL_S = 1800
 MOOV_REWRITE_MIN_BYTES_PER_SEC = 20_000_000
-_IO_UNREADABLE_READS = 3  # consecutive loop passes (>= 0.5 s real) before the fallback
+_IO_UNREADABLE_READS = 3  # consecutive unreadable loop passes before the fallback (no time bound)
 
 
 def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> int:

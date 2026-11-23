@@ -945,6 +945,32 @@ class TestMoovRewriteFollowsOwnProgress:
         assert len(fell_back) == 1 and fell_back[0].levelname == "WARNING"
         assert reads["n"] == 3  # io mode ended at the third unreadable read: no more reads
 
+    @pytest.mark.parametrize("exiting", [True, False])
+    def test_a_child_proc_stat_shows_exiting_never_takes_the_fallback(
+        self, tmp_path, monkeypatch, caplog, exiting
+    ):
+        # Deterministic pin of the _child_exiting check at the fallback site: the real slow-exit
+        # test depends on the disk keeping the exit gap open for 3 reads.
+        reads = {"n": 0}
+
+        def io(proc):
+            if proc.moov_at is None or proc.clock.t - proc.moov_at < 60:
+                return proc.io
+            reads["n"] += 1
+            return None if reads["n"] <= 3 else proc.io
+
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.ffmpeg_runner._child_exiting", lambda pid: exiting
+        )
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=True, io_fn=io, tick=30.0, copy_s=1797.0,
+                rewrite_s=2516.0, size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and proc.terminated is False
+        fell_back = [r for r in caplog.records if "became unreadable" in r.getMessage()]
+        assert len(fell_back) == (0 if exiting else 1)
+
     def test_io_mode_logs_exactly_one_warning_naming_the_mode(self, tmp_path, monkeypatch, caplog):
         with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
             result, proc, _, _ = _run_concat(
