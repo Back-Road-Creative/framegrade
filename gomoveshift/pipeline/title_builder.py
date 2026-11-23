@@ -1889,16 +1889,52 @@ def strip_drive_date(label: str) -> str:
     return _DRIVE_DATE_SUFFIX_RE.sub("", label)
 
 
-def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
-    """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
+def _drive_dated(title, raw_date):
+    """``title`` + `` (Mon D, YYYY)`` for the measured ``raw_date`` (``YYYY-MM-DD…``).
+
+    ``None`` when ``raw_date`` is missing or unparseable: a date is never guessed. A
+    date suffix already on ``title`` is stripped first, so a title is never dated twice.
+    """
     import datetime as _dt
 
-    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
-    if not (drive_project and video_id and raw):
+    raw = str(raw_date or "").strip()
+    if not raw:
         return None
     try:
         day = _dt.date.fromisoformat(raw[:10])
     except ValueError:
+        return None
+    return f"{strip_drive_date(title)} ({day.strftime('%b')} {day.day}, {day.year})"
+
+
+def bracket_dated_title_inputs(ost_text, bracket_route, lf_dates):
+    """``{lf: title input}`` for the title map: a country/state bracket LF is dated.
+
+    An LF whose burned OST text IS the bracket label of a ``country`` or ``state``
+    level record gets that label dated with its own MEASURED recording date
+    (``lf_dates`` ``{lf: "YYYY-MM-DD"}``). Such a label is the same bare string for every
+    same-country drive, so it carries the date from the start instead of leaving
+    uniqueness to a late fallback. No measured date, a county/states level, an invalid
+    record or any other LF text is returned unchanged; the OST text itself is never
+    touched, and ``ensure_unique_titles`` still runs on the result.
+    """
+    record = bracket_route if isinstance(bracket_route, dict) else {}
+    label = str(record.get("label") or "").strip()
+    if not label or record.get("level") not in {"country", "state"}:
+        return dict(ost_text)
+    out = {}
+    for lf_idx, text in ost_text.items():
+        dated = None
+        if str(text or "").strip() == label:
+            dated = _drive_dated(text, (lf_dates or {}).get(lf_idx))
+        out[lf_idx] = text if dated is None else dated
+    return out
+
+
+def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
+    """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
+    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
+    if not (drive_project and video_id and raw):
         return None
     if video_projects is None:
         from .longform_metadata import ledger_video_projects
@@ -1907,7 +1943,7 @@ def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_p
     other = (video_projects.get(video_id) or "").strip()
     if not other or other == drive_project:
         return None
-    return f"{title} ({day.strftime('%b')} {day.day}, {day.year})"
+    return _drive_dated(title, raw)
 
 
 def ensure_unique_titles(

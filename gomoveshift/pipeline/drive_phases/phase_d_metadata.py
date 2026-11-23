@@ -21,7 +21,7 @@ from ..final_text_record import build_final_text_review
 from ..location_evidence import refuse_unsupported_title
 from ..region_resolver import derive_region, is_us_region
 from ..route_profile import RouteProfile, build_lf_profile
-from ..title_builder import ensure_unique_titles
+from ..title_builder import bracket_dated_title_inputs, ensure_unique_titles
 
 # Use the phase_d logger name so existing log-capture tests + grep-trails
 # stay valid across the module split (tests assert on
@@ -317,6 +317,13 @@ def _build_metadata_per_lf(
             for k, v in per_lf_ost_text_state.items()
             if int(k) not in _split_idx and int(k) not in pre_render_decisions
         }
+        # A country/state bracket label is the same bare string for every same-country
+        # drive: the title input carries this LF's measured date (the OST stays bare).
+        _title_map_input = bracket_dated_title_inputs(
+            _title_map_input,
+            getattr(state, "bracket_route", None),
+            state.per_lf_recording_date,
+        )
         per_lf_titles_override = ensure_unique_titles(
             _title_map_input,
             published_titles=known_channel_titles(),

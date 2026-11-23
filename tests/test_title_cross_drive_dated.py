@@ -52,3 +52,12 @@ def test_dated_title_that_also_collides_raises():
     dated = "county cork, ireland (sep 19, 2025) in 4k"
     with pytest.raises(PhaseBCExitContractError):
         _run(published_titles={_LIVE, dated})
+
+
+def test_cross_drive_dated_never_dates_an_already_dated_title():
+    from gomoveshift.pipeline.title_builder import _drive_dated
+
+    assert _drive_dated("Ireland (Sep 16, 2025)", "2025-09-17") == "Ireland (Sep 17, 2025)"
+    assert _drive_dated("Ireland", "2025-09-17") == "Ireland (Sep 17, 2025)"
+    assert _drive_dated("Ireland", "") is None
+    assert _drive_dated("Ireland", "garbage") is None
