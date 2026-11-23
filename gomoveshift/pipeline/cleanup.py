@@ -1006,20 +1006,35 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
     """True when dropping the day master cannot leave the day's blur mask unprovable.
 
     A day with no blur sidecar is refused by the publish gate whatever the master holds, so it
-    never keeps one. Otherwise the master (the gate's container probe) may go only while the raw
-    is present, or while the persisted source-frame proof validates by the gate's own check
-    (``mask_frame_gate.persisted_source_count``). Anything else keeps the master and says so."""
+    never keeps one. Otherwise the master goes only once the gate can measure the day without
+    it (``mask_frame_gate.can_measure_without_master``). When it cannot, a proof is written
+    from the master itself (the count the gate would trust from it) and the gate's rule is asked
+    again; if it still says no, the master is kept and a WARNING says so."""
     if not (day_dir / f"day_{date}_blur_regions.json").exists():
         return True
-    if os.path.lexists(day_dir / f"day_{date}_raw.mp4"):
-        return True
-    from ..publishing.mask_frame_gate import persisted_source_count
+    from ..publishing.mask_frame_gate import can_measure_without_master
+    from . import blur_gate
 
-    if persisted_source_count(day_dir, date):
+    if can_measure_without_master(day_dir, date):
+        return True
+    master = day_dir / f"day_{date}_master.mp4"
+    try:
+        fingerprint = f"master:{master.stat().st_size}:{master.stat().st_mtime_ns}"
+        blur_gate.persist_source_frames(
+            master,
+            day_dir / f"day_{date}_blur_mask.mkv",
+            day_dir / f"day_{date}_blur_regions.json",
+            source_fingerprint=fingerprint,
+        )
+    except Exception as exc:  # never block cleanup; the master simply stays
+        logger.warning(
+            "  master-drop: day %s: could not write a proof from the master (%s)", date, exc
+        )
+    if can_measure_without_master(day_dir, date):
         return True
     logger.warning(
-        "  master-drop: day %s has no raw and no valid source frame proof — keeping the master "
-        "so the publish gate can still count its frames",
+        "  master-drop: day %s: the publish gate cannot measure the day without its master "
+        "(no probeable raw, no proof that validates) — keeping the master",
         date,
     )
     return False

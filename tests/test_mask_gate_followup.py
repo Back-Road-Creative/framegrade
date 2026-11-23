@@ -165,9 +165,10 @@ def test_master_dropped_when_the_persisted_proof_validates(tmp_path):
     assert not is_unknown(tmp_path / "st")
 
 
-def test_master_dropped_when_the_raw_is_present(tmp_path):
+def test_master_dropped_when_the_raw_is_present_and_probes(tmp_path, monkeypatch):
     day = _day_with_finals(tmp_path / "st")
     (day / f"day_{DATE}_raw.mp4").write_bytes(b"raw")
+    monkeypatch.setattr(gate, "probe_frames", lambda p: 306377)
     assert _drop(day)["dropped"] is True
 
 

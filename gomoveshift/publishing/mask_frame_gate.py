@@ -88,6 +88,20 @@ def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
     return None
 
 
+def can_measure_without_master(day_dir: Path, date: str) -> bool:
+    """True when ``day_findings`` would still measure this day with its master gone.
+
+    The one rule cleanup asks before it drops a master: the raw is a regular file that probes
+    to a positive frame count, else no raw exists at all (a present raw blocks the proof
+    fallback in ``day_findings``) and the persisted proof validates."""
+    raw = day_dir / _CONTAINER_NAMES[0].format(date=date)
+    if raw.is_file():
+        return bool(probe_frames(raw))
+    if os.path.lexists(raw):
+        return False
+    return bool(persisted_source_count(day_dir, date))
+
+
 def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
     """The source frame count the pairing check persisted, or None unless it still vouches.
 
