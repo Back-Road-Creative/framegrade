@@ -826,7 +826,16 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   gone is still done. A held delete never blocks a repost or hides the repost incident. A row at
   the attempts cap with a held delete still lists the post each drain: the lowest id (numeric for
   Meta's `123_99` ids, text for YouTube's) that says the row's text is adopted, the rest are
-  queued as our own extra deletes, so exactly one copy stays live and the row records it. Before any repost the dedupe listing still runs, so an earlier own id
+  queued as our own extra deletes, so exactly one copy stays live and the row records it. A
+  reopened delete runs first in its row's correction pass and outside the correction cap (a row
+  at the cap, or with a failing sibling item, never strands it; a failure there counts no
+  attempt); its only bound is the 24-hour wait. That wait always ends visibly: a failing
+  listing past the deadline, a listing cut short, a copy of ours that says other text (kept,
+  never deleted) and a plain "not listed" each drop with an error line and ONE incident naming
+  every id and the reason. **By design:** a copy that appears after the 24-hour drop is not
+  looked for again and needs a hand delete (the incident says so). Adopting a capped row resets
+  its correction attempts, and a held reopened delete never delays restoring a removed row.
+  Before any repost the dedupe listing still runs, so an earlier own id
   that reappears is adopted, not posted again. A comment gone after every repost stops at
   `FIRST_COMMENT_MAX_ATTEMPTS` and the repost incident stays open. When the row cannot move (a
   correction is pending) the recheck adds an error line and a WARNING, and the incident stays

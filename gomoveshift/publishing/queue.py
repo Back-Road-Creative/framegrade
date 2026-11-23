@@ -1663,6 +1663,20 @@ def first_comment_correction_ids(conn: sqlite3.Connection, platforms: Iterable[s
 
 def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
     """Posted rows with a correction to make: under the attempt cap, platform not paused."""
+    return _posted_correction_rows(conn, platforms, over_cap=False)
+
+
+def reopened_delete_rows(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
+    """Posted rows holding a delete a gone reopen queued, at ANY correction attempt count: that
+    delete runs outside the correction cap (its only bound is ``REOPEN_LAG_WINDOW``), so a row
+    at the cap never strands it."""
+    rows = _posted_correction_rows(conn, platforms, over_cap=True)
+    return [r for r in rows if any(i.get("reopened") for i in first_comment_corrections(r))]
+
+
+def _posted_correction_rows(
+    conn: sqlite3.Connection, platforms: Iterable[str], over_cap: bool
+) -> list:
     wanted = list(platforms)
     marks = ",".join("?" for _ in wanted)
     rows = conn.execute(
@@ -1670,9 +1684,9 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
         "platform_post_id, first_comment_error, first_comment_correction, scheduled_at, "
         "first_comment_live_id "
         f"FROM deliveries WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
-        "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts < ? "
-        "ORDER BY id",
-        (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
+        "AND first_comment_posted_at IS NOT NULL "
+        "AND (? OR first_comment_correction_attempts < ?) ORDER BY id",
+        (*wanted, int(over_cap), FIRST_COMMENT_MAX_ATTEMPTS),
     ).fetchall()
     paused: dict = {}
     for row in rows:
@@ -1682,10 +1696,11 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
 
 
 def capped_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
-    """Posted rows whose correction hit ``FIRST_COMMENT_MAX_ATTEMPTS`` refusals (a human acts)."""
+    """Posted rows whose correction hit ``FIRST_COMMENT_MAX_ATTEMPTS`` refusals (a human acts).
+    A row holding only reopened deletes is not one: those run outside the cap."""
     wanted = list(platforms)
     marks = ",".join("?" for _ in wanted)
-    return conn.execute(
+    rows = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_text, "  # noqa: S608
         "first_comment_correction FROM deliveries "
         f"WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
@@ -1693,6 +1708,13 @@ def capped_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterab
         "ORDER BY id",
         (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
     ).fetchall()
+    return [r for r in rows if not _only_reopened(r["first_comment_correction"])]
+
+
+def _only_reopened(raw: Optional[str]) -> bool:
+    """The correction is nothing but deletes a gone reopen queued (they never decide the text)."""
+    items = first_comment_corrections({"first_comment_correction": raw})
+    return bool(items) and all(i.get("reopened") for i in items)
 
 
 def unposted_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
@@ -1748,14 +1770,20 @@ def unpost_removed_first_comment(
     """A removed row has comment text again: unpost it with that text, the way a gone edit does
     (``unpost_first_comment_for_repost``), so the drain reposts it or adopts our own copy."""
     with conn:
+        old = conn.execute(
+            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        raw = old["first_comment_correction"] if old is not None else None
+        if raw and not _only_reopened(raw):
+            return False  # a held reopened delete never delays this: any other correction does
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
                 "first_comment_live_id=NULL, first_comment_error=NULL, "
                 "first_comment_removed_at=NULL, first_comment_attempts=0, updated_at=? "
                 "WHERE id=? AND first_comment_removed_at IS NOT NULL "
-                "AND first_comment_posted_at IS NOT NULL AND first_comment_correction IS NULL",
-                (text, now, delivery_id),
+                "AND first_comment_posted_at IS NOT NULL AND first_comment_correction IS ?",
+                (text, now, delivery_id, raw),
             ).rowcount
         )
 
@@ -1771,10 +1799,14 @@ def adopt_removed_first_comment(
     cannot slip one in."""
     with conn:
         row = conn.execute(
-            "SELECT first_comment_prior_text, first_comment_live_id FROM deliveries WHERE id=?",
+            "SELECT first_comment_prior_text, first_comment_live_id, first_comment_correction "
+            "FROM deliveries WHERE id=?",
             (delivery_id,),
         ).fetchone()
         if row is None or comment_id == (row["first_comment_live_id"] or None):
+            return False
+        raw = row["first_comment_correction"]
+        if raw and not _only_reopened(raw):
             return False
         from .first_comment import full_drive_video_id  # lazy: keeps the modules acyclic
 
@@ -1790,7 +1822,7 @@ def adopt_removed_first_comment(
                 "first_comment_error=NULL, first_comment_removed_at=NULL, "
                 "first_comment_attempts=0, updated_at=? WHERE id=? "
                 "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
-                "AND first_comment_correction IS NULL "
+                "AND first_comment_correction IS ? "
                 "AND (first_comment_text IS NULL OR first_comment_text='') "
                 "AND first_comment_prior_text IS ? AND first_comment_live_id IS ?",
                 (
@@ -1798,6 +1830,7 @@ def adopt_removed_first_comment(
                     comment_id,
                     now,
                     delivery_id,
+                    raw,
                     row["first_comment_prior_text"],
                     row["first_comment_live_id"],
                 ),
@@ -1900,14 +1933,16 @@ def adopt_capped_first_comment(
     conn: sqlite3.Connection, delivery_id: int, comment_id: str, text: str, now: str
 ) -> bool:
     """A capped unposted row found OUR comment ``comment_id`` saying exactly its text live: record
-    it as the row's live comment and mark it posted (attempts stay as counted). ``False`` when
-    the row moved meanwhile (posted, a new text, below the cap)."""
+    it as the row's live comment and mark it posted (repost attempts stay as counted; the
+    correction attempts, which only guard the stale-comment edits and deletes, restart at 0 so
+    the adopted row's queued extra deletes are not born capped). ``False`` when the row moved
+    meanwhile (posted, a new text, below the cap)."""
     with conn:
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_posted_at=?, first_comment_live_id=?, "
-                "first_comment_error=NULL, updated_at=? WHERE id=? "
-                "AND first_comment_posted_at IS NULL AND first_comment_attempts >= ? "
+                "first_comment_error=NULL, first_comment_correction_attempts=0, updated_at=? "
+                "WHERE id=? AND first_comment_posted_at IS NULL AND first_comment_attempts >= ? "
                 "AND first_comment_text=?",
                 (now, comment_id, now, delivery_id, FIRST_COMMENT_MAX_ATTEMPTS, text),
             ).rowcount
