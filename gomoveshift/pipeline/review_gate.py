@@ -155,7 +155,7 @@ def _label_quality_warning(metadata_json: dict) -> "str | None":
     )
 
 
-def compute_gate_cd_hash(*, state, output_dir: Path) -> str:
+def compute_gate_cd_hash(*, state, output_dir: Path, skip_plans: tuple = ()) -> str:
     """Stable sha256 of Gate C/D content payload.
 
     Covers LF count, per-LF title + youtube.json sha, consolidated
@@ -172,7 +172,8 @@ def compute_gate_cd_hash(*, state, output_dir: Path) -> str:
     ``state.gate_cd_confirmation_hash`` before spooling any delivery, so a
     plan edited after review cannot reach the queue. Excludes wall-clock fields (``generated_at``,
     mtimes) so a stale state file + freshly-regenerated artefact pair
-    don't churn the hash.
+    don't churn the hash. ``skip_plans`` names sidecars left out of the hash (the replace swap's
+    own, which it rewrites on every run); every other file is still covered.
     """
     output_dir = Path(output_dir)
     lf_count = len(list(state.regular_lf_paths or []))
@@ -200,6 +201,8 @@ def compute_gate_cd_hash(*, state, output_dir: Path) -> str:
         )
     plan_entries: list[dict] = []
     for plan_path in sorted(output_dir.glob("*_publish_plan.json")):
+        if plan_path.name in skip_plans:
+            continue
         try:
             plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

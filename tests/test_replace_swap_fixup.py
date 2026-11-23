@@ -220,7 +220,7 @@ def test_an_unreadable_state_refuses(w):
 def test_the_gate_check_is_called_with_the_run_state_and_the_plan_dir(w, monkeypatch):
     seen = []
 
-    def spy(state, output_dir):
+    def spy(state, output_dir, **_k):
         seen.append(output_dir)
         raise enqueue_plan.GateNotApprovedError("spy refuses")
 

@@ -88,12 +88,15 @@ def _load_state(state_path: Path) -> PipelineState:
     return PipelineState.from_dict(raw)
 
 
-def assert_gate_cd_approved(state: PipelineState, output_dir: Path) -> None:
+def assert_gate_cd_approved(
+    state: PipelineState, output_dir: Path, *, skip_plans: tuple = ()
+) -> None:
     """Raise when a human Gate C/D confirmation no longer matches the content.
 
     An unreviewed run (no confirmation recorded) passes: shorts publish
     automatically through the automated pre-spool gates. A confirmed run
-    must still carry a hash, and the sidecars must be unchanged since."""
+    must still carry a hash, and the sidecars must be unchanged since. ``skip_plans`` names
+    sidecars left out of the comparison (see ``compute_gate_cd_hash``)."""
     if not getattr(state, "gate_cd_confirmed", None):
         return
     recorded = getattr(state, "gate_cd_confirmation_hash", None)
@@ -102,7 +105,7 @@ def assert_gate_cd_approved(state: PipelineState, output_dir: Path) -> None:
             "Gate C/D is marked confirmed but carries no confirmation hash, so the approval "
             "cannot be tied to any particular content — refusing to enqueue."
         )
-    current = compute_gate_cd_hash(state=state, output_dir=output_dir)
+    current = compute_gate_cd_hash(state=state, output_dir=output_dir, skip_plans=skip_plans)
     if current != recorded:
         raise GateNotApprovedError(
             "the reviewed content has CHANGED since Gate C/D was confirmed "

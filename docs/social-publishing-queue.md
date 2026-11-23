@@ -679,6 +679,11 @@ is the set-aside run's stage dir. **Rebuild, then relink:** every other field,
 run's `<stages>/pipeline_state.json`. A `--no-review` replace never persists a confirmation, so it
 normally passes as unreviewed; a stale confirmation hash or unreadable state refuses EVERY Short
 with one `...:gate_cd` incident ("Gate C/D must be re-confirmed"). Nothing forges a confirmation.
+The check leaves the swap's OWN sidecar out of the hash (`skip_plans`): the swap rewrites it on
+every run, so a confirmation taken before the first swap would otherwise refuse every later run
+(and the deferred sibling). The rewrite keeps every reviewed text field from the old record and is
+covered by the identity, derived-hash, own-day privacy and mask checks below; the LF JSON, the CSV
+and every other plan file in the directory are still hashed, so a real content change refuses.
 
 A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed, `consent_hash`
 moved only when it equalled the old derived hash) only when:
@@ -692,8 +697,13 @@ moved only when it equalled the old derived hash) only when:
 - **The attestations can be placed.** `_sync_privacy_attestations` puts the per-day attestations
   beside the sidecar in the same write, so a real drain uploads with no hand step; else every swap
   is refused.
-- **No row blocks it.** A recovery row, an uploaded row ("one Short cannot be half old, half new")
-  or an unfinished row on another sidecar file (matched by resolved path) refuses the Short.
+- **No row blocks it.** A recovery row, an uploaded row, a `published` row with an upload id beside
+  a still-open sibling ("one Short cannot be half old, half new"; it stays refused after the
+  sibling publishes) or an unfinished row on another sidecar file (matched by resolved path; a row
+  with no `sidecar_path` counts as the plan dispatch serves it from) refuses the Short.
+- **No other day holds the run.** Dispatch merges a run's day attestations worst-state-wins, so a
+  Short whose own day verifies is still DEFERRED (naming that day) while another day of the plan is
+  unattested; placement never replaces a verified copy with an inconclusive one.
 
 A refused Short keeps the OLD fingerprint (dispatch refuses the stale bytes), rows unchanged, and
 one `replace_rebuild_refused` incident shows in `gomoveshift status --json` (resolved when a later
@@ -706,14 +716,25 @@ stalled on old bytes, so it moves; dispatch's own gates still run at upload.
 Rows of a swapped Short that are queued, unleased and have no upload id move `plan_hash` in one
 transaction with a `response_log` audit row (compare-and-set on `status='queued'`; commit, then
 `os.replace`). A crash between leaves rows ahead of the file; a rerun that refuses or defers that
-Short restores them (action `replace_rebuild_restore`), and one that swaps it converges.
+Short restores them (action `replace_rebuild_restore`) only while the file still carries the OLD
+hash and the row is still queued, unuploaded and unleased; any other such row is listed in
+`RebuildResult.untouched` and named in the Short's reason, never changed, and never makes the run
+raise. A finished swap (its record on disk, no row at the old hash) is carried through every later
+run, refusing or not; a Short whose rows are all terminal (cancelled, published) has nothing left
+to swap and its refusal incident resolves; a rerun that swaps a Short converges.
 Other rows are never changed and are listed in `RebuildResult.untouched`.
+`old_stages_dir` is the set-aside run's stage dir,
+`<stages_root>/_superseded/<project>-<stamp>/<project>/_stages`; a missing audit names the path it
+expected.
 
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
-ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
+ceiling (`dispatch.media_stall_attempts(base, cap)`, computed from the drain's own
+`backoff_base_seconds`/`backoff_cap_seconds`; `MEDIA_STALL_ATTEMPTS` is the default, 7 attempts at
+60 s doubling to the 3600 s cap) opens a
 `delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
-(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
-error, i.e. after it uploads.
+(the error is exempt from `max_attempts`); the incident closes only when the row has uploaded or gone
+terminal (another error replacing the media error does not close it). A sqlite error while syncing these incidents is logged, returned by
+`sync_media_stall_incidents` and reported in `DrainResult.errors`; the drain carries on.
 
 ## A replaced long-form upload (`relink_replaced_lf`)
 
