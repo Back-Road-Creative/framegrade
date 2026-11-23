@@ -11,7 +11,8 @@ drives (none left = covered). A drive whose output dir already holds Phase D upl
 not staged by a prior run's ``resume.json`` and not under a ``no-auto-resume`` hold; storage
 (``storage_plan``); the subset dir of symlinks; ``run_preflight``; launch; ``register_ready``
 as ``auditing``. A region drive whose newest audit succeeded is handed to ``publish`` (the
-caller's ``health publish``) instead of a noop; nothing here uploads or books itself.
+caller's ``health publish``) instead of a noop; a failed publish the publisher refuses (a mask or
+title gate) is listed under ``failed_publishes`` and skipped, never a hold on the region; nothing here uploads or books itself.
 
 ``supersede=(project, reason)`` replaces that row's own stale run (an earlier render of the same
 project, e.g. on an older release): its stage root and output dir are moved under
@@ -1672,7 +1673,14 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 # a replace that has not finished is retried with the heal backoff, never hot
                 res.setdefault("publish_backoff", []).append({"project": proj, "wait_s": wait})
                 continue
-            return _publish_audited(res, proj, publish, dry_run)
+            out = _publish_audited(dict(res), proj, publish, dry_run)
+            if out.get("action") != "refused":  # a ``no claim:`` slot wait carries no action
+                return out  # launched, a dry run, a noop or a Waypost slot wait: the tick ends here
+            # a refused publish (a mask or title gate) stays unpublished, but never holds the
+            # region: it is reported and the tick goes on to the next drive (2026-11-23, Kerry)
+            why = str(out["publish"].get("reason") or "")
+            logger.warning("backlog: publish of %s refused, the region goes on: %s", proj, why)
+            res.setdefault("failed_publishes", []).append({"project": proj, "reason": why})
     relaunch, auto = None, False
     for proj in auditing:
         since = since_of.get(proj, 0.0)
@@ -1740,6 +1748,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     siblings: List[str] = []
     gated = None  # the first row the render gate refused, when no row behind it is eligible
     reopen = False  # the own row is ``complete``: Waypost reopens it for the replace
+    refused = {f["project"] for f in res.get("failed_publishes", ())}
     for cand in (r for r in rows if r.region == region):
         own = cand.project == target
         mine_staged = staged
@@ -1765,6 +1774,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             cand_status = {k: v for k, v in status.items() if k != cand.project}
             cand_known = known - {cand.project, cand.project.strip().lower()}
         why = _skip_reason(cand, cand_status, cand_known, mine_staged, stages_root, own_ok=own)
+        if why is None and cand.project in refused:
+            why = "its publish was refused this tick"  # never re-rendered or re-claimed
         if why is None:
             # the drive's own pre-ingest refusal, asked before anything is moved, launched or
             # booked; a refused row is skipped so it never stalls the rows behind it
