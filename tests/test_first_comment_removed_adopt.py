@@ -285,8 +285,9 @@ def test_a_read_back_that_answers_gone_is_reported_and_reposted(conn, inc):
 
     graph.get = get
     res = _drain_as(conn, _fb(graph, "p"), inc)
-    # Confirmed gone: not recorded as posted (the next drain reposts it), and it is said.
-    assert not _meta_row(conn, did)["first_comment_posted_at"]
+    # One gone read may be lag: recorded as posted (the next drain re-reads it before any repost),
+    # and it is said.
+    assert _meta_row(conn, did)["first_comment_live_id"] == "new1"
     assert any(f"delivery {did}" in e for e in res.errors), res.errors
 
 

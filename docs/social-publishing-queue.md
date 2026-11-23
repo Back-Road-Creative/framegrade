@@ -795,21 +795,35 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   account) is picked up on the next drain. The re-add must say exactly
   `🎬 Watch the full drive: https://youtu.be/<id>` (the full drive's real video id, which the
   `first_comment_removed` incident prints) and nothing else. Only our CURRENT link is adopted
-  (`_adopt_one`, mirrored in the `adopt_removed_first_comment` UPDATE): a comment saying a text
-  a relink replaced (`first_comment_prior_text`) or carrying the id of the comment we deleted
-  (`first_comment_live_id`) is skipped, and when more than one distinct candidate remains none
-  is adopted and the error line names the ids (listing order never decides). A viewer's or
-  authorless copy is never adopted; a failed or cut-short listing, a refused adopt (a pending
-  correction) or an ambiguity leaves the row removed and the incident open, with an error line.
-- **A comment read back gone is reposted.** When the read-back right after a Meta post, or the
-  own-id recheck, CONFIRMS the comment gone (against the post's listing), it is not an own-id
-  mismatch: a post-time gone leaves the row unposted (`reopen_gone_first_comment`, one try
-  counted) under a `first_comment_repost_failed` incident and the drain reposts it; an open
-  own-id incident whose comment reads gone is resolved with a note and the row is unposted the
-  same way (a row with no text is marked removed instead). A comment gone after every repost
-  stops at `FIRST_COMMENT_MAX_ATTEMPTS` and the repost incident stays open. A read-back by
-  another author, or a read that failed, stays an own-id incident (the recheck's failed read
-  adds an error line).
+  (`_adopt_one`, mirrored in the `adopt_removed_first_comment` UPDATE): a comment whose link
+  names a video a relink replaced (`first_comment_prior_text`, compared by VIDEO ID, so a
+  different emoji prefix is the same link) or carrying the id of the comment we deleted
+  (`first_comment_live_id`) is skipped. The current link is known at adopt time when the plan's
+  sidecar names the parent video (`enqueue_from_plan.parent_video_id`): then only a comment
+  linking that video is adopted and the others are skipped with an error line. Our own comments
+  that all name the SAME video are one link (two identical hand re-adds): the lowest comment id
+  is adopted and the others are queued as our own extra deletes (`queue_own_extra_deletes`; the
+  delete is checked against the comment's author and text when it runs). Our own copy of a
+  replaced link still live after the adopt is queued the same way. Comments naming DIFFERENT
+  videos with the current one unknown are ambiguous: none is adopted and the error line names
+  the ids (listing order never decides). A viewer's or authorless copy is never adopted or
+  deleted; a failed or cut-short listing, a refused adopt (a pending correction) or an ambiguity
+  leaves the row removed and the incident open, with an error line. An adopt gives the row a full
+  attempts budget (`first_comment_attempts` resets to 0).
+- **A comment read back gone is re-read before any repost.** One "gone" answer can be
+  read-after-write lag, so a post-time gone does NOT unpost the row: it is recorded as posted
+  with its id under a `first_comment_own_id_mismatch` incident (detail: recorded, re-read next
+  drain). The next drain's own-id recheck re-reads it: live and ours closes the incident; a
+  SECOND confirmed gone (against the post's listing) routes the row (`_route_gone`): a row with
+  text is unposted (`reopen_gone_first_comment`, one try counted, and the old id queued as our
+  own extra delete so a comment that only lagged is deleted, never left as a second live copy)
+  under a `first_comment_repost_failed` incident and the drain reposts it; a row with no text is
+  marked removed instead. Before any repost the dedupe listing still runs, so an earlier own id
+  that reappears is adopted, not posted again. A comment gone after every repost stops at
+  `FIRST_COMMENT_MAX_ATTEMPTS` and the repost incident stays open. When the row cannot move (a
+  correction is pending) the recheck adds an error line and a WARNING, and the incident stays
+  open with a detail saying why. A read-back by another author, or a read that failed, stays an
+  own-id incident (the recheck's failed read adds an error line).
 - **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
   replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
   (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on
@@ -823,7 +837,8 @@ run first, the queue last, each in its own `try` (failures land in `report.error
 - **A private relink keeps its comment findable.** An unposted, published row relinked to a
   video that is private at its slot loses its text, so the drain never scans it again: the report
   carries an operator item to check the post by hand for an OLD comment. A posted row's note says
-  to re-add the comment by hand once the video is public; an unposted row's note says the drain posts
+  to re-add the comment by hand once the video is public (the drain also restores it by itself
+  once the plan gives the row text, and adopts a hand re-add); an unposted row's note says the drain posts
   it by itself once the plan gives it text.
   `id_map` values must be `(str, str)`; anything else raises `TypeError` before a write.
 - **`drop_private_edit` is a compare-and-set** on the correction JSON, retried, like

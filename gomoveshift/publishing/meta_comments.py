@@ -28,17 +28,14 @@ from .first_comment_stale import (
     GONE,
     OWN_ID_KIND,
     UNVERIFIED,
-    _now_iso,
     raise_repost_incident,
     recheck_own_id,
     run_corrections,
 )
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
-    FIRST_COMMENT_MAX_ATTEMPTS,
     first_comment_prior_texts,
     first_comment_still_current,
-    reopen_gone_first_comment,
     select_due_first_comments,
 )
 from .youtube_comments import (
@@ -61,8 +58,10 @@ def _author_mismatch(adapter: object, posted_id: object, object_id: str = "") ->
     """For a comment this drain just posted: ``None`` when it reads back with our own account id
     as its author (or it was not posted by this call), else why it is not confirmed: who Graph
     says wrote it (``"no author"`` when it names none), or ``UNVERIFIED`` plus the reason when the
-    read-back failed or answered gone (confirmed against ``object_id``'s listing). The comment
-    is live either way and is never touched."""
+    read-back failed, or ``GONE`` plus the reason when it answered gone (confirmed against
+    ``object_id``'s listing). Nothing is deleted here. A gone answer may be read-after-write lag:
+    the caller records the comment as posted and the next drain re-reads it, reposting only on a
+    second confirmed gone."""
     if type(posted_id) is not PostedId:
         return None  # found already there, so listed with its author: not a fresh post
     try:
@@ -169,18 +168,18 @@ def drain_meta_first_comments(
             continue
         mismatch = _author_mismatch(adapter_for(platform), posted_id, row["comment_target_id"])
         if mismatch and mismatch.startswith(GONE):
-            # Confirmed gone right after the post: zero of ours live. Not recorded as posted; the
-            # next drain reposts (each try counts toward FIRST_COMMENT_MAX_ATTEMPTS).
+            # One read said gone right after the post. That can be read-after-write lag, so the
+            # comment is recorded as posted (below) and an own-id incident is opened: the NEXT
+            # drain re-reads it, and only a second confirmed gone reposts it (``_route_gone``,
+            # which counts the try). Reposting on this one read could leave two live copies.
             why = mismatch[len(GONE) :]
-            reopen_gone_first_comment(conn, row["id"], "", _now_iso(), why)
             result.errors.append(
-                f"delivery {row['id']}: comment {posted_id} posted, but {why}; it is not "
-                f"recorded as posted and the drain reposts it (up to {FIRST_COMMENT_MAX_ATTEMPTS} tries)"
+                f"delivery {row['id']}: comment {posted_id} posted, but {why}; it is recorded as "
+                "posted and re-read on the next drain, which reposts it only if it is still gone"
             )
             logger.warning("first comment: delivery %s: read-back gone: %s", row["id"], why)
-            raise_repost_incident(conn, row["id"], mismatch, incidents_dir)
-            continue
-        if mismatch:
+            raise_repost_incident(conn, row["id"], mismatch, incidents_dir, kind=OWN_ID_KIND)
+        elif mismatch:
             result.errors.append(
                 f"delivery {row['id']}: comment {posted_id} posted, but "
                 + (

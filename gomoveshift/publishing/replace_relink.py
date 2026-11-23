@@ -244,7 +244,8 @@ def _relink_pending(path: Path, id_map, report: RelinkReport, *, dry_run: bool) 
 
 _PRIVATE_POSTED_NOTE = (
     ": the replacement is not public by this short's slot ({slot}); a live comment is never "
-    "edited, so re-add the comment by hand once the video is public"
+    "edited, so re-add the comment by hand once the video is public (the drain also "
+    "restores it by itself once the plan gives the row text, and adopts a hand re-add)"
 )
 _PRIVATE_NOTE = (
     ": the replacement is not public by this short's slot ({slot}), so no comment links it "
@@ -321,7 +322,8 @@ def _relink_pending_corrections(conn, row, pat, id_map, times, now, report) -> N
                 f"{_row_label(row)}: the replacement is not public by this short's slot "
                 f"({row['scheduled_at']}); the edit of live comment {item.get('live_id') or '?'} "
                 "became a delete, so it links no private video; re-add the comment by hand "
-                "once the video is public"
+                "once the video is public (the drain also restores it by itself once the plan "
+                "gives the row text, and adopts a hand re-add)"
             )
     report.queue_rewritten.append(QueueRewrite(*base, written))
 

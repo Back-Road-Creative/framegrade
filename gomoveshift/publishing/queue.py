@@ -1775,8 +1775,14 @@ def adopt_removed_first_comment(
         ).fetchone()
         if row is None or comment_id == (row["first_comment_live_id"] or None):
             return False
-        if text.strip() in {t.strip() for t in first_comment_prior_texts(row)}:
-            return False
+        from .first_comment import full_drive_video_id  # lazy: keeps the modules acyclic
+
+        prior = {t.strip() for t in first_comment_prior_texts(row)}
+        said_vid = full_drive_video_id(text)
+        if text.strip() in prior or (
+            said_vid and said_vid in {full_drive_video_id(t) for t in prior}
+        ):
+            return False  # a replaced link, whatever precedes it
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
@@ -1798,26 +1804,82 @@ def adopt_removed_first_comment(
         )
 
 
+def _own_extra_delete(live_id: str, live_text: str) -> dict:
+    """A correction item: delete our own comment ``live_id`` if it still says ``live_text``."""
+    return {
+        "live_id": live_id,
+        "live_text": live_text,
+        "action": "delete",
+        "extra": True,
+        "ours": True,
+    }
+
+
 def reopen_gone_first_comment(
     conn: sqlite3.Connection, delivery_id: int, live_id: str, now: str, error: str
 ) -> bool:
     """A read confirmed our comment gone (``live_id``, or one just posted: ``live_id`` ``""``):
     unpost the row with its own text, so the drain reposts it, and count the try
     (``first_comment_attempts``): a comment that is gone again after every repost stops at
-    ``FIRST_COMMENT_MAX_ATTEMPTS`` instead of reposting forever. Only a row with text, no
-    pending correction and still recording that ``live_id``; ``False`` (nothing written) else."""
+    ``FIRST_COMMENT_MAX_ATTEMPTS`` instead of reposting forever. The old id is queued as our own
+    extra delete (checked against its author and text when the drain runs), so a read that only
+    lagged cannot leave a second live copy. Only a row with text, no pending correction and
+    still recording that ``live_id``; ``False`` (nothing written) else."""
     with conn:
+        old = conn.execute(
+            "SELECT first_comment_text FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        text = (old["first_comment_text"] or "") if old is not None else ""
+        queued = json.dumps([_own_extra_delete(live_id, text)]) if live_id and text else None
         return bool(
             conn.execute(
                 "UPDATE deliveries SET first_comment_posted_at=NULL, first_comment_live_id=NULL, "
                 "first_comment_error=?, first_comment_attempts=first_comment_attempts+1, "
+                "first_comment_correction=?, "
                 "updated_at=? WHERE id=? AND first_comment_correction IS NULL "
                 "AND first_comment_removed_at IS NULL "
-                "AND first_comment_text IS NOT NULL AND first_comment_text <> '' "
+                "AND first_comment_text=? AND first_comment_text <> '' "
                 "AND COALESCE(first_comment_live_id, '')=?",
-                (error[:500], now, delivery_id, live_id),
+                (error[:500], queued, now, delivery_id, text, live_id),
             ).rowcount
         )
+
+
+def queue_own_extra_deletes(
+    conn: sqlite3.Connection, delivery_id: int, copies: Iterable[Tuple[str, str]]
+) -> int:
+    """Queue each ``(comment id, text)`` of ``copies`` as an extra delete of OUR OWN comment on a
+    posted row (the caller lists only comments positively authored by our account). Skips the
+    row's recorded live id and ids already queued; compare-and-set on the correction value.
+    Returns how many were queued."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_correction, first_comment_live_id, first_comment_posted_at "
+            "FROM deliveries WHERE id=?",
+            (delivery_id,),
+        ).fetchone()
+        if row is None or not row["first_comment_posted_at"]:
+            return 0
+        items = first_comment_corrections(row)
+        seen = {i.get("live_id") for i in items} | {row["first_comment_live_id"]}
+        fresh = []
+        for cid, text in copies:
+            if cid and cid not in seen:
+                seen.add(cid)
+                fresh.append(_own_extra_delete(str(cid), text))
+        if not fresh:
+            return 0
+        done = conn.execute(
+            "UPDATE deliveries SET first_comment_correction=? WHERE id=? "
+            "AND first_comment_correction IS ? AND first_comment_live_id IS ?",
+            (
+                json.dumps([*items, *fresh]),
+                delivery_id,
+                row["first_comment_correction"],
+                row["first_comment_live_id"],
+            ),
+        ).rowcount
+        return len(fresh) if done else 0
 
 
 def unpost_first_comment_for_repost(
