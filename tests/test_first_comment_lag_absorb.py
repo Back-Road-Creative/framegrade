@@ -33,6 +33,8 @@ from tests.test_first_comment_meta_correction import NEW, FakeGraph, Resp
 from tests.test_first_comment_meta_correction import _open_incidents
 from tests.test_first_comment_meta_correction import _relinked as _meta_relinked
 from tests.test_first_comment_meta_correction import _row as _meta_row
+from tests.test_first_comment_reopen_cap import FIXED  # noqa: F401
+from tests.test_first_comment_reopen_cap import frozen_queue_clock  # noqa: F401 -- autouse
 from tests.test_first_comment_stale import (
     _NOW,
     NEW_TEXT,
@@ -58,8 +60,8 @@ def inc(tmp_path):
     return tmp_path / "incidents"
 
 
-def _ago(hours):
-    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+def _ago(hours, now=FIXED):
+    return (now - timedelta(hours=hours)).isoformat()
 
 
 def _lag(graph, schedule):

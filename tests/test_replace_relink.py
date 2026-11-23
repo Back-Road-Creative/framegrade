@@ -174,11 +174,10 @@ def test_unposted_rows_are_rewritten_whatever_their_live_status(conn, tmp_path, 
     ],
 )
 def test_an_exhausted_or_live_leased_row_is_frozen(conn, tmp_path, sets, reason):
-    # A lease is live by this process's clock (not the caller's ``now``), so its times are
-    # relative to the wall clock.
-    wall = datetime.now(timezone.utc)
-    sets = sets.replace("{+1h}", (wall + timedelta(hours=1)).isoformat()).replace(
-        "{-1h}", (wall - timedelta(hours=1)).isoformat()
+    # A lease is live by this process's clock (not the caller's ``now``): the live one runs out
+    # in 9999, the expired one in 2000, so no wall clock is read.
+    sets = sets.replace("{+1h}", datetime(9999, 1, 1, tzinfo=timezone.utc).isoformat()).replace(
+        "{-1h}", datetime(2000, 1, 1, tzinfo=timezone.utc).isoformat()
     )
     did = _row(conn, 1)
     conn.execute(f"UPDATE deliveries SET {sets} WHERE id=?", (did,))  # noqa: S608
