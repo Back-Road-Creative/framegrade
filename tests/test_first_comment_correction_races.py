@@ -17,7 +17,12 @@ from gomoveshift.publishing.queue import (
     rewrite_first_comment_corrections,
 )
 from gomoveshift.publishing.replace_relink import relink_replaced_lf
-from tests.test_first_comment_correction_safety import _posted_stale, _relink_text
+from tests.test_first_comment_correction_safety import (
+    _PARENT_AT,
+    _SLOT,
+    _posted_stale,
+    _relink_text,
+)
 from tests.test_first_comment_stale import (
     NEW_TEXT,
     OLD_TEXT,
@@ -122,9 +127,12 @@ def test_r3_a_relink_during_an_in_flight_edit_is_not_lost(conn, inc, tmp_path):
     a, b, c = "aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"
     did = _published(conn)
     with conn:
-        conn.execute("UPDATE deliveries SET first_comment_text=? WHERE id=?", (_comment(a), did))
+        conn.execute(
+            "UPDATE deliveries SET first_comment_text=?, scheduled_at=? WHERE id=?",
+            (_comment(a), _SLOT, did),
+        )
     now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
-    relink_replaced_lf("proj", tmp_path, {a: b}, conn=conn, now=now)
+    relink_replaced_lf("proj", tmp_path, {a: (b, _PARENT_AT)}, conn=conn, now=now)
     _drain(conn, _Service(pages=[{"items": [_thread(_comment(a), "X")]}]), inc)
     assert first_comment_corrections(_row(conn, did))[0]["to"] == _comment(b)
 
@@ -132,7 +140,7 @@ def test_r3_a_relink_during_an_in_flight_edit_is_not_lost(conn, inc, tmp_path):
     orig = svc.comments_api.update
 
     def update(part, body):
-        rep = relink_replaced_lf("proj", tmp_path, {b: c}, conn=conn, now=now)
+        rep = relink_replaced_lf("proj", tmp_path, {b: (c, _PARENT_AT)}, conn=conn, now=now)
         assert [x.written for x in rep.queue_rewritten] == [True]
         return orig(part, body)
 

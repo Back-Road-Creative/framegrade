@@ -8,6 +8,7 @@ import pytest
 from gomoveshift.publishing import meta_comments, youtube_comments
 from gomoveshift.publishing.first_comment import PriorCommentLiveError, post_graph_comment
 from gomoveshift.publishing.queue import (
+    first_comment_corrections,
     PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM,
     enqueue,
     open_queue_db,
@@ -208,6 +209,7 @@ def test_meta_rewrite_during_the_post_records_the_live_old_text_and_reports_it(c
     assert again.posted == 0
     row = _row(conn, did)
     assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
+    assert first_comment_corrections(row)  # the edit is still queued, never lost
     # The second drain tried the correction; this fake gave no comment id, so it cannot edit and
     # says so on the row (still visible, never silent).
     assert row["first_comment_error"] == (

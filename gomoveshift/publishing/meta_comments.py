@@ -64,14 +64,19 @@ def drain_meta_first_comments(
             adapters[platform] = adapter_factories[platform]()
         return adapters[platform]
 
-    run_corrections(
-        conn,
-        platforms=tuple(adapter_factories),
-        client_for=adapter_for,
-        refused=lambda exc: isinstance(exc, _REFUSED_FOR_THE_POST),
-        result=result,
-        incidents_dir=incidents_dir,
-    )
+    try:
+        run_corrections(
+            conn,
+            platforms=tuple(adapter_factories),
+            client_for=adapter_for,
+            refused=lambda exc: isinstance(exc, _REFUSED_FOR_THE_POST),
+            result=result,
+            incidents_dir=incidents_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 -- a correction pass failing never stops the posting
+        detail = str(exc).strip() or exc.__class__.__name__
+        logger.exception("drain_meta_first_comments: the correction pass failed")
+        result.errors.append(f"stale-comment corrections failed: {detail}")
 
     due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     for row in due:

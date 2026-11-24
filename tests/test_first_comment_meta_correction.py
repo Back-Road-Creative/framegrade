@@ -22,6 +22,7 @@ from gomoveshift.publishing.first_comment import (
 )
 from gomoveshift.publishing.instagram_adapter import InstagramReelsAdapter
 from gomoveshift.publishing.queue import (
+    FIRST_COMMENT_MAX_ATTEMPTS,
     PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM,
     enqueue,
     first_comment_corrections,
@@ -58,6 +59,13 @@ class FakeGraph:
         self.page, self.log, self.n = page, [], 0
         self.fail_post = None
         self.fail_edit = None
+        self.post_refusal = False  # a permanent refusal (Graph code 100, HTTP 400), not a 500
+        self.delete_answer = None  # a 2xx body that is not {"success": true}; the comment stays
+        self.delete_raises = False  # the DELETE never lands: a network failure
+        self.delete_refusal = False  # Graph code 100 on the DELETE
+        self.delete_outage = False  # HTTP 500 on the DELETE
+        self.lose_delete_response = False  # the delete lands, its answer is lost once
+        self.lose_post_response = False  # the post lands, its answer is lost once
 
     def get(self, url, params=None, **kw):
         assert url.endswith("/comments"), url
@@ -74,6 +82,9 @@ class FakeGraph:
 
     def post(self, url, data=None, **kw):
         if url.endswith("/comments"):
+            if self.post_refusal:
+                self.log.append("post-refused")
+                return Resp({"error": {"code": 100, "message": "refused"}}, 400)
             if self.fail_post:
                 self.log.append("post-failed")
                 return Resp({"error": {"code": 2, "message": self.fail_post}}, 500)
@@ -82,6 +93,9 @@ class FakeGraph:
             self.comments[cid] = data["message"]
             self.authors[cid] = self.own
             self.log.append(f"post:{cid}")
+            if self.lose_post_response:
+                self.lose_post_response = False
+                raise ConnectionError("read timed out")
             return Resp({"id": cid})
         cid = url.rsplit("/", 1)[1]
         if self.fail_edit:
@@ -93,8 +107,26 @@ class FakeGraph:
 
     def delete(self, url, **kw):
         cid = url.rsplit("/", 1)[1]
+        if self.delete_raises:
+            self.log.append(f"delete-raised:{cid}")
+            raise ConnectionError("connection reset")
+        if self.delete_outage:
+            self.log.append(f"delete-outage:{cid}")
+            return Resp({"error": {"code": 2, "message": "try later"}}, 500)
+        if self.delete_refusal:
+            self.log.append(f"delete-refused:{cid}")
+            return Resp({"error": {"code": 100, "message": "refused"}}, 400)
+        if self.delete_answer is not None:
+            self.log.append(f"delete-unconfirmed:{cid}")
+            return Resp(self.delete_answer)
+        if cid not in self.comments:  # Graph: code 100, subcode 33 -- the object does not exist
+            self.log.append(f"delete-missing:{cid}")
+            return Resp({"error": {"code": 100, "error_subcode": 33, "message": "no such"}}, 400)
         self.comments.pop(cid)
         self.log.append(f"delete:{cid}")
+        if self.lose_delete_response:
+            self.lose_delete_response = False
+            raise ConnectionError("read timed out")
         return Resp({"success": True})
 
 
@@ -186,11 +218,14 @@ def test_instagram_post_failure_after_the_delete_retries_without_a_second_commen
     _drain(conn, "instagram", graph, inc)
     graph.fail_post = "boom"
     failed = _drain(conn, "instagram", graph, inc)
-    assert failed.stale == 1 and graph.comments == {}  # never silent: reported, incident open
-    assert _open_incidents(inc) and first_comment_corrections(_row(conn, did))
+    # never silent: the failed post is reported by the posting path that now owns it
+    assert graph.comments == {} and failed.failed >= 1 and failed.errors
+    row = _row(conn, did)
+    assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW
+    assert not first_comment_corrections(row) and row["first_comment_error"]
     graph.fail_post = None
     ok = _drain(conn, "instagram", graph, inc)
-    assert ok.corrected == 1 and list(graph.comments.values()) == [NEW]
+    assert ok.posted == 1 and list(graph.comments.values()) == [NEW]
     assert not _open_incidents(inc)
 
 
@@ -249,3 +284,125 @@ def test_instagram_will_not_post_when_it_cannot_confirm_the_stale_comment_is_gon
             raise_for_error=lambda s, b: None, own_id="u",
         )  # fmt: skip
     assert not [e for e in graph.log if e.startswith("post:")]
+
+
+# --- a confirmed delete followed by a refused post never ends at zero comments, silently ------
+
+
+def test_a_refused_post_after_a_confirmed_delete_returns_the_row_to_unposted_with_the_new_text(
+    conn, inc
+):
+    did = _relinked(conn, "instagram")
+    graph = FakeGraph("instagram", [("c1", OLD)])
+    graph.post_refusal = True
+    _drain(conn, "instagram", graph, inc)  # finds the stale comment, queues the replace
+    second = _drain(conn, "instagram", graph, inc)  # delete confirmed, post refused (code 100)
+    row = _row(conn, did)
+    assert graph.comments == {} and "delete:c1" in graph.log
+    # never marked posted with the OLD text; the normal posting path owns the NEW one
+    assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW
+    assert not first_comment_corrections(row)
+    assert second.failed == 1 and second.errors and row["first_comment_attempts"] == 1
+    assert row["first_comment_error"]  # visible on the row
+    for _ in range(FIRST_COMMENT_MAX_ATTEMPTS + 2):
+        _drain(conn, "instagram", graph, inc)
+    row = _row(conn, did)
+    assert row["first_comment_attempts"] == FIRST_COMMENT_MAX_ATTEMPTS  # ends at the posting cap
+    assert row["first_comment_text"] == NEW and row["first_comment_error"]
+    graph.post_refusal = False
+    row = _row(conn, did)  # the cap is the posting path's: a human reset posts it once
+    conn.execute("UPDATE deliveries SET first_comment_attempts=0 WHERE id=?", (did,))
+    conn.commit()
+    assert _drain(conn, "instagram", graph, inc).posted == 1
+    assert list(graph.comments.values()) == [NEW]
+
+
+def test_a_delete_whose_answer_was_lost_resolves_once_graph_says_it_is_gone(conn, inc):
+    did = _relinked(conn, "facebook")
+    graph = FakeGraph("facebook", [("n1", NEW), ("o1", OLD)])
+    graph.lose_delete_response = True
+    _drain(conn, "facebook", graph, inc)  # queues delete o1
+    for _ in range(3):
+        _drain(conn, "facebook", graph, inc)
+    row = _row(conn, did)
+    assert graph.comments == {"n1": NEW}
+    assert "delete-missing:o1" in graph.log  # Graph: code 100, subcode 33 -> done
+    assert not first_comment_corrections(row) and not _open_incidents(inc)
+    assert row["first_comment_correction_attempts"] == 0
+
+
+def test_a_lost_post_answer_after_the_delete_is_found_not_posted_twice(conn, inc):
+    did = _relinked(conn, "instagram")
+    graph = FakeGraph("instagram", [("c1", OLD)])
+    graph.lose_post_response = True
+    _drain(conn, "instagram", graph, inc)
+    _drain(conn, "instagram", graph, inc)  # delete, post lands, answer lost
+    _drain(conn, "instagram", graph, inc)
+    assert list(graph.comments.values()) == [NEW]
+    assert not first_comment_corrections(_row(conn, did))
+
+
+# --- a delete that did not succeed never lets the post go ahead ----------------------------
+
+
+@pytest.mark.parametrize("how", ["success-false", "no-success-key", "raises"], ids=lambda h: h)
+def test_instagram_posts_nothing_when_the_delete_is_not_confirmed(conn, inc, how):
+    did = _relinked(conn, "instagram")
+    graph = FakeGraph("instagram", [("c1", OLD)])
+    _drain(conn, "instagram", graph, inc)  # queues the replace
+    if how == "raises":
+        graph.delete_raises = True
+    else:
+        graph.delete_answer = {"success": False} if how == "success-false" else {}
+    for _ in range(2):
+        later = _drain(conn, "instagram", graph, inc)
+    assert not [e for e in graph.log if e.startswith("post")]  # nothing posted beside it
+    assert graph.comments == {"c1": OLD}
+    assert later.stale == 1 and later.errors  # reported, never silent
+    assert first_comment_corrections(_row(conn, did)) and _open_incidents(inc)
+
+
+def test_a_permanent_refusal_of_the_correction_counts_toward_the_cap_and_an_outage_never_does(
+    conn, inc
+):
+    refused = _relinked(conn, "facebook")
+    graph = FakeGraph("facebook", [("n1", NEW), ("o1", OLD)])
+    _drain(conn, "facebook", graph, inc)  # queues delete o1
+    graph.delete_refusal = True
+    for _ in range(FIRST_COMMENT_MAX_ATTEMPTS + 2):
+        _drain(conn, "facebook", graph, inc)
+    row = _row(conn, refused)
+    assert row["first_comment_correction_attempts"] == FIRST_COMMENT_MAX_ATTEMPTS
+    assert graph.log.count("delete-refused:o1") == FIRST_COMMENT_MAX_ATTEMPTS  # then it stops
+    assert {i["kind"] for i in _open_incidents(inc)} == {"first_comment_correction_capped"}
+
+
+def test_an_outage_on_the_correction_is_never_counted(conn, inc):
+    did = _relinked(conn, "facebook")
+    graph = FakeGraph("facebook", [("n1", NEW), ("o1", OLD)])
+    _drain(conn, "facebook", graph, inc)
+    graph.delete_outage = True
+    for _ in range(FIRST_COMMENT_MAX_ATTEMPTS + 2):
+        _drain(conn, "facebook", graph, inc)
+    row = _row(conn, did)
+    assert row["first_comment_correction_attempts"] == 0 and first_comment_corrections(row)
+    assert graph.log.count("delete-outage:o1") == FIRST_COMMENT_MAX_ATTEMPTS + 2
+
+
+def test_a_failing_correction_pass_is_recorded_and_meta_posting_continues(conn, inc, monkeypatch):
+    did = enqueue(conn, "proj", 1, "facebook", "h1", first_comment_text=NEW)
+    assert transition(
+        conn, did, "queued", "published",
+        platform_upload_id="vid", platform_post_id="post", published_at_source=PLATFORM,
+    )  # fmt: skip
+    conn.execute("UPDATE deliveries SET published_at=? WHERE id=?", (_PUB_AT, did))
+    conn.commit()
+
+    def boom(*a, **k):
+        raise RuntimeError("corrections exploded")
+
+    monkeypatch.setattr(meta_comments, "run_corrections", boom)
+    graph = FakeGraph("facebook", [])
+    result = _drain(conn, "facebook", graph, inc)
+    assert any("corrections exploded" in e for e in result.errors)
+    assert result.posted == 1 and list(graph.comments.values()) == [NEW]
