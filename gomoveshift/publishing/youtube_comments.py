@@ -5,7 +5,7 @@ that ``platform_post_id`` holds for YouTube.
 
 ``post_first_comment`` makes at most one ``commentThreads().insert`` call,
 and none when the video already carries the exact text
-(``_existing_first_comment``).
+(``_scan_first_comments``).
 ``drain_first_comments`` selects due rows via
 ``queue.select_due_first_comments`` and posts each -- see its docstring for
 how a missing ``youtube.force-ssl`` scope is handled without ever raising
@@ -22,9 +22,11 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
+from .first_comment_stale import raise_stale_incident, run_corrections
 from .queue import (
     first_comment_prior_texts,
     first_comment_still_current,
@@ -53,16 +55,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _find_first_comment(
+def _scan_first_comments(
     service, video_id: str, text: str, also_accept: Iterable[str] = ()
-) -> Optional[Tuple[str, str]]:
-    """``(thread id, the text it says)`` of a top-level comment thread on ``video_id`` that
-    already says exactly ``text`` -- or exactly one of ``also_accept``, the texts a relink
-    replaced (``queue.first_comment_prior_texts``) -- (stripped), else None -- so a comment
-    YouTube created whose answer was lost (googleapiclient reads with a 60 s timeout) is
-    found on the next pass, not posted again. The second item is ``text`` or the prior text
-    that matched. Any error raises, so the caller posts nothing."""
-    want = {text.strip(): text, **{t.strip(): t for t in also_accept}}
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """``(current, prior)``: ``(comment id, the text it says)`` for each top-level comment on
+    ``video_id`` that already says exactly ``text`` (stripped), and for each that says one of
+    ``also_accept``, the texts a relink replaced (``queue.first_comment_prior_texts``) -- so a
+    comment YouTube created whose answer was lost (googleapiclient reads with a 60 s timeout)
+    is found on the next pass, not posted again. Without ``also_accept`` the scan stops at the
+    first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
+    text live beside the new one is seen. Any error raises, so the caller posts nothing."""
+    want = {text.strip(): True, **{t.strip(): False for t in also_accept}}
+    current: List[Tuple[str, str]] = []
+    prior: List[Tuple[str, str]] = []
     request = {
         "part": "snippet",
         "videoId": video_id,
@@ -77,42 +82,39 @@ def _find_first_comment(
             for field_name in ("textOriginal", "textDisplay"):
                 heard = str(said.get(field_name) or "").strip()
                 if heard in want:
-                    return str(thread.get("id") or ""), want[heard]
+                    found = (str(top.get("id") or thread.get("id") or ""), heard)
+                    (current if want[heard] else prior).append(found)
+                    break
         token = response.get("nextPageToken")
-        if not token:
-            return None
+        if (current and not also_accept) or not token:
+            return current, prior
         request = {**request, "pageToken": token}
     logger.warning(
         "first comment: video %s has over %d pages of comments; posting without reading the rest",
         video_id,
         COMMENT_CHECK_MAX_PAGES,
     )
-    return None
-
-
-def _existing_first_comment(
-    service, video_id: str, text: str, also_accept: Iterable[str] = ()
-) -> Optional[str]:
-    """The thread id ``_find_first_comment`` finds, else None."""
-    found = _find_first_comment(service, video_id, text, also_accept)
-    return found[0] if found else None
+    return current, prior
 
 
 def post_first_comment_reporting(
     service, video_id: str, text: str, also_accept: Iterable[str] = ()
-) -> Tuple[str, str]:
-    """``(thread id, the text that is live)``: POSTs one top-level comment on ``video_id`` -- or,
-    when the video already carries exactly ``text`` (``_find_first_comment``) or one of
-    ``also_accept``, finds that thread and posts nothing. The live text differs from ``text``
-    only when a replaced (prior) text was found live."""
-    found = _find_first_comment(service, video_id, text, also_accept)
-    if found is not None:
+) -> Tuple[str, str, Tuple[Tuple[str, str], ...]]:
+    """``(comment id, the text that is live, duplicates)``: POSTs one top-level comment on
+    ``video_id`` -- or, when the video already carries exactly ``text`` or one of ``also_accept``
+    (``_scan_first_comments``), finds that comment and posts nothing. The live text differs from
+    ``text`` only when only a replaced (prior) text was found live. ``duplicates`` are the
+    replaced-text comments found live beside the one returned (id, said): the drain deletes them."""
+    current, prior = _scan_first_comments(service, video_id, text, also_accept)
+    if current or prior:
+        first = current[0] if current else prior[0]
+        dupes = tuple(prior if current else prior[1:])
         logger.info(
-            "first comment: video %s already carries it (thread %s); not posting it again",
+            "first comment: video %s already carries it (comment %s); not posting it again",
             video_id,
-            found[0],
+            first[0],
         )
-        return found
+        return first[0], (text if current else first[1]), dupes
     body = {
         "snippet": {
             "videoId": video_id,
@@ -120,18 +122,32 @@ def post_first_comment_reporting(
         }
     }
     response = service.commentThreads().insert(part="snippet", body=body).execute()
-    return response["id"], text
+    return response["id"], text, ()
 
 
 def post_first_comment(service, video_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
-    """POST one top-level comment on ``video_id``; returns the new comment
-    thread id -- or, when the video already carries exactly ``text``
-    (``_existing_first_comment``) or one of ``also_accept``, that thread's id, posting
-    nothing.
+    """POST one top-level comment on ``video_id``; returns the new comment thread id -- or, when
+    the video already carries exactly ``text``, that thread's id, posting nothing.
 
     ``service`` is an already-authenticated ``googleapiclient`` YouTube
     Data API v3 client -- this function performs no auth of its own."""
     return post_first_comment_reporting(service, video_id, text, also_accept)[0]
+
+
+class YouTubeCommentEditor:
+    """``edit_comment`` / ``delete_comment`` on the channel's own comments, over the same
+    ``youtube.force-ssl`` client that posts them (``comments.update`` takes the comment id and
+    ``snippet.textOriginal``; a top-level comment's id is its thread's id)."""
+
+    def __init__(self, service):
+        self._service = service
+
+    def edit_comment(self, comment_id: str, text: str) -> None:
+        body = {"id": comment_id, "snippet": {"textOriginal": text}}
+        self._service.comments().update(part="snippet", body=body).execute()
+
+    def delete_comment(self, comment_id: str) -> None:
+        self._service.comments().delete(id=comment_id).execute()
 
 
 def _is_scope_error(exc: Exception) -> bool:
@@ -180,6 +196,11 @@ class FirstCommentResult:
     #: the operator re-authorises; distinct from ``failed``, which is a per-row
     #: problem a retry might resolve on its own.
     skipped_scope_error: int = 0
+    #: Stale comments (a replaced text went live) found this pass or still not corrected:
+    #: the summary line prints it, ``first_comment_stale`` health incidents list each one.
+    stale: int = 0
+    #: Stale comments the drain edited or deleted on the platform this pass.
+    corrected: int = 0
     errors: List[str] = field(default_factory=list)
 
     @property
@@ -192,8 +213,10 @@ def drain_first_comments(
     *,
     service_factory: Callable[[], object],
     now: Optional[str] = None,
+    incidents_dir: Optional[Path] = None,
 ) -> FirstCommentResult:
-    """Post every due first comment (``queue.select_due_first_comments``).
+    """Post every due first comment (``queue.select_due_first_comments``), after fixing the
+    stale comments earlier passes recorded (``first_comment_stale.run_corrections``).
 
     ``service_factory`` is called at most once, lazily -- only once a row
     is actually due -- so an idle pass with nothing due never builds a
@@ -213,10 +236,25 @@ def drain_first_comments(
     either way -- one bad delivery must never abort the rest, same
     contract as ``dispatch.drain_queue``."""
     result = FirstCommentResult()
+    services: list = []
+
+    def service_once():
+        if not services:
+            services.append(service_factory())
+        return services[0]
+
+    run_corrections(
+        conn,
+        platforms=("youtube",),
+        client_for=lambda _platform: YouTubeCommentEditor(service_once()),
+        refused=_refused_for_the_video,
+        result=result,
+        incidents_dir=incidents_dir,
+    )
     due = select_due_first_comments(conn, now, platforms=("youtube",))
     if not due:
         return result
-    service = service_factory()
+    service = service_once()
     logged_scope_error = False
     for row in due:
         # A relink may have rewritten the text after selection: post what the row says NOW.
@@ -225,7 +263,7 @@ def drain_first_comments(
             continue
         text = fresh["first_comment_text"]
         try:
-            _, live_text = post_first_comment_reporting(
+            live_id, live_text, duplicates = post_first_comment_reporting(
                 service,
                 row["comment_target_id"],
                 text,
@@ -251,33 +289,71 @@ def drain_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        if live_text.strip() != text.strip():  # a replaced text was already live: report it
-            record_live_comment(conn, row["id"], live_text, result)
-        else:
-            mark_posted(conn, row["id"], text, result)
+        record_found_comments(
+            conn, row["id"], text, live_id, live_text, duplicates, result, incidents_dir
+        )
     return result
 
 
-def record_live_comment(
-    conn: sqlite3.Connection, delivery_id: int, live_text: str, result: FirstCommentResult
+def record_found_comments(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    text: str,
+    live_id: str,
+    live_text: str,
+    duplicates: Iterable[Tuple[str, str]],
+    result: FirstCommentResult,
+    incidents_dir: Optional[Path] = None,
 ) -> None:
-    """A comment saying ``live_text`` is live but the row now holds other text (a relink
-    rewrote it): store the live text, mark the row posted, set ``first_comment_error`` and
-    add it to ``result.errors`` (``queue.record_stale_live_comment``). Never silent."""
-    error = record_stale_live_comment(conn, delivery_id, live_text, _now_iso())
+    """What the drain found live for a row whose text is ``text``: the comment ``live_id``
+    saying ``live_text`` (``text`` itself, or a replaced text) plus replaced-text
+    ``duplicates`` (id, said) beside it. A replaced text is recorded and reported
+    (:func:`record_live_comment`); duplicates get a delete correction. Never silent."""
+    if live_text.strip() != text.strip():
+        record_live_comment(conn, delivery_id, live_text, live_id, result, incidents_dir)
+    else:
+        mark_posted(conn, delivery_id, text, result, live_id, incidents_dir)
+    for dup_id, dup_text in duplicates:
+        record_live_comment(
+            conn, delivery_id, dup_text, dup_id, result, incidents_dir, primary=False
+        )
+
+
+def record_live_comment(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    live_text: str,
+    live_id: str,
+    result: FirstCommentResult,
+    incidents_dir: Optional[Path] = None,
+    *,
+    primary: bool = True,
+) -> None:
+    """A comment (``live_id``) saying ``live_text`` is live but the row holds other text (a
+    relink rewrote it): ``queue.record_stale_live_comment`` stores it and queues the fix, then
+    this adds it to ``result`` (``stale``, ``errors``; ``posted`` when it is the row's own
+    comment) and files the ``first_comment_stale`` incident. Never silent."""
+    error = record_stale_live_comment(conn, delivery_id, live_text, _now_iso(), live_id)
     if error is None:
         logger.warning("first comment: delivery %s changed under the drain; next pass", delivery_id)
         return
-    result.posted += 1
+    result.posted += int(primary)
+    result.stale += 1
     result.errors.append(f"delivery {delivery_id}: {error}")
     logger.warning("first comment: delivery %s: %s", delivery_id, error)
+    raise_stale_incident(conn, delivery_id, incidents_dir)
 
 
 def mark_posted(
-    conn: sqlite3.Connection, delivery_id: int, posted_text: str, result: FirstCommentResult
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    posted_text: str,
+    result: FirstCommentResult,
+    live_id: str = "",
+    incidents_dir: Optional[Path] = None,
 ) -> None:
     """Mark ``delivery_id`` posted iff its text is still ``posted_text``. When a relink
-    rewrote it during the post, the comment that went live is the OLD text:
+    rewrote it during the post, the comment that went live (``live_id``) is the OLD text:
     :func:`record_live_comment` records and reports that instead."""
     with conn:
         marked = conn.execute(
@@ -288,4 +364,4 @@ def mark_posted(
     if marked:
         result.posted += 1
     else:
-        record_live_comment(conn, delivery_id, posted_text, result)
+        record_live_comment(conn, delivery_id, posted_text, live_id, result, incidents_dir)

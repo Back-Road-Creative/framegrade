@@ -7,10 +7,12 @@ nowhere else: never the journal site / API / KV / photos, never a live comment. 
 first, the queue last, each in its own ``try`` (failures land in ``RelinkReport.errors``).
 See docs/social-publishing-queue.md for each store's rule.
 
-Reported as ``operator_items``, never rewritten: a posted comment still linking the old id (the
-drains record a stale comment they found live as posted, with the old text), other projects' rows
-naming an old id, a rewritten plan (Gate C/D must be re-confirmed) and journeys to check by hand.
-A rerun reports zero changes; ``dry_run`` reports without writing.
+Reported as ``operator_items``, never rewritten: a posted comment still linking the old id, other
+projects' rows naming an old id, a rewritten plan (Gate C/D must be re-confirmed) and journeys to
+check by hand. A stale comment a drain found live is raised by the drain itself (a
+``first_comment_stale`` health incident, corrected in place on the next pass), never only by a
+relink rerun; a rewritten row of a published short lands in ``drain_will_verify``. A rerun
+reports zero changes; ``dry_run`` reports without writing.
 """
 
 from __future__ import annotations
@@ -78,6 +80,10 @@ class RelinkReport:
     #: Things only a human can settle (a live comment that still links the old id, rows of
     #: other projects, a Gate C/D to re-confirm, journey files to check).
     operator_items: List[str] = field(default_factory=list)
+    #: Rewritten rows whose comment may already be live with the old text (the short is
+    #: published): the next first-comment drain looks, and on a hit corrects it and files a
+    #: ``first_comment_stale`` incident. Nothing for a human to do.
+    drain_will_verify: List[str] = field(default_factory=list)
     #: One line per store that failed; the other stores' results above are still true.
     errors: List[str] = field(default_factory=list)
 
@@ -224,8 +230,12 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
             stale = row["first_comment_error"] or ""
             report.operator_items.append(
                 f"{_row_label(row)}: comment already live, links OLD id; a live comment is "
-                "never edited, fix it by hand"
-                + (f" ({stale})" if stale.startswith("stale") else "")
+                "never edited by a relink"
+                + (
+                    f" ({stale}); the drain corrects it"
+                    if stale.startswith("stale")
+                    else ", fix it by hand"
+                )
             )
         elif row["status"] in _queue.FIRST_COMMENT_FROZEN_STATUSES:
             reason = f"status {row['status']}"
@@ -245,6 +255,11 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
                     )
                     continue
             report.queue_rewritten.append(QueueRewrite(*base, written))
+            if row["status"] == "published":
+                report.drain_will_verify.append(
+                    f"{_row_label(row)}: rewritten while published; the first-comment drain "
+                    "checks whether the old text already went live and corrects it"
+                )
             continue
         report.queue_skipped.append(QueueSkip(*base, reason))
 
@@ -304,7 +319,7 @@ def relink_replaced_lf(
             )
     try:
         _relink_queue(conn, project, pat, id_map, now, report)
-        _report_other_projects(conn, project, pat, id_map, report)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"queue: {type(exc).__name__}: {exc}")
+    _report_other_projects(conn, project, pat, id_map, report)
     return report

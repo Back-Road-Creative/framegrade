@@ -364,7 +364,27 @@ def test_a_live_comment_left_by_a_mid_post_rewrite_is_an_operator_item(conn, tmp
     conn.commit()
     report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
     assert _text(conn, did) == _comment(OLD)
-    assert any(f"delivery {did}" in i and "links OLD" in i for i in report.operator_items)
+    (item,) = [i for i in report.operator_items if f"delivery {did}" in i]
+    assert "links OLD" in item and "(stale comment live: links " in item
+    assert "the drain corrects it" in item and "by hand" not in item
+
+
+def test_a_posted_comment_with_no_stale_note_is_still_a_hand_fix(conn, tmp_path):
+    did = _row(conn, 1, posted="2026-11-22T11:00:00+00:00")
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    (item,) = [i for i in report.operator_items if f"delivery {did}" in i]
+    assert "fix it by hand" in item and "(stale" not in item
+
+
+def test_a_rewritten_published_row_is_listed_for_the_drain_to_verify(conn, tmp_path):
+    queued = _row(conn, 1)
+    published = _row(conn, 2, status="published", platform="instagram")
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    (note,) = report.drain_will_verify
+    assert f"delivery {published}" in note and "drain" in note
+    assert not any(f"delivery {queued}" in n for n in report.drain_will_verify)
+    dry = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW, dry_run=True)
+    assert dry.drain_will_verify == []  # nothing left to rewrite on the rerun
 
 
 def test_a_rewritten_plan_asks_for_gate_c_d_again(conn, tmp_path):
@@ -392,3 +412,4 @@ def test_rows_of_other_projects_naming_the_old_id_are_reported_not_rewritten(con
     items = [i for i in report.operator_items if "other-project" in i]
     assert len(items) == 1 and f"delivery {other}" in items[0]
     assert not any(f"delivery {longer}" in i for i in report.operator_items)
+    assert not any(f"delivery {mine}" in i for i in report.operator_items)  # own project excluded
