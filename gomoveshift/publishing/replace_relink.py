@@ -215,11 +215,56 @@ def _row_label(row) -> str:
     return f"delivery {row['id']} (short {row['short_index']}, {row['platform']})"
 
 
+def _drain_corrects(row) -> bool:
+    """Whether the next drain fixes this row's stale comment: a pending correction under the cap,
+    every item naming its live comment, and (Instagram) a known media id. Else a hand step."""
+    items = _queue.first_comment_corrections(row)
+    if not items or not (row["first_comment_error"] or "").startswith("stale"):
+        return False
+    if row["first_comment_correction_attempts"] >= _queue.FIRST_COMMENT_MAX_ATTEMPTS:
+        return False
+    if any(not i.get("live_id") for i in items):
+        return False
+    if row["platform"] != "instagram":  # only an Instagram edit is a delete + post on the media
+        return True
+    target = _queue.registered_platform_id(
+        row["platform"], row["platform_upload_id"], row["platform_post_id"]
+    )
+    return bool(target) or all(i.get("action") != "edit" for i in items)
+
+
+def _drain_checks(row) -> bool:
+    """Whether the first-comment drain ever reads this unposted row's post."""
+    target = _queue.registered_platform_id(
+        row["platform"], row["platform_upload_id"], row["platform_post_id"]
+    )
+    return bool(target) and row["upload_kind"] != _queue.FACEBOOK_PHOTO_KIND
+
+
+def _relink_pending_corrections(conn, row, pat, id_map, now, report) -> None:
+    """A pending ``edit``'s ``to`` naming an old id is rewritten too (a second replace)."""
+    base = (row["id"], row["short_index"], row["platform"], row["status"])
+    rewrite = lambda t: _sub(t, pat, id_map)[0]  # noqa: E731
+    items = _queue.first_comment_corrections(row)
+    if not any(
+        i.get("action") == "edit" and _sub(i.get("to") or "", pat, id_map)[1] for i in items
+    ):
+        return
+    written = not report.dry_run
+    if written and not _queue.rewrite_first_comment_corrections(
+        conn, row["id"], rewrite, now.isoformat()
+    ):
+        report.queue_skipped.append(QueueSkip(*base, "row changed while relinking; rerun"))
+        return
+    report.queue_rewritten.append(QueueRewrite(*base, written))
+
+
 def _relink_queue(conn, project, pat, id_map, now, report) -> None:
     for row in _queue.first_comments_naming(conn, project, id_map):
+        _relink_pending_corrections(conn, row, pat, id_map, now, report)
         text = row["first_comment_text"]
         new_text, n = _sub(text, pat, id_map)
-        if n == 0:  # the old id only inside a longer token
+        if n == 0:  # the old id only inside a longer token, or only in a pending correction
             continue
         base = (row["id"], row["short_index"], row["platform"], row["status"])
         # A lease is live by this process's clock, like the CAS in ``_queue``, never the caller's.
@@ -234,7 +279,7 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
                 "never edited by a relink"
                 + (
                     f" ({stale}); the drain corrects it"
-                    if stale.startswith("stale")
+                    if _drain_corrects(row)
                     else ", fix it by hand"
                 )
             )
@@ -260,6 +305,9 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
                 report.drain_will_verify.append(
                     f"{_row_label(row)}: rewritten while published; the first-comment drain "
                     "checks whether the old text already went live and corrects it"
+                    if _drain_checks(row)
+                    else f"{_row_label(row)}: rewritten while published, but the drain never "
+                    "checks it (no post id to read comments from): look at the post by hand"
                 )
             continue
         report.queue_skipped.append(QueueSkip(*base, reason))

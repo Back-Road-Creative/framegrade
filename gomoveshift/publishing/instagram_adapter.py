@@ -228,6 +228,7 @@ class InstagramReelsAdapter:
             permission="instagram_manage_comments",
             raise_for_error=_raise_for_graph_error,
             also_accept=also_accept,
+            own_id=self._ig_user_id,
         )
 
     def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
@@ -238,7 +239,7 @@ class InstagramReelsAdapter:
         replace_graph_comment(
             self._session, self._base, object_id, comment_id, text, self._access_token,
             text_field="text", permission="instagram_manage_comments",
-            raise_for_error=_raise_for_graph_error,
+            raise_for_error=_raise_for_graph_error, own_id=self._ig_user_id,
         )  # fmt: skip
 
     def delete_comment(self, comment_id: str) -> None:

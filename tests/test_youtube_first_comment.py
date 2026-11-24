@@ -99,6 +99,9 @@ class _FakeService:
     def commentThreads(self):
         return self._threads
 
+    def channels(self):
+        return _OwnChannels()
+
 
 def _make_published_youtube_row(conn, short_index, first_comment_text="great drive!"):
     delivery_id = enqueue(
@@ -271,14 +274,25 @@ def test_drain_first_comments_never_counts_an_outage_toward_the_cap(conn, exc):
 _TEXT = "great drive!"
 
 
-def _threads(*texts, next_page=None):
+OWN_CHANNEL = "UC-own"  # the authenticated channel's id
+
+
+class _OwnChannels:
+    """``channels().list(...).execute()`` answers the authenticated channel."""
+
+    def list(self, **kwargs):
+        return _FakeListRequest({"items": [{"id": OWN_CHANNEL}]})
+
+
+def _threads(*texts, next_page=None, author=OWN_CHANNEL):
     """One ``commentThreads.list`` page: top-level comments t0, t1, ... saying ``texts``."""
+
+    def snippet(t):
+        return {"textOriginal": t, "textDisplay": t, "authorChannelId": {"value": author}}
+
     page = {
         "items": [
-            {
-                "id": f"t{i}",
-                "snippet": {"topLevelComment": {"snippet": {"textOriginal": t, "textDisplay": t}}},
-            }
+            {"id": f"t{i}", "snippet": {"topLevelComment": {"snippet": snippet(t)}}}
             for i, t in enumerate(texts)
         ]
     }
@@ -359,6 +373,9 @@ class _SlowYouTube:
 
     def commentThreads(self):
         return self
+
+    def channels(self):
+        return _OwnChannels()
 
     def list(self, **kwargs):
         return _FakeListRequest(_threads(*(t for v, t in self.threads if v == kwargs["videoId"])))

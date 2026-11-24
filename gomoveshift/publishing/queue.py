@@ -25,7 +25,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple, Union
 
 from gomoveshift.pipeline._file_lock import lock_exclusive, unlock
 
@@ -552,6 +552,12 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         if "first_comment_correction" not in cols:
             # JSON list ``{live_id, live_text, action: edit|delete, to}`` for the drain to fix.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_correction TEXT")
+        if "first_comment_correction_attempts" not in cols:
+            # Refusals of a stale-comment correction (apart from ``first_comment_attempts``).
+            conn.execute(
+                "ALTER TABLE deliveries ADD COLUMN first_comment_correction_attempts "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
         for recovery_col, recovery_type in (
             # ``recover_terminal_delivery``: NULL on every row that is not a
             # recovery row -- an honest "not a recovery", never backfilled.
@@ -1431,17 +1437,22 @@ def find_delivery(
 def first_comments_naming(
     conn: sqlite3.Connection, project_name: str, needles: Iterable[str]
 ) -> list:
-    """Deliveries of ``project_name`` whose ``first_comment_text`` contains a needle (plain
-    substring), in id order, whatever their state -- the caller decides which are safe."""
+    """Deliveries of ``project_name`` whose ``first_comment_text`` or pending correction JSON
+    contains a needle (plain substring), in id order, whatever their state."""
     needles = [n for n in needles if n]
     if not needles:
         return []
-    clause = " OR ".join("instr(first_comment_text, ?) > 0" for _ in needles)
+    clause = " OR ".join(
+        "instr(first_comment_text, ?) > 0 OR instr(COALESCE(first_comment_correction, ''), ?) > 0"
+        for _ in needles
+    )
     return conn.execute(
         "SELECT id, short_index, platform, status, first_comment_text, "  # noqa: S608
         "first_comment_posted_at, first_comment_attempts, first_comment_error, lease_owner, "
-        f"lease_expires_at FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
-        (project_name, *needles),
+        "lease_expires_at, first_comment_correction, first_comment_correction_attempts, "
+        "platform_upload_id, platform_post_id, upload_kind "
+        f"FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
+        (project_name, *[n for n in needles for _ in (0, 1)]),
     ).fetchall()
 
 
@@ -1487,13 +1498,21 @@ def _same_correction(a: dict, b: dict) -> bool:
     return a.get("live_id") == b.get("live_id") and a.get("live_text") == b.get("live_text")
 
 
+def first_comment_intended_texts(row: Any) -> set:
+    """The texts the row means to have live: its current text and every pending edit's ``to``."""
+    texts = {(row["first_comment_text"] or "").strip()}
+    texts.update((i.get("to") or "").strip() for i in first_comment_corrections(row))
+    return texts - {""}
+
+
 def record_stale_live_comment(
     conn: sqlite3.Connection, delivery_id: int, live_text: str, now: str, live_id: str = ""
 ) -> Optional[str]:
     """Comment ``live_id`` saying ``live_text`` is live but the row holds other text. Unposted
     row: store the live text, mark it posted, queue an ``edit`` to the intended text. Posted row
-    (concurrent drain, both texts live): queue a ``delete``. Returns the error set, or ``None``
-    when nothing changed (row gone, same text, comment already tracked)."""
+    (concurrent drain, both texts live): queue a ``delete``, never of an intended text; a
+    live pending edit's ``to`` is ADOPTED (row text, its edits become deletes). Returns the error
+    set, or ``None`` when nothing changed."""
     with conn:
         row = conn.execute(
             "SELECT first_comment_text, first_comment_posted_at, first_comment_correction "
@@ -1509,8 +1528,24 @@ def record_stale_live_comment(
         if any(_same_correction(i, item) for i in items):
             return None
         if row["first_comment_posted_at"] is not None:
-            if current == live_text and not live_id:
+            said = live_text.strip()
+            if said == current.strip():
                 return None
+            if said in first_comment_intended_texts(row):
+                items = [
+                    {**i, "action": "delete"}
+                    if i.get("action") == "edit" and (i.get("to") or "").strip() == said
+                    else i
+                    for i in items
+                ]
+                error = stale_live_error(current, live_text)
+                done = conn.execute(
+                    "UPDATE deliveries SET first_comment_text=?, first_comment_error=?, "
+                    "first_comment_correction=?, updated_at=? WHERE id=? "
+                    "AND first_comment_posted_at IS NOT NULL AND first_comment_text=?",
+                    (live_text, error, json.dumps(items), now, delivery_id, current),
+                ).rowcount
+                return error if done == 1 else None
             done = conn.execute(
                 "UPDATE deliveries SET first_comment_error=?, first_comment_correction=?, "
                 "updated_at=? WHERE id=? AND first_comment_posted_at IS NOT NULL",
@@ -1551,7 +1586,8 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
         "SELECT id, project_name, short_index, platform, first_comment_text, platform_upload_id, "  # noqa: S608
         "platform_post_id, first_comment_error, first_comment_correction FROM deliveries "
         f"WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
-        "AND first_comment_posted_at IS NOT NULL AND first_comment_attempts < ? ORDER BY id",
+        "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts < ? "
+        "ORDER BY id",
         (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
     ).fetchall()
     paused: dict = {}
@@ -1559,6 +1595,75 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
         if row["platform"] not in paused:
             paused[row["platform"]] = is_platform_paused(conn, row["platform"])
     return [r for r in rows if not paused[r["platform"]]]
+
+
+def capped_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
+    """Posted rows whose correction hit ``FIRST_COMMENT_MAX_ATTEMPTS`` refusals (a human acts)."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    return conn.execute(
+        "SELECT id, project_name, short_index, platform, first_comment_text, "  # noqa: S608
+        "first_comment_correction FROM deliveries "
+        f"WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
+        "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts >= ? "
+        "ORDER BY id",
+        (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
+    ).fetchall()
+
+
+def unpost_first_comment_for_repost(
+    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str
+) -> None:
+    """An ``edit`` found its comment gone (404): unpost the row with the edit's ``to`` as its
+    text, so the normal drain posts it. Items for the same dead comment go."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None:
+            return
+        left = [
+            i
+            for i in first_comment_corrections(row)
+            if not _same_correction(i, item) and i.get("live_id") != item.get("live_id")
+        ]
+        conn.execute(
+            "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
+            "first_comment_error=NULL, first_comment_correction=?, updated_at=? WHERE id=?",
+            (item.get("to") or "", json.dumps(left) if left else None, now, delivery_id),
+        )
+
+
+def rewrite_first_comment_corrections(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    rewrite: Callable[[str], str],
+    now: str,
+) -> Optional[bool]:
+    """Compare-and-set ``to`` -> ``rewrite(to)`` on every pending ``edit``. ``None`` when none
+    changes, ``True`` when written, ``False`` when the JSON moved since it was read."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+        ).fetchone()
+        if row is None or not row["first_comment_correction"]:
+            return None
+        raw = row["first_comment_correction"]
+        items = first_comment_corrections(row)
+        out = [
+            {**i, "to": rewrite(i["to"])}
+            if i.get("action") == "edit" and isinstance(i.get("to"), str)
+            else i
+            for i in items
+        ]
+        if out == items:
+            return None
+        done = conn.execute(
+            "UPDATE deliveries SET first_comment_correction=?, updated_at=? "
+            "WHERE id=? AND first_comment_correction=?",
+            (json.dumps(out), now, delivery_id, raw),
+        ).rowcount
+        return done == 1
 
 
 def resolve_first_comment_correction(
@@ -1592,7 +1697,7 @@ def fail_first_comment_correction(
     with conn:
         conn.execute(
             "UPDATE deliveries SET first_comment_error=?, "
-            "first_comment_attempts=first_comment_attempts+? WHERE id=?",
+            "first_comment_correction_attempts=first_comment_correction_attempts+? WHERE id=?",
             (f"stale comment live: correction failed: {detail}"[:500], int(refused), delivery_id),
         )
 

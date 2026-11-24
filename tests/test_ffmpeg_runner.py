@@ -5,7 +5,9 @@ Tests stall detection, progress parsing, cleanup on failure, and video validatio
 """
 
 import json
+import logging
 import os
+import sys
 import textwrap
 import threading
 import time
@@ -15,6 +17,7 @@ import pytest
 
 from gomoveshift.pipeline.ffmpeg_runner import (
     MOOV_REWRITE_MIN_STALL_S,
+    _moov_rewrite_fallback_timeout,
     _moov_rewrite_stall_timeout,
     _read_io_counters,
     _parse_time_to_seconds,
@@ -712,7 +715,7 @@ class _SimConcat:
         return self.returncode
 
 
-def _run_concat(tmp_path, monkeypatch, *, io_readable, **kw):
+def _run_concat(tmp_path, monkeypatch, *, io_readable, io_fn=None, **kw):
     """Run the prepend_montage call shape (default stall, expected_duration=0) on a sim."""
     out = tmp_path / "lf_01.mp4"
     clock = _SimClock()
@@ -728,13 +731,35 @@ def _run_concat(tmp_path, monkeypatch, *, io_readable, **kw):
     monkeypatch.setattr("gomoveshift.pipeline.ffmpeg_runner.time.sleep", _sleep)
     monkeypatch.setattr(
         "gomoveshift.pipeline.ffmpeg_runner._read_io_counters",
-        (lambda pid: proc.io) if io_readable else (lambda pid: None),
+        (lambda pid: io_fn(proc))
+        if io_fn
+        else ((lambda pid: proc.io) if io_readable else (lambda pid: None)),
     )
     cmd = ["ffmpeg", "-nostdin", "-i", "l.txt", "-c", "copy", "-movflags", "+faststart", str(out)]
     result = run_ffmpeg_encode(
         cmd, out, expected_duration=0.0, description="prepend_montage concat", time_source=clock
     )
     return result, proc, clock, out
+
+
+_REAL_REWRITE_CHILD = textwrap.dedent(
+    """\
+    import sys, time
+    out, chunks = sys.argv[1], int(sys.argv[2])
+    e = sys.stderr
+    e.write("frame=   10 fps=1 q=-1.0 size=     256KiB time=00:00:01.00 bitrate=N/A speed=1x\\n")
+    e.flush()
+    e.write("[mp4 @ 0x1] Starting second pass: moving the moov atom to the beginning of the file\\n")
+    e.flush()
+    with open(out, "wb") as fh:
+        for _ in range(chunks):
+            fh.write(b"x" * 65536)
+            fh.flush()
+            time.sleep(0.02)
+    e.write("frame=   10 fps=1 q=-1.0 Lsize=    9999KiB time=00:00:01.00 bitrate=N/A speed=1x\\n")
+    e.flush()
+    """
+)
 
 
 class TestMoovRewriteFollowsOwnProgress:
@@ -772,8 +797,10 @@ class TestMoovRewriteFollowsOwnProgress:
         assert proc.terminated is True
         assert result.killed_reason == "stall"
         assert not out.exists()
-        # dead within the normal rewrite floor (plus a couple of polls), not the size window
+        # dead within the normal rewrite floor (plus a couple of polls), not the size window,
+        # and never before the floor: a plain 600 s stall window must not kill a rewrite
         assert clock.t - proc.moov_at <= MOOV_REWRITE_MIN_STALL_S + 90
+        assert clock.t - proc.moov_at >= MOOV_REWRITE_MIN_STALL_S - 60
 
     def test_counters_unreadable_falls_back_and_18_MBps_finishes(
         self, tmp_path, monkeypatch, caplog
@@ -838,7 +865,72 @@ class TestMoovRewriteFollowsOwnProgress:
                 ["ffmpeg", str(out)], out, expected_duration=0.0, time_source=clock
             )
         assert result.success and proc.terminated is False
-        assert any("became unreadable" in r.getMessage() for r in caplog.records)
+        warned = [r for r in caplog.records if "became unreadable" in r.getMessage()]
+        assert len(warned) == 1 and warned[0].levelname == "WARNING"
+
+    def test_io_mode_logs_exactly_one_warning_naming_the_mode(self, tmp_path, monkeypatch, caplog):
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=True, tick=30.0, copy_s=600.0, rewrite_s=3000.0,
+                size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and proc.terminated is False
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warned) == 1 and "I/O counters" in warned[0], warned
+
+    def test_fallback_window_is_exactly_twice_the_elapsed_run_when_that_is_larger(
+        self, tmp_path, monkeypatch
+    ):
+        assert _moov_rewrite_fallback_timeout(10**9, 600, 3000.0) == 6000
+        small = 10**9  # the size window is far below 2x the 3000 s copy pass
+        result, proc, clock, _ = _run_concat(
+            tmp_path, monkeypatch, io_readable=False, tick=30.0, copy_s=3000.0, rewrite_s=10**9,
+            size=small,
+        )  # fmt: skip
+        assert result.killed_reason == "stall" and proc.terminated
+        assert 6000 - 60 <= clock.t - proc.moov_at <= 6000 + 90
+
+    def test_counters_that_restart_below_the_last_total_never_reset_the_stall_clock(
+        self, tmp_path, monkeypatch
+    ):
+        state = {"k": 0}
+
+        def io(proc):
+            if proc.moov_at is not None and proc.clock.t - proc.moov_at > 60:
+                state["k"] += 1000  # growing, but below the total seen at detection
+                return state["k"]
+            return proc.io
+
+        result, proc, clock, _ = _run_concat(
+            tmp_path, monkeypatch, io_readable=True, io_fn=io, tick=30.0, copy_s=600.0,
+            rewrite_s=10**9, size=GALLEY_LF1_BYTES,
+        )  # fmt: skip
+        assert result.killed_reason == "stall" and proc.terminated
+        assert clock.t - proc.moov_at <= MOOV_REWRITE_MIN_STALL_S + 120
+
+    @pytest.mark.skipif(
+        not os.path.exists(f"/proc/{os.getpid()}/io"), reason="needs /proc/<pid>/io (Linux)"
+    )
+    def test_healthy_real_rewrite_logs_one_warning_and_never_a_false_fallback(
+        self, tmp_path, caplog
+    ):
+        """An exited, not-yet-reaped ffmpeg has unreadable /proc/<pid>/io; that is an exit,
+        not a counters failure, so a healthy rewrite ends with only the io-mode WARNING."""
+        child = tmp_path / "child.py"
+        child.write_text(_REAL_REWRITE_CHILD)
+        for i in range(5):
+            out = tmp_path / f"o{i}.mp4"
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="gomoveshift.pipeline.ffmpeg_runner"):
+                result = run_ffmpeg_encode(
+                    [sys.executable, "-I", str(child), str(out), "40"],
+                    out,
+                    expected_duration=0.0,
+                    description="real rewrite",
+                )
+            assert result.success, result
+            warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+            assert len(warned) == 1 and "I/O counters" in warned[0], warned
 
 
 class TestReadIoCounters:

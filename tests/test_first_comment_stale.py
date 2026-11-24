@@ -4,6 +4,7 @@ corrected in place by the next YouTube drain -- never silent, never needing a hu
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -77,8 +78,12 @@ def _incidents(inc):
     return [json.loads(p.read_text()) for p in sorted(inc.glob("*.json"))] if inc.is_dir() else []
 
 
-def _thread(text, tid="t-old"):
-    return {"id": tid, "snippet": {"topLevelComment": {"snippet": {"textOriginal": text}}}}
+OWN = "UC-own"  # the authenticated channel's id; a viewer's comment names another
+
+
+def _thread(text, tid="t-old", author=OWN):
+    snippet = {"textOriginal": text, "authorChannelId": {"value": author}}
+    return {"id": tid, "snippet": {"topLevelComment": {"snippet": snippet}}}
 
 
 class _Req:
@@ -117,6 +122,9 @@ class _Service:
 
     def comments(self):
         return self.comments_api
+
+    def channels(self):
+        return SimpleNamespace(list=lambda **kw: _Req({"items": [{"id": OWN}]}))
 
     def list(self, **kw):
         self.lists.append(kw)
@@ -181,9 +189,11 @@ def test_a_platform_refusal_of_the_correction_counts_toward_the_cap(conn, inc):
 
     did = _published(conn)
     _drain(conn, _Service(on_insert=lambda: _rewrite(conn, did)), inc)
-    refused = _Service(fail=[_make_http_error(404, "commentNotFound")])
+    refused = _Service(fail=[_make_http_error(400, "invalidValue")])
     _drain(conn, refused, inc)
-    assert _row(conn, did)["first_comment_attempts"] == 1
+    row = _row(conn, did)
+    assert row["first_comment_correction_attempts"] == 1
+    assert row["first_comment_attempts"] == 0  # the posting counter is not shared
 
 
 def test_both_texts_live_deletes_the_old_one_and_never_the_new_one(conn, inc):
@@ -203,7 +213,7 @@ def test_both_texts_live_deletes_the_old_one_and_never_the_new_one(conn, inc):
     assert _incidents(inc)[0]["resolved_at"]
 
 
-def test_the_scan_reads_every_bounded_page_and_prefers_the_prior_text(conn):
+def test_the_scan_reads_every_bounded_page_and_prefers_the_current_text(conn):
     page1 = {"items": [_thread(NEW_TEXT, "t-new")], "nextPageToken": "p2"}
     page2 = {"items": [_thread(OLD_TEXT, "t-old")]}
     service = _Service(pages=[page1, page2])

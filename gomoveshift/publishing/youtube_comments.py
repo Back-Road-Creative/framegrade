@@ -38,10 +38,10 @@ from .queue import (
 logger = logging.getLogger(__name__)
 
 #: HTTP 403 ``reason`` strings meaning the OAuth token lacks the
-#: ``youtube.force-ssl`` scope (or comment-posting was never granted) --
+#: ``youtube.force-ssl`` scope (``forbidden`` is a refusal that counts to the cap) --
 #: recoverable only by a human re-authorising, never by retrying. Mirrors
 #: ``youtube_uploader.QUOTA_REASONS``' shape for a different 403 class.
-SCOPE_ERROR_REASONS = frozenset({"insufficientPermissions", "forbidden"})
+SCOPE_ERROR_REASONS = frozenset({"insufficientPermissions"})
 
 _ERROR_DETAIL_MAX = 500
 
@@ -56,6 +56,22 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class OwnChannelUnknownError(Exception):
+    """Our own channel id could not be read, so whose a comment is is unknown (fails closed)."""
+
+
+def _own_channel_id(service) -> str:
+    """The authenticated channel's id (``channels.list(mine=True)``); else ``OwnChannelUnknownError``."""
+    try:
+        items = service.channels().list(part="snippet", mine=True).execute().get("items") or []
+        own = str((items[0] or {}).get("id") or "") if items else ""
+        if not own:
+            raise ValueError("the authenticated channel has no id")
+    except Exception as exc:  # noqa: BLE001 -- any failure means the author is unknown
+        raise OwnChannelUnknownError(f"cannot tell whose comment it is: {exc}") from exc
+    return own
+
+
 def _scan_first_comments(
     service, video_id: str, text: str, also_accept: Iterable[str] = ()
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
@@ -63,12 +79,14 @@ def _scan_first_comments(
     ``video_id`` that already says exactly ``text`` (stripped), and for each that says one of
     ``also_accept``, the texts a relink replaced (``queue.first_comment_prior_texts``) -- so a
     comment YouTube created whose answer was lost (googleapiclient reads with a 60 s timeout)
-    is found on the next pass, not posted again. Without ``also_accept`` the scan stops at the
-    first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
+    is found on the next pass, not posted again. ``text`` counts whoever wrote it; only OUR comment
+    saying a replaced text is ``prior`` (``authorChannelId`` must be the channel's, read lazily on
+    such a match: ``OwnChannelUnknownError`` when unreadable). Without ``also_accept`` the scan stops at the first match; with it every page (up to ``COMMENT_CHECK_MAX_PAGES``) is read so a replaced
     text live beside the new one is seen. Any error raises, so the caller posts nothing."""
     want = {text.strip(): True, **{t.strip(): False for t in also_accept}}
     current: List[Tuple[str, str]] = []
     prior: List[Tuple[str, str]] = []
+    own: List[str] = []
     request = {
         "part": "snippet",
         "videoId": video_id,
@@ -84,7 +102,13 @@ def _scan_first_comments(
                 heard = str(said.get(field_name) or "").strip()
                 if heard in want:
                     found = (str(top.get("id") or thread.get("id") or ""), heard)
-                    (current if want[heard] else prior).append(found)
+                    if want[heard]:
+                        current.append(found)
+                        break
+                    author = str(((said.get("authorChannelId") or {}).get("value")) or "")
+                    own = own or [_own_channel_id(service)]
+                    if author and author == own[0]:
+                        prior.append(found)
                     break
         token = response.get("nextPageToken")
         if (current and not also_accept) or not token:
@@ -171,6 +195,13 @@ def _is_scope_error(exc: Exception) -> bool:
     return any(isinstance(d, dict) and d.get("reason") in SCOPE_ERROR_REASONS for d in details)
 
 
+def _comment_gone(exc: Exception) -> bool:
+    """True iff ``exc`` is an ``HttpError`` 404 (``commentNotFound``): the comment is already gone."""
+    from googleapiclient.errors import HttpError
+
+    return isinstance(exc, HttpError) and getattr(exc.resp, "status", None) == 404
+
+
 def _refused_for_the_video(exc: Exception) -> bool:
     """True iff YouTube refused this comment because of its video -- a 4xx
     ``HttpError`` such as 404 ``videoNotFound`` (the short was taken down) or
@@ -205,6 +236,8 @@ class FirstCommentResult:
     #: Stale comments (a replaced text went live) found this pass or still not corrected:
     #: the summary line prints it, ``first_comment_stale`` health incidents list each one.
     stale: int = 0
+    #: Rows whose correction hit the refusal cap (a human acts), reported every pass.
+    correction_capped: int = 0
     #: Stale comments the drain edited or deleted on the platform this pass.
     corrected: int = 0
     errors: List[str] = field(default_factory=list)
@@ -256,6 +289,7 @@ def drain_first_comments(
         refused=_refused_for_the_video,
         result=result,
         incidents_dir=incidents_dir,
+        gone=_comment_gone,
     )
     due = select_due_first_comments(conn, now, platforms=("youtube",))
     if not due:
