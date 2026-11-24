@@ -222,8 +222,9 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
         if n == 0:  # the old id only inside a longer token
             continue
         base = (row["id"], row["short_index"], row["platform"], row["status"])
+        # A lease is live by this process's clock, like the CAS in ``_queue``, never the caller's.
         leased = (
-            row["lease_owner"] is not None and (row["lease_expires_at"] or "") > now.isoformat()
+            row["lease_owner"] is not None and (row["lease_expires_at"] or "") > _queue._now_iso()
         )
         if row["first_comment_posted_at"] is not None:
             reason = "comment already live"
@@ -321,5 +322,8 @@ def relink_replaced_lf(
         _relink_queue(conn, project, pat, id_map, now, report)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"queue: {type(exc).__name__}: {exc}")
-    _report_other_projects(conn, project, pat, id_map, report)
+    try:
+        _report_other_projects(conn, project, pat, id_map, report)
+    except Exception as exc:  # noqa: BLE001 -- a report failure is recorded, never raised
+        report.errors.append(f"other projects: {type(exc).__name__}: {exc}")
     return report

@@ -168,11 +168,18 @@ def test_a_rewrite_between_select_and_post_posts_the_fresh_text(conn, monkeypatc
     assert _row(conn, did)["first_comment_posted_at"] is not None
 
 
-def test_post_first_comment_accepts_either_text_as_already_there():
-    for said in (OLD_TEXT, NEW_TEXT):
-        service = _Service(pages=[_thread(said)])
-        assert post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,)) == "t-old"
-        assert service.inserted == []
+def test_post_first_comment_returns_the_id_of_the_new_text_already_there():
+    service = _Service(pages=[_thread(NEW_TEXT)])
+    assert post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,)) == "t-old"
+    assert service.inserted == []
+
+
+def test_post_first_comment_reports_a_replaced_text_instead_of_returning_its_id():
+    service = _Service(pages=[_thread(OLD_TEXT)])
+    with pytest.raises(PriorCommentLiveError) as info:
+        post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,))
+    assert info.value.comment_id == "t-old" and info.value.said == OLD_TEXT
+    assert service.inserted == []
 
 
 def test_meta_rewrite_during_the_post_records_the_live_old_text_and_reports_it(conn):
@@ -194,7 +201,11 @@ def test_meta_rewrite_during_the_post_records_the_live_old_text_and_reports_it(c
     assert again.posted == 0
     row = _row(conn, did)
     assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
-    assert row["first_comment_error"] == "stale comment live: links old"
+    # The second drain tried the correction; this fake gave no comment id, so it cannot edit and
+    # says so on the row (still visible, never silent).
+    assert row["first_comment_error"] == (
+        "stale comment live: correction failed: instagram cannot edit comment (id unknown)"
+    )
     assert result.posted == 1 and result.errors == [
         f"delivery {did}: stale comment live: links old"
     ]

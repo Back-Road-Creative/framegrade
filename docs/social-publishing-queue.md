@@ -694,8 +694,23 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   `gomoveshift status --json`). The NEXT YouTube drain (`first_comment_stale.run_corrections`,
   before it posts) edits the comment to the intended text or deletes the duplicate, clears the
   error and resolves the incident; a failure retries every pass, and only a platform refusal
-  counts toward `FIRST_COMMENT_MAX_ATTEMPTS`. Meta drains count and file it but have no
-  edit/delete wired yet: the incident stays open.
+  counts toward `FIRST_COMMENT_MAX_ATTEMPTS`. The Meta drain runs the same corrections first
+  (`drain_meta_first_comments`): **Facebook** edits the Page's comment in place (`POST
+  /{comment-id}` `message=`; if Graph refuses the edit it deletes and reposts as Instagram
+  does), **Instagram** cannot edit a comment (the IG Comment node only hides/unhides), so
+  `replace_graph_comment` reads every bounded page, deletes the stale comment, waits for Graph
+  to confirm the delete (`success: true`), then posts the intended text unless one already
+  says it: never two comments, never a post before the delete. A stale comment already gone
+  (the post failed last pass) is only trusted when the read was complete; otherwise nothing is
+  posted. Graph: <https://developers.facebook.com/docs/graph-api/reference/comment/>,
+  <https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment>.
+  **Listing lag**: Graph's comment list can trail a write, so a comment created whose answer was
+  lost may not be listed on the very next pass; that pass can post a second copy. The next
+  pass sees both and queues a delete for the replaced one, never the new one. The Graph scan
+  reads every bounded page when a prior text exists and, with the new text live beside a
+  replaced one, reports the replaced one (`PriorCommentLiveError.duplicates`).
+  Public `youtube_comments.post_first_comment` raises `PriorCommentLiveError` for a replaced
+  text instead of returning its id.
   Rolling deploy: a drain still
   running the previous code has no text CAS and no prior-text dedup, so a relink while old
   drains run can leave a stale comment unreported; run it after the deploy settles.

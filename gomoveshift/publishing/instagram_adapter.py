@@ -16,7 +16,11 @@ from urllib.parse import urlsplit
 
 import requests
 
-from gomoveshift.publishing.first_comment import post_graph_comment
+from gomoveshift.publishing.first_comment import (
+    delete_graph_comment,
+    post_graph_comment,
+    replace_graph_comment,
+)
 from gomoveshift.publishing.instagram_reels_spec import ReelsSpecError, make_in_spec_bytes
 from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import GRAPH_TIMEOUT, graph_base_url, graph_post
@@ -225,6 +229,24 @@ class InstagramReelsAdapter:
             raise_for_error=_raise_for_graph_error,
             also_accept=also_accept,
         )
+
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
+        """Instagram cannot edit a comment's text (the IG Comment node only hides/unhides): delete
+        ``comment_id`` on ``object_id``, then post ``text`` once the delete is confirmed."""
+        if not object_id:
+            raise InstagramPermanentError(f"cannot replace comment {comment_id}: media id unknown")
+        replace_graph_comment(
+            self._session, self._base, object_id, comment_id, text, self._access_token,
+            text_field="text", permission="instagram_manage_comments",
+            raise_for_error=_raise_for_graph_error,
+        )  # fmt: skip
+
+    def delete_comment(self, comment_id: str) -> None:
+        """Delete the account's own comment (``DELETE /{comment-id}``)."""
+        delete_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
+        )  # fmt: skip
 
     def _check_publishing_limit(self) -> None:
         """Live read of the account's rolling publishing-limit quota
