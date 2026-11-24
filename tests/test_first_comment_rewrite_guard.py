@@ -75,6 +75,11 @@ class _Service:
     def __init__(self, pages=(), on_insert=None):
         self.inserted, self.pages, self.on_insert = [], list(pages), on_insert
 
+    def channels(self):
+        return SimpleNamespace(
+            list=lambda **_: SimpleNamespace(execute=lambda: {"items": [{"id": OWN_CHANNEL}]})
+        )
+
     def commentThreads(self):
         return self
 
@@ -89,10 +94,12 @@ class _Service:
         return SimpleNamespace(execute=lambda: {"id": "new-thread"})
 
 
-def _thread(text, tid="t-old"):
-    return {
-        "items": [{"id": tid, "snippet": {"topLevelComment": {"snippet": {"textOriginal": text}}}}]
-    }
+OWN_CHANNEL = "UC-own"
+
+
+def _thread(text, tid="t-old", author=OWN_CHANNEL):
+    snippet = {"textOriginal": text, "authorChannelId": {"value": author}}
+    return {"items": [{"id": tid, "snippet": {"topLevelComment": {"snippet": snippet}}}]}
 
 
 def test_a_rewrite_during_the_post_records_the_live_old_text_and_reports_it(conn):
@@ -247,7 +254,7 @@ def test_the_graph_dedup_reports_a_prior_text_and_posts_nothing(field):
             self.posts = []
 
         def get(self, url, **kw):
-            return Resp({"data": [{"id": "c1", field: OLD_TEXT}]})
+            return Resp({"data": [{"id": "c1", field: OLD_TEXT, "from": {"id": "me"}}]})
 
         def post(self, url, **kw):
             self.posts.append(url)
@@ -257,7 +264,7 @@ def test_the_graph_dedup_reports_a_prior_text_and_posts_nothing(field):
     with pytest.raises(PriorCommentLiveError) as info:
         post_graph_comment(
             session, "https://g", "OBJ", NEW_TEXT, "tok", text_field=field, permission="p",
-            raise_for_error=lambda s, b: None, also_accept=(OLD_TEXT,),
+            raise_for_error=lambda s, b: None, also_accept=(OLD_TEXT,), own_id="me",
         )  # fmt: skip
     assert info.value.comment_id == "c1" and info.value.said == OLD_TEXT
     assert session.posts == []
