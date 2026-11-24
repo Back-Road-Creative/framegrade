@@ -5,12 +5,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Iterable, Optional
 from urllib.parse import urlsplit
 
 import requests
 
-from gomoveshift.publishing.first_comment import post_graph_comment
+from gomoveshift.publishing.first_comment import (
+    delete_graph_comment,
+    edit_graph_comment,
+    post_graph_comment,
+    read_graph_comment,
+    replace_graph_comment,
+)
 from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
 from gomoveshift.publishing.models import FacebookPayload, ShortPublishRecord
@@ -149,10 +155,11 @@ class FacebookReelsAdapter:
     def _get(self, url: str, **kwargs) -> dict:
         return graph_get(self._session, url, _raise_for_graph_error, **kwargs)
 
-    def post_comment(self, object_id: str, text: str) -> str:
+    def post_comment(self, object_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).
         A permission-class error raises ``CommentPermissionError`` naming
-        ``pages_manage_engagement``."""
+        ``pages_manage_engagement``. ``also_accept`` is the texts a relink replaced: one already
+        live raises ``first_comment.PriorCommentLiveError`` and nothing is posted."""
         return post_graph_comment(
             self._session,
             self._base,
@@ -162,7 +169,54 @@ class FacebookReelsAdapter:
             text_field="message",
             permission="pages_manage_engagement",
             raise_for_error=_raise_for_graph_error,
+            also_accept=also_accept,
+            own_id=self._page_id,
+            post_beside_foreign=True,
+            report_duplicates=True,
         )
+
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> str | None:
+        """Edit the Page's own comment in place (``POST /{comment-id}`` ``message=``). When Graph
+        refuses the edit and ``object_id`` is known, delete it and post ``text`` instead (never
+        two comments, never a post before the delete is confirmed). Returns the id of the comment
+        that now says ``text`` when it is a new one, else ``None`` (edited in place)."""
+        kwargs = {
+            "permission": "pages_manage_engagement",
+            "raise_for_error": _raise_for_graph_error,
+        }
+        try:
+            edit_graph_comment(
+                self._session, self._base, comment_id, text, self._access_token, **kwargs
+            )
+        except FacebookPermanentError:
+            if not object_id:
+                raise
+            return replace_graph_comment(
+                self._session, self._base, object_id, comment_id, text, self._access_token,
+                text_field="message", own_id=self._page_id, **kwargs,
+            )  # fmt: skip
+        return None
+
+    def read_comment(self, comment_id: str, object_id: str | None = None) -> str | None:
+        """The text comment ``comment_id`` says now (``.author`` is who wrote it), or ``None``
+        when Graph says it is gone (confirmed by listing ``object_id`` when given)."""
+        return read_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            text_field="message", permission="pages_manage_engagement",
+            raise_for_error=_raise_for_graph_error, object_id=object_id,
+        )  # fmt: skip
+
+    def own_id(self) -> str:
+        """Our own account id: what a comment's author must be for it to be ours."""
+        return self._page_id
+
+    def delete_comment(self, comment_id: str, object_id: str | None = None) -> None:
+        """Delete the Page's own comment (``DELETE /{comment-id}``)."""
+        delete_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            text_field="message", permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
+            object_id=object_id,
+        )  # fmt: skip
 
     def start_upload(self) -> UploadHandle:
         body = self._post(

@@ -11,12 +11,17 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 from urllib.parse import urlsplit
 
 import requests
 
-from gomoveshift.publishing.first_comment import post_graph_comment
+from gomoveshift.publishing.first_comment import (
+    delete_graph_comment,
+    post_graph_comment,
+    read_graph_comment,
+    replace_graph_comment,
+)
 from gomoveshift.publishing.instagram_reels_spec import ReelsSpecError, make_in_spec_bytes
 from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import GRAPH_TIMEOUT, graph_base_url, graph_post
@@ -209,10 +214,11 @@ class InstagramReelsAdapter:
     def _get(self, url: str, op: str | None = None, **kwargs) -> dict:
         return self._request("get", url, op, **kwargs)
 
-    def post_comment(self, object_id: str, text: str) -> str:
+    def post_comment(self, object_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).
         A permission-class error raises ``CommentPermissionError`` naming
-        ``instagram_manage_comments``."""
+        ``instagram_manage_comments``. ``also_accept`` is the texts a relink replaced: one already
+        live raises ``first_comment.PriorCommentLiveError`` and nothing is posted."""
         return post_graph_comment(
             self._session,
             self._base,
@@ -222,7 +228,44 @@ class InstagramReelsAdapter:
             text_field="text",
             permission="instagram_manage_comments",
             raise_for_error=_raise_for_graph_error,
+            also_accept=also_accept,
+            own_id=self._ig_user_id,
+            post_beside_foreign=True,
+            report_duplicates=True,
         )
+
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> str | None:
+        """Instagram cannot edit a comment's text (the IG Comment node only hides/unhides): delete
+        ``comment_id`` on ``object_id``, then post ``text`` once the delete is confirmed. Returns
+        the id of the comment that now says ``text``."""
+        if not object_id:
+            raise InstagramPermanentError(f"cannot replace comment {comment_id}: media id unknown")
+        return replace_graph_comment(
+            self._session, self._base, object_id, comment_id, text, self._access_token,
+            text_field="text", permission="instagram_manage_comments",
+            raise_for_error=_raise_for_graph_error, own_id=self._ig_user_id,
+        )  # fmt: skip
+
+    def read_comment(self, comment_id: str, object_id: str | None = None) -> str | None:
+        """The text comment ``comment_id`` says now (``.author`` is who wrote it), or ``None``
+        when Graph says it is gone (confirmed by listing ``object_id`` when given)."""
+        return read_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            text_field="text", permission="instagram_manage_comments",
+            raise_for_error=_raise_for_graph_error, object_id=object_id,
+        )  # fmt: skip
+
+    def own_id(self) -> str:
+        """Our own account id: what a comment's author must be for it to be ours."""
+        return self._ig_user_id
+
+    def delete_comment(self, comment_id: str, object_id: str | None = None) -> None:
+        """Delete the account's own comment (``DELETE /{comment-id}``)."""
+        delete_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            text_field="text", permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
+            object_id=object_id,
+        )  # fmt: skip
 
     def _check_publishing_limit(self) -> None:
         """Live read of the account's rolling publishing-limit quota

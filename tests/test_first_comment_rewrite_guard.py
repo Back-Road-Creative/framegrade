@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from gomoveshift.publishing import meta_comments, youtube_comments
+from gomoveshift.publishing.first_comment import PriorCommentLiveError, post_graph_comment
 from gomoveshift.publishing.queue import (
+    first_comment_corrections,
     PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM,
     enqueue,
     open_queue_db,
@@ -74,6 +76,11 @@ class _Service:
     def __init__(self, pages=(), on_insert=None):
         self.inserted, self.pages, self.on_insert = [], list(pages), on_insert
 
+    def channels(self):
+        return SimpleNamespace(
+            list=lambda **_: SimpleNamespace(execute=lambda: {"items": [{"id": OWN_CHANNEL}]})
+        )
+
     def commentThreads(self):
         return self
 
@@ -88,29 +95,76 @@ class _Service:
         return SimpleNamespace(execute=lambda: {"id": "new-thread"})
 
 
-def _thread(text, tid="t-old"):
-    return {
-        "items": [{"id": tid, "snippet": {"topLevelComment": {"snippet": {"textOriginal": text}}}}]
-    }
+OWN_CHANNEL = "UC-own"
 
 
-def test_a_rewrite_during_the_post_never_marks_the_new_text_posted(conn):
+def _thread(text, tid="t-old", author=OWN_CHANNEL):
+    snippet = {"textOriginal": text, "authorChannelId": {"value": author}}
+    return {"items": [{"id": tid, "snippet": {"topLevelComment": {"snippet": snippet}}}]}
+
+
+def test_a_rewrite_during_the_post_records_the_live_old_text_and_reports_it(conn):
+    # Stricter than before: the old comment IS live, so the row records the text that is
+    # actually live (never the new text) and the failure is visible three ways.
     did = _published(conn)
     service = _Service(on_insert=lambda: _rewrite(conn, did))
     result = drain_first_comments(conn, service_factory=lambda: service, now=_NOW)
     assert service.inserted == [OLD_TEXT]
-    assert result.posted == 0
     row = _row(conn, did)
-    assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW_TEXT
+    assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
+    assert row["first_comment_error"] == "stale comment live: links old"
+    assert result.posted == 1
+    assert result.errors == [f"delivery {did}: stale comment live: links old"]
 
 
-def test_the_next_pass_recognises_the_old_text_already_live(conn):
+def test_the_next_pass_recognises_the_old_text_already_live_and_reports_it(conn):
+    # Stricter than before: recognised (nothing posted) AND reported, never silently done.
     did = _published(conn)
     _rewrite(conn, did)
     service = _Service(pages=[_thread(OLD_TEXT)])
     result = drain_first_comments(conn, service_factory=lambda: service, now=_NOW)
     assert service.inserted == [] and result.posted == 1
-    assert _row(conn, did)["first_comment_posted_at"] is not None
+    row = _row(conn, did)
+    assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
+    assert row["first_comment_error"] == "stale comment live: links old"
+    assert result.errors == [f"delivery {did}: stale comment live: links old"]
+
+
+def test_a_lost_response_then_a_relink_is_reported_not_marked_done(conn):
+    did = _published(conn)
+
+    class Lost(_Service):
+        def insert(self, part, body):
+            self.inserted.append(body["snippet"]["topLevelComment"]["snippet"]["textOriginal"])
+            raise TimeoutError("read timed out")  # YouTube did create it
+
+    drain_first_comments(conn, service_factory=lambda: Lost(), now=_NOW)
+    _rewrite(conn, did)
+    service = _Service(pages=[_thread(OLD_TEXT)])
+    result = drain_first_comments(conn, service_factory=lambda: service, now=_NOW)
+    row = _row(conn, did)
+    assert service.inserted == [] and row["first_comment_text"] == OLD_TEXT
+    assert row["first_comment_error"] == "stale comment live: links old"
+    assert len(result.errors) == 1
+
+
+def test_the_new_text_already_live_is_an_ordinary_post(conn):
+    did = _published(conn)
+    _rewrite(conn, did)
+    service = _Service(pages=[_thread(NEW_TEXT)])
+    result = drain_first_comments(conn, service_factory=lambda: service, now=_NOW)
+    row = _row(conn, did)
+    assert result.posted == 1 and result.errors == []
+    assert row["first_comment_text"] == NEW_TEXT and row["first_comment_error"] is None
+
+
+def test_a_stale_report_names_no_id_when_the_text_has_none():
+    from gomoveshift.publishing.queue import stale_live_error
+
+    assert stale_live_error("hello", "hello again") == (
+        "stale comment live: links an id the relink replaced"
+    )
+    assert stale_live_error(OLD_TEXT, NEW_TEXT) == "stale comment live: links old"
 
 
 def test_a_rewrite_between_select_and_post_posts_the_fresh_text(conn, monkeypatch):
@@ -122,35 +176,107 @@ def test_a_rewrite_between_select_and_post_posts_the_fresh_text(conn, monkeypatc
     assert _row(conn, did)["first_comment_posted_at"] is not None
 
 
-def test_post_first_comment_accepts_either_text_as_already_there():
-    for said in (OLD_TEXT, NEW_TEXT):
-        service = _Service(pages=[_thread(said)])
-        assert post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,)) == "t-old"
-        assert service.inserted == []
+def test_post_first_comment_returns_the_id_of_the_new_text_already_there():
+    service = _Service(pages=[_thread(NEW_TEXT)])
+    assert post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,)) == "t-old"
+    assert service.inserted == []
 
 
-def test_meta_rewrite_during_the_post_never_marks_the_new_text_posted(conn):
+def test_post_first_comment_reports_a_replaced_text_instead_of_returning_its_id():
+    service = _Service(pages=[_thread(OLD_TEXT)])
+    with pytest.raises(PriorCommentLiveError) as info:
+        post_first_comment(service, "vid", NEW_TEXT, also_accept=(OLD_TEXT,))
+    assert info.value.comment_id == "t-old" and info.value.said == OLD_TEXT
+    assert service.inserted == []
+
+
+def test_meta_rewrite_during_the_post_records_the_live_old_text_and_reports_it(conn):
     did = _published(conn, platform="instagram")
     seen = []
 
     class Adapter:
-        def post_comment(self, object_id, text):
+        def post_comment(self, object_id, text, also_accept=()):
             seen.append(text)
             _rewrite(conn, did)
 
     result = meta_comments.drain_meta_first_comments(
         conn, adapter_factories={"instagram": Adapter}, now=_NOW
     )
-    assert seen == [OLD_TEXT] and result.posted == 0
+    again = meta_comments.drain_meta_first_comments(
+        conn, adapter_factories={"instagram": Adapter}, now=_NOW
+    )
+    assert seen == [OLD_TEXT]  # never a second comment beside the live one
+    assert again.posted == 0
     row = _row(conn, did)
-    assert row["first_comment_posted_at"] is None and row["first_comment_text"] == NEW_TEXT
+    assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
+    assert first_comment_corrections(row)  # the edit is still queued, never lost
+    # The second drain tried the correction; this fake gave no comment id, so it cannot edit and
+    # says so on the row (still visible, never silent).
+    assert row["first_comment_error"] == (
+        "stale comment live: correction failed: instagram cannot edit comment (id unknown)"
+    )
+    assert result.posted == 1 and result.errors == [
+        f"delivery {did}: stale comment live: links old"
+    ]
+
+
+def test_meta_a_prior_text_already_live_is_reported_not_posted_over(conn):
+    did = _published(conn, platform="facebook")
+    _rewrite(conn, did)
+    seen = []
+
+    class Adapter:
+        def post_comment(self, object_id, text, also_accept=()):
+            seen.append((text, tuple(also_accept)))
+            raise PriorCommentLiveError("c9", OLD_TEXT)
+
+    result = meta_comments.drain_meta_first_comments(
+        conn, adapter_factories={"facebook": Adapter}, now=_NOW
+    )
+    assert seen == [(NEW_TEXT, (OLD_TEXT,))]
+    row = _row(conn, did)
+    assert row["first_comment_posted_at"] is not None and row["first_comment_text"] == OLD_TEXT
+    assert row["first_comment_error"] == "stale comment live: links old"
+    assert result.errors == [f"delivery {did}: stale comment live: links old"]
+
+
+@pytest.mark.parametrize("field", ["text", "message"])
+def test_the_graph_dedup_reports_a_prior_text_and_posts_nothing(field):
+    class Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def json(self):
+            return self.body
+
+    class Session:
+        def __init__(self):
+            self.posts = []
+
+        def get(self, url, **kw):
+            return Resp({"data": [{"id": "c1", field: OLD_TEXT, "from": {"id": "me"}}]})
+
+        def post(self, url, **kw):
+            self.posts.append(url)
+            return Resp({"id": "new"})
+
+    session = Session()
+    with pytest.raises(PriorCommentLiveError) as info:
+        post_graph_comment(
+            session, "https://g", "OBJ", NEW_TEXT, "tok", text_field=field, permission="p",
+            raise_for_error=lambda s, b: None, also_accept=(OLD_TEXT,), own_id="me",
+        )  # fmt: skip
+    assert info.value.comment_id == "c1" and info.value.said == OLD_TEXT
+    assert session.posts == []
 
 
 def test_meta_posts_the_fresh_text_when_rewritten_before_the_post(conn, monkeypatch):
     did = _published(conn, platform="instagram")
     _rewrite_after_select(monkeypatch, meta_comments, conn, did)
     seen = []
-    adapter = type("A", (), {"post_comment": lambda s, o, t: seen.append(t)})()
+    adapter = type("A", (), {"post_comment": lambda s, o, t, also_accept=(): seen.append(t)})()
     result = meta_comments.drain_meta_first_comments(
         conn, adapter_factories={"instagram": lambda: adapter}, now=_NOW
     )

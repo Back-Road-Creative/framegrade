@@ -840,6 +840,73 @@ class TestRunAllDaysCrashRecovery:
             "remaining days; day 3 should still be processed."
         )
 
+    def test_failed_days_records_each_days_cause(self, tmp_path):
+        """A raised day and a soft-None day each leave their cause in ``failed_days`` so the
+        caller's "incomplete" error can name them."""
+        from gomoveshift.pipeline import day_pipeline
+
+        scores = _make_scores(1800)
+        file_boundaries = [(0.0, 600.0), (600.0, 1200.0), (1200.0, 1800.0)]
+
+        def _fake_run_day(day_batch, day_scores, output_dir, location, config, **kw):
+            if day_batch.date == "2026-02-21":
+                raise RuntimeError("Day 2026-02-21: LF 2 prepend concat killed (stall)")
+            if day_batch.date == "2026-02-22":
+                return None
+            return day_pipeline.DayArtifacts(
+                date=day_batch.date,
+                master_path=output_dir / f"master_{day_batch.date}.mp4",
+                regular_lf_paths=[],
+                short_paths=[],
+            )
+
+        failed: dict = {}
+        with patch(
+            "gomoveshift.pipeline.day_pipeline.run_day_pipeline",
+            side_effect=_fake_run_day,
+        ):
+            results = day_pipeline.run_all_days(
+                day_batches=self._three_batches(),
+                drive_scores=scores,
+                file_boundaries=file_boundaries,
+                output_base=tmp_path,
+                location="",
+                config=None,
+                state=make_state(),
+                failed_days=failed,
+            )
+        assert [a.date for a in results] == ["2026-02-20"]
+        assert sorted(failed) == ["2026-02-21", "2026-02-22"]
+        assert "prepend concat killed (stall)" in failed["2026-02-21"]
+        assert "no artifacts" in failed["2026-02-22"]
+
+    def test_a_day_with_no_score_bounds_records_its_cause_in_failed_days(self, tmp_path):
+        """A day whose score bounds cannot be derived is skipped; phase_bc's "incomplete" error
+        must be able to name it, not say "no cause recorded"."""
+        from gomoveshift.pipeline import day_pipeline
+
+        failed: dict = {}
+        with (
+            patch.object(day_pipeline, "_derive_day_score_bounds", return_value=None),
+            patch.object(day_pipeline, "run_day_pipeline") as run_day,
+        ):
+            results = day_pipeline.run_all_days(
+                day_batches=[
+                    _make_day_batch("2026-02-20", 1, per_ep_duration=600.0, start_index=0)
+                ],
+                drive_scores=_make_scores(600),
+                file_boundaries=[(0.0, 600.0)],
+                output_base=tmp_path,
+                location="",
+                config=None,
+                state=make_state(),
+                failed_days=failed,
+            )
+        assert results == []
+        assert run_day.call_count == 0
+        assert list(failed) == ["2026-02-20"]
+        assert "score bounds" in failed["2026-02-20"]
+
     def test_exception_with_finals_on_disk_fires_callback(self, tmp_path):
         """When day-master raises AND the day dir already has finals on
         disk (e.g. a prior partial run landed LFs + shorts), the callback

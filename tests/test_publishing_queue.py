@@ -1052,6 +1052,7 @@ def test_opening_a_pre_c1_db_adds_first_comment_columns(tmp_path):
             "first_comment_posted_at",
             "first_comment_error",
             "first_comment_attempts",
+            "first_comment_correction_attempts",
         } <= cols
         # A legacy row has no columns to be due on; must not raise.
         assert select_due_first_comments(conn, now=_NOW_25H_LATER) == []

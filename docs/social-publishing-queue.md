@@ -663,11 +663,45 @@ line per Short (`changed` / `unchanged` / `refused`, old -> new title). Local fi
 (no queue row, no platform call); the plan is re-parsed by `load_publish_plan` before it replaces
 the old file, and `reviewed_plan_hash` stays a stored field.
 
+## A replace re-render (`rebuild_replaced_sidecar`)
+
+A replace supersedes the project dir and re-renders every Short to the same output path, but the
+replace run emits no `<project>_publish_plan.json` and enqueues nothing, so queued rows pointed at
+a missing sidecar (`TransientMediaError` forever). `replace_rebuild.py::rebuild_replaced_sidecar(conn,
+*, old_sidecar, new_sidecar, project, stages_dir, now, incidents_dir=None)` reads the OLD sidecar
+from `_superseded/<at>/...` and writes the rebuilt one at the ORIGINAL path (tmp file then
+`os.replace`), so rows' `sidecar_path` resolves again with no row edit. **Rebuild, then relink:**
+every other field, `parent_lf_video_id` included, is kept; `relink_replaced_lf` rewrites it after.
+It is not wired into `replace_scheduled`; the wiring unit calls it.
+
+A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed with `review_hash`,
+`consent_hash` moved only when it equalled the old derived hash) only when: the re-render is the
+same clip (same parent LF; the stages' `shorts_ost_audit_<date>.json` window and the new media
+agree with the old duration to `DURATION_TOLERANCE_S`); the new run's privacy attestation verifies
+(`privacy_hold_reason`); `mask_frame_refusal` passes; the old hash was the derived one (a hand-set
+hash needs a human re-review); and no queued row is inside the 24 h lead time. Otherwise it is
+refused: its record keeps the OLD fingerprint (dispatch's media check then refuses the stale
+bytes, never uploads them), its rows are unchanged, and one `replace_rebuild_refused` incident
+shows in `gomoveshift status --json` (resolved when a later run swaps it).
+
+Rows of a swapped Short that are queued, unleased and have no upload id move `plan_hash` in one
+transaction with a `response_log` audit row (compare-and-set; commit, then `os.replace`; a crash
+between leaves the old file or none and a rerun converges). Leased, in-flight and uploaded rows
+are never changed and block that Short's swap; published and awaiting-manual rows are never
+changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
+
+**Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
+ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
+`delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
+(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
+error, i.e. after it uploads.
+
 ## A replaced long-form upload (`relink_replaced_lf`)
 
 Replacing a still-scheduled long-form video uploads the re-render under a NEW id and deletes the
 old one. `replace_relink.py::relink_replaced_lf(project, output_dir, id_map, *, conn, now,
-dry_run=False)` rewrites old -> new (token-bounded) and returns a `RelinkReport`. File stores
+dry_run=False)` takes `id_map = {old_id: (new_id, new_publish_at_iso_utc)}` (a bare-string value
+raises `TypeError`; a missing or unzoned time is refused) and rewrites old -> new (token-bounded) and returns a `RelinkReport`. File stores
 run first, the queue last, each in its own `try` (failures land in `report.errors`).
 
 - **Queue** `first_comment_text` freezes on POSTING state, not status (a scheduled Short is
@@ -675,12 +709,150 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   `FIRST_COMMENT_MAX_ATTEMPTS`, status not `failed_permanent` / `cancelled` / `missing_remote`,
   and no live lease (`queue.rewrite_unposted_first_comment`, a compare-and-set that also records
   the replaced text in `first_comment_prior_text`). Other rows are in `queue_skipped`; a posted
-  comment is an operator item ("comment already live, links OLD"), never edited.
+  comment is an operator item ("comment already live, links OLD"), never edited by a relink (when a
+  drain recorded it as stale, pending and under its cap the item says the drain corrects it; otherwise it says to fix it by hand).
 - **Drain guard**: both first-comment drains re-read the text right before posting and mark it
-  posted only `WHERE first_comment_text = <posted text>`; a rewrite mid-post leaves the row for
-  the next pass. YouTube's `_existing_first_comment` also accepts any prior text, so a
-  lost-response retry cannot double-post. (Meta has no read-back dedup: a mid-post rewrite there
-  can leave the old comment beside the new one.)
+  posted only `WHERE first_comment_text = <posted text>`. Both also read the post's comments
+  first and accept any prior text (`first_comment_prior_text`) as "already there" (YouTube:
+  `_scan_first_comments`; Meta: `post_graph_comment(also_accept=...)`, which raises
+  `PriorCommentLiveError` instead of posting beside it). The YouTube scan reads every bounded
+  page when a prior text exists, so a replaced text live beside the new one is seen.
+- **A stale comment is counted, filed and (YouTube) fixed.** When a replaced text is found live,
+  or a post succeeded but the text CAS missed (a relink rewrote the row mid-post, or another
+  drain already marked the row posted), the OLD comment links a deleted video.
+  `queue.record_stale_live_comment` stores the live text, marks the row posted, sets
+  `first_comment_error` to `stale comment live: links <old id>` and queues the fix in
+  `first_comment_correction` (live comment id, `edit` to the intended NEW text, or `delete` for a
+  duplicate). The drain counts it (`stale`, `first_comment_stale=N` on the summary line), adds an
+  `errors` line and files one `first_comment_stale` health incident per delivery (visible in
+  `gomoveshift status --json`). The NEXT YouTube drain (`first_comment_stale.run_corrections`,
+  before it posts) edits the comment to the intended text or deletes the duplicate, clears the
+  error and resolves the incident; a failure retries every pass, and only a platform refusal
+  counts toward `FIRST_COMMENT_MAX_ATTEMPTS`. The Meta drain runs the same corrections first
+  (`drain_meta_first_comments`): **Facebook** edits the Page's comment in place (`POST
+  /{comment-id}` `message=`; if Graph refuses the edit it deletes and reposts as Instagram
+  does), **Instagram** cannot edit a comment (the IG Comment node only hides/unhides), so
+  `replace_graph_comment` reads every bounded page, deletes the stale comment, waits for Graph
+  to confirm the delete (`success: true`), then posts the intended text unless one already
+  says it: never two comments, never a post before the delete. A stale comment already gone
+  (the post failed last pass) is only trusted when the read was complete; otherwise nothing is
+  posted. Graph: <https://developers.facebook.com/docs/graph-api/reference/comment/>,
+  <https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment>.
+- **A correction never deletes the intended comment or a stranger's.** Only our own comments are
+  edited or deleted (YouTube: `authorChannelId.value` is our channel id, read on a replaced-text
+  match; Meta: `from.id` is the Page / IG user id); with no author or no own id a replaced text
+  fails closed. The check before a post counts a comment with the current text whoever wrote it. A
+  live comment saying the row's text or a pending edit's `to` is adopted, never deleted. A row's
+  other items wait for the pass after its first failed item.
+- **Races never lose or delete the intended comment.** While a pending edit fixes a comment that
+  says the row's text, the intended texts are the edits' `to` only, so a second stale duplicate
+  gets a delete. Adopting a comment drops its own pending items and turns only the others into
+  deletes. Applying an edit or a 404 unpost matches the item's `to` too: a relink that moved it
+  mid-edit leaves it pending for the next pass. A 404 edit still runs the row's deletes. `forbidden`
+  is a scope gap when posting but a refusal for a correction; a `channels.list` scope gap is a re-auth.
+- **Own counter, own cap, never silent.** Corrections count in `first_comment_correction_attempts`;
+  a refusal (403 `forbidden`, 400 `invalidValue`) counts, only `insufficientPermissions` sets
+  `needs_reauth`. At `FIRST_COMMENT_MAX_ATTEMPTS` the drain stops, the summary line keeps
+  `first_comment_correction_capped=N` and an incident names the hand step. A 404 on a delete is
+  resolved; on an edit it unposts the row (text = the edit's `to`) so the drain posts it. A second
+  replace rewrites pending edits' `to` (a compare-and-set on the JSON).
+- **A relinked comment never links a private video (#517).** The relink rewrites
+  `parent_lf_publish_at` with `parent_lf_video_id`, and checks every queue row with the one rule
+  (`first_comment.parent_is_public_at(row slot, new_publish_at)`; an unknown or unzoned time never
+  links). An unposted row that fails drops its link (text NULL, as enqueue does) with an operator
+  item; a pending `edit` correction that fails becomes a `delete` of the live comment (and the row
+  text goes, so the delete of the intended text guard lets it run); one that passes keeps
+  `parent_at`, and `run_corrections` re-checks it before editing, so a later slot move never links
+  a private video. A posted row with no correction stays an operator item (no comment id is stored).
+  The signature is documented here because a later unit wires the caller in.
+- **Meta replace is delete-then-post, and durable.** Once the DELETE is confirmed, a refused post
+  raises `ReplacePostFailedError`; `run_corrections` returns the row to unposted with the NEW text
+  and the normal posting path (its attempts and alerts) owns the post, so a row is never left
+  posted with the OLD text. A DELETE answered "does not exist" (Graph code 100, subcode 33;
+  UNVERIFIED against Meta's docs here) counts as success. A failing correction pass is recorded in
+  `errors` and Meta posting continues. A capped correction's incident says "stopped trying", never
+  "the drain will".
+- **Only a comment positively ours is ever deleted, edited or adopted.** A comment is ours only
+  when its author is our channel id (YouTube `authorChannelId`) or Page / IG user id (Graph
+  `from.id`). Every other one, another account's or one with no author at all, comes back from
+  the scans (`_scan_first_comments`, `_existing_graph_comment`) with a
+  `first_comment.ForeignCommentId` id, after ours. It never marks a row posted and is never an
+  edit or delete target (`mark_posted`, `record_live_comment`, `record_found_comments` leave it);
+  the drain posts ours beside it (`post_beside_foreign`). A no-author copy of our text is logged
+  once per scan ("no author"). When Graph or YouTube omit the author is UNVERIFIED here.
+- **A queued delete re-reads its comment first.** `run_corrections` reads the one comment
+  (YouTube `comments.list(id=...)`, Graph `GET /{id}`, `read_comment` on the clients); one that now
+  says an intended text is a stale observation: the delete is dropped. A failed read leaves the
+  item pending and visible, never a blind delete (Graph's gone answer for the read is the same
+  UNVERIFIED code 100 / subcode 33 as above).
+- **A second copy of the current text is deleted.** `deliveries.first_comment_live_id` holds the
+  comment the drain recorded as posted. Another of our comments saying the same text queues a
+  `delete` marked `extra` and `ours`; the recorded one is never touched. On Meta the drain's
+  scan reports our second and later copies of the current text the same way (`report_duplicates`),
+  so two own copies end as one. The delete is re-read like any other (`_extra_check`): it
+  runs only on an item marked `ours`, not the recorded comment, whose fresh read still says the
+  copied text and names our own account as its author (`read_comment(...).author` against the
+  client's `own_id()`: Graph `from.id`, YouTube `authorChannelId`). An unmarked item or the
+  recorded comment is dropped quietly. A Graph "gone" answer for the read is confirmed by listing
+  the post's comments (still listed, or a cut-short listing, keeps the delete pending); a copy
+  that now says other text, or whose author is missing or not ours, is dropped with an error line
+  in the drain's errors, never silently. A row with no recorded id (older rows) deletes nothing
+  and reports the second copy once in `first_comment_error` and the drain's errors.
+- **A mismatched own id is reported.** Our own id is `page_id` (Facebook) or `ig_user_id`
+  (Instagram). A Meta comment the drain just posted is read back once; when Graph names another
+  author, or none, the drain adds an error line and keeps a `first_comment_own_id_mismatch`
+  incident open (one per delivery). The comment stays ours and is never deleted. UNVERIFIED:
+  whether Graph's `from.id` equals `page_id` / `ig_user_id` for these tokens (no URL was fetched);
+  until it is checked, an incident here means the id or the assumption is wrong, and a lost answer
+  can post a second copy because our own comment is read as a viewer's.
+- **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
+  unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
+  the row's text NULL (`first_comment_posted_at` stays set). When that delete lands the row has no
+  comment live, so `run_corrections` marks the row removed (`first_comment_removed_at`, kept
+  beside `first_comment_posted_at`), adds an error line and keeps a `first_comment_removed`
+  incident open. Restoring the text alone closes nothing: the next pass (`restore_removed`) takes
+  the row's text, or the one the plan gives it now (the backfill's `_backfill_text`), and
+  unposts the row (`unpost_removed_first_comment`), so the drain reposts it or adopts our own copy
+  (a hand re-add) through its scan; a viewer's copy is never adopted. A `first_comment_repost_failed`
+  incident then stays open until a new live id is recorded. With no text anywhere the row stays
+  removed and a hand re-add is the only way.
+- **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
+  replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
+  (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on
+  `GET /{id}` proves nothing (UNVERIFIED: the pair also covers a comment that cannot be loaded).
+  Still listed, a failed or cut-short listing, or no `object_id` raises, the delete stays pending
+  and nothing is posted or resolved. An edit answered 100/33 is never a success.
+- **A replace records the new comment.** `edit_comment` returns the id of the comment it posted
+  (Instagram, or a Facebook edit Graph refused); `resolve_first_comment_correction(new_live_id=)`
+  makes it the row's `first_comment_live_id` when the replaced one was the recorded one, so a
+  later scan never takes it for a second copy and deletes it.
+- **A private relink keeps its comment findable.** An unposted, published row relinked to a
+  video that is private at its slot loses its text, so the drain never scans it again: the report
+  carries an operator item to check the post by hand for an OLD comment. A posted row's note says
+  to re-add the comment by hand once the video is public; an unposted row's note says the drain posts
+  it by itself once the plan gives it text.
+  `id_map` values must be `(str, str)`; anything else raises `TypeError` before a write.
+- **`drop_private_edit` is a compare-and-set** on the correction JSON, retried, like
+  `rewrite_first_comment_corrections`.
+- **Zero comments live is never silent.** When an Instagram delete lands and the post fails, the
+  row is unposted, the failure counts toward `first_comment_attempts`, and a
+  `first_comment_repost_failed` incident stays open until the row is posted again (closed by the
+  next correction pass). The dispatch-queue CLI prints a drain's errors even when every counter is 0.
+- **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
+  pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
+  on the JSON) and reports the row.
+  **Listing lag**: Graph's comment list can trail a write, so a comment created whose answer was
+  lost may not be listed on the very next pass; that pass can post a second copy. The next
+  pass sees both and queues a delete for the replaced one, never the new one. The Graph scan
+  reads every bounded page when a prior text exists and, with the new text live beside a
+  replaced one, reports the replaced one (`PriorCommentLiveError.duplicates`).
+  Public `youtube_comments.post_first_comment` raises `PriorCommentLiveError` for a replaced
+  text instead of returning its id.
+  Rolling deploy: a drain still
+  running the previous code has no text CAS and no prior-text dedup, so a relink while old
+  drains run can leave a stale comment unreported; run it after the deploy settles.
+- **Lease clock**: `rewrite_unposted_first_comment` judges a lease live or expired by its own
+  clock, not the caller's `now` (which only stamps `updated_at`).
 - **`related_video_worklist_state.json`** (the dedup record) is never rewritten: the NEW
   `RELATED VIDEO` line and one `SUPERSEDED: <old> replaced by <new>` line are appended to
   `operator_checklist.txt`, and only the new line is added to the state.
@@ -691,8 +863,12 @@ run first, the queue last, each in its own `try` (failures land in `report.error
 - **`pending_journal.json`**: no "sent" flag exists (the flush removes entries), so every entry
   is rewritten, then deduped by `(journey_path, youtube_id)`. Journey files are not read; the
   report asks the operator to check each touched journey for the OLD id.
+- **Operator items**: a rewritten plan adds "re-confirm Gate C/D" (`enqueue-plan` refuses a plan
+  whose reviewed content changed since approval, `GateNotApprovedError`), and a report-only
+  query lists other projects' rows naming an old id (`queue.first_comments_naming_elsewhere`),
+  never rewriting them. The plan's compare-and-set has a small window between the sha re-check
+  and `os.replace` (the same convention as the other sidecar writers).
 
-Not done: reporting other projects' rows naming an old id, and a "re-confirm Gate C/D" note.
 The journal site, its API or KV and `/journal-photo/` files are never touched. A rerun reports
 zero changes; an empty map, empty id, old == new, or a chain raises `ValueError`. No CLI yet.
 

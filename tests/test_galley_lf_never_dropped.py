@@ -247,24 +247,40 @@ def test_resume_still_skips_a_day_with_every_planned_lf(tmp_path):
 class _Stderr:
     """Yields one progress line per ``release()``, then EOF once ``finish()``."""
 
-    def __init__(self, lines_when_done=()):
+    def __init__(self, lines_when_done=(), *, frozen=False):
         self._sem = threading.Semaphore(0)
         self._done = False
         self.emitted = 0
+        self.released = 0
+        self.calls = 0
+        self.frozen = frozen
 
     def release(self):
+        self.released += 1
         self._sem.release()
+
+    def settled(self):
+        """True once the reader has queued every released line and is blocked again."""
+        return self._done or self.calls >= self.released + 1
 
     def finish(self):
         self._done = True
         self._sem.release()
 
     def readline(self):
+        self.calls += 1
         self._sem.acquire()
         if self._done:
             return ""
         self.emitted += 1
-        return f"frame={self.emitted} fps=25 size=1024kB time=00:00:{self.emitted % 60:02d}.00\n"
+        if self.frozen:
+            # ffmpeg 7 while a muxer write blocks: frame, size and time frozen; only
+            # fps/speed vary (rr23 ff7_stall.err).
+            return f"frame=100 fps={self.emitted} size=1024kB time=00:00:04.00 speed=0.{self.emitted}x\n"
+        n = self.emitted
+        return (
+            f"frame={n} fps=25 size={n}kB time={n // 3600:02d}:{n // 60 % 60:02d}:{n % 60:02d}.00\n"
+        )
 
 
 class _Stdout:
@@ -278,9 +294,9 @@ class _Proc:
     ``progress=True`` emits one progress line per tick; ``exit_after`` ticks later it
     exits 0 (``None`` = never)."""
 
-    def __init__(self, clock, *, tick, progress, exit_after, out=None):
+    def __init__(self, clock, *, tick, progress, exit_after, out=None, frozen=False):
         self.clock, self.tick, self.progress, self.exit_after = clock, tick, progress, exit_after
-        self.stdout, self.stderr = _Stdout(), _Stderr()
+        self.stdout, self.stderr = _Stdout(), _Stderr(frozen=frozen)
         self.polls = 0
         self.returncode = None
         self.terminated = False
@@ -315,6 +331,13 @@ class _Proc:
 _real_sleep = _time.sleep
 
 
+def _await_consumed(proc):
+    """The runner's per-tick sleep: wait until the reader has queued every released line."""
+    deadline = _time.monotonic() + 5.0
+    while not proc.stderr.settled() and _time.monotonic() < deadline:
+        _real_sleep(0.001)
+
+
 class _Clock:
     def __init__(self):
         self.t = 0.0
@@ -323,9 +346,14 @@ class _Clock:
         return self.t
 
 
-def _prepend(tmp_path, proc_factory):
+_BIG_INPUT = 40 * 10**9  # sparse: a 40 GB raw LF
+
+
+def _prepend(tmp_path, proc_factory, failures=None, raw_bytes=3):
     raw = tmp_path / "raw_lf.mp4"
     raw.write_bytes(b"RAW")
+    with open(raw, "r+b") as fh:
+        fh.truncate(raw_bytes)  # sparse, costs no disk
     work = tmp_path / "work"
     work.mkdir()
     out = tmp_path / "out.mp4"
@@ -344,7 +372,7 @@ def _prepend(tmp_path, proc_factory):
         patch.object(montage_builder, "build_montage", side_effect=_build),
         patch.object(_runner, "run_ffmpeg_encode", side_effect=_with_clock),
         patch.object(_runner.subprocess, "Popen", return_value=proc),
-        patch.object(_runner.time, "sleep", side_effect=lambda _s: _real_sleep(0.01)),
+        patch.object(_runner.time, "sleep", side_effect=lambda _s: _await_consumed(proc)),
     ):
         result = montage_builder.prepend_montage(
             raw_lf_path=raw,
@@ -353,6 +381,7 @@ def _prepend(tmp_path, proc_factory):
             work_dir=work,
             master_path=tmp_path / "master.mp4",
             file_boundaries=[(0.0, 600.0)],
+            failures=failures,
         )
     return result, out, proc, clock
 
@@ -361,6 +390,7 @@ def test_concat_that_keeps_reporting_progress_past_1800s_is_not_killed(tmp_path)
     result, out, proc, clock = _prepend(
         tmp_path,
         lambda clock, out: _Proc(clock, tick=300.0, progress=True, exit_after=8, out=out),
+        raw_bytes=_BIG_INPUT,
     )
     assert clock.t > 1800.0, "the fake run must outlast the old fixed clock"
     assert proc.terminated is False
@@ -368,28 +398,66 @@ def test_concat_that_keeps_reporting_progress_past_1800s_is_not_killed(tmp_path)
     assert out.exists()
 
 
+def test_concat_still_advancing_past_the_old_size_based_ceiling_is_not_killed(tmp_path):
+    """Galley LF1 was 38,824,572,047 B: the old ceiling was 3884 s. A concat under load that
+    keeps reporting progress for 4500 s (fake clock) must finish, not be clocked out."""
+    result, out, proc, clock = _prepend(
+        tmp_path,
+        lambda clock, out: _Proc(clock, tick=300.0, progress=True, exit_after=14, out=out),
+        raw_bytes=38_824_572_047,
+    )
+    assert clock.t > 3884.0, "the fake run must outlast the old size-based ceiling"
+    assert proc.terminated is False
+    assert result == out
+
+
 def test_concat_that_stalls_is_killed_and_its_partial_output_removed(tmp_path):
+    failures: list = []
     result, out, proc, clock = _prepend(
         tmp_path,
         lambda clock, out: _Proc(clock, tick=300.0, progress=False, exit_after=None, out=out),
+        failures,
     )
     assert proc.terminated is True
     assert result is None
     assert not out.exists(), "a truncated concat must not be left on disk"
+    # The STALL rule, not the ceiling (which would also terminate and delete).
+    assert failures == [failures[0]] and "killed (stall)" in failures[0]
 
 
-def test_concat_uses_the_stall_runner_not_a_fixed_timeout(tmp_path):
-    """The command goes through run_ffmpeg_encode with its own ceiling, never a 1800 s
-    wall clock."""
+def test_concat_repeating_an_identical_stats_line_is_killed_as_a_stall(tmp_path):
+    """A frozen stats line (blocked muxer write) is a stall, not progress."""
+    failures: list = []
+    result, out, proc, clock = _prepend(
+        tmp_path,
+        lambda clock, out: _Proc(
+            clock, tick=300.0, progress=True, exit_after=None, out=out, frozen=True
+        ),
+        failures,
+        raw_bytes=_BIG_INPUT,
+    )
+    assert proc.terminated is True
+    assert result is None
+    assert not out.exists()
+    assert "killed (stall)" in failures[0]
+    assert clock.t < 86400.0, "ended by the stall rule, not the 86400 s ceiling"
+
+
+@pytest.mark.parametrize("raw_bytes", [3, _BIG_INPUT])
+def test_concat_uses_the_stall_runner_without_a_wall_clock_ceiling(tmp_path, raw_bytes):
+    """Through run_ffmpeg_encode (never run_ffmpeg_quick's fixed wall clock) and `-nostdin`,
+    and with NO `max_timeout` of its own: a size-based ceiling killed a still-advancing concat
+    on a slow volume (Galley LF1 measured ~21.6 MB/s against a 20 MB/s floor), so the runner's
+    default 24 h ceiling stands and the stall rule is the only clock."""
     raw = tmp_path / "raw_lf.mp4"
-    raw.write_bytes(b"RAW")
+    with open(raw, "wb") as fh:
+        fh.truncate(raw_bytes)
     work = tmp_path / "work"
     work.mkdir()
-    out = tmp_path / "out.mp4"
     seen: dict = {}
 
     def _encode(cmd, output_path, expected_duration, description, **kw):
-        seen.update(kw, output_path=output_path)
+        seen.update(kw, cmd=cmd)
         Path(output_path).write_bytes(b"ok")
         return SimpleNamespace(success=True, killed_reason=None, stderr_tail="")
 
@@ -406,17 +474,15 @@ def test_concat_uses_the_stall_runner_not_a_fixed_timeout(tmp_path):
         result = montage_builder.prepend_montage(
             raw_lf_path=raw,
             peaks=[SimpleNamespace(source_file_index=0, start_time=0.0, end_time=40.0)],
-            output_path=out,
+            output_path=tmp_path / "out.mp4",
             work_dir=work,
             master_path=tmp_path / "master.mp4",
             file_boundaries=[(0.0, 600.0)],
         )
-    assert result == out
+    assert result == tmp_path / "out.mp4"
     quick.assert_not_called()
-    import inspect
-
-    default = inspect.signature(_runner.run_ffmpeg_encode).parameters["max_timeout"].default
-    assert seen.get("max_timeout", default) > 1800
+    assert "max_timeout" not in seen, "the concat sets no wall-clock ceiling of its own"
+    assert "-nostdin" in seen["cmd"]
 
 
 # --- C. montage clip start: never a `-c copy` that snaps back a GOP ------------
@@ -471,3 +537,282 @@ def test_duration_validator_tolerance_is_unchanged():
     ):
         result = PipelineValidator().validate_montage_output(Path("m.mp4"), target_duration=15.0)
     assert not result.passed
+
+
+# --- D. a synthesised full_drive plan carries montage peaks ---------------------
+
+
+def _fd_synth_segments():
+    return [
+        SimpleNamespace(
+            source_file_index=i,
+            original_start_time=i * 1200.0,
+            original_end_time=(i + 1) * 1200.0,
+            composite_score=0.5,
+        )
+        for i in range(2)
+    ]
+
+
+def _fd_episodes():
+    return [SimpleNamespace(concat_path=f"/nonexistent/ep{i}.mp4") for i in range(2)]
+
+
+def _fd_peaks(scores):
+    from gomoveshift.config import DriveConfig
+
+    return day_pipeline._full_drive_montage_peaks(
+        DriveConfig(), scores, [(0.0, 1200.0), (1200.0, 2400.0)], _fd_episodes(), _SEGS
+    )
+
+
+_SEGS = _fd_synth_segments()
+
+
+def test_full_drive_peaks_come_from_the_score_pool_inside_the_plan():
+    import numpy as np
+
+    scores = _make_scores(2400)
+    scores[:, 1] = 0.2 + 0.6 * (np.sin(np.arange(2400) / 40.0) > 0)  # alternating high/low runs
+    peaks = _fd_peaks(scores)
+    assert 1 <= len(peaks) <= 6  # DriveConfig.montage_peak_count
+    assert {p.source_file_index for p in peaks} <= {0, 1}, "indices stay day-local"
+
+
+def test_full_drive_peaks_are_score_pool_windows_inside_the_plan_never_outside_it(tmp_path):
+    """The best pool window outside the plan is never chosen, and a chosen peak is a window
+    of the pool (shorter than its parent segment), not the plan segment itself."""
+    import numpy as np
+
+    from gomoveshift.config import DriveConfig
+    from gomoveshift.models import LFSegment
+    from gomoveshift.pipeline.longform_assembler import COL_COMPOSITE, COL_MOTION_ENERGY
+
+    n = 600
+    scores = np.zeros((n, 9), dtype=np.float64)
+    scores[:, 0] = np.arange(n)
+    scores[:, COL_MOTION_ENERGY] = 0.05  # above any motion floor, as the real scorer's output
+    # Exactly half the rows are high, so the pool's p50 threshold sits between low and high
+    # and only the high rows form windows.
+    scores[100:140, COL_COMPOSITE] = 0.9  # file 0, inside the plan
+    scores[140:200, COL_COMPOSITE] = 0.6
+    scores[240:300, COL_COMPOSITE] = 0.7
+    scores[390:450, COL_COMPOSITE] = 0.95  # file 1, in the gap the plan does not cover
+    scores[500:580, COL_COMPOSITE] = 0.8  # file 1, inside the plan
+    bounds = [(0.0, 300.0), (300.0, 600.0)]
+    eps = [SimpleNamespace(concat_path=str(tmp_path / f"e{i}.mp4")) for i in range(2)]
+
+    def seg(gi, start, end):
+        return LFSegment(
+            source_file_index=gi,
+            source_path=Path("/x"),
+            start_time=start - bounds[gi][0],
+            end_time=end - bounds[gi][0],
+            original_start_time=start,
+            original_end_time=end,
+            composite_score=0.3,
+            gps_center_lat=0,
+            gps_center_lon=0,
+            terrain_type="full_drive",
+            contiguous_with_previous=False,
+        )
+
+    plan = [seg(0, 0.0, 300.0), seg(1, 300.0, 380.0), seg(1, 460.0, 600.0)]
+    peaks = day_pipeline._full_drive_montage_peaks(DriveConfig(), scores, bounds, eps, plan)
+    assert peaks
+
+    def parent(p):
+        return next(
+            g
+            for g in plan
+            if g.source_file_index == p.source_file_index
+            and g.original_start_time <= p.original_start_time
+            and p.original_end_time <= g.original_end_time
+        )  # StopIteration = a peak outside every plan segment
+
+    assert not any(p.original_start_time < 450 and p.original_end_time > 390 for p in peaks)
+    assert any(
+        p.original_end_time - p.original_start_time
+        < parent(p).original_end_time - parent(p).original_start_time
+        for p in peaks
+    ), "peaks are pool windows, not the plan's own segments"
+
+
+def test_full_drive_peaks_fall_back_to_the_plans_own_segments():
+    from gomoveshift.pipeline.longform_assembler import LongFormAssembler
+
+    with patch.object(LongFormAssembler, "_build_full_drive_peak_pool", return_value=[]):
+        peaks = _fd_peaks(_make_scores(2400))
+    assert peaks and all(p in _SEGS for p in peaks), "an empty pool leaves the plan's segments"
+
+
+def test_synthesised_full_drive_day_builds_its_montage_with_the_real_prepend(tmp_path):
+    """Real ``prepend_montage`` (only ffmpeg/keycut IO faked): `montage_peaks=[]` made it return None."""
+    from test_day_pipeline_full_drive_mode import _make_config as _fd_config
+    from test_day_pipeline_full_drive_mode import _make_day_batch as _fd_batch
+
+    out = tmp_path / "out"
+    master = out / f"day_{DATE}" / f"day_{DATE}_master.mp4"
+    master.parent.mkdir(parents=True, exist_ok=True)
+    master.write_bytes(b"m")
+    clips: list = []
+
+    def _concat(files, output_path, list_file, *a, **kw):
+        _write(output_path)
+        return True
+
+    def _encode(cmd, output_path, expected_duration, description, **kw):
+        _write(output_path)
+        return SimpleNamespace(success=True, killed_reason=None, stderr_tail="", returncode=0)
+
+    with (
+        patch("gomoveshift.pipeline.day_pipeline.encode_day_master", return_value=master),
+        patch(
+            "gomoveshift.pipeline.day_pipeline.extract_and_concat_segments",
+            side_effect=lambda master_path, segments, file_boundaries, output_path, work_dir, **kw: (
+                _write(output_path)
+            ),
+        ),
+        patch(
+            "gomoveshift.pipeline.day_pipeline.apply_ost",
+            side_effect=lambda input_path, output_path, location, layout, **kw: _write(output_path),
+        ),
+        patch(
+            "gomoveshift.pipeline.day_pipeline._render_short_ffmpeg",
+            side_effect=lambda source_video, output_path, *a, **kw: bool(_write(output_path)),
+        ),
+        patch("gomoveshift.pipeline.day_pipeline.check_lf_work_space"),
+        patch("gomoveshift.pipeline.day_pipeline.plan_shorts", return_value=_SHORTS),
+        patch.object(montage_builder, "probe_keyframes", return_value=None),
+        patch.object(
+            montage_builder, "reencode_range", side_effect=lambda *a, **kw: clips.append(a) or True
+        ),
+        patch.object(montage_builder, "concat_demuxer", side_effect=_concat),
+        patch(
+            "gomoveshift.pipeline.validation.ffprobe_client.FFprobeClient.probe_duration",
+            return_value=0.0,
+        ),
+        patch.object(_runner, "run_ffmpeg_encode", side_effect=_encode),
+    ):
+        artifacts = day_pipeline.run_day_pipeline(
+            day_batch=_fd_batch(DATE, 2, per_ep_duration=1200.0),
+            day_scores=_make_scores(2400),
+            output_dir=out,
+            location="L",
+            config=_fd_config(lf_selection_mode="full_drive"),
+            lf_plans=None,
+            state=make_state(ost_audit_confirmed=True),
+        )
+    assert len(artifacts.regular_lf_paths) == 1
+    assert clips, "the montage was built from at least one peak clip"
+
+
+# --- E. montage clip cuts and every named failure cause -------------------------
+
+
+def _trim(tmp_path, keyframes, *, peak=(110.0, 140.0)):
+    master = tmp_path / "master.mp4"
+    master.write_bytes(b"fake")
+    pk = SimpleNamespace(source_file_index=0, start_time=peak[0], end_time=peak[1])
+    copy, reenc = MagicMock(return_value=True), MagicMock(return_value=True)
+    with (
+        patch.object(montage_builder, "probe_keyframes", return_value=keyframes),
+        patch.object(montage_builder, "stream_copy_range", copy),
+        patch.object(montage_builder, "reencode_range", reenc),
+    ):
+        ok = montage_builder._trim_peak_to(
+            master, pk, [(0.0, 600.0)], tmp_path / "clip.mp4", clip_duration=5.0
+        )
+    return ok, copy, reenc
+
+
+def test_a_keyframe_just_before_the_start_still_reencodes(tmp_path):
+    """Start 122.5 s, prior keyframe 121.0: `-c copy` would replay 1.5 s of pre-peak footage."""
+    ok, copy, reenc = _trim(tmp_path, [0.0, 121.0, 200.0])
+    assert ok is True
+    copy.assert_not_called()
+    reenc.assert_called_once()
+
+
+def test_both_reencode_branches_pin_the_long_form_encoder_args(tmp_path):
+    expected = montage_builder.lf_reencode_args()
+    for keyframes in (None, [0.0, 100.0, 200.0]):  # probe unavailable / none fits
+        ok, copy, reenc = _trim(tmp_path, keyframes)
+        assert ok is True
+        assert reenc.call_args.kwargs["encode_args"] == expected
+
+
+def test_no_keyframe_fits_reencode_is_logged_at_warning(tmp_path, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger=montage_builder.logger.name):
+        _trim(tmp_path, [0.0, 100.0, 200.0])
+    assert any(
+        r.levelno == logging.WARNING and "no keyframe at its start" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def _real_prepend(tmp_path, *, clip_ok=True, concat_ok=True, probe=15.0, encode=None):
+    """prepend_montage with its real build_montage; only ffmpeg/keycut/ffprobe IO is faked."""
+    raw = tmp_path / "raw_lf.mp4"
+    raw.write_bytes(b"RAW")
+    work = tmp_path / "work"
+    failures: list = []
+
+    def _concat(files, output_path, list_file, *a, **kw):
+        if concat_ok:
+            _write(output_path)
+        return concat_ok
+
+    with (
+        patch.object(montage_builder, "probe_keyframes", return_value=None),
+        patch.object(montage_builder, "reencode_range", return_value=clip_ok),
+        patch.object(montage_builder, "concat_demuxer", side_effect=_concat),
+        patch(
+            "gomoveshift.pipeline.validation.ffprobe_client.FFprobeClient.probe_duration",
+            return_value=probe,
+        ),
+        patch.object(_runner, "run_ffmpeg_encode", side_effect=encode),
+    ):
+        result = montage_builder.prepend_montage(
+            raw_lf_path=raw,
+            peaks=[SimpleNamespace(source_file_index=0, start_time=0.0, end_time=40.0)],
+            output_path=tmp_path / "out.mp4",
+            work_dir=work,
+            master_path=tmp_path / "master.mp4",
+            file_boundaries=[(0.0, 600.0)],
+            failures=failures,
+        )
+    return result, failures
+
+
+def test_a_montage_that_fails_the_duration_gate_names_why(tmp_path):
+    result, failures = _real_prepend(tmp_path, probe=16.7)
+    assert result is None
+    assert failures and "duration verification" in failures[0]
+    assert "16.7" in failures[0]
+
+
+def test_every_clip_extraction_failing_is_named(tmp_path):
+    result, failures = _real_prepend(tmp_path, clip_ok=False)
+    assert result is None
+    assert failures == ["every montage peak clip extraction failed"]
+
+
+def test_a_failed_montage_concat_is_named(tmp_path):
+    result, failures = _real_prepend(tmp_path, concat_ok=False)
+    assert result is None
+    assert failures == ["montage clip concat failed"]
+
+
+def test_a_nonzero_exit_prepend_concat_is_named_with_its_stderr(tmp_path):
+    def _encode(cmd, output_path, expected_duration, description, **kw):
+        return SimpleNamespace(
+            success=False, killed_reason=None, returncode=1, stderr_tail="Invalid data found\n"
+        )
+
+    result, failures = _real_prepend(tmp_path, encode=_encode)
+    assert result is None
+    assert len(failures) == 1
+    assert "failed (exit 1)" in failures[0] and "Invalid data found" in failures[0]

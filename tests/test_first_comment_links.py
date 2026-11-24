@@ -597,10 +597,13 @@ class _Session:
         return page
 
 
+_OWN = {"id": "1"}  # the adapters below hold page / IG user id "1": a comment is ours only by it
+
+
 def _comments(field, *texts, after=None):
     """One Graph page of comments carrying ``texts`` in ``field``; ``after``
     adds the cursor and ``next`` link Graph sends when more pages follow."""
-    body = {"data": [{"id": f"c{i}", field: text} for i, text in enumerate(texts)]}
+    body = {"data": [{"id": f"c{i}", field: text, "from": _OWN} for i, text in enumerate(texts)]}
     if after:
         body["paging"] = {"cursors": {"after": after}, "next": "https://graph.facebook.com/next"}
     return _Resp(200, body)
@@ -796,7 +799,9 @@ class _SlowGraph:
 
     def post(self, url, **kwargs):
         self.posts += 1
-        self.comments.append({"id": f"C{self.posts}", "message": kwargs["data"]["message"]})
+        self.comments.append(
+            {"id": f"C{self.posts}", "message": kwargs["data"]["message"], "from": {"id": "1"}}
+        )
         raise requests.ReadTimeout("Read timed out. (read timeout=30)")
 
     def get(self, url, **kwargs):

@@ -330,6 +330,13 @@ def _trim_peak_to(
     if not any(abs(k - clip_start) <= 1e-3 for k in keyframes):
         # No keyframe fits: `-c copy` would snap back to the prior keyframe and
         # replay pre-peak footage. Cut the centred window accurately instead.
+        # WARNING like the probe-unavailable branch: a montage quietly downgraded
+        # to a CPU re-encode (generational loss) must be visible in the drive log.
+        logger.warning(
+            "montage peak has no keyframe at its start in %s — re-encoding the "
+            "centred window instead of stream-copying (CPU, generational loss)",
+            master_path,
+        )
         return reencode_range(
             master_path,
             clip_start,
@@ -584,6 +591,7 @@ def prepend_montage(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg",
+        "-nostdin",
         "-y",
         "-f",
         "concat",
@@ -600,11 +608,18 @@ def prepend_montage(
     # Stall-detecting runner, not a fixed wall clock: a 38 GB `-c copy
     # +faststart` concat on a slow volume ran past the old `timeout=1800` while
     # still writing (Galley Head 2026-11). It is killed only when ffmpeg stops
-    # reporting progress, with the moov-rewrite window sized from the output
-    # actually on disk (`_moov_rewrite_stall_timeout`). On a stall, a non-zero
-    # exit or a start failure it deletes the partial output: a truncated concat
-    # left on disk is worse than none, since a resume would ship a half-length
-    # long-form. The failure is reported as None with its cause.
+    # making progress: a stats line that advanced, or, during the silent
+    # moov rewrite, growth of ffmpeg's own I/O counters (`_read_io_counters`),
+    # so the rewrite takes as long as the volume needs. Where those counters
+    # cannot be read the rewrite window is max(size window, 2x this run's
+    # elapsed time), which also scales with a slow volume. It passes NO
+    # `max_timeout`: the runner's default 86400 s ceiling stands, because a
+    # size-based ceiling killed a concat that was still advancing whenever the
+    # volume was slower than its assumed speed, on every retry. On a stall, a
+    # non-zero exit or a start failure it deletes the partial output: a
+    # truncated concat left on disk is worse than none, since a resume would
+    # ship a half-length long-form. The failure is reported as None with its
+    # cause.
     from .ffmpeg_runner import run_ffmpeg_encode
 
     result = run_ffmpeg_encode(
