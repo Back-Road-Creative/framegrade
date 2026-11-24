@@ -10,7 +10,12 @@ from urllib.parse import urlsplit
 
 import requests
 
-from gomoveshift.publishing.first_comment import post_graph_comment
+from gomoveshift.publishing.first_comment import (
+    delete_graph_comment,
+    edit_graph_comment,
+    post_graph_comment,
+    replace_graph_comment,
+)
 from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import graph_base_url, graph_get, graph_post
 from gomoveshift.publishing.models import FacebookPayload, ShortPublishRecord
@@ -165,6 +170,33 @@ class FacebookReelsAdapter:
             raise_for_error=_raise_for_graph_error,
             also_accept=also_accept,
         )
+
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
+        """Edit the Page's own comment in place (``POST /{comment-id}`` ``message=``). When Graph
+        refuses the edit and ``object_id`` is known, delete it and post ``text`` instead (never
+        two comments, never a post before the delete is confirmed)."""
+        kwargs = {
+            "permission": "pages_manage_engagement",
+            "raise_for_error": _raise_for_graph_error,
+        }
+        try:
+            edit_graph_comment(
+                self._session, self._base, comment_id, text, self._access_token, **kwargs
+            )
+        except FacebookPermanentError:
+            if not object_id:
+                raise
+            replace_graph_comment(
+                self._session, self._base, object_id, comment_id, text, self._access_token,
+                text_field="message", **kwargs,
+            )  # fmt: skip
+
+    def delete_comment(self, comment_id: str) -> None:
+        """Delete the Page's own comment (``DELETE /{comment-id}``)."""
+        delete_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
+        )  # fmt: skip
 
     def start_upload(self) -> UploadHandle:
         body = self._post(
