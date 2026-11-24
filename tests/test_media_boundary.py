@@ -33,6 +33,7 @@ PHASE_D_FILES: dict[str, str] = {
         "title_decision.py",
         "final_text_record.py",
         "drive_text_adapter.py",
+        "replace_scheduled.py",
     )
 }
 PHASE_D_DIRS = ("chapters/", "site_sync/")

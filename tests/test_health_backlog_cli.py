@@ -196,3 +196,15 @@ def test_failed_audits_reach_the_cron_log_and_a_launch_exits_zero(tmp_path, caps
     out = capsys.readouterr().out
     assert "failed audit ire-a: audit failed: ire-a job 1 ended failed" in out
     assert out.rstrip().endswith("launched: ire-b for slot")
+
+
+def test_replace_scheduled_reaches_run_backlog(tmp_path, wired):
+    wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
+    args = _args(tmp_path, "--supersede", "ire-a", "--reason", "x", "--replace-scheduled")
+    assert health.cmd_health(args, SimpleNamespace()) == 0
+    assert wired["replace_scheduled"] is True and callable(wired["live_status"])
+
+
+def test_replace_scheduled_needs_supersede(tmp_path):
+    with pytest.raises(SystemExit):
+        health.cmd_health(_args(tmp_path, "--replace-scheduled"), SimpleNamespace())
