@@ -1007,7 +1007,7 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
 
     A day with no blur sidecar is refused by the publish gate whatever the master holds, so it
     never keeps one. Otherwise the master goes only once the gate can measure the day without
-    it (``mask_frame_gate.can_measure_without_master``). When it cannot: the pairing check
+    it (``blur_gate.can_measure_without_master``). When it cannot: the pairing check
     ``persist_source_frames`` requires runs first (a refusal keeps the master); a proof is then
     written from the master itself; and if a stray day concat intermediate (``day_<date>_raw.mp4``,
     the file the encoder's Step 3 unlinks after the master encode) still blocks the proof, it is
@@ -1015,11 +1015,8 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
     with a WARNING naming the reason whenever the answer is still no."""
     if not (day_dir / f"day_{date}_blur_regions.json").exists():
         return True
-    from ..publishing.mask_frame_gate import (
-        can_measure_without_master,
-        persisted_source_count,
-    )
     from . import blur_gate
+    from .blur_gate import can_measure_without_master, persisted_source_count
     from .day_master_encoder import master_fingerprint
 
     if can_measure_without_master(day_dir, date):

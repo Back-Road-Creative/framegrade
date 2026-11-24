@@ -186,7 +186,10 @@ def test_unprobeable_raw_with_a_valid_proof_keeps_the_master(tmp_path, monkeypat
 def test_probeable_raw_lets_the_master_go_and_the_day_stays_measured(tmp_path, monkeypatch):
     day = _day(tmp_path)
     (day / f"day_{DATE}_raw.mp4").write_bytes(b"raw")
+    # The engine asks blur_gate.probe_frames; the gate's own name is patched too, as the day's
+    # later check reads that one.
     monkeypatch.setattr(gate, "probe_frames", lambda p: N)
+    monkeypatch.setattr(blur_gate, "probe_frames", lambda p: N)
     assert _drop(day)["dropped"] is True
     assert not is_unknown(tmp_path / "st")
 

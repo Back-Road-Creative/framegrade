@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,7 +34,18 @@ from ..health.store import (
     utc_iso,
     write_row,
 )
-from ..pipeline.blur_gate import SOURCE_FRAMES_SCHEMA, file_sha256, mask_identity
+
+# ``persisted_source_count`` lives engine-side (``cleanup`` needs it and the engine may not import
+# publishing); it and the names it reads are re-exported here so the gate's callers and tests
+# are unchanged.
+from ..pipeline.blur_gate import (  # noqa: F401
+    SOURCE_FRAMES_SCHEMA,
+    can_measure_without_master,
+    file_sha256,
+    mask_identity,
+    persisted_source_count,
+    probe_frames,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +55,6 @@ REASON_MISMATCH = "mask_frame_count_mismatch"
 #: The sidecar keeps ``source_frame_count`` in its header; no need to parse the whole file.
 _HEADER_BYTES = 4096
 _COUNT_RE = re.compile(r'"source_frame_count"\s*:\s*(\d+)')
-_PROBE_TIMEOUT_S = 180
 #: Container candidates, in order: the raw concat the detect pass read, then the master.
 _CONTAINER_NAMES = ("day_{date}_raw.mp4", "day_{date}_master.mp4")
 
@@ -65,19 +74,6 @@ def sidecar_frame_count(sidecar: Path) -> Optional[int]:
     return int(found.group(1)) if found else None
 
 
-def probe_frames(path: Path) -> Optional[int]:
-    """The video stream's container ``nb_frames`` via ffprobe, or None when unreadable."""
-    try:
-        out = subprocess.run(  # noqa: S603,S607 -- fixed argv
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=nb_frames", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S, check=True,
-        ).stdout.strip()  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return int(out) if out.isdigit() else None
-
-
 def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
     for pattern in _CONTAINER_NAMES:
         path = day_dir / pattern.format(date=date)
@@ -86,51 +82,6 @@ def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
             if count:
                 return count
     return None
-
-
-def can_measure_without_master(day_dir: Path, date: str) -> bool:
-    """True when ``day_findings`` would still measure this day with its master gone.
-
-    The one rule cleanup asks before it drops a master: the raw is a regular file that probes
-    to a positive frame count, else no raw exists at all (a present raw blocks the proof
-    fallback in ``day_findings``) and the persisted proof validates."""
-    raw = day_dir / _CONTAINER_NAMES[0].format(date=date)
-    if raw.is_file():
-        return bool(probe_frames(raw))
-    if os.path.lexists(raw):
-        return False
-    return bool(persisted_source_count(day_dir, date))
-
-
-def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
-    """The source frame count the pairing check persisted, or None unless it still vouches.
-
-    Read only when the raw and the master are both gone. The file is trusted only while the
-    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
-    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
-    None, so the day stays ``mask_frame_count_unknown``."""
-    try:
-        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
-        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
-            return None  # includes a v1 file, which named no day: fail closed
-        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
-            return None  # a proof copied from another day
-        counts = doc["counts"]
-        values = [counts["container"], counts["mask"], counts["sidecar"]]
-        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
-            return None
-        sidecar = day_dir / f"day_{date}_blur_regions.json"
-        mask = day_dir / f"day_{date}_blur_mask.mkv"
-        if not isinstance(doc.get("sidecar_sha256"), str):
-            return None
-        if doc["sidecar_sha256"] != file_sha256(sidecar):
-            return None
-        recorded = doc["mask"]
-        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
-            return None
-        return values[0]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return None
 
 
 def _has_finals(day_dir: Path) -> bool:
@@ -189,7 +140,6 @@ def _row_path(incidents_dir: Path, drive: str, date: str) -> Path:
 
 def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> None:
     """One open incident per drive-day: an existing unresolved row is left as it is."""
-    import json
 
     path = _row_path(incidents_dir, drive, row["date"])
     try:
@@ -206,7 +156,6 @@ def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> 
 
 
 def _resolve_passed(incidents_dir: Path, drive: str, failing: set, stages_dir: Path) -> None:
-    import json
 
     for day_dir in Path(stages_dir).glob("day_*"):
         date = day_dir.name[len("day_") :]

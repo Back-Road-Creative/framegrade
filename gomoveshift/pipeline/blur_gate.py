@@ -439,6 +439,68 @@ def source_frames_day(sidecar: Path) -> tuple:
     return stem.removeprefix("day_"), Path(sidecar).parent.name
 
 
+def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
+    """The source frame count the pairing check persisted, or None unless it still vouches.
+
+    Read only when the raw and the master are both gone. The file is trusted only while the
+    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
+    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
+    None, so the day stays ``mask_frame_count_unknown``."""
+    try:
+        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
+        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
+            return None  # includes a v1 file, which named no day: fail closed
+        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
+            return None  # a proof copied from another day
+        counts = doc["counts"]
+        values = [counts["container"], counts["mask"], counts["sidecar"]]
+        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
+            return None
+        sidecar = day_dir / f"day_{date}_blur_regions.json"
+        mask = day_dir / f"day_{date}_blur_mask.mkv"
+        if not isinstance(doc.get("sidecar_sha256"), str):
+            return None
+        if doc["sidecar_sha256"] != file_sha256(sidecar):
+            return None
+        recorded = doc["mask"]
+        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
+            return None
+        return values[0]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+#: ffprobe ``nb_frames`` read for the publish gate's container count.
+_FRAME_PROBE_TIMEOUT_S = 180
+
+
+def probe_frames(path: Path) -> Optional[int]:
+    """The video stream's container ``nb_frames`` via ffprobe, or None when unreadable."""
+    try:
+        out = subprocess.run(  # noqa: S603,S607 -- fixed argv
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=nb_frames", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=_FRAME_PROBE_TIMEOUT_S, check=True,
+        ).stdout.strip()  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return int(out) if out.isdigit() else None
+
+
+def can_measure_without_master(day_dir: Path, date: str) -> bool:
+    """True when the publish gate would still measure this day with its master gone.
+
+    The one rule cleanup asks before it drops a master: the raw is a regular file that probes
+    to a positive frame count, else no raw exists at all (a present raw blocks the proof
+    fallback in ``mask_frame_gate.day_findings``) and the persisted proof validates."""
+    raw = day_dir / f"day_{date}_raw.mp4"
+    if raw.is_file():
+        return bool(probe_frames(raw))
+    if os.path.lexists(raw):
+        return False
+    return bool(persisted_source_count(day_dir, date))
+
+
 def _proof_snapshot(mask: Path, sidecar: Path) -> dict:
     return {"sidecar_sha256": file_sha256(sidecar), "mask": mask_identity(mask)}
 
