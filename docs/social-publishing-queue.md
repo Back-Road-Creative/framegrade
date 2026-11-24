@@ -663,6 +663,39 @@ line per Short (`changed` / `unchanged` / `refused`, old -> new title). Local fi
 (no queue row, no platform call); the plan is re-parsed by `load_publish_plan` before it replaces
 the old file, and `reviewed_plan_hash` stays a stored field.
 
+## A replaced long-form upload (`relink_replaced_lf`)
+
+Replacing a still-scheduled long-form video uploads the re-render under a NEW id and deletes the
+old one. `replace_relink.py::relink_replaced_lf(project, output_dir, id_map, *, conn, now,
+dry_run=False)` rewrites old -> new (token-bounded) and returns a `RelinkReport`. File stores
+run first, the queue last, each in its own `try` (failures land in `report.errors`).
+
+- **Queue** `first_comment_text` freezes on POSTING state, not status (a scheduled Short is
+  `published` from upload while its comment still posts): rewritable iff unposted, under
+  `FIRST_COMMENT_MAX_ATTEMPTS`, status not `failed_permanent` / `cancelled` / `missing_remote`,
+  and no live lease (`queue.rewrite_unposted_first_comment`, a compare-and-set that also records
+  the replaced text in `first_comment_prior_text`). Other rows are in `queue_skipped`; a posted
+  comment is an operator item ("comment already live, links OLD"), never edited.
+- **Drain guard**: both first-comment drains re-read the text right before posting and mark it
+  posted only `WHERE first_comment_text = <posted text>`; a rewrite mid-post leaves the row for
+  the next pass. YouTube's `_existing_first_comment` also accepts any prior text, so a
+  lost-response retry cannot double-post. (Meta has no read-back dedup: a mid-post rewrite there
+  can leave the old comment beside the new one.)
+- **`related_video_worklist_state.json`** (the dedup record) is never rewritten: the NEW
+  `RELATED VIDEO` line and one `SUPERSEDED: <old> replaced by <new>` line are appended to
+  `operator_checklist.txt`, and only the new line is added to the state.
+- **Publish plan**: only `parent_lf_video_id` and ids in a URL context (`youtu.be/<id>`,
+  `watch?v=<id>`, `/shorts/<id>`) change, never a media path. The bytes' sha is rechecked before
+  `os.replace` (`SidecarChangedError`) and the new bytes pass `load_publish_plan` first;
+  `reviewed_plan_hash` is not recomputed.
+- **`pending_journal.json`**: no "sent" flag exists (the flush removes entries), so every entry
+  is rewritten, then deduped by `(journey_path, youtube_id)`. Journey files are not read; the
+  report asks the operator to check each touched journey for the OLD id.
+
+Not done: reporting other projects' rows naming an old id, and a "re-confirm Gate C/D" note.
+The journal site, its API or KV and `/journal-photo/` files are never touched. A rerun reports
+zero changes; an empty map, empty id, old == new, or a chain raises `ValueError`. No CLI yet.
+
 ## Validate problems gate enqueue and dispatch
 
 A `publishing-status --validate` problem used to be a report nobody had to
