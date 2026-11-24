@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.148] - 2026-11-24
+
+### Added
+
+- `rebuild_replaced_sidecar`: a replace re-render rebuilds the shorts plan onto the new media (fresh
+  fingerprint, recomputed plan hash moved on queued rows) behind the identity, privacy and mask-frame
+  checks, or holds the Short with a `replace_rebuild_refused` incident in `status --json`. Not wired
+  into `replace_scheduled` yet; rebuild, then relink.
+- A delivery stuck on `TransientMediaError` past the backoff ceiling opens a
+  `delivery_media_stalled` incident; it keeps retrying and the incident closes after it uploads.
+
 ## [0.3.147] - 2026-11-24
 
 ### Fixed
@@ -1728,7 +1739,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.147...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.148...HEAD
+[0.3.148]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.147...v0.3.148
 [0.3.147]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.146...v0.3.147
 [0.3.146]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.145...v0.3.146
 [0.3.145]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.144...v0.3.145
