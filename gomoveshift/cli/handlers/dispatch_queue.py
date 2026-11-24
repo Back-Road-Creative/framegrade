@@ -577,13 +577,14 @@ def cmd_dispatch_queue(args, config) -> int:
             )
             if any(
                 (fc_result.posted, fc_result.failed, fc_result.needs_reauth)
-                + (fc_result.stale, fc_result.corrected)
+                + (fc_result.stale, fc_result.corrected, fc_result.correction_capped)
             ):
                 print(
                     f"first_comment: posted={fc_result.posted} failed={fc_result.failed}"
                     + (" needs_reauth=1" if fc_result.needs_reauth else "")
                     + (f" stale={fc_result.stale}" if fc_result.stale else "")
                     + (f" corrected={fc_result.corrected}" if fc_result.corrected else "")
+                    + (f" correction_capped={n}" if (n := fc_result.correction_capped) else "")
                 )
                 for err in fc_result.errors:
                     print(f"  error: {err}")
@@ -601,13 +602,14 @@ def cmd_dispatch_queue(args, config) -> int:
             mc_result = drain_meta_first_comments(conn, adapter_factories=meta_factories)
             if any(
                 (mc_result.posted, mc_result.failed, mc_result.needs_reauth)
-                + (mc_result.stale, mc_result.corrected)
+                + (mc_result.stale, mc_result.corrected, mc_result.correction_capped)
             ):
                 print(
                     f"first_comment: posted={mc_result.posted} failed={mc_result.failed}"
                     + (" needs_reauth=1" if mc_result.needs_reauth else "")
                     + (f" stale={mc_result.stale}" if mc_result.stale else "")
                     + (f" corrected={mc_result.corrected}" if mc_result.corrected else "")
+                    + (f" correction_capped={n}" if (n := mc_result.correction_capped) else "")
                 )
                 for err in mc_result.errors:
                     print(f"  error: {err}")
@@ -652,6 +654,7 @@ def cmd_dispatch_queue(args, config) -> int:
         fc_reauth = ",".join(who for who, r in comment_results if r.needs_reauth)
         fc_stale = sum(r.stale for _, r in comment_results)
         fc_corrected = sum(r.corrected for _, r in comment_results)
+        fc_capped = sum(r.correction_capped for _, r in comment_results)
         print(
             f"\nattempted={result.attempted} succeeded={result.succeeded} "
             f"retried={result.retried} failed_permanent={result.failed_permanent} "
@@ -688,6 +691,7 @@ def cmd_dispatch_queue(args, config) -> int:
             + (f" first_comment_needs_reauth={fc_reauth}" if fc_reauth else "")
             + (f" first_comment_stale={fc_stale}" if fc_stale else "")
             + (f" first_comment_corrected={fc_corrected}" if fc_corrected else "")
+            + (f" first_comment_correction_capped={fc_capped}" if fc_capped else "")
             # TikTok pack sweep: its own lines never reach the cron log, so a
             # drive that is offline would read like a healthy idle hour.
             + (f" tiktok_packed={pack_counts['packed']}" if pack_counts["packed"] else "")

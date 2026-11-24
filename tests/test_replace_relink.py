@@ -364,9 +364,14 @@ def test_a_live_comment_left_by_a_mid_post_rewrite_is_an_operator_item(conn, tmp
     # The drain recorded the OLD text as live (posted) with the stale error; relink reports it.
     did = _row(conn, 1, posted="2026-11-22T11:00:00+00:00")
     conn.execute(
-        "UPDATE deliveries SET first_comment_error=? WHERE id=?",
-        (f"stale comment live: links {OLD}", did),
-    )
+        "UPDATE deliveries SET first_comment_error=?, first_comment_correction=? WHERE id=?",
+        (
+            f"stale comment live: links {OLD}",
+            json.dumps([{"live_id": "c1", "live_text": _comment(OLD), "action": "edit",
+                         "to": _comment(NEW)}]),
+            did,
+        ),
+    )  # fmt: skip
     conn.commit()
     report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
     assert _text(conn, did) == _comment(OLD)
@@ -385,6 +390,8 @@ def test_a_posted_comment_with_no_stale_note_is_still_a_hand_fix(conn, tmp_path)
 def test_a_rewritten_published_row_is_listed_for_the_drain_to_verify(conn, tmp_path):
     queued = _row(conn, 1)
     published = _row(conn, 2, status="published", platform="instagram")
+    conn.execute("UPDATE deliveries SET platform_post_id='media1' WHERE id=?", (published,))
+    conn.commit()
     report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
     (note,) = report.drain_will_verify
     assert f"delivery {published}" in note and "drain" in note

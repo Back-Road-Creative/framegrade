@@ -110,6 +110,15 @@ def _graph_body(response, permission: str, raise_for_error: Callable[[int, dict]
     return body
 
 
+def _author_id(comment: dict) -> str:
+    author = comment.get("from")
+    return str(author.get("id") or "") if isinstance(author, dict) else ""
+
+
+def _own_id_unknown(object_id: str) -> CommentCheckError:
+    return CommentCheckError(f"comment check for {object_id}: our own account id is unknown")
+
+
 def _read_graph_comments(
     session,
     base: str,
@@ -119,18 +128,21 @@ def _read_graph_comments(
     text_field: str,
     permission: str,
     raise_for_error: Callable[[int, dict], None],
-    stop: Optional[Callable[[List[Tuple[str, str]]], bool]] = None,
-) -> Tuple[List[Tuple[str, str]], bool]:
-    """``(comments, complete)``: ``(id, text)`` of the comments on ``object_id`` (text stripped),
-    reading up to ``COMMENT_CHECK_MAX_PAGES`` pages, or fewer once ``stop(comments)`` holds.
+    own_id: str = "",
+    stop: Optional[Callable[[List[Tuple[str, str, bool]]], bool]] = None,
+) -> Tuple[List[Tuple[str, str, bool]], bool]:
+    """``(comments, complete)``: ``(id, text, ours)`` of the comments on ``object_id`` (text
+    stripped); ``ours`` only when ``from.id`` is ``own_id``, the Page or IG user (a comment with
+    no ``from``, or no ``own_id``, is never ours). Reads up to ``COMMENT_CHECK_MAX_PAGES``
+    pages, or fewer once ``stop(comments)`` holds.
     ``complete`` is ``True`` only when the last page was reached. A failed read raises like a
     failed post: the caller must never post on a check that did not finish."""
     # The token rides in a header, never in ``params``: ``requests`` puts
     # params into the URL, and a ConnectionError's message embeds that URL
     # and ends up in the row's ``first_comment_error``.
     headers = {"Authorization": f"OAuth {access_token}"}
-    params = {"fields": f"id,{text_field}", "limit": _COMMENT_PAGE_SIZE}
-    found: List[Tuple[str, str]] = []
+    params = {"fields": f"id,{text_field},from", "limit": _COMMENT_PAGE_SIZE}
+    found: List[Tuple[str, str, bool]] = []
     for _ in range(COMMENT_CHECK_MAX_PAGES):
         response = session.get(
             f"{base}/{object_id}/comments", params=params, headers=headers, timeout=30
@@ -146,7 +158,8 @@ def _read_graph_comments(
         for comment in body["data"]:
             if isinstance(comment, dict):
                 said = str(comment.get(text_field) or "").strip()
-                found.append((str(comment.get("id") or ""), said))
+                ours = bool(own_id) and _author_id(comment) == own_id
+                found.append((str(comment.get("id") or ""), said, ours))
         paging = body.get("paging") or {}
         after = (paging.get("cursors") or {}).get("after")
         if not paging.get("next") or not after:
@@ -173,17 +186,19 @@ def _existing_graph_comment(
     permission: str,
     raise_for_error: Callable[[int, dict], None],
     also_accept: Iterable[str] = (),
+    own_id: str = "",
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
     """``(current, prior)``: ``(comment id, the text it says)`` of every comment on
-    ``object_id`` whose ``text_field`` is exactly ``text`` (``current``), or one of
-    ``also_accept``, the texts a relink replaced (``prior``) -- whitespace-trimmed. Without
-    ``also_accept`` the scan stops at the first match; with it every bounded page is read so
-    a replaced text live beside the new one is seen. A failed read raises."""
+    ``object_id`` whose ``text_field`` is exactly ``text`` (``current``, whoever wrote it, ours
+    first), or OUR comment saying one of ``also_accept``, the texts a relink replaced (``prior``;
+    only these may be edited or deleted) -- whitespace-trimmed. Without ``also_accept`` the scan
+    stops at the first match; with it every bounded page is read, and a replaced text with no
+    ``own_id`` to attribute it raises ``CommentCheckError``. A failed read raises."""
     wanted = {text.strip(): text}
     prior_texts = {t.strip(): t for t in also_accept}
 
     def done(found):
-        return not prior_texts and any(said in wanted for _, said in found)
+        return not prior_texts and any(said in wanted for _, said, _ in found)
 
     comments, _ = _read_graph_comments(
         session,
@@ -193,13 +208,17 @@ def _existing_graph_comment(
         text_field=text_field,
         permission=permission,
         raise_for_error=raise_for_error,
+        own_id=own_id,
         stop=done,
     )
-    current = [(cid, wanted[said]) for cid, said in comments if said in wanted]
+    if not own_id and any(said in prior_texts and said not in wanted for _, said, _ in comments):
+        raise _own_id_unknown(object_id)
+    hits = [(c, wanted[s], o) for c, s, o in comments if s in wanted]
+    current = [(c, s) for c, s, o in hits if o] + [(c, s) for c, s, o in hits if not o]
     prior = [
         (cid, prior_texts[said])
-        for cid, said in comments
-        if said in prior_texts and said not in wanted
+        for cid, said, ours in comments
+        if ours and said in prior_texts and said not in wanted
     ]
     return current, prior
 
@@ -215,6 +234,7 @@ def post_graph_comment(
     permission: str,
     raise_for_error: Callable[[int, dict], None],
     also_accept: Iterable[str] = (),
+    own_id: str = "",
 ) -> str:
     """POST ``{base}/{object_id}/comments``; returns the new comment id.
 
@@ -240,6 +260,7 @@ def post_graph_comment(
         permission=permission,
         raise_for_error=raise_for_error,
         also_accept=also_accept,
+        own_id=own_id,
     )
     if prior:
         # The new text's comment is the one to keep; with none, the first replaced one stands in
@@ -310,6 +331,7 @@ def replace_graph_comment(
     text_field: str,
     permission: str,
     raise_for_error: Callable[[int, dict], None],
+    own_id: str = "",
 ) -> str:
     """Replace comment ``stale_id`` on ``object_id`` with ``text`` where a comment cannot be
     edited (Instagram): never two comments, never a post before the delete is confirmed.
@@ -318,6 +340,8 @@ def replace_graph_comment(
     ``success`` raises). Not listed: it is gone (an earlier pass deleted it and the post
     failed), but only when the read was complete, else ``CommentCheckError``. Then post ``text``
     unless a comment already says it. Returns the id of the comment that says ``text``."""
+    if not own_id:
+        raise _own_id_unknown(object_id)
     comments, complete = _read_graph_comments(
         session,
         base,
@@ -326,8 +350,9 @@ def replace_graph_comment(
         text_field=text_field,
         permission=permission,
         raise_for_error=raise_for_error,
+        own_id=own_id,
     )
-    if any(cid == stale_id for cid, _ in comments):
+    if any(cid == stale_id and ours for cid, _, ours in comments):
         delete_graph_comment(
             session, base, stale_id, access_token,
             permission=permission, raise_for_error=raise_for_error,
@@ -340,4 +365,5 @@ def replace_graph_comment(
     return post_graph_comment(
         session, base, object_id, text, access_token,
         text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+        own_id=own_id,
     )  # fmt: skip

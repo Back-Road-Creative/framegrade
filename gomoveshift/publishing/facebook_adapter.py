@@ -169,6 +169,7 @@ class FacebookReelsAdapter:
             permission="pages_manage_engagement",
             raise_for_error=_raise_for_graph_error,
             also_accept=also_accept,
+            own_id=self._page_id,
         )
 
     def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
@@ -188,7 +189,7 @@ class FacebookReelsAdapter:
                 raise
             replace_graph_comment(
                 self._session, self._base, object_id, comment_id, text, self._access_token,
-                text_field="message", **kwargs,
+                text_field="message", own_id=self._page_id, **kwargs,
             )  # fmt: skip
 
     def delete_comment(self, comment_id: str) -> None:

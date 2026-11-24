@@ -676,11 +676,11 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   and no live lease (`queue.rewrite_unposted_first_comment`, a compare-and-set that also records
   the replaced text in `first_comment_prior_text`). Other rows are in `queue_skipped`; a posted
   comment is an operator item ("comment already live, links OLD"), never edited by a relink (when a
-  drain recorded it as stale the item says the drain corrects it).
+  drain recorded it as stale, pending and under its cap the item says the drain corrects it; otherwise it says to fix it by hand).
 - **Drain guard**: both first-comment drains re-read the text right before posting and mark it
   posted only `WHERE first_comment_text = <posted text>`. Both also read the post's comments
   first and accept any prior text (`first_comment_prior_text`) as "already there" (YouTube:
-  `_find_first_comment`; Meta: `post_graph_comment(also_accept=...)`, which raises
+  `_scan_first_comments`; Meta: `post_graph_comment(also_accept=...)`, which raises
   `PriorCommentLiveError` instead of posting beside it). The YouTube scan reads every bounded
   page when a prior text exists, so a replaced text live beside the new one is seen.
 - **A stale comment is counted, filed and (YouTube) fixed.** When a replaced text is found live,
@@ -704,6 +704,18 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   (the post failed last pass) is only trusted when the read was complete; otherwise nothing is
   posted. Graph: <https://developers.facebook.com/docs/graph-api/reference/comment/>,
   <https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-comment>.
+- **A correction never deletes the intended comment or a stranger's.** Only our own comments are
+  edited or deleted (YouTube: `authorChannelId.value` is our channel id, read on a replaced-text
+  match; Meta: `from.id` is the Page / IG user id); with no author or no own id a replaced text
+  fails closed. The check before a post counts a comment with the current text whoever wrote it. A
+  live comment saying the row's text or a pending edit's `to` is adopted, never deleted. A row's
+  other items wait for the pass after its first failed item.
+- **Own counter, own cap, never silent.** Corrections count in `first_comment_correction_attempts`;
+  a refusal (403 `forbidden`, 400 `invalidValue`) counts, only `insufficientPermissions` sets
+  `needs_reauth`. At `FIRST_COMMENT_MAX_ATTEMPTS` the drain stops, the summary line keeps
+  `first_comment_correction_capped=N` and an incident names the hand step. A 404 on a delete is
+  resolved; on an edit it unposts the row (text = the edit's `to`) so the drain posts it. A second
+  replace rewrites pending edits' `to` (a compare-and-set on the JSON).
   **Listing lag**: Graph's comment list can trail a write, so a comment created whose answer was
   lost may not be listed on the very next pass; that pass can post a second copy. The next
   pass sees both and queues a delete for the replaced one, never the new one. The Graph scan

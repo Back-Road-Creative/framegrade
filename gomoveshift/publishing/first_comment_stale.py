@@ -11,17 +11,22 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from .queue import (
+    FIRST_COMMENT_MAX_ATTEMPTS,
+    capped_first_comment_corrections,
     fail_first_comment_correction,
     first_comment_correction_ids,
     first_comment_corrections,
+    first_comment_intended_texts,
     pending_first_comment_corrections,
     registered_platform_id,
     resolve_first_comment_correction,
+    unpost_first_comment_for_repost,
 )
 
 logger = logging.getLogger(__name__)
 
 KIND = "first_comment_stale"
+CAPPED_KIND = "first_comment_correction_capped"
 _DETAIL_MAX = 500
 
 
@@ -40,8 +45,8 @@ def _target(row: Any) -> Optional[str]:
     )
 
 
-def _key(delivery_id: int) -> str:
-    return f"{KIND}:{delivery_id}"
+def _key(delivery_id: int, kind: str = KIND) -> str:
+    return f"{kind}:{delivery_id}"
 
 
 def _describe(row: Any) -> str:
@@ -57,10 +62,29 @@ def _describe(row: Any) -> str:
     )[:_DETAIL_MAX]
 
 
+def _describe_capped(row: Any) -> str:
+    return (
+        f"{row['platform']}#{row['id']} {row['project_name']} short {row['short_index']}: the "
+        f"stale-comment correction was refused {FIRST_COMMENT_MAX_ATTEMPTS} times; the drain "
+        "stopped. Fix it by hand: delete or edit the old comment so only the intended one "
+        f"({row['first_comment_text']!r}) is live, then clear first_comment_correction. Pending: "
+        + "; ".join(
+            f"{i.get('action')} comment {i.get('live_id') or '?'}"
+            for i in first_comment_corrections(row)
+        )
+    )[:_DETAIL_MAX]
+
+
 def raise_stale_incident(
-    conn: sqlite3.Connection, delivery_id: int, incidents_dir: Optional[Path] = None
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    incidents_dir: Optional[Path] = None,
+    *,
+    capped: bool = False,
 ) -> None:
-    """File (or refresh) the one open incident for ``delivery_id``. Never fatal."""
+    """File (or refresh) the one open incident for ``delivery_id`` (``capped``: the hand-step
+    one). Never fatal."""
+    kind = CAPPED_KIND if capped else KIND
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -71,26 +95,30 @@ def raise_stale_incident(
 
     row = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_error, "
-        "first_comment_correction FROM deliveries WHERE id=?",
+        "first_comment_text, first_comment_correction FROM deliveries WHERE id=?",
         (delivery_id,),
     ).fetchone()
     if row is None or not first_comment_corrections(row):
         return
     directory = incidents_dir or default_incidents_dir(default_data_root())
-    filename = f"{safe_name(_key(delivery_id))}.json"
-    detail = _describe(row)
+    filename = f"{safe_name(_key(delivery_id, kind))}.json"
+    detail = _describe_capped(row) if capped else _describe(row)
     try:
         path = directory / filename
         prior = json.loads(path.read_text()) if path.is_file() else None
         if isinstance(prior, dict) and not prior.get("resolved_at"):
-            prior.update(detail=detail, error=row["first_comment_error"])
+            prior.update(
+                detail=detail,
+                error=row["first_comment_error"],
+                live_comments=first_comment_corrections(row),
+            )
             write_row(directory, prior)
             return
         write_row(
             directory,
             new_incident(
-                KIND,
-                _key(delivery_id),
+                kind,
+                _key(delivery_id, kind),
                 filename,
                 _now_iso(),
                 delivery_id=delivery_id,
@@ -108,9 +136,12 @@ def raise_stale_incident(
 
 
 def _resolve_incidents(
-    platforms: Iterable[str], still_pending: set, incidents_dir: Optional[Path]
+    platforms: Iterable[str],
+    still_pending: set,
+    incidents_dir: Optional[Path],
+    kind: str = KIND,
 ) -> None:
-    """Resolve open incidents of ``platforms`` whose delivery has no correction left."""
+    """Resolve open ``kind`` incidents of ``platforms`` whose delivery is not in ``still_pending``."""
     from ..health.store import default_data_root, default_incidents_dir, load_all, write_row
 
     wanted = set(platforms)
@@ -119,7 +150,7 @@ def _resolve_incidents(
         rows, _ = load_all(directory)
         for row in rows:
             if (
-                row.get("kind") == KIND
+                row.get("kind") == kind
                 and not row.get("resolved_at")
                 and row.get("platform") in wanted
                 and row.get("delivery_id") not in still_pending
@@ -138,15 +169,24 @@ def run_corrections(
     refused: Callable[[Exception], bool],
     result: Any,
     incidents_dir: Optional[Path] = None,
+    gone: Optional[Callable[[Exception], bool]] = None,
 ) -> None:
     """Apply every pending correction through ``client_for(platform)`` (built lazily; has
     ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id)``; ``object_id`` is the
-    post the comment is on, for a platform that can only replace a comment). ``result`` gains ``corrected`` per fix
-    and ``stale`` plus an error line per failure; ``refused(exc)`` counts toward the cap."""
+    post the comment is on, for a platform that can only replace a comment). ``result`` gains
+    ``corrected`` per fix and ``stale`` plus an error line per failure; ``refused(exc)`` counts
+    toward the correction cap. After a row's first failure its other items wait for the next
+    pass. ``gone(exc)`` is "comment not found": a delete is then done, an edit unposts the row.
+    A delete of the row's intended text is never run. A capped row is counted in
+    ``result.correction_capped`` and gets the capped incident every pass."""
     platforms = tuple(platforms)
-    _resolve_incidents(platforms, first_comment_correction_ids(conn, platforms), incidents_dir)
+    _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
+        keep = first_comment_intended_texts(row)
         for item in first_comment_corrections(row):
+            if item.get("action") == "delete" and (item.get("live_text") or "").strip() in keep:
+                resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                continue
             try:
                 client = client_for(row["platform"])
                 call = getattr(client, f"{item.get('action')}_comment", None)
@@ -160,6 +200,13 @@ def run_corrections(
                 else:
                     call(item["live_id"])
             except Exception as exc:  # noqa: BLE001 -- graded per correction
+                if gone is not None and gone(exc):
+                    if item.get("action") == "edit":
+                        unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())
+                        break
+                    resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                    result.corrected += 1
+                    continue
                 detail = str(exc).strip() or exc.__class__.__name__
                 fail_first_comment_correction(
                     conn,
@@ -173,7 +220,20 @@ def run_corrections(
                     "first comment: delivery %s correction failed: %s", row["id"], detail
                 )
                 raise_stale_incident(conn, row["id"], incidents_dir)
-                continue
+                break
             resolve_first_comment_correction(conn, row["id"], item, _now_iso())
             result.corrected += 1
-    _resolve_incidents(platforms, first_comment_correction_ids(conn, platforms), incidents_dir)
+    capped = capped_first_comment_corrections(conn, platforms)
+    result.correction_capped += len(capped)
+    for row in capped:
+        raise_stale_incident(conn, row["id"], incidents_dir, capped=True)
+    _resolve_all(conn, platforms, incidents_dir)
+
+
+def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:
+    """Stale incidents close once a row has no correction left or is capped; capped ones close
+    once it is not."""
+    capped = {r["id"] for r in capped_first_comment_corrections(conn, platforms)}
+    pending = first_comment_correction_ids(conn, platforms) - capped
+    _resolve_incidents(platforms, pending, incidents_dir)
+    _resolve_incidents(platforms, capped, incidents_dir, CAPPED_KIND)
