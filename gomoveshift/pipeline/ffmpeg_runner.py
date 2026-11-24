@@ -162,17 +162,55 @@ def _stall_kill_reason(
 
 
 # ffmpeg prints nothing while +faststart shifts the whole file to put the moov
-# atom first, so the stall window for that phase must cover the file's size. A
-# 118 GB day master on /mnt/c rewrote at ~52 MB/s (~38 min) and was killed by a
-# flat 1800s window; 20 MB/s leaves room for a slower disk.
+# atom first, so the stats-line stall clock cannot see that phase. The runner
+# times it by the ffmpeg child's own I/O instead: ``/proc/<pid>/io`` ``rchar`` +
+# ``wchar`` (bytes passed through read()/write()) grow for as long as the rewrite
+# is moving bytes, on any volume speed, and growth resets the stall clock exactly
+# like an advancing stats line. (Measured for a file-to-file ``-c copy
+# -movflags +faststart``: both counters climb through the rewrite pass;
+# ``read_bytes``/``write_bytes`` do not, they count page-cache misses and writeback.)
+# A rewrite whose counters stop is killed after MOOV_REWRITE_MIN_STALL_S.
+#
+# Where the counters cannot be read (non-Linux, permission error) the window is
+# the larger of the size-based window and twice the run's elapsed time so far:
+# the rewrite moves the bytes the copy pass just wrote, so a slow volume scales
+# with itself. The size-based term is a floor for a fast volume only; it is not a
+# speed assumption (a 118 GB day master rewrote at ~52 MB/s on /mnt/c, and the
+# Galley Head 38.8 GB LF copied at ~21.6 MB/s, below a fixed 20 MB/s floor's
+# headroom on the rewrite).
 MOOV_REWRITE_MIN_STALL_S = 1800
 MOOV_REWRITE_MIN_BYTES_PER_SEC = 20_000_000
 
 
 def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> int:
-    """Stall window for the silent moov rewrite of an *output_size_bytes* file."""
+    """Size-based stall window for the silent moov rewrite of an *output_size_bytes* file."""
     by_size = -(-output_size_bytes // MOOV_REWRITE_MIN_BYTES_PER_SEC)
     return max(stall_timeout, MOOV_REWRITE_MIN_STALL_S, by_size)
+
+
+def _moov_rewrite_fallback_timeout(
+    output_size_bytes: int, stall_timeout: int, elapsed_s: float
+) -> int:
+    """Window when ffmpeg's I/O counters are unreadable: it scales with this run's own speed."""
+    return max(
+        _moov_rewrite_stall_timeout(output_size_bytes, stall_timeout), int(2 * max(elapsed_s, 0.0))
+    )
+
+
+def _read_io_counters(pid, proc_root: str = "/proc") -> Optional[int]:
+    """``rchar + wchar`` of process *pid*, or None when ``<proc_root>/<pid>/io`` is unreadable.
+
+    None covers non-Linux, a permission error, an exited process and unparseable content:
+    the caller then falls back to the elapsed-time window rather than guessing.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    try:
+        with open(f"{proc_root}/{pid}/io") as fh:
+            fields = dict(line.split(":", 1) for line in fh.read().splitlines() if ":" in line)
+        return int(fields["rchar"]) + int(fields["wchar"])
+    except (OSError, ValueError, KeyError):
+        return None
 
 
 _STATS_TIME_RE = re.compile(r"time=\s*(\S+)")
@@ -186,9 +224,11 @@ def _stats_progress_advanced(line: str, last: Optional[tuple]) -> tuple[bool, Op
 
     ffmpeg 7 re-prints an identical stats line (frame, size and time frozen; only
     fps/speed/elapsed vary) while a muxer write blocks, so a line counts as progress only
-    when its ``time=`` or ``size=`` grew; with neither parseable (``size=N/A time=N/A``
-    until the first packet is muxed), when its ``frame=`` grew, and with no ``frame=`` either,
-    when its raw tokens differ.
+    when its ``time=`` or ``size=`` grew. ffmpeg 7 writing to a file prints
+    ``frame=    0 ... size=       0KiB time=N/A`` until the first packet is muxed: ``size=0KiB``
+    parses, so that line is judged by ``size=``. Only a line with neither parseable (pipe and
+    other non-seekable outputs print ``size=N/A time=N/A``) falls back to ``frame=`` growth,
+    and with no ``frame=`` either, to its raw tokens differing.
     """
     t_m, s_m = _STATS_TIME_RE.search(line), _STATS_SIZE_RE.search(line)
     secs = _parse_time_to_seconds(t_m.group(1)) if t_m else None
@@ -255,6 +295,8 @@ def run_ffmpeg_encode(
     in_moov_rewrite = False
     last_counted_stats: Optional[tuple] = None
     effective_stall_timeout = stall_timeout
+    io_mode = False  # in a moov rewrite: True = follow the child's I/O counters
+    last_io_total: Optional[int] = None
 
     logger.info(f"  {description}: starting (stall={stall_timeout}s, max={max_timeout}s)")
 
@@ -290,6 +332,24 @@ def run_ffmpeg_encode(
     try:
         while True:
             now = time_source()
+
+            if in_moov_rewrite and io_mode:
+                io_total = _read_io_counters(getattr(proc, "pid", None))
+                if io_total is None:
+                    io_mode = False
+                    effective_stall_timeout = _moov_rewrite_fallback_timeout(
+                        _output_size(output_path), stall_timeout, now - start_time
+                    )
+                    logger.warning(
+                        "⚠ ffmpeg_runner: %s: ffmpeg's I/O counters became unreadable during the "
+                        "moov rewrite; stall window is now %ss (max of the size window and 2x "
+                        "elapsed)",
+                        description,
+                        effective_stall_timeout,
+                    )
+                elif last_io_total is None or io_total > last_io_total:
+                    last_io_total = io_total
+                    last_progress_time = now
 
             kill_reason = _stall_kill_reason(
                 now, start_time, last_progress_time, max_timeout, effective_stall_timeout
@@ -346,24 +406,37 @@ def run_ffmpeg_encode(
                 if "Starting second pass" in line or "moving the moov atom" in line.lower():
                     if not in_moov_rewrite:
                         in_moov_rewrite = True
-                        # Extend stall timeout during moov rewrite — no frame progress
-                        try:
-                            output_size = output_path.stat().st_size
-                        except OSError:
-                            output_size = 0
-                        effective_stall_timeout = _moov_rewrite_stall_timeout(
-                            output_size, stall_timeout
-                        )
-                        logger.warning(
-                            "⚠ ffmpeg_runner: %s: moov atom rewrite phase detected "
-                            "(trigger='Starting second pass' / 'moving the moov atom'); "
-                            "extending stall timeout from %ss to %ss for a %.1f GB "
-                            "output — stall detection is suppressed during this window",
-                            description,
-                            stall_timeout,
-                            effective_stall_timeout,
-                            output_size / 1e9,
-                        )
+                        output_size = _output_size(output_path)
+                        last_io_total = _read_io_counters(getattr(proc, "pid", None))
+                        io_mode = last_io_total is not None
+                        if io_mode:
+                            effective_stall_timeout = max(stall_timeout, MOOV_REWRITE_MIN_STALL_S)
+                            logger.warning(
+                                "⚠ ffmpeg_runner: %s: moov atom rewrite phase detected "
+                                "(trigger='Starting second pass' / 'moving the moov atom'); the "
+                                "stall clock now follows ffmpeg's own I/O counters "
+                                "(/proc/%s/io rchar+wchar): any growth counts as progress, "
+                                "none for %ss kills it, for a %.1f GB output",
+                                description,
+                                proc.pid,
+                                effective_stall_timeout,
+                                output_size / 1e9,
+                            )
+                        else:
+                            effective_stall_timeout = _moov_rewrite_fallback_timeout(
+                                output_size, stall_timeout, now - start_time
+                            )
+                            logger.warning(
+                                "⚠ ffmpeg_runner: %s: moov atom rewrite phase detected "
+                                "(trigger='Starting second pass' / 'moving the moov atom') and "
+                                "ffmpeg's I/O counters are unreadable: stall window falls back "
+                                "to %ss = max(size window, 2x the %.0fs this run has taken so "
+                                "far) for a %.1f GB output",
+                                description,
+                                effective_stall_timeout,
+                                now - start_time,
+                                output_size / 1e9,
+                            )
 
                 # Parse progress lines
                 # ffmpeg outputs: frame= 1234 fps= 142 ... time=00:45:30.00 ... speed=1.2x
@@ -378,6 +451,7 @@ def run_ffmpeg_encode(
                     # Reset moov rewrite stall extension once we see frame progress again
                     if in_moov_rewrite and "frame=" in line:
                         in_moov_rewrite = False
+                        io_mode = False
                         effective_stall_timeout = stall_timeout
 
                     # Parse time
@@ -486,6 +560,13 @@ def run_ffmpeg_encode(
         last_speed=last_speed,
         stdout=captured_stdout,
     )
+
+
+def _output_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def run_ffmpeg_retry_enomem(

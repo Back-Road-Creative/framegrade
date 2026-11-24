@@ -880,6 +880,33 @@ class TestRunAllDaysCrashRecovery:
         assert "prepend concat killed (stall)" in failed["2026-02-21"]
         assert "no artifacts" in failed["2026-02-22"]
 
+    def test_a_day_with_no_score_bounds_records_its_cause_in_failed_days(self, tmp_path):
+        """A day whose score bounds cannot be derived is skipped; phase_bc's "incomplete" error
+        must be able to name it, not say "no cause recorded"."""
+        from gomoveshift.pipeline import day_pipeline
+
+        failed: dict = {}
+        with (
+            patch.object(day_pipeline, "_derive_day_score_bounds", return_value=None),
+            patch.object(day_pipeline, "run_day_pipeline") as run_day,
+        ):
+            results = day_pipeline.run_all_days(
+                day_batches=[
+                    _make_day_batch("2026-02-20", 1, per_ep_duration=600.0, start_index=0)
+                ],
+                drive_scores=_make_scores(600),
+                file_boundaries=[(0.0, 600.0)],
+                output_base=tmp_path,
+                location="",
+                config=None,
+                state=make_state(),
+                failed_days=failed,
+            )
+        assert results == []
+        assert run_day.call_count == 0
+        assert list(failed) == ["2026-02-20"]
+        assert "score bounds" in failed["2026-02-20"]
+
     def test_exception_with_finals_on_disk_fires_callback(self, tmp_path):
         """When day-master raises AND the day dir already has finals on
         disk (e.g. a prior partial run landed LFs + shorts), the callback
