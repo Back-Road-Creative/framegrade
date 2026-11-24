@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.147] - 2026-11-24
+
+### Fixed
+
+- A queued second-copy delete is never dropped silently: a Graph "gone" answer on its re-read is
+  confirmed by listing the post (still listed keeps it pending); a copy that now says other text,
+  or whose author is missing or not our account, is dropped with an error line.
+- The comment a Meta drain just posted is read back; an author other than our own id raises a
+  `first_comment_own_id_mismatch` incident and an error line, and the comment is never deleted.
+  Whether Graph's `from.id` equals `page_id` / `ig_user_id` is unverified.
+- `read_comment` returns the author too (`.author`), and the extra delete requires it to equal our
+  own account id (`own_id()` on all three clients).
+
 ## [0.3.146] - 2026-11-24
 
 ### Fixed
@@ -1715,7 +1728,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.146...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.147...HEAD
+[0.3.147]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.146...v0.3.147
 [0.3.146]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.145...v0.3.146
 [0.3.145]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.144...v0.3.145
 [0.3.144]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.143...v0.3.144
