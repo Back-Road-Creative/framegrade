@@ -78,6 +78,17 @@ def _plan_manifests(*, state, **_kwargs):
     return dict(state.upload_manifests or {}), None
 
 
+def _assert_replace_finished(output_base: Path) -> None:
+    """A plan run is not a success while a plan LF is neither ``done`` nor ``abandoned``: open a
+    ``replace_scheduled_partial`` incident and raise, so the next entry resumes it."""
+    left = replace_scheduled.unfinished_lfs(replace_scheduled.load_plan(output_base))
+    if not left:
+        return
+    detail = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
+    replace_scheduled.record_incident(Path(output_base).name, "unfinished", f"Phase D ended with replaced LFs not done: {detail}")  # fmt: skip
+    raise RuntimeError(f"REPLACE-UNFINISHED: replaced LFs not done ({detail}); see the replace_scheduled_partial incident")  # fmt: skip
+
+
 def _claim_native_only() -> bool:
     """The brand MediaProfile's ``claim_native_resolution_only`` (strict ``True`` if unloadable)."""
     from ...console.settings import current_brand
@@ -1421,10 +1432,8 @@ class PhaseD:
         # Under a ``--replace-scheduled`` plan the kept (public) LFs go back into
         # ``state.youtube_uploads`` FIRST, so the schedule below is built around them.
         replace_plan = replace_scheduled.load_plan(output_base)
-        replace_lfs: set = set()
         if replace_plan:
             replace_scheduled.apply_kept(state, replace_plan)
-            replace_lfs = set(replace_scheduled.replace_map(replace_plan))
         rebase_info = _maybe_rebase_drive_schedule(state, output_base)
         drive_schedule = _build_and_persist_drive_schedule(
             scheduler_cls=PipelineScheduler,
@@ -1693,7 +1702,9 @@ class PhaseD:
             yt=yt,
             # Under a plan only the replacement videos get one; a kept public video is not touched.
             youtube_uploads=(
-                {k: v for k, v in youtube_uploads.items() if k in replace_lfs}
+                replace_scheduled.thumbnail_targets(
+                    replace_scheduled.load_plan(output_base), youtube_uploads
+                )
                 if replace_plan
                 else youtube_uploads
             ),
@@ -1751,7 +1762,11 @@ class PhaseD:
         # into ``assert_phase_d_title_quality``, not here.
         from ..quality_gates import assert_phase_d_quality
 
-        assert_phase_d_quality(state, drive_plan, consolidated_csv_path)
+        if replace_plan:
+            _assert_replace_finished(output_base)
+        assert_phase_d_quality(
+            state, drive_plan, consolidated_csv_path, replace_plan=bool(replace_plan)
+        )
 
 
 def _partition_shorts_slots(

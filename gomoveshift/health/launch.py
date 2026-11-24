@@ -702,6 +702,37 @@ def _supersede(project, reason, moves, now, plan=None, out_dir=None) -> None:
         replace_scheduled_mod.write_plan(Path(out_dir), plan)
 
 
+def _unsupersede(moves, out_dir, now) -> str:
+    """Undo ``_supersede``'s renames after a refusal: whatever fresh dir the failed attempt left
+    (the replace plan, empty dirs) is removed, or set aside under ``SUPERSEDED_DIR`` when it holds
+    anything else; the old dir goes back and loses its ``SUPERSEDE_RECORD``. Returns what could
+    not be restored (``""`` when everything was)."""
+    stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    failed = []
+    for move in reversed(moves):
+        src, dst = Path(move["from"]), Path(move["to"])
+        try:
+            if src.exists():
+                plan_file = src / replace_scheduled_mod.REPLACE_PLAN_FILENAME
+                plan_file.unlink(missing_ok=True)
+                try:
+                    for d in sorted((p for p in src.rglob("*") if p.is_dir()), reverse=True):
+                        d.rmdir()
+                    src.rmdir()
+                except OSError:  # the attempt left real files: keep them, beside the old run
+                    aside = dst.with_name(f"{dst.name}-failed-attempt-{stamp}")
+                    src.rename(aside)
+            dst.rename(src)
+            (src / SUPERSEDE_RECORD).unlink(missing_ok=True)
+            try:
+                dst.parent.rmdir()  # ``SUPERSEDED_DIR`` itself, once empty
+            except OSError:
+                pass
+        except OSError as exc:
+            failed.append(f"{src}: {exc}")
+    return "; ".join(failed)
+
+
 def _hold_recipes(stages_root: Path, project: str, reason: str, dry_run: bool) -> List[str]:
     """``no-auto-resume`` beside each of a given-up drive's unheld resume recipes, so ``health
     heal`` never re-resumes it on a later mirror SHA; the stage dirs held (dry run: would be)."""
@@ -1147,10 +1178,12 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         cand_status, cand_known = status, known
         if own and replace is not None:  # the drive's own upload bookings are what is replaced
             held = status.get(cand.project)
-            if held == "claimed":  # register_ready refuses to reopen it, and so does Waypost
-                why = f"the schedule store row is {held}; only Waypost can reopen it"
+            if (
+                held != "complete"
+            ):  # only Waypost's reopen can replace booked slots; never ``register``
+                why = f"the schedule store row is {held or 'absent'}, not complete; --replace-scheduled replaces a complete drive's bookings, and only Waypost can reopen it"  # fmt: skip
                 return {**res, "action": "refused", "reason": f"cannot supersede {target}: {why}"}
-            reopen = held == "complete"  # needs a replace plan: checked once the plan is known
+            reopen = True  # needs a replace plan: checked once the plan is known
             cand_status = {k: v for k, v in status.items() if k != cand.project}
             cand_known = known - {cand.project, cand.project.strip().lower()}
         why = _skip_reason(cand, cand_status, cand_known, mine_staged, stages_root, own_ok=own)
@@ -1229,13 +1262,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         run_origin.LAUNCHED_BY_ENV: run_origin.BACKLOG_LAUNCHER,
     }
     res.update(argv=argv, env=env, stages_dir=str(stages_dir))
-    if dry_run:
-        return {**res, "action": "would_launch", "reason": f"{row.project} for {res['slot']}"}
-    stale = stale_pin_reason(python, installed_version, latest_version)
-    if stale:
-        return {**res, "action": "refused", "reason": stale}
     store, reopen_kw = None, {}
-    if reopen:  # before any rename: ask Waypost whether it would reopen the row
+    if (
+        reopen
+    ):  # before any rename (and in a dry run too): ask Waypost whether it would reopen the row
         plan = replace["plan"]
         expected, replaced = plan_lfs(plan)
         reopen_kw = dict(expected=expected, replace=replaced, reason=supersede[1],
@@ -1248,25 +1278,44 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         why = store.reopen_for_replace(row.project, plan_digest=plan_digest(plan), dry_run=True, **reopen_kw)  # fmt: skip
         if why:
             return {**res, "action": "refused", "reason": f"cannot supersede {target}: Waypost will not reopen it: {why}"}  # fmt: skip
+    if dry_run:
+        return {**res, "action": "would_launch", "reason": f"{row.project} for {res['slot']}"}
+    stale = stale_pin_reason(python, installed_version, latest_version)
+    if stale:
+        return {**res, "action": "refused", "reason": stale}
+    planned = (replace or {}).get("plan")
     if supersede:
-        _supersede(row.project, supersede[1], res["supersede"]["moves"], now,
-                   (replace or {}).get("plan"), out_dir)  # fmt: skip
+        _supersede(row.project, supersede[1], res["supersede"]["moves"], now, planned, out_dir)
+
+    def refuse(reason):
+        """A refusal after the renames: put the drive back so a retry starts from the same state
+        (a replace retry needs the old ``youtube_uploads.json`` to build its plan again)."""
+        if planned:
+            failed = _unsupersede(res["supersede"]["moves"], out_dir, now)
+            if failed:
+                replace_scheduled_mod.record_incident(row.project, "restore_failed", f"{reason}; the set-aside run could not be put back: {failed}")  # fmt: skip
+                reason = f"{reason}; could not restore the set-aside run (see the replace_scheduled_partial incident): {failed}"  # fmt: skip
+        return {**res, "action": "refused", "reason": reason}
+
     try:
         preflight(
             subset, out_dir, staging_dir=stages_dir, ingest_mode=row.ingest_mode, python=python
         )
     except PreflightBlockedError as exc:
-        return {**res, "action": "refused", "reason": str(exc)}
+        return refuse(str(exc))
     ok, detail = launcher(argv, str(Path(code_root) / SERVICE_DIR), env)
     if not ok:
-        return {**res, "action": "refused", "reason": f"launch failed: {detail}"}
+        return refuse(f"launch failed: {detail}")
     if reopen:  # register_ready raises on a complete row: Waypost's own reopen replaces it
+        reopen_kw["now"] = datetime.now(timezone.utc)  # not the tick's start: the launch took time
         why = store.reopen_for_replace(
             row.project, plan_digest=plan_digest(replace["plan"], out_dir), dry_run=False, **reopen_kw
         )  # fmt: skip
-        if why:
+        if why:  # the audit is already running on the fresh dirs: they stay, a human reopens it
             logger.error("REPLACE-REOPEN-REFUSED: %s: %s (stages already set aside, audit launched)", row.project, why)  # fmt: skip
-            return {**res, "action": "refused", "reason": f"launched the audit but Waypost refused to reopen {row.project}: {why}"}  # fmt: skip
+            msg = f"launched the audit but Waypost refused to reopen {row.project}: {why}"
+            replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"{msg}; the store row is still complete and the replace plan is in {out_dir}")  # fmt: skip
+            return {**res, "action": "refused", "reason": msg}
     else:
         register(
             project=row.project, region=region, lf_count=1, status="auditing",

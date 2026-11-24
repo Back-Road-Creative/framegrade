@@ -55,6 +55,7 @@ class Rig:
         self.supersede = None
         self.replace_scheduled = False
         self.live = None  # replace_scheduled: video ids -> {id: state}
+        self.replace_store = None  # replace_scheduled: a fake Waypost store
         self.gate_reason = None
         self.gates: list = []
         self.publish_result = None  # set -> run_backlog gets a publisher returning it
@@ -111,6 +112,7 @@ class Rig:
             latest_version=lambda: self.latest,
             **({"supersede": self.supersede} if self.supersede else {}),
             **({"replace_scheduled": True, "live_status": self.live} if self.replace_scheduled else {}),
+            **({"replace_store": lambda: self.replace_store} if self.replace_store else {}),
             **({"publish": self.publish} if self.publish_result else {}),
             **({"failed_relaunch": self.relaunch} if self.relaunch else {}),
         )  # fmt: skip
@@ -1932,6 +1934,9 @@ def _replace_rig(tmp_path, uploads, live=None, flag=True):
     rig.supersede = ("day-a", "blur mask was wrong")
     rig.replace_scheduled = flag
     rig.live = live or (lambda ids: {i: "scheduled" for i in ids})
+    if flag:
+        rig.drives.append(drive("day-a", "complete"))  # M3: only a complete row is replaced
+        rig.replace_store = ReopenStore(rig)
     return rig
 
 
@@ -1993,22 +1998,28 @@ def test_replace_unreadable_file_refuses(tmp_path):
 
 
 class ReopenStore:
-    """A fake Waypost store: records each ``reopen_for_replace`` and what the disk looked like."""
+    """A fake Waypost store: records each ``reopen_for_replace`` and what the disk looked like.
+    The parameter list is Waypost's own (``ScheduleStore.reopen_for_replace``, waypost PR #117):
+    an unknown keyword raises ``TypeError`` here exactly as it would there."""
 
     def __init__(self, rig, refuse_dry=None, refuse_real=None):
         self.rig, self.refuse_dry, self.refuse_real, self.calls = rig, refuse_dry, refuse_real, []
 
-    def reopen_for_replace(self, project, **kw):
+    def reopen_for_replace(
+        self, project, *, expected, replace, plan_digest, reason, output_dir, now,
+        margin_h=6.0, dry_run=False,
+    ):  # fmt: skip
         stage_present = (self.rig.stages / project).is_dir()
-        self.calls.append({"project": project, "stage_present": stage_present, **kw})
-        return self.refuse_dry if kw["dry_run"] else self.refuse_real
+        self.calls.append({"project": project, "stage_present": stage_present, "expected": expected,
+                           "replace": replace, "plan_digest": plan_digest, "reason": reason,
+                           "output_dir": output_dir, "now": now, "margin_h": margin_h,
+                           "dry_run": dry_run})  # fmt: skip
+        return self.refuse_dry if dry_run else self.refuse_real
 
 
 def _complete_run(rig, store):
-    rig.drives.append(drive("day-a", "complete"))
-    kw = rig.kwargs()
-    kw["replace_store"] = lambda: store
-    return launch.run_backlog(**kw)
+    rig.replace_store = store
+    return rig.run()
 
 
 def _three_lfs():
@@ -2032,7 +2043,8 @@ def test_complete_row_dry_runs_the_reopen_before_any_rename_then_reopens_for_rea
         assert call["replace"] == {2, 3}
         assert call["plan_digest"] == hashlib.sha256(plan_file.read_bytes()).hexdigest()
         assert call["reason"] == "blur mask was wrong"
-        assert call["output_dir"] == str(rig.out / "day-a") and call["now"] == NOW
+        assert call["output_dir"] == str(rig.out / "day-a")
+    assert dry["now"] == NOW and real["now"] > NOW  # the real reopen re-reads the clock
 
 
 def test_a_dry_run_refusal_moves_nothing_and_never_registers(tmp_path):
@@ -2058,11 +2070,9 @@ def test_a_refused_real_reopen_fails_loudly_and_never_registers(tmp_path, caplog
 
 def test_a_claimed_row_is_still_refused_under_replace(tmp_path):
     rig = _replace_rig(tmp_path, _three_lfs())
-    rig.drives.append(drive("day-a", "claimed"))
-    store = ReopenStore(rig)
-    kw = rig.kwargs()
-    kw["replace_store"] = lambda: store
-    res = launch.run_backlog(**kw)
+    rig.drives[:] = [drive("day-a", "claimed")]
+    store = rig.replace_store
+    res = rig.run()
     assert res["action"] == "refused" and "claimed" in res["reason"], res
     assert not store.calls and (rig.stages / "day-a").is_dir()
 
@@ -2081,3 +2091,114 @@ def test_a_store_without_reopen_for_replace_is_refused_before_any_rename(tmp_pat
     assert res["action"] == "refused" and "reopen_for_replace" in res["reason"], res
     assert "repin" in res["reason"]
     assert (rig.stages / "day-a").is_dir() and not rig.launches and rig.registered == []
+
+
+# --replace-scheduled review fixes: M2 (a refusal after the renames is undone), M3 (only a
+# ``complete`` row), m2 (fresh clock), m3 (dry run asks Waypost), m5 (incidents).
+
+
+def _replace_incidents():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    return [r for r in rows if r.get("kind") == "replace_scheduled_partial"]
+
+
+def _untouched(rig):
+    """The drive exactly as before the attempt: stages, output, receipt, no leftovers."""
+    assert (rig.stages / "day-a").is_dir() and (rig.out / "day-a" / "shorts" / "s01.mp4").is_file()
+    held = json.loads((rig.out / "day-a" / "youtube_uploads.json").read_text())
+    assert held and not (rig.out / "day-a" / "replace_plan.json").exists()
+    assert not (rig.out / "day-a" / launch.SUPERSEDE_RECORD).exists()
+    assert not list((rig.stages / "day-a").rglob(launch.SUPERSEDE_RECORD))
+    for root in (rig.stages, rig.out):
+        assert not (root / launch.SUPERSEDED_DIR).exists() or not any(
+            (root / launch.SUPERSEDED_DIR).iterdir()
+        )
+
+
+@pytest.mark.parametrize("how", ["preflight", "launcher"])
+def test_a_refusal_after_the_renames_restores_the_drive_so_a_retry_can_plan(tmp_path, how):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    if how == "preflight":
+        rig.preflight_error = PreflightBlockedError([("storage", "no space")])
+    else:
+        rig.launch_ok = False
+    res = rig.run()
+    assert res["action"] == "refused", res
+    _untouched(rig)
+    assert rig.registered == [] and [c["dry_run"] for c in rig.replace_store.calls] == [True]
+    rig.preflight_error, rig.launch_ok = None, True  # the blocker is fixed: the retry plans again
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert (rig.out / "day-a" / "replace_plan.json").is_file()
+
+
+def test_a_restore_that_cannot_finish_opens_an_incident(tmp_path, monkeypatch):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.launch_ok = False
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if SUPERSEDED_MARK in str(self) and "_stages" not in str(self):
+            raise OSError("device busy")
+        return real_rename(self, target)
+
+    SUPERSEDED_MARK = launch.SUPERSEDED_DIR
+    monkeypatch.setattr(Path, "rename", rename)
+    res = rig.run()
+    assert res["action"] == "refused" and "restore" in res["reason"], res
+    (row,) = _replace_incidents()
+    assert row["drive"] == "day-a" and not row["resolved_at"] and "device busy" in row["error"]
+
+
+@pytest.mark.parametrize("status", ["ready", "auditing", "failed", None])
+def test_replace_needs_the_drives_own_store_row_complete(tmp_path, status):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.drives[:] = [drive("day-a", status)] if status else []
+    res = rig.run()
+    assert res["action"] != "launched" and not rig.launches and not rig.replace_store.calls, res
+    _untouched(rig)
+    if status in ("ready", None):
+        assert res["action"] == "refused" and "complete" in res["reason"], res
+
+
+def test_a_refused_real_reopen_opens_an_incident_and_the_launched_run_is_left_alone(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = ReopenStore(rig, refuse_real="drifted")
+    res = rig.run()
+    assert res["action"] == "refused" and "drifted" in res["reason"], res
+    assert len(rig.launches) == 1 and (rig.out / launch.SUPERSEDED_DIR).is_dir()  # audit running
+    (row,) = _replace_incidents()
+    assert row["drive"] == "day-a" and "drifted" in row["error"] and not row["resolved_at"]
+
+
+def test_the_real_reopen_gets_a_fresh_clock(tmp_path, monkeypatch):
+    later = NOW + timedelta(minutes=47)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return later
+
+    monkeypatch.setattr(launch, "datetime", Clock)
+    rig = _replace_rig(tmp_path, _three_lfs())
+    assert rig.run()["action"] == "launched"
+    dry, real = rig.replace_store.calls
+    assert dry["now"] == NOW and real["now"] == later
+
+
+def test_a_dry_run_asks_waypost_and_reports_its_refusal(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
+    res = rig.run(dry_run=True)
+    assert res["action"] == "refused" and "LF2 is not booked as expected" in res["reason"], res
+    _untouched(rig)
+
+
+def test_a_dry_run_that_waypost_accepts_would_launch_and_writes_nothing(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    res = rig.run(dry_run=True)
+    assert res["action"] == "would_launch", res
+    assert [c["dry_run"] for c in rig.replace_store.calls] == [True]
+    _untouched(rig)

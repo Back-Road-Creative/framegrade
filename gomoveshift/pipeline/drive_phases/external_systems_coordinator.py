@@ -844,7 +844,7 @@ def resume_replacements(yt, *, plan_dir, state, config, save_state, project_base
     old_by_lf = replace_scheduled.replace_map(plan)
     for lf, prog in sorted(replace_scheduled.progress_map(plan).items()):
         st, old = prog.get("state"), old_by_lf.get(lf)
-        if old is None or st in (replace_scheduled.DONE, replace_scheduled.ABANDONED):
+        if old is None or st in (replace_scheduled.DONE, replace_scheduled.ABANDONED, replace_scheduled.SLOT_PASSED):  # fmt: skip
             continue
         if st == replace_scheduled.PENDING:
             rec = (state.youtube_uploads or {}).get(lf) or {}
@@ -881,22 +881,33 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
         return
     if not meta or not meta.get("title"):
         raise ValueError(f"LF {lf.index}: no gated metadata in metadata_per_lf for the replacement")
+    # The NEW render's gated title and its own decision: ``require_title_decision`` runs unchanged
+    # (the old title is not the decided one, so it can never pass). Both titles go in the plan.
     metadata = dict(meta)
-    if old.get("title_decision"):  # the decision the old title shipped under
-        metadata["title_decision"] = old["title_decision"]
+    replace_scheduled.set_progress(plan_dir, lf.index, old_title=old.get("title"), new_title=meta["title"])  # fmt: skip
+
+    def _persist_new() -> None:
+        """Runs the moment ``videos.insert`` returns: the new id reaches the plan before anything
+        else can fail, so a crash cannot orphan a private copy."""
+        save_state(state)
+        vid = ((state.youtube_uploads or {}).get(lf.index) or {}).get("video_id")
+        if vid and vid != old["video_id"]:
+            replace_scheduled.set_progress(plan_dir, lf.index, new_id=vid, state=replace_scheduled.UPLOADED)  # fmt: skip
+
     try:
         record = _upload_lf_to_youtube(
-            yt=yt, state=state, lf=lf, lf_path=lf_path, title=old.get("title") or meta["title"],
+            yt=yt, state=state, lf=lf, lf_path=lf_path, title=meta["title"],
             description=meta.get("description", ""), tags=meta.get("tags", []), publish_at=None,
             metadata=metadata,
             config=None,  # no playlist now: it is filed later from the OLD record
-            persist=lambda: save_state(state),
+            persist=_persist_new,
         )  # fmt: skip
     except (TitleDecisionMismatchError, TitleDecisionMissingError) as exc:
         logger.error(
-            "REPLACE-TITLE-GATE lf=%s: the title gate refused the old title %r (%s); the LF stays "
-            "pending and the old video %s is untouched", lf.index, old.get("title"), exc, old["video_id"],
+            "REPLACE-TITLE-GATE lf=%s: the title gate refused the new title %r (%s); the LF stays "
+            "pending and the old video %s is untouched", lf.index, meta["title"], exc, old["video_id"],
         )  # fmt: skip
+        replace_scheduled.record_incident(plan_dir.name, "title_gate", f"LF {lf.index}: the title gate refused the new title {meta['title']!r} ({exc}); old {old['video_id']} untouched, LF pending", lf=lf.index)  # fmt: skip
         return
     except YouTubeQuotaError:
         save_state(state)
@@ -905,6 +916,7 @@ def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, 
     new = record or (state.youtube_uploads or {}).get(lf.index) or {}
     if not new.get("video_id") or new["video_id"] == old["video_id"]:
         logger.error("REPLACE-NOT-UPLOADED lf=%s: nothing was inserted; old %s untouched", lf.index, old["video_id"])  # fmt: skip
+        replace_scheduled.record_incident(plan_dir.name, "not_uploaded", f"LF {lf.index}: nothing was inserted; old {old['video_id']} untouched, LF pending", lf=lf.index)  # fmt: skip
         return
     replace_scheduled.set_progress(plan_dir, lf.index, new_id=new["video_id"], state=replace_scheduled.UPLOADED)  # fmt: skip
     _replace_advance(
@@ -983,41 +995,56 @@ def _upload_lfs_to_youtube(
         replace_old = replace_scheduled.replace_map(replace_plan)
         replace_scheduled.init_progress(replace_plan_dir)
 
+    def _open_uploader():
+        logger.info("  D-upload-lfs: Uploading LFs to YouTube...")
+        try:
+            YouTubeUploader = _resolve_youtube_uploader_class()  # noqa: N806
+        except Exception as e:
+            raise RuntimeError(
+                "YouTubeUploader not available — install google-api-python-client "
+                f"or check imports: {e}"
+            ) from e
+        uploader = YouTubeUploader()
+        operator_checklist_path = output_base / "operator_checklist.txt"
+        uploader.set_operator_checklist_path(operator_checklist_path)
+        logger.info(
+            "  D-upload-lfs: operator end-screen checklist → %s "
+            "(open each link in Studio Editor, doc-only sidecar)",
+            operator_checklist_path,
+        )
+        return uploader
+
     # Refuse before the FIRST upload of a batch this run cannot
     # complete within the configured daily quota, rather than discovering
     # the same ceiling as a mid-batch HTTP 403 (see ``YouTubeQuotaError``
     # for the resume story — this raise is caught the same way).
-    pending_inserts = _pending_youtube_insert_count(
-        drive_plan=drive_plan,
-        youtube_uploads=youtube_uploads,
-        state=state,
-        output_base=output_base,
-    )
-    _refuse_if_over_youtube_quota_budget(pending_inserts=pending_inserts, config=config)
-
-    logger.info("  D-upload-lfs: Uploading LFs to YouTube...")
-    try:
-        YouTubeUploader = _resolve_youtube_uploader_class()  # noqa: N806
-    except Exception as e:
-        raise RuntimeError(
-            "YouTubeUploader not available — install google-api-python-client "
-            f"or check imports: {e}"
-        ) from e
-
-    yt = YouTubeUploader()
-    operator_checklist_path = output_base / "operator_checklist.txt"
-    yt.set_operator_checklist_path(operator_checklist_path)
-    logger.info(
-        "  D-upload-lfs: operator end-screen checklist → %s "
-        "(open each link in Studio Editor, doc-only sidecar)",
-        operator_checklist_path,
-    )
-
-    if replace_plan:  # before any upload: finish what a previous entry left half done
+    yt = None
+    if replace_plan:
+        # Finish what a previous entry left half done BEFORE the budget check (it inserts
+        # nothing); the projection then counts only the plan LFs still to be inserted.
+        yt = _open_uploader()
         resume_replacements(
             yt, plan_dir=replace_plan_dir, state=state, config=config, save_state=save_state,
             project_base=project_base, metadata_per_lf=metadata_per_lf, clock=clock,
         )  # fmt: skip
+        progress = replace_scheduled.progress_map(replace_scheduled.load_plan(replace_plan_dir))
+        pending_inserts = sum(
+            1
+            for lf in drive_plan.regular_lfs
+            if lf.index in replace_old
+            and lf.index not in replace_kept
+            and progress.get(lf.index, {}).get("state") == replace_scheduled.PENDING
+        )
+    else:
+        pending_inserts = _pending_youtube_insert_count(
+            drive_plan=drive_plan,
+            youtube_uploads=youtube_uploads,
+            state=state,
+            output_base=output_base,
+        )
+    _refuse_if_over_youtube_quota_budget(pending_inserts=pending_inserts, config=config)
+    if yt is None:
+        yt = _open_uploader()
 
     for i, (lf, lf_path) in enumerate(zip(drive_plan.regular_lfs, regular_lf_paths)):
         if replace_plan:

@@ -28,6 +28,7 @@ from seo_manager.scheduling.claim import Claim, claim_or_reason
 from seo_manager.scheduling.store import SlotTaken, StaleDrive
 
 from .. import run_origin
+from ..pipeline.replace_scheduled import record_incident, unfinished
 from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
@@ -250,7 +251,15 @@ def reconcile_publishes(
         if state in (None, "running"):
             continue
         ok = uploaded(d.output_dir)
-        done.append({"project": d.project, "status": store.finish_claim(d.claim_id, ok=ok)})
+        row = {"project": d.project, "status": store.finish_claim(d.claim_id, ok=ok)}
+        left = unfinished(read_replace_plan(Path(d.output_dir))) if ok and d.output_dir else {}
+        if (
+            left
+        ):  # kept receipts close the claim, but a replace that did not finish is not a clean one
+            why = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
+            row["partial"] = f"replace not finished: {why}"
+            record_incident(d.project, "partial_finish", f"claim closed {row['status']} on kept receipts but {row['partial']}")  # fmt: skip
+        done.append(row)
     return done + retire_uploaded(store)
 
 
