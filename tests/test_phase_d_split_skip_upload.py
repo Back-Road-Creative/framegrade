@@ -434,3 +434,46 @@ def test_quality_gate_honours_skip_drive_upload():
         "with skip_drive_upload=False AND empty manifests, the check must report "
         "missing LFs (sanity-check on the negative path)"
     )
+
+
+class TestReplacePlanSuppression:
+    """Under a ``--replace-scheduled`` plan Phase D touches only the replaced LFs."""
+
+    def test_a_plan_run_makes_no_shorts_csv_sidecar_or_kept_lf_thumbnail(
+        self, tmp_path, monkeypatch
+    ):
+        from datetime import timezone
+
+        from gomoveshift.pipeline import replace_scheduled as rs
+
+        state = _build_state(tmp_path, num_lfs=2)
+        out = Path(state["output_base"])
+        at2 = datetime(2026, 11, 27, 19, 0, tzinfo=timezone.utc).isoformat()
+        kept = {"video_id": "pub1", "title": "Kept", "publish_at": "2026-11-20T19:00:00+00:00"}
+        old2 = {"video_id": "old2", "title": "Old 2", "publish_at": at2, "playlist_id": "PL1"}
+        rs.write_plan(
+            out, {"schema": rs.REPLACE_PLAN_SCHEMA, "kept": {"1": kept}, "replace": {"2": old2}}
+        )
+        rs.init_progress(out)
+        rs.set_progress(out, 2, state=rs.DONE, new_id="new2")  # finished by an earlier entry
+        state["youtube_uploads"] = {2: {"video_id": "new2", "title": "Old 2", "publish_at": at2}}
+        state["skip_csv"] = False
+        state["upload_manifests"] = {1: {"s.mp4": "u1"}, 2: {"s.mp4": "u2"}}  # the first run's
+        (out / "thumbnails").mkdir()
+        for n in (1, 2):
+            (out / "thumbnails" / f"lf_{n:02d}.jpg").write_bytes(b"jpg")
+
+        with (
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_d._emit_publish_plan_sidecar"
+            ) as sidecar,
+            patch("gomoveshift.pipeline.drive_phases.phase_d._emit_consolidated_shorts_csv") as csv,
+        ):
+            uploader, tracker = _run_phase_d(state, num_lfs=2, monkeypatch=monkeypatch)
+        yt = sys.modules["gomoveshift.pipeline.drive_phases.youtube_uploader"].YouTubeUploader()
+
+        assert uploader.upload_shorts.call_count == 0, "no new shorts under a plan"
+        assert tracker.get("calls", []) == [], "LF1 is kept and LF2 is already done: no insert"
+        sidecar.assert_not_called()
+        csv.assert_not_called()
+        assert [c.args[0] for c in yt.set_thumbnail.call_args_list] == ["new2"]

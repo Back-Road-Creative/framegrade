@@ -351,6 +351,31 @@ class TestPhaseBcDayFirst:
         ):
             orch._phase_bc_day_first(state)
 
+    def test_incomplete_error_names_each_failed_day_and_its_cause(self, tmp_path):
+        """The "Phase BC incomplete" error carries every failed day's own cause, so the
+        heal (and the operator) sees why without scrolling the log."""
+        state, dates = _make_state_for_day_first(tmp_path)
+        orch = DrivePipelineOrchestrator()
+
+        def _run_all_days(**kwargs):
+            kwargs["failed_days"][dates[0]] = "Day X: LF 2 prepend concat killed (stall)"
+            return []
+
+        with (
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.group_episodes_by_day",
+                return_value=[DayBatch(date=dates[0], episodes=[])],
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
+                side_effect=_run_all_days,
+            ),
+            pytest.raises(RuntimeError, match="Phase BC incomplete") as exc,
+        ):
+            orch._phase_bc_day_first(state)
+        assert dates[0] in str(exc.value)
+        assert "LF 2 prepend concat killed (stall)" in str(exc.value)
+
     def test_resumes_from_phase_a_without_ingest_plan_object(self, tmp_path):
         """When resuming from a Phase A checkpoint, `ingest_plan` is NOT
         in state (Python objects don't survive JSON serialization). The

@@ -31,7 +31,7 @@ from .. import run_origin
 from ..publishing.mask_frame_gate import mask_frame_refusal
 from . import resume
 from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
-from .launch import _uploaded, default_launcher, upload_receipts
+from .launch import _uploaded, default_launcher, plan_total_lfs, read_replace_plan, upload_receipts
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -134,6 +134,11 @@ def run_publish(
     lf_count = rendered_lf_count(recipe_path)
     if lf_count is None:
         return _refuse(res, f"no long-form plan in {recipe_path.parent / 'drive_plan.json'}; re-audit it")  # fmt: skip
+    plan = read_replace_plan(Path(d.output_dir)) if d.output_dir else {}
+    if plan and lf_count != plan_total_lfs(plan):
+        # a different split would upload other content under the old titles and slots (M5)
+        return _refuse(res, f"{project} rendered {lf_count} long-forms but its replace plan covers "
+                       f"{plan_total_lfs(plan)}; re-render it to the same split or supersede it again")  # fmt: skip
     older = [r for r in store.drives(region, "ready") if (r.created_at, r.project) < (d.created_at, d.project)]  # fmt: skip
     published = [r.project for r in older if upload_receipts(r.output_dir)]
     older = [r for r in older if r.project not in published]
