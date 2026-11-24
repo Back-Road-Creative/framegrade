@@ -160,8 +160,15 @@ def test_a_plan_from_other_code_re_enters_phase_bc_where_it_is_rebuilt(tmp_path,
     assert out == ["phase_a"]
     assert done == ["phase_a"]
     assert state.phases_completed == ["phase_a"]
-    msg = " ".join(r.getMessage() for r in caplog.records)
-    assert "drive_plan.json" in msg and "rebuild" in msg
+    # Judge the invalidator's own WARNING by logger, level and args, not by words: the plan
+    # loader (`_load_current_drive_plan`) also logs "drive_plan.json ... rebuilding", which
+    # satisfied a text match with the invalidator's warning demoted to debug.
+    own = [
+        r
+        for r in caplog.records
+        if r.name == "gomoveshift.pipeline.drive_orchestrator" and r.levelno == logging.WARNING
+    ]
+    assert len(own) == 1 and own[0].args == (tmp_path,)
 
 
 def test_a_corrupt_plan_re_enters_phase_bc(tmp_path):

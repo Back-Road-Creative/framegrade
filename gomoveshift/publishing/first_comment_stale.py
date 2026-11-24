@@ -15,6 +15,7 @@ from .queue import (
     first_comment_correction_ids,
     first_comment_corrections,
     pending_first_comment_corrections,
+    registered_platform_id,
     resolve_first_comment_correction,
 )
 
@@ -30,6 +31,13 @@ class CorrectionUnavailableError(Exception):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _target(row: Any) -> Optional[str]:
+    """The post the row's comment sits on (what the drain posts to), or ``None``."""
+    return registered_platform_id(
+        row["platform"], row["platform_upload_id"], row["platform_post_id"]
+    )
 
 
 def _key(delivery_id: int) -> str:
@@ -132,7 +140,8 @@ def run_corrections(
     incidents_dir: Optional[Path] = None,
 ) -> None:
     """Apply every pending correction through ``client_for(platform)`` (built lazily; has
-    ``edit_comment(id, text)`` / ``delete_comment(id)``). ``result`` gains ``corrected`` per fix
+    ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id)``; ``object_id`` is the
+    post the comment is on, for a platform that can only replace a comment). ``result`` gains ``corrected`` per fix
     and ``stale`` plus an error line per failure; ``refused(exc)`` counts toward the cap."""
     platforms = tuple(platforms)
     _resolve_incidents(platforms, first_comment_correction_ids(conn, platforms), incidents_dir)
@@ -147,7 +156,7 @@ def run_corrections(
                         f"{item.get('live_id') or '(id unknown)'}"
                     )
                 if item["action"] == "edit":
-                    call(item["live_id"], item["to"])
+                    call(item["live_id"], item["to"], object_id=_target(row))
                 else:
                     call(item["live_id"])
             except Exception as exc:  # noqa: BLE001 -- graded per correction

@@ -5,13 +5,18 @@ Tests stall detection, progress parsing, cleanup on failure, and video validatio
 """
 
 import json
+import os
 import textwrap
+import threading
+import time
 from unittest.mock import Mock, patch
 
 import pytest
 
 from gomoveshift.pipeline.ffmpeg_runner import (
+    MOOV_REWRITE_MIN_STALL_S,
     _moov_rewrite_stall_timeout,
+    _read_io_counters,
     _parse_time_to_seconds,
     _stall_kill_reason,
     run_ffmpeg_encode,
@@ -590,6 +595,282 @@ class TestRunFfmpegEncode:
         assert fake.terminated is True
 
 
+# ── +faststart rewrite timed by its own progress ─────────────────────
+
+GALLEY_LF1_BYTES = 38_824_572_047  # Galley Head LF1, the concat that was killed as a "stall"
+
+
+class _SimClock:
+    """Clock the fake ffmpeg advances itself (one tick per poll), so no real time passes."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
+class _SimStderr:
+    def __init__(self):
+        self.lines = []
+        self.cv = threading.Condition()
+        self.done = False
+        self.served = 0
+        self.waiting = False
+
+    def push(self, line):
+        with self.cv:
+            self.lines.append(line)
+            self.cv.notify_all()
+
+    def finish(self):
+        with self.cv:
+            self.done = True
+            self.cv.notify_all()
+
+    def readline(self):
+        with self.cv:
+            while self.served >= len(self.lines) and not self.done:
+                self.waiting = True
+                self.cv.wait()
+            self.waiting = False
+            if self.served < len(self.lines):
+                self.served += 1
+                return self.lines[self.served - 1]
+            return ""
+
+    def settled(self):
+        with self.cv:
+            return self.done or (self.served >= len(self.lines) and self.waiting)
+
+
+class _SimConcat:
+    """A ``-c copy -movflags +faststart`` ffmpeg: a copy pass printing advancing stats lines,
+    then the mp4 muxer's silent moov rewrite, then exit 0.
+
+    ``io`` is what ``/proc/<pid>/io`` would report (rchar+wchar): it grows through both passes
+    unless ``freeze_io_in_rewrite``. The clock moves ``tick`` seconds per poll.
+    """
+
+    pid = 4242
+
+    def __init__(self, clock, out, *, tick, copy_s, rewrite_s, size, freeze_io_in_rewrite=False):
+        self.clock, self.out, self.tick = clock, out, tick
+        self.copy_s, self.rewrite_s, self.size = copy_s, rewrite_s, size
+        self.freeze_io_in_rewrite = freeze_io_in_rewrite
+        self.stdout, self.stderr = _FakeStdout(), _SimStderr()
+        self.returncode = None
+        self.terminated = False
+        self.n = 0
+        self.moov_at = None
+        self.io = 0
+
+    def poll(self):
+        self.clock.t += self.tick
+        t = self.clock.t
+        if self.returncode is not None:
+            return self.returncode
+        if t < self.copy_s:
+            self.n += 1
+            kib = int(self.size * t / self.copy_s) // 1024
+            with open(self.out, "wb") as fh:
+                fh.truncate(kib * 1024)
+            self.io = 2 * kib * 1024
+            self.stderr.push(
+                f"frame={self.n * 25} fps=0.0 q=-1.0 size={kib}KiB "
+                f"time=00:00:{self.n % 60:02d}.00 bitrate=N/A speed=1x\n"
+            )
+            return None
+        if self.moov_at is None:
+            with open(self.out, "wb") as fh:
+                fh.truncate(self.size)
+            self.moov_at = t
+            self.stderr.push(
+                "[mp4 @ 0x1] Starting second pass: moving the moov atom to the beginning "
+                "of the file\n"
+            )
+            return None
+        if not self.freeze_io_in_rewrite:
+            self.io += int(2 * self.size * self.tick / max(self.rewrite_s, 1))
+        if t - self.moov_at >= self.rewrite_s:
+            self.stderr.push("frame=999 fps=0.0 q=-1.0 Lsize=1KiB time=00:59:59.00 bitrate=N/A\n")
+            self.returncode = 0
+            self.stderr.finish()
+            return 0
+        return None
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+        self.stderr.finish()
+
+    def kill(self):
+        self.returncode = -9
+        self.stderr.finish()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _run_concat(tmp_path, monkeypatch, *, io_readable, **kw):
+    """Run the prepend_montage call shape (default stall, expected_duration=0) on a sim."""
+    out = tmp_path / "lf_01.mp4"
+    clock = _SimClock()
+    proc = _SimConcat(clock, out, **kw)
+    real_sleep = time.sleep
+
+    def _sleep(_s):  # wait for the stderr reader thread to hand over the line just pushed
+        deadline = time.monotonic() + 5.0
+        while not proc.stderr.settled() and time.monotonic() < deadline:
+            real_sleep(0.0005)
+
+    monkeypatch.setattr("gomoveshift.pipeline.ffmpeg_runner.subprocess.Popen", lambda *a, **k: proc)
+    monkeypatch.setattr("gomoveshift.pipeline.ffmpeg_runner.time.sleep", _sleep)
+    monkeypatch.setattr(
+        "gomoveshift.pipeline.ffmpeg_runner._read_io_counters",
+        (lambda pid: proc.io) if io_readable else (lambda pid: None),
+    )
+    cmd = ["ffmpeg", "-nostdin", "-i", "l.txt", "-c", "copy", "-movflags", "+faststart", str(out)]
+    result = run_ffmpeg_encode(
+        cmd, out, expected_duration=0.0, description="prepend_montage concat", time_source=clock
+    )
+    return result, proc, clock, out
+
+
+class TestMoovRewriteFollowsOwnProgress:
+    """The silent +faststart rewrite is timed by its own progress, not a fixed speed floor.
+
+    Galley Head LF1 (38.8 GB) copied at ~21.6 MB/s; the rewrite moves the same bytes, and a
+    fixed 20 MB/s floor left a 1942 s window against a ~1797 s rewrite, so any volume under
+    20 MB/s was killed as a "stall" on every retry.
+    """
+
+    def test_both_passes_at_18_MBps_finish_when_io_counters_move(self, tmp_path, monkeypatch):
+        slow = 2157.0  # 38.8 GB at 18 MB/s, copy and rewrite alike
+        result, proc, _, _ = _run_concat(
+            tmp_path, monkeypatch, io_readable=True, tick=30.0, copy_s=slow, rewrite_s=slow,
+            size=GALLEY_LF1_BYTES,
+        )  # fmt: skip
+        assert result.success and result.killed_reason is None
+        assert proc.terminated is False
+
+    def test_a_rewrite_much_slower_than_its_copy_pass_still_finishes_while_io_moves(
+        self, tmp_path, monkeypatch
+    ):
+        result, proc, _, _ = _run_concat(
+            tmp_path, monkeypatch, io_readable=True, tick=30.0, copy_s=1797.0, rewrite_s=7200.0,
+            size=GALLEY_LF1_BYTES,
+        )  # fmt: skip
+        assert result.success and result.killed_reason is None
+        assert proc.terminated is False
+
+    def test_a_rewrite_whose_io_counters_freeze_is_killed_as_a_stall(self, tmp_path, monkeypatch):
+        result, proc, clock, out = _run_concat(
+            tmp_path, monkeypatch, io_readable=True, tick=30.0, copy_s=600.0, rewrite_s=10**9,
+            size=GALLEY_LF1_BYTES, freeze_io_in_rewrite=True,
+        )  # fmt: skip
+        assert proc.terminated is True
+        assert result.killed_reason == "stall"
+        assert not out.exists()
+        # dead within the normal rewrite floor (plus a couple of polls), not the size window
+        assert clock.t - proc.moov_at <= MOOV_REWRITE_MIN_STALL_S + 90
+
+    def test_counters_unreadable_falls_back_and_18_MBps_finishes(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        slow = 2157.0
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=False, tick=30.0, copy_s=slow,
+                rewrite_s=slow, size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and result.killed_reason is None
+        assert proc.terminated is False
+        fallback_logs = [r for r in caplog.records if "unreadable" in r.getMessage()]
+        assert len(fallback_logs) == 1
+        assert fallback_logs[0].levelname == "WARNING"
+
+    def test_fallback_scales_with_the_run_so_a_slower_rewrite_than_copy_finishes(
+        self, tmp_path, monkeypatch
+    ):
+        # copy pass 1797 s, rewrite 1.4x slower (2516 s): past the 1942 s size window, inside 2x elapsed
+        result, proc, _, _ = _run_concat(
+            tmp_path, monkeypatch, io_readable=False, tick=30.0, copy_s=1797.0, rewrite_s=2516.0,
+            size=GALLEY_LF1_BYTES,
+        )  # fmt: skip
+        assert result.success and result.killed_reason is None
+        assert proc.terminated is False
+
+    def test_fallback_still_kills_a_stuck_rewrite_within_its_window(self, tmp_path, monkeypatch):
+        result, proc, clock, out = _run_concat(
+            tmp_path, monkeypatch, io_readable=False, tick=30.0, copy_s=600.0, rewrite_s=10**9,
+            size=GALLEY_LF1_BYTES,
+        )  # fmt: skip
+        assert proc.terminated is True and result.killed_reason == "stall"
+        assert not out.exists()
+        assert clock.t - proc.moov_at <= _moov_rewrite_stall_timeout(GALLEY_LF1_BYTES, 600) + 90
+
+    def test_io_counters_that_vanish_mid_rewrite_switch_to_the_fallback_window(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        out = tmp_path / "lf_01.mp4"
+        clock = _SimClock()
+        proc = _SimConcat(
+            clock, out, tick=30.0, copy_s=1797.0, rewrite_s=2516.0, size=GALLEY_LF1_BYTES
+        )
+        real_sleep = time.sleep
+
+        def _sleep(_s):
+            deadline = time.monotonic() + 5.0
+            while not proc.stderr.settled() and time.monotonic() < deadline:
+                real_sleep(0.0005)
+
+        def _counters(pid):  # readable at detection, unreadable after
+            return proc.io if proc.moov_at is None or clock.t - proc.moov_at < 120 else None
+
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.ffmpeg_runner.subprocess.Popen", lambda *a, **k: proc
+        )
+        monkeypatch.setattr("gomoveshift.pipeline.ffmpeg_runner.time.sleep", _sleep)
+        monkeypatch.setattr("gomoveshift.pipeline.ffmpeg_runner._read_io_counters", _counters)
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result = run_ffmpeg_encode(
+                ["ffmpeg", str(out)], out, expected_duration=0.0, time_source=clock
+            )
+        assert result.success and proc.terminated is False
+        assert any("became unreadable" in r.getMessage() for r in caplog.records)
+
+
+class TestReadIoCounters:
+    def test_sums_rchar_and_wchar(self, tmp_path):
+        (tmp_path / "77").mkdir()
+        (tmp_path / "77" / "io").write_text(
+            "rchar: 1000\nwchar: 250\nsyscr: 5\nsyscw: 6\nread_bytes: 0\nwrite_bytes: 0\n"
+        )
+        assert _read_io_counters(77, proc_root=str(tmp_path)) == 1250
+
+    @pytest.mark.parametrize("content", ["", "garbage", "rchar: x\nwchar: 1\n", "rchar: 5\n"])
+    def test_unparseable_content_is_none(self, tmp_path, content):
+        (tmp_path / "77").mkdir()
+        (tmp_path / "77" / "io").write_text(content)
+        assert _read_io_counters(77, proc_root=str(tmp_path)) is None
+
+    def test_missing_process_or_non_int_pid_is_none(self, tmp_path):
+        assert _read_io_counters(99999, proc_root=str(tmp_path)) is None
+        assert _read_io_counters(None) is None
+        assert _read_io_counters(Mock()) is None
+
+    @pytest.mark.skipif(not os.path.exists("/proc/self/io"), reason="needs Linux /proc/<pid>/io")
+    def test_real_process_counters_grow_with_a_file_to_file_copy(self, tmp_path):
+        src, dst = tmp_path / "a.bin", tmp_path / "b.bin"
+        src.write_bytes(b"x" * 4_000_000)
+        before = _read_io_counters(os.getpid())
+        dst.write_bytes(src.read_bytes())
+        after = _read_io_counters(os.getpid())
+        assert before is not None and after is not None
+        assert after - before >= 8_000_000  # 4 MB read + 4 MB written
+
+
 # ── run_ffmpeg_quick ──────────────────────────────────────────────────
 
 
@@ -998,8 +1279,39 @@ class TestValidateVideoAVDrift:
             ],
             [True, True, True, False],
         ),
+        # ffmpeg pads frame= with spaces ("frame=   10"); the fallback must still read it.
+        (
+            [
+                "frame=   10 fps= 5 q=-1.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+                "frame=   12 fps= 6 q=-1.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+                "frame=   12 fps= 7 q=-1.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+            ],
+            [True, True, False],
+        ),
+        # size= parses while time=N/A: size decides, frame= is not consulted.
+        (
+            [
+                "frame=    5 fps=1 q=0.0 size=     100KiB time=N/A bitrate=N/A speed=N/A\n",
+                "frame=    5 fps=1 q=0.0 size=     200KiB time=N/A bitrate=N/A speed=N/A\n",
+                "frame=    5 fps=2 q=0.0 size=     200KiB time=N/A bitrate=N/A speed=N/A\n",
+            ],
+            [True, True, False],
+        ),
+        # ffmpeg 7 to a file, before the first packet: size=0KiB parses (0), time=N/A, frame=0
+        # repeating. Only fps/elapsed vary, so none of the repeats is progress.
+        (
+            [
+                "frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A "
+                "elapsed=0:00:00.20\n",
+                "frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A "
+                "elapsed=0:00:00.40\n",
+            ],
+            [True, False],
+        ),
         # No frame=, time= or size= that parses: the raw tokens decide (identical = no progress).
         (["time=N/A bitrate=1\n", "time=N/A bitrate=2\n"], [True, False]),
+        # A frame= appearing after a line that had none must not be compared to the missing one.
+        (["time=N/A bitrate=1\n", "frame=1 time=N/A bitrate=1\n"], [True, False]),
         (["size=5XB speed=1\n", "size=6XB speed=1\n"], [True, True]),
     ],
 )

@@ -15,11 +15,21 @@ All notable changes to this project are recorded here. The format follows
 ### Fixed
 
 - A resume now re-runs a day that was recorded complete with fewer long-forms than planned, even when Phase B/C was checkpointed: the orchestrator drops the checkpoint when a planned long-form index has no non-empty final, or when `drive_plan.json` is present but unloadable (phase_bc then rebuilds it). A Galley Head style job therefore heals on retry instead of failing Phase D with `shorts_per_lf SPLIT-BRAIN` every time. The "Phase BC incomplete" error names each failed day and its cause. A full_drive day with no supplied plan now builds a montage instead of dropping its long-form.
-- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress; stats lines with `time=N/A size=N/A` count `frame=` advancing as progress. The montage prepend concat passes `-nostdin` and no ceiling of its own (the runner's 24 h default stands): a size-based ceiling killed a concat that was still advancing on a volume slower than the 20 MB/s floor.
+- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress. The montage prepend concat passes `-nostdin` and no ceiling of its own (the runner's 24 h default stands): a size-based ceiling killed a concat that was still advancing on a volume slower than the 20 MB/s floor. The silent `+faststart` moov rewrite is timed by ffmpeg's own progress: growth of its `/proc/<pid>/io` `rchar + wchar` resets the stall clock, and a rewrite whose counters stop is killed after 30 minutes; where the counters cannot be read the window is the larger of the size window and twice the run's elapsed time. The old fixed 20 MB/s floor killed a healthy rewrite of Galley LF1 (38.8 GB) on any volume under 20 MB/s, on every retry. ffmpeg 7 writing to a file prints `frame=    0 ... size=       0KiB time=N/A` before the first packet, judged by `size=`; the `frame=` fallback serves pipe and other non-seekable outputs (`size=N/A time=N/A`).
+- A plan with no `plan_code_version` stamp (written before the stamp existed) now re-enters phase_bc and phase_d on resume, like any plan from other code: it cannot be shown to match the current planner or to confirm every planned long-form. The rebuild costs no encode and stamps the plan. A `drive_plan.json` that cannot be written now stops phase_bc before any encode with the cause, instead of a warning followed by re-dropping the phases on every resume. A day with no score bounds now records its cause in the "Phase BC incomplete" error.
+- A replaced first comment found live on Facebook is edited in place (`POST /{comment-id}`
+  `message=`, else deleted and reposted); on Instagram, which has no comment edit, it is deleted
+  and the intended text posted only once the delete is confirmed, never two comments and never a
+  post before the delete. Both run at the start of the next Meta drain.
+- The Graph scan reads every bounded page when a replaced text exists, prefers the new comment
+  and reports a replaced one live beside it for deletion, never the new one.
+- `relink_replaced_lf`: the lease pre-check uses the process clock, and a failing other-project
+  report is recorded, not raised. Public `post_first_comment` raises for a replaced text.
 - A first comment found live with a replaced text is counted (`stale`, `first_comment_stale=N`
   on the summary line), filed as a `first_comment_stale` health incident (`gomoveshift status
   --json`) and, on YouTube, corrected in place on the next pass (edit, or delete a duplicate);
-  the incident clears itself. Meta drains count and file it; their edit/delete is not wired yet.
+  the incident clears itself. Meta drains count and file it too (their correction: see
+  `relink-meta-correct.md`).
 - The YouTube scan reads every bounded page and reports a replaced text live beside the new one,
   and a concurrent drain's comment is reported. Relink lists rewritten published rows for the
   drain to verify.

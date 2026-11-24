@@ -1548,8 +1548,8 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
     wanted = list(platforms)
     marks = ",".join("?" for _ in wanted)
     rows = conn.execute(
-        "SELECT id, project_name, short_index, platform, first_comment_text, "  # noqa: S608
-        "first_comment_error, first_comment_correction FROM deliveries "
+        "SELECT id, project_name, short_index, platform, first_comment_text, platform_upload_id, "  # noqa: S608
+        "platform_post_id, first_comment_error, first_comment_correction FROM deliveries "
         f"WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
         "AND first_comment_posted_at IS NOT NULL AND first_comment_attempts < ? ORDER BY id",
         (*wanted, FIRST_COMMENT_MAX_ATTEMPTS),
