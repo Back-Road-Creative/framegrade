@@ -162,6 +162,8 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
 
     if args.supersede and not args.reason:
         raise SystemExit("health backlog: --supersede needs --reason")
+    if getattr(args, "replace_scheduled", False) and not args.supersede:
+        raise SystemExit("health backlog: --replace-scheduled needs --supersede")
 
     code_root = Path(args.code_root) if args.code_root else root
     now = datetime.now(timezone.utc)
@@ -179,6 +181,9 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
+        replace_scheduled=bool(getattr(args, "replace_scheduled", False)),
+        live_status=launch.default_live_status() if getattr(args, "replace_scheduled", False) else None,  # fmt: skip
+        replace_store=launch.default_replace_store(config),
         horizon_h=launch.render_horizon_h(config),
         latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
         incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
