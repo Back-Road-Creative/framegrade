@@ -760,6 +760,25 @@ def purge_lf_intermediates(day_dir: Path, lf_index: int) -> Dict[str, int]:
     return summary
 
 
+def release_stale_lf_work(day_dir: Path, lf_index: int) -> Dict[str, int]:
+    """Remove ONE long-form's leftover work files before it is burned again.
+
+    A burn that died after its montage (an OST output that failed validation,
+    a kill) leaves the concat, the montage copy, the map inset and the work
+    dir on the volume, with no final to gate ``purge_lf_intermediates``. The
+    next burn cuts, prepends and renders all of them again from scratch, so
+    ``run_day_pipeline`` calls this when its work-space gate is short with
+    them in the way (Courtmacsherry 2025-09-19, 2026-11-24: 103.5 GB of
+    them, 15.2 GB short). Same targets as ``purge_lf_intermediates``; the
+    final ``lf_XX.mp4`` and its fingerprint are never touched here.
+
+    Returns ``{"files_deleted", "dirs_deleted", "bytes_freed"}``.
+    """
+    summary = {"files_deleted": 0, "dirs_deleted": 0, "bytes_freed": 0}
+    _purge_lf_work(Path(day_dir) / "regular_lfs", f"{int(lf_index):02d}", summary)
+    return summary
+
+
 def purge_day_intermediates(day_dir: Path) -> Dict[str, int]:
     """Remove LF + short work files for a single day once finals exist.
 
