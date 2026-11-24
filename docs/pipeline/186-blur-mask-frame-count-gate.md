@@ -24,7 +24,13 @@ too (fail closed). A raw or master that is a dangling symlink counts as present 
 snapshots the sidecar sha256 and mask identity before and after counting and writes nothing if they
 moved; it is best-effort (any exception is logged and the encode goes on). `redactcam_commit` is the
 commit installed when the proof was written, not necessarily the one that rendered a cache-reused
-mask: no reader may treat it as the mask's renderer commit. A day rendered before this file existed
+mask: no reader may treat it as the mask's renderer commit. Every skipped proof is logged (WARNING naming the day and the reason), a failed write removes its
+`.tmp`, and no proof is written for the stage path (its sidecar is named for the project, not a
+`day_<date>` dir, so nothing would read it). Cleanup (`drop_day_master`) keeps the day master unless
+the raw is present or the persisted proof validates by the gate's own check, so an mtime-only change
+to the mask leaves the master for the gate to count; a day with no blur sidecar is unaffected. A
+`day_<date>` dir holding no `day_<date>_*` file is `mask_frame_count_unknown` when it holds finals
+(`regular_lfs`, `shorts`, `superlong`), else skipped with a WARNING. A day rendered before this file existed
 has none, so it stays unknown until a re-render. Each refused day gets one `mask_index_mismatch` incident
 (`mask_index_mismatch_<drive>_<date>.json`, key `mask_index_mismatch:<drive>:<date>`), never one
 per tick; it is resolved once the counts agree. There is no override flag or variable: re-render

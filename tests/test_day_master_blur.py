@@ -116,7 +116,14 @@ class TestFreshEncodeBlursMaster:
 class TestPairedMaskPersistsItsSourceFrameCount:
     """The pairing check is the only moment the source container, the mask and the sidecar
     are all on disk and proven equal; the count is kept so a purged master can still prove
-    its mask later (``mask_frame_gate``)."""
+    its mask later (``mask_frame_gate``). The proof is written only for a real ``day_<date>``
+    stage dir, so these tests run inside one."""
+
+    @pytest.fixture
+    def tmp_path(self, tmp_path):
+        day = tmp_path / "day_2026-02-24"
+        day.mkdir()
+        return day
 
     def _rig(self, tmp_path, monkeypatch, *, pairing=None):
         cap = _mock_encode(monkeypatch)

@@ -20,6 +20,7 @@ and the row is resolved once the day passes."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -34,7 +35,18 @@ from ..health.store import (
     utc_iso,
     write_row,
 )
-from ..pipeline.blur_gate import SOURCE_FRAMES_SCHEMA, file_sha256, mask_identity
+
+# ``persisted_source_count`` lives engine-side (``cleanup`` needs it and the engine may not import
+# publishing); it and the names it reads are re-exported here so the gate's callers and tests
+# are unchanged.
+from ..pipeline.blur_gate import (  # noqa: F401
+    SOURCE_FRAMES_SCHEMA,
+    file_sha256,
+    mask_identity,
+    persisted_source_count,
+)
+
+logger = logging.getLogger(__name__)
 
 KIND = "mask_index_mismatch"
 REASON_UNKNOWN = "mask_frame_count_unknown"
@@ -85,35 +97,9 @@ def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
     return None
 
 
-def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
-    """The source frame count the pairing check persisted, or None unless it still vouches.
-
-    Read only when the raw and the master are both gone. The file is trusted only while the
-    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
-    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
-    None, so the day stays ``mask_frame_count_unknown``."""
-    try:
-        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
-        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
-            return None  # includes a v1 file, which named no day: fail closed
-        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
-            return None  # a proof copied from another day
-        counts = doc["counts"]
-        values = [counts["container"], counts["mask"], counts["sidecar"]]
-        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
-            return None
-        sidecar = day_dir / f"day_{date}_blur_regions.json"
-        mask = day_dir / f"day_{date}_blur_mask.mkv"
-        if not isinstance(doc.get("sidecar_sha256"), str):
-            return None
-        if doc["sidecar_sha256"] != file_sha256(sidecar):
-            return None
-        recorded = doc["mask"]
-        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
-            return None
-        return values[0]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return None
+def _has_finals(day_dir: Path) -> bool:
+    """True when the dir holds any rendered final (an LF, short or superlong part)."""
+    return any(any(day_dir.glob(f"{sub}/*.mp4")) for sub in ("regular_lfs", "shorts", "superlong"))
 
 
 def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
@@ -125,7 +111,14 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
             continue
         date = day_dir.name[len("day_") :]
         if not any(day_dir.glob(f"day_{date}_*")):
-            continue  # no render artefacts (only shorts/work dirs): not a rendered day
+            if _has_finals(day_dir):
+                # Renders with no sidecar, mask or container to measure: unmeasured, so refused.
+                findings.append({"date": date, "reason": REASON_UNKNOWN,
+                                 "sidecar_frames": None, "container_frames": None})  # fmt: skip
+            else:
+                logger.warning("mask gate: %s holds no day_%s_* file and no finals; skipped",
+                               day_dir, date)  # fmt: skip
+            continue
         sidecar_n = sidecar_frame_count(day_dir / f"day_{date}_blur_regions.json")
         container_n = container_frame_count(day_dir, date)
         if container_n is None and not any(
@@ -160,7 +153,6 @@ def _row_path(incidents_dir: Path, drive: str, date: str) -> Path:
 
 def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> None:
     """One open incident per drive-day: an existing unresolved row is left as it is."""
-    import json
 
     path = _row_path(incidents_dir, drive, row["date"])
     try:
@@ -177,7 +169,6 @@ def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> 
 
 
 def _resolve_passed(incidents_dir: Path, drive: str, failing: set, stages_dir: Path) -> None:
-    import json
 
     for day_dir in Path(stages_dir).glob("day_*"):
         date = day_dir.name[len("day_") :]

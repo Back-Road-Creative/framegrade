@@ -439,6 +439,37 @@ def source_frames_day(sidecar: Path) -> tuple:
     return stem.removeprefix("day_"), Path(sidecar).parent.name
 
 
+def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
+    """The source frame count the pairing check persisted, or None unless it still vouches.
+
+    Read only when the raw and the master are both gone. The file is trusted only while the
+    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
+    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
+    None, so the day stays ``mask_frame_count_unknown``."""
+    try:
+        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
+        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
+            return None  # includes a v1 file, which named no day: fail closed
+        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
+            return None  # a proof copied from another day
+        counts = doc["counts"]
+        values = [counts["container"], counts["mask"], counts["sidecar"]]
+        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
+            return None
+        sidecar = day_dir / f"day_{date}_blur_regions.json"
+        mask = day_dir / f"day_{date}_blur_mask.mkv"
+        if not isinstance(doc.get("sidecar_sha256"), str):
+            return None
+        if doc["sidecar_sha256"] != file_sha256(sidecar):
+            return None
+        recorded = doc["mask"]
+        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
+            return None
+        return values[0]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _proof_snapshot(mask: Path, sidecar: Path) -> dict:
     return {"sidecar_sha256": file_sha256(sidecar), "mask": mask_identity(mask)}
 
@@ -475,7 +506,19 @@ def persist_source_frames(
     mask identity are snapshotted before and after the count probes; a change in between
     writes nothing. The file records its ``date`` and ``day_dir`` so it vouches only for them."""
     if mask is None or sidecar is None:
+        logger.warning(
+            "BLUR: no source frame proof for %s: %s is missing",
+            Path(video).name,
+            "mask" if mask is None else "sidecar",
+        )
         return None
+    date, day_dir = source_frames_day(Path(sidecar))
+    if day_dir != f"day_{date}":
+        # The stage path names its sidecar after the project, not a day: the gate reads a proof
+        # only from stages/day_<date>/, so one written here would have no reader.
+        logger.info("BLUR: no source frame proof for %s: not a day stage dir", Path(sidecar).name)
+        return None
+    tmp: Optional[Path] = None
     try:
         before = _proof_snapshot(Path(mask), Path(sidecar))
         counts = {
@@ -483,14 +526,27 @@ def persist_source_frames(
             "mask": container_frame_count(Path(mask)),
             "sidecar": sidecar_frame_count(sidecar),
         }
-        if counts["container"] <= 0 or not (
-            counts["container"] == counts["mask"] == counts["sidecar"]
+        if not (
+            type(counts["container"]) is int
+            and counts["container"] > 0
+            and counts["container"] == counts["mask"] == counts["sidecar"]
         ):
+            logger.warning(
+                "BLUR: day %s: no source frame proof written, the counts disagree or are "
+                "unreadable (container=%s mask=%s sidecar=%s); the publish gate stays unknown",
+                date,
+                counts["container"],
+                counts["mask"],
+                counts["sidecar"],
+            )
             return None
         if _proof_snapshot(Path(mask), Path(sidecar)) != before:
-            logger.warning("BLUR: the mask or sidecar changed while its frames were counted")
+            logger.warning(
+                "BLUR: day %s: the mask or sidecar changed while its frames were counted; "
+                "no source frame proof written",
+                date,
+            )
             return None
-        date, day_dir = source_frames_day(Path(sidecar))
         doc = {
             "schema": SOURCE_FRAMES_SCHEMA,
             "date": date,
@@ -509,8 +565,16 @@ def persist_source_frames(
         return target
     except Exception as exc:  # best-effort: never block the encode
         logger.warning(
-            "BLUR: could not persist the source frame count (%s: %s)", type(exc).__name__, exc
+            "BLUR: day %s: could not persist the source frame count (%s: %s)",
+            date,
+            type(exc).__name__,
+            exc,
         )
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError as rm_exc:
+                logger.warning("BLUR: could not remove %s (%s)", tmp, rm_exc)
         return None
 
 

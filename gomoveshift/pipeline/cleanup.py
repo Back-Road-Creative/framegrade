@@ -1002,6 +1002,30 @@ def verify_shorts_integrity(
     return summary
 
 
+def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
+    """True when dropping the day master cannot leave the day's blur mask unprovable.
+
+    A day with no blur sidecar is refused by the publish gate whatever the master holds, so it
+    never keeps one. Otherwise the master (the gate's container probe) may go only while the raw
+    is present, or while the persisted source-frame proof validates by the gate's own check
+    (``blur_gate.persisted_source_count``, the one ``mask_frame_gate`` applies). Anything else
+    keeps the master and says so."""
+    if not (day_dir / f"day_{date}_blur_regions.json").exists():
+        return True
+    if os.path.lexists(day_dir / f"day_{date}_raw.mp4"):
+        return True
+    from .blur_gate import persisted_source_count
+
+    if persisted_source_count(day_dir, date):
+        return True
+    logger.warning(
+        "  master-drop: day %s has no raw and no valid source frame proof — keeping the master "
+        "so the publish gate can still count its frames",
+        date,
+    )
+    return False
+
+
 def drop_day_master(
     day_dir: Path,
     *,
@@ -1096,6 +1120,9 @@ def drop_day_master(
             integrity["missing"],
             [b["name"] for b in integrity["bad"]],  # type: ignore[index]
         )
+        return summary
+
+    if not _publish_gate_can_do_without(day_dir, date):
         return summary
 
     try:
