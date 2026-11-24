@@ -11,7 +11,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 from urllib.parse import urlsplit
 
 import requests
@@ -209,10 +209,11 @@ class InstagramReelsAdapter:
     def _get(self, url: str, op: str | None = None, **kwargs) -> dict:
         return self._request("get", url, op, **kwargs)
 
-    def post_comment(self, object_id: str, text: str) -> str:
+    def post_comment(self, object_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
         """Post a top-level comment on ``object_id`` (first-comment drain).
         A permission-class error raises ``CommentPermissionError`` naming
-        ``instagram_manage_comments``."""
+        ``instagram_manage_comments``. ``also_accept`` is the texts a relink replaced: one already
+        live raises ``first_comment.PriorCommentLiveError`` and nothing is posted."""
         return post_graph_comment(
             self._session,
             self._base,
@@ -222,6 +223,7 @@ class InstagramReelsAdapter:
             text_field="text",
             permission="instagram_manage_comments",
             raise_for_error=_raise_for_graph_error,
+            also_accept=also_accept,
         )
 
     def _check_publishing_limit(self) -> None:
