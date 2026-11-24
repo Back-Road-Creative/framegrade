@@ -1008,12 +1008,13 @@ def _publish_gate_can_do_without(day_dir: Path, date: str) -> bool:
     A day with no blur sidecar is refused by the publish gate whatever the master holds, so it
     never keeps one. Otherwise the master (the gate's container probe) may go only while the raw
     is present, or while the persisted source-frame proof validates by the gate's own check
-    (``mask_frame_gate.persisted_source_count``). Anything else keeps the master and says so."""
+    (``blur_gate.persisted_source_count``, the one ``mask_frame_gate`` applies). Anything else
+    keeps the master and says so."""
     if not (day_dir / f"day_{date}_blur_regions.json").exists():
         return True
     if os.path.lexists(day_dir / f"day_{date}_raw.mp4"):
         return True
-    from ..publishing.mask_frame_gate import persisted_source_count
+    from .blur_gate import persisted_source_count
 
     if persisted_source_count(day_dir, date):
         return True

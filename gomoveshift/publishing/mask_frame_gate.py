@@ -35,7 +35,15 @@ from ..health.store import (
     utc_iso,
     write_row,
 )
-from ..pipeline.blur_gate import SOURCE_FRAMES_SCHEMA, file_sha256, mask_identity
+# ``persisted_source_count`` lives engine-side (``cleanup`` needs it and the engine may not import
+# publishing); it and the names it reads are re-exported here so the gate's callers and tests
+# are unchanged.
+from ..pipeline.blur_gate import (  # noqa: F401
+    SOURCE_FRAMES_SCHEMA,
+    file_sha256,
+    mask_identity,
+    persisted_source_count,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,37 +94,6 @@ def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
             if count:
                 return count
     return None
-
-
-def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
-    """The source frame count the pairing check persisted, or None unless it still vouches.
-
-    Read only when the raw and the master are both gone. The file is trusted only while the
-    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
-    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
-    None, so the day stays ``mask_frame_count_unknown``."""
-    try:
-        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
-        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
-            return None  # includes a v1 file, which named no day: fail closed
-        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
-            return None  # a proof copied from another day
-        counts = doc["counts"]
-        values = [counts["container"], counts["mask"], counts["sidecar"]]
-        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
-            return None
-        sidecar = day_dir / f"day_{date}_blur_regions.json"
-        mask = day_dir / f"day_{date}_blur_mask.mkv"
-        if not isinstance(doc.get("sidecar_sha256"), str):
-            return None
-        if doc["sidecar_sha256"] != file_sha256(sidecar):
-            return None
-        recorded = doc["mask"]
-        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
-            return None
-        return values[0]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return None
 
 
 def _has_finals(day_dir: Path) -> bool:
