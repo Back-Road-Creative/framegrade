@@ -1878,6 +1878,15 @@ def append_full_drive_part_suffix(
     return f"{base}{suffix}"
 
 
+def split_lf_parts(lfs) -> dict[int, tuple[int | None, int | None]]:
+    """``{lf.index: (part_index, part_count)}`` for the LFs of a split ``full_drive`` day."""
+    return {
+        int(lf.index): (getattr(lf, "part_index", None), lf.part_count)
+        for lf in lfs or ()
+        if (getattr(lf, "part_count", None) or 1) > 1
+    }
+
+
 # The `` (Mon D, YYYY)`` suffix ``_cross_drive_dated`` appends, and only that.
 _DRIVE_DATE_SUFFIX_RE = re.compile(
     r" \((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [1-9][0-9]?, [0-9]{4}\)$"
@@ -1889,16 +1898,53 @@ def strip_drive_date(label: str) -> str:
     return _DRIVE_DATE_SUFFIX_RE.sub("", label)
 
 
-def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
-    """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
+def _drive_dated(title, raw_date):
+    """``title`` + `` (Mon D, YYYY)`` for the measured ``raw_date`` (``YYYY-MM-DD…``).
+
+    ``None`` when ``raw_date`` is missing or unparseable: a date is never guessed. A
+    date suffix already on ``title`` is stripped first, so a title is never dated twice;
+    stray whitespace is stripped too, so the suffix never follows a double space.
+    """
     import datetime as _dt
 
-    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
-    if not (drive_project and video_id and raw):
+    raw = str(raw_date or "").strip()
+    if not raw:
         return None
     try:
         day = _dt.date.fromisoformat(raw[:10])
     except ValueError:
+        return None
+    return f"{strip_drive_date(str(title).strip())} ({day.strftime('%b')} {day.day}, {day.year})"
+
+
+def bracket_dated_title_inputs(ost_text, bracket_route, lf_dates):
+    """``{lf: title input}`` for the title map: a country/state bracket LF is dated.
+
+    An LF whose burned OST text IS the bracket label of a ``country`` or ``state``
+    level record gets that label dated with its own MEASURED recording date
+    (``lf_dates`` ``{lf: "YYYY-MM-DD"}``). Such a label is the same bare string for every
+    same-country drive, so it carries the date from the start instead of leaving
+    uniqueness to a late fallback. No measured date, a county/states level, an invalid
+    record or any other LF text is returned unchanged; the OST text itself is never
+    touched, and ``ensure_unique_titles`` still runs on the result.
+    """
+    record = bracket_route if isinstance(bracket_route, dict) else {}
+    label = str(record.get("label") or "").strip()
+    if not label or record.get("level") not in {"country", "state"}:
+        return dict(ost_text)
+    out = {}
+    for lf_idx, text in ost_text.items():
+        dated = None
+        if str(text or "").strip() == label:
+            dated = _drive_dated(text, (lf_dates or {}).get(lf_idx))
+        out[lf_idx] = text if dated is None else dated
+    return out
+
+
+def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_projects):
+    """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
+    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
+    if not (drive_project and video_id and raw):
         return None
     if video_projects is None:
         from .longform_metadata import ledger_video_projects
@@ -1907,7 +1953,7 @@ def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_p
     other = (video_projects.get(video_id) or "").strip()
     if not other or other == drive_project:
         return None
-    return f"{title} ({day.strftime('%b')} {day.day}, {day.year})"
+    return _drive_dated(title, raw)
 
 
 def ensure_unique_titles(
@@ -1917,6 +1963,8 @@ def ensure_unique_titles(
     drive_project: str | None = None,
     lf_dates: dict[int, str] | None = None,
     video_projects: dict[str, str] | None = None,
+    bracket_route: dict | None = None,
+    lf_parts: dict[int, tuple[int | None, int | None]] | None = None,
 ) -> dict[int, str]:
     """Post-process: append ``(Part N)`` to any duplicate titles.
 
@@ -1960,11 +2008,29 @@ def ensure_unique_titles(
     project (a genuine re-upload), an unknown project (``drive_project`` or the
     video's), no measured date, or a dated title that also collides.
 
+    ``bracket_route`` (the ``state.bracket_route`` record): Phase BC passes it so its
+    preview, audit hash and uniqueness check run on the SAME dated bracket title Phase D
+    ships (``bracket_dated_title_inputs`` with ``lf_dates``) without importing this
+    module. Phase D passes the same record, so BOTH sites build the final per-LF title
+    map through this one function.
+
+    ``lf_parts`` (``{lf: (part_index, part_count)}``, see :func:`split_lf_parts`): a split
+    ``full_drive`` day's LFs get the deliberate `` — Part k of K`` suffix HERE, after the
+    dating and before the uniqueness pass, so the title Phase BC confirms is the one
+    Phase D ships (the generator's own suffix step is then a no-op).
+
     Titles that are already unique (in-batch and vs the channel) are
     returned unchanged.
     """
     if not lf_titles:
         return {}
+    if bracket_route:
+        lf_titles = bracket_dated_title_inputs(lf_titles, bracket_route, lf_dates)
+    if lf_parts:
+        lf_titles = {
+            k: append_full_drive_part_suffix(v, *lf_parts[k]) if k in lf_parts else v
+            for k, v in lf_titles.items()
+        }
     # Count occurrences
     from collections import Counter
 

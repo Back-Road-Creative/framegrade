@@ -2886,3 +2886,131 @@ class TestPreEncodeLocationInvariant:
         _assert_pre_encode_location_invariant(
             {3: "Drive in Colleton County"}, {}, evidence_by_lf={}
         )
+
+
+@pytest.mark.overpass_answers_empty
+class TestBCTitleIsTheDatedBracketTitlePhaseDShips:
+    """BC previews, hashes into the OST audit and checks the SAME title Phase D ships.
+
+    A country/state bracket LF's title input is its label dated with the LF's measured
+    drive date; the burned OST text (``per_lf_ost_text``) stays the bare label.
+    """
+
+    _REC = {"level": "country", "label": "Ireland", "gap_h": 41.5}
+
+    def test_preseed_and_final_titles_are_dated_and_the_ost_stays_bare(self, tmp_path):
+        from gomoveshift.config import Config
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import PhaseBCDayFirst
+
+        output_base = tmp_path / "out"
+        stages_dir = output_base / "_stages"
+        stages_dir.mkdir(parents=True)
+        lfs = [
+            _make_real_lf_dict(1, [_seg_dict(0, 100, 200, 35.0, -80.0)]),
+            _make_real_lf_dict(2, [_seg_dict(1, 100, 200, 34.0, -81.0)]),
+        ]
+        TestRealLFPlansThreaded._write_drive_plan(None, stages_dir, lfs)
+        eps = [
+            SimpleNamespace(
+                index=i,
+                concat_path=Path(f"/fake/ep_00{i}.mp4"),
+                date=d,
+                total_duration=1500.0,
+                gpx_path=None,
+                creation_time=None,
+            )
+            for i, d in enumerate(["2025-09-16", "2025-09-17"])
+        ]
+        state = make_state(
+            output_base=output_base,
+            ingest_plan=SimpleNamespace(episodes=eps),
+            episode_files=[str(e.concat_path) for e in eps],
+            episode_dates=["2025-09-16", "2025-09-17"],
+            episode_locations=["", ""],
+            file_durations=[1500.0, 1500.0],
+            region="usa",
+            location="Ireland",
+            drive_scores=None,
+            file_boundaries=[(0.0, 1500.0), (1500.0, 3000.0)],
+            bracket_route=dict(self._REC),
+        )
+        geocoder = MagicMock()
+        geocoder.reverse_geocode.side_effect = lambda lat, lon: _Loc("Cork", country="USA")
+        geocoder.reverse_geocode_detailed.side_effect = _detailed_by_lat
+        bare = {1: "Ireland", 2: "Ireland"}
+        seen: dict = {}
+
+        def _fake_run_all_days(**kwargs):
+            seen["titles"] = dict(state.get("per_lf_titles") or {})
+            seen["ost"] = dict(state.get("per_lf_ost_text") or {})
+            return [
+                SimpleNamespace(
+                    date=b.date,
+                    master_path=Path(f"/fake/master_{b.date}.mp4"),
+                    regular_lf_paths=[],
+                    short_paths=[],
+                )
+                for b in kwargs["day_batches"]
+            ]
+
+        phase = PhaseBCDayFirst(Config())
+        with (
+            patch(
+                "gomoveshift.pipeline.gps_enrichment._build_shared_geocoder",
+                return_value=geocoder,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.run_all_days",
+                side_effect=_fake_run_all_days,
+            ),
+            patch(
+                "gomoveshift.pipeline.drive_phases.phase_bc_day_first.flatten_ost_text",
+                return_value=dict(bare),
+            ),
+        ):
+            phase.run(state, probe_duration_fn=lambda p: 100.0)
+
+        dated = {1: "Ireland (Sep 16, 2025)", 2: "Ireland (Sep 17, 2025)"}
+        assert seen["titles"] == dated
+        assert seen["ost"] == bare
+        assert dict(state.per_lf_titles) == dated
+        assert dict(state.per_lf_ost_text) == bare
+
+    def test_demoted_label_preview_dates_a_bracket_label_and_keeps_the_ost(self):
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _apply_demoted_labels
+
+        from gomoveshift.pipeline.title_builder import ensure_unique_titles
+
+        kit = SimpleNamespace(unique_titles=ensure_unique_titles, published_titles=lambda: set())
+        state = SimpleNamespace(
+            per_lf_ost_text={},
+            per_lf_titles={},
+            bracket_route=dict(self._REC),
+            per_lf_recording_date={1: "2025-09-16"},
+        )
+        ost = {1: "old"}
+        _apply_demoted_labels({1: "Ireland"}, ost, {}, state, kit)
+        assert state.per_lf_titles == {1: "Ireland (Sep 16, 2025)"}
+        assert ost == {1: "Ireland"}
+        assert state.per_lf_ost_text == {1: "Ireland"}
+
+    def test_no_measured_date_keeps_the_bare_label_in_the_preview(self):
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _apply_demoted_labels
+
+        from gomoveshift.pipeline.title_builder import ensure_unique_titles
+
+        kit = SimpleNamespace(unique_titles=ensure_unique_titles, published_titles=lambda: set())
+        state = SimpleNamespace(per_lf_ost_text={}, per_lf_titles={}, bracket_route=dict(self._REC))
+        _apply_demoted_labels({1: "Ireland"}, {1: "old"}, {}, state, kit)
+        assert state.per_lf_titles == {1: "Ireland"}
+
+    def test_demoted_label_preview_counts_the_channel_title_ids_like_every_other_site(self):
+        """The preview's published set includes the run's channel refresh (ids)."""
+        from gomoveshift.pipeline.drive_phases.phase_bc_day_first import _apply_demoted_labels
+        from gomoveshift.pipeline.title_builder import ensure_unique_titles
+
+        kit = SimpleNamespace(unique_titles=ensure_unique_titles, published_titles=lambda: set())
+        state = SimpleNamespace(per_lf_ost_text={}, per_lf_titles={}, bracket_route=None)
+        live = {"ireland in 4k": "vid123"}
+        with pytest.raises(Exception, match="vid123"):
+            _apply_demoted_labels({1: "Ireland"}, {1: "old"}, {}, state, kit, title_ids=live)

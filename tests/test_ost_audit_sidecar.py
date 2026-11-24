@@ -212,3 +212,104 @@ def test_shorts_audit_carries_score_fields_and_hash_ignores_them():
     legacy = plain["shorts"][0]
     assert legacy["window_mean"] is None and legacy["moment_kind"] is None
     assert compute_shorts_ost_audit_hash(rich) == compute_shorts_ost_audit_hash(plain)
+
+
+# ── a stale day re-confirms the CURRENT payload ─────────────────────────────
+
+_STALE_DATE = "2025-09-16"
+
+
+def _stale_state(title="Ireland (Sep 16, 2025)", stored=None, cli=None):
+    return {
+        "per_lf_ost_text": {1: "Ireland"},
+        "per_lf_titles": {1: title},
+        "per_lf_recording_date": {1: _STALE_DATE},
+        "per_lf_locations": {},
+        "ost_audit_passed": {_STALE_DATE: True} if stored else {},
+        "ost_audit_hash": {_STALE_DATE: stored} if stored else {},
+        "ost_audit_confirmed_this_run": cli,
+    }
+
+
+def _old_hash():
+    old = _stale_state(title="Ireland")
+    return compute_ost_audit_hash(format_ost_audit(_STALE_DATE, old, [1]))
+
+
+def _current_hash():
+    return compute_ost_audit_hash(format_ost_audit(_STALE_DATE, _stale_state(), [1]))
+
+
+def test_stale_day_is_reconfirmed_by_the_flag_and_the_hash_is_rebound(tmp_path):
+    import pytest
+
+    state = _stale_state(stored=_old_hash(), cli=True)
+    sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+    assert state["ost_audit_hash"][_STALE_DATE] == _current_hash() != _old_hash()
+    state["ost_audit_confirmed_this_run"] = None  # the next run, no flag
+    sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+    # ...and a text change after the re-bind is stale again (the flag is not a blanket pass)
+    state["per_lf_titles"] = {1: "Ireland (Sep 17, 2025)"}
+    with pytest.raises(sidecar.OstAuditPendingError):
+        sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+
+
+def test_stale_day_with_no_route_refuses_unchanged_and_names_only_working_routes(tmp_path):
+    import pytest
+
+    state = _stale_state(stored=_old_hash())
+    with pytest.raises(sidecar.OstAuditPendingError) as exc:
+        sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+    msg = str(exc.value)
+    assert state["ost_audit_hash"][_STALE_DATE] == _old_hash()
+    assert "--ost-audit-confirmed" in msg
+    assert _current_hash() in msg  # the hash a marker must carry to pass
+    assert "create " not in msg  # a bare hand-made marker does not pass a stale day
+    assert "system review" not in msg  # that route does not re-confirm a stale day
+
+
+def test_a_stale_day_never_passes_on_its_own(tmp_path):
+    import pytest
+
+    for stored_passed in (True, False):
+        state = _stale_state(stored=_old_hash())
+        state["ost_audit_passed"] = {_STALE_DATE: stored_passed}
+        with pytest.raises(sidecar.OstAuditPendingError):
+            sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+
+
+def test_a_bare_confirmed_marker_does_not_pass_a_stale_day(tmp_path):
+    import pytest
+
+    (tmp_path / f"ost_audit_{_STALE_DATE}.confirmed").write_text("ok")
+    state = _stale_state(stored=_old_hash())
+    with pytest.raises(sidecar.OstAuditPendingError):
+        sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+
+
+def test_a_marker_stamped_with_the_current_hash_passes_a_stale_day_and_rebinds(tmp_path):
+    marker = tmp_path / f"ost_audit_{_STALE_DATE}.confirmed"
+    marker.write_text(_current_hash())
+    state = _stale_state(stored=_old_hash())
+    sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+    assert state["ost_audit_hash"][_STALE_DATE] == _current_hash()
+
+
+def test_an_unchanged_payload_still_passes_without_a_flag(tmp_path):
+    state = _stale_state(title="Ireland", stored=_old_hash())
+    sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+
+
+def test_a_system_review_does_not_reconfirm_a_stale_day(tmp_path):
+    import pytest
+
+    from gomoveshift.pipeline import ost_system_review as osr
+    from gomoveshift.pipeline.route_claims import route_claim_outcome
+
+    state = _stale_state(stored=_old_hash())
+    state["ost_system_review_this_run"] = True
+    outcomes = {1: route_claim_outcome(1, "Ireland", None, chosen="Ireland", reason="")}
+    osr.record_system_reviews(state, {_STALE_DATE: {1: "Ireland"}}, outcomes)
+    with pytest.raises(sidecar.OstAuditPendingError):
+        sidecar.lf_gate_or_raise(tmp_path, _STALE_DATE, [1], state)
+    assert state["ost_audit_hash"][_STALE_DATE] == _old_hash()
