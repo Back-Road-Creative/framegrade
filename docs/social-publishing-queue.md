@@ -771,7 +771,11 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   incident open (one per delivery). The comment stays ours and is never deleted. UNVERIFIED:
   whether Graph's `from.id` equals `page_id` / `ig_user_id` for these tokens (no URL was fetched);
   until it is checked, an incident here means the id or the assumption is wrong, and a lost answer
-  can post a second copy because our own comment is read as a viewer's.
+  can post a second copy because our own comment is read as a viewer's. A read-back that fails
+  or answers gone (confirmed against the post's listing, like every other single read) is
+  reported the same way, as "could not be verified", never silently. The incident closes by
+  itself: each drain re-reads the row's recorded comment for every open one
+  (`recheck_own_id`) and resolves it once the author equals our own id.
 - **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
   unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
   the row's text NULL (`first_comment_posted_at` stays set). When that delete lands the row has no
@@ -779,10 +783,17 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   beside `first_comment_posted_at`), adds an error line and keeps a `first_comment_removed`
   incident open. Restoring the text alone closes nothing: the next pass (`restore_removed`) takes
   the row's text, or the one the plan gives it now (the backfill's `_backfill_text`), and
-  unposts the row (`unpost_removed_first_comment`), so the drain reposts it or adopts our own copy
-  (a hand re-add) through its scan; a viewer's copy is never adopted. A `first_comment_repost_failed`
-  incident then stays open until a new live id is recorded. With no text anywhere the row stays
-  removed and a hand re-add is the only way.
+  unposts the row (`unpost_removed_first_comment`, which also resets `first_comment_attempts` to
+  0: the attempts spent on the delete never starve the repost), so the drain reposts it or adopts
+  our own copy through its scan; a viewer's copy is never adopted. A `first_comment_repost_failed`
+  incident then stays open until a new live id is recorded. With no text anywhere the pipeline
+  lists the post's comments (`own_comments` on the client) and adopts a top-level comment whose
+  author is positively our own id and whose text has the full-drive shape
+  (`first_comment.is_full_drive_comment`): it becomes `first_comment_live_id`, `removed_at`
+  clears and the `first_comment_removed` incident closes in that drain. So the pipeline watches
+  for our comment and closes the incident when it is live again; a hand re-add (by the channel
+  account) is picked up on the next drain. A viewer's or authorless copy is never adopted; a
+  failed or cut-short listing leaves the row removed and the incident open, with an error line.
 - **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
   replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
   (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on

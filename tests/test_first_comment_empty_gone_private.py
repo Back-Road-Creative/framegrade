@@ -200,7 +200,7 @@ def test_x4_a_private_relink_delete_leaves_an_open_incident_until_the_comment_is
     assert row["first_comment_posted_at"] and not row["first_comment_text"]  # posted_at kept
     (incident,) = _open(inc, "first_comment_removed")
     assert incident["delivery_id"] == did
-    assert any("by hand" in e for e in result.errors)
+    assert any("hand re-add" in e and "closes the incident" in e for e in result.errors)
     _drain(conn, _Service(), inc)  # another pass: still no comment, still open
     assert len(_open(inc, "first_comment_removed")) == 1
     with conn:  # the row has its comment text again: the text alone closes nothing
@@ -264,7 +264,9 @@ def test_x4_a_removed_row_with_no_text_anywhere_stays_open_and_asks_for_a_hand_s
     res = _drain(conn, svc, inc)
     assert svc.inserted == [] and len(_open(inc, "first_comment_removed")) == 1
     assert _row(conn, did)["first_comment_posted_at"]  # posted_at kept
-    assert res.errors == [] or any("by hand" in e for e in res.errors)
+    assert res.errors == []  # nothing new to say: the listing found no comment of ours
+    (incident,) = _open(inc, "first_comment_removed")
+    assert "hand re-add" in incident["detail"] and "closes this incident" in incident["detail"]
 
 
 # --- F5 / F7: a private relink keeps its comment findable and tells the truth ------------------

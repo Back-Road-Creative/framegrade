@@ -18,6 +18,7 @@ import requests
 
 from gomoveshift.publishing.first_comment import (
     delete_graph_comment,
+    list_own_graph_comments,
     post_graph_comment,
     read_graph_comment,
     replace_graph_comment,
@@ -253,6 +254,15 @@ class InstagramReelsAdapter:
             self._session, self._base, comment_id, self._access_token,
             text_field="text", permission="instagram_manage_comments",
             raise_for_error=_raise_for_graph_error, object_id=object_id,
+        )  # fmt: skip
+
+    def own_comments(self, object_id: str) -> tuple[list[tuple[str, str]], bool]:
+        """``(id, text)`` of the comments on ``object_id`` our own account wrote, and whether
+        the listing was complete (a removed row adopts one of these)."""
+        return list_own_graph_comments(
+            self._session, self._base, object_id, self._access_token,
+            text_field="text", permission="instagram_manage_comments",
+            raise_for_error=_raise_for_graph_error, own_id=self._ig_user_id,
         )  # fmt: skip
 
     def own_id(self) -> str:

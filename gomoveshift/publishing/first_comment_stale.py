@@ -10,9 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from .first_comment import ReplacePostFailedError, parent_is_public_at
+from .first_comment import ReplacePostFailedError, is_full_drive_comment, parent_is_public_at
 from .queue import (
     FIRST_COMMENT_MAX_ATTEMPTS,
+    adopt_removed_first_comment,
     capped_first_comment_corrections,
     drop_private_edit,
     fail_first_comment_correction,
@@ -37,6 +38,8 @@ CAPPED_KIND = "first_comment_correction_capped"
 REPOST_KIND = "first_comment_repost_failed"
 REMOVED_KIND = "first_comment_removed"
 OWN_ID_KIND = "first_comment_own_id_mismatch"
+#: Prefix of an own-id incident cause when the read-back itself failed (nothing was compared).
+UNVERIFIED = "unverified: "
 _DETAIL_MAX = 500
 
 
@@ -181,15 +184,21 @@ def raise_repost_incident(
     if kind == REMOVED_KIND:
         detail = (
             f"{where}the comment was deleted and the row has no text to post ({cause}); no "
-            "comment is live. The drain posts it by itself (or adopts yours) as soon as the row "
-            "has text again; add it by hand only if no text will come"
+            "comment is live. The pipeline watches for our comment and closes this incident "
+            "when it is live again: it reposts it once the row has text, and a hand re-add (by "
+            "the channel account) is picked up on the next drain"
         )[:_DETAIL_MAX]
     elif kind == OWN_ID_KIND:
+        who = (
+            f"could not be verified as ours ({cause[len(UNVERIFIED) :]})"
+            if cause.startswith(UNVERIFIED)
+            else f"reads back with author {cause}, not our own id"
+        )
         detail = (
-            f"{where}the comment we just posted reads back with author {cause}, not our own id; "
-            "the configured page_id / ig_user_id is wrong or Graph's from.id differs for this "
-            "token (UNVERIFIED which). It is left alone, never deleted; until the id is right a "
-            "lost answer can post a second copy. Check the platform config by hand"
+            f"{where}the comment we just posted {who}; the configured page_id / ig_user_id is "
+            "wrong or Graph's from.id differs for this token (UNVERIFIED which). It is left "
+            "alone, never deleted; until the id is right a lost answer can post a second copy. "
+            "This incident closes by itself once a read-back shows our own id as its author"
         )[:_DETAIL_MAX]
     else:
         detail = (
@@ -233,19 +242,28 @@ def _note_removed(
     cause = "its replacement is private at the short's slot, or the text was dropped"
     result.errors.append(
         f"delivery {delivery_id}: the stale comment was deleted and the row has no text to post; "
-        "no comment is live. The drain restores it by itself once the row has text; add it by "
-        "hand only if no text will come"
+        "no comment is live. The pipeline watches for our comment and closes the incident when "
+        "it is live again: it reposts once the row has text, and a hand re-add (by the channel "
+        "account) is picked up on the next drain"
     )
     raise_repost_incident(conn, delivery_id, cause, incidents_dir, kind=REMOVED_KIND)
 
 
 def restore_removed(
-    conn: sqlite3.Connection, platforms: Iterable[str], incidents_dir: Optional[Path]
+    conn: sqlite3.Connection,
+    platforms: Iterable[str],
+    incidents_dir: Optional[Path],
+    client_for: Optional[Callable[[str], object]] = None,
+    result: Any = None,
 ) -> None:
     """Put a removed row back on the drain: with its own text, or the one the plan gives it now
     (the backfill's source). The row is unposted, so the drain reposts it or adopts our own copy
-    (a hand re-add) through its scan; a repost incident stays open until a new live id is
-    recorded. No text: the row stays removed."""
+    through its scan; a repost incident stays open until a new live id is recorded. No text: the
+    post's comments are listed (``client_for(platform).own_comments``) and a top-level comment
+    positively ours with the full-drive shape is adopted as the row's live comment (a hand
+    re-add), which closes the removed incident. A viewer's or authorless copy is never adopted. A
+    listing that fails or is cut short leaves the row removed and adds an error line to
+    ``result``."""
     from . import enqueue_from_plan  # lazy: it imports the queue
 
     cache: dict = {}
@@ -253,10 +271,95 @@ def restore_removed(
         text = (row["first_comment_text"] or "").strip() or enqueue_from_plan._backfill_text(
             row, cache
         )
-        if text and unpost_removed_first_comment(conn, row["id"], text, _now_iso()):
-            raise_repost_incident(
-                conn, row["id"], "the comment text is back; the drain posts it", incidents_dir
+        if text:
+            if unpost_removed_first_comment(conn, row["id"], text, _now_iso()):
+                raise_repost_incident(
+                    conn, row["id"], "the comment text is back; the drain posts it", incidents_dir
+                )
+        elif client_for is not None:
+            _adopt_hand_re_add(conn, row, client_for, result)
+
+
+def _adopt_hand_re_add(
+    conn: sqlite3.Connection, row: Any, client_for: Callable[[str], object], result: Any
+) -> None:
+    """Adopt our own full-drive comment found live on a removed row's post (see
+    ``restore_removed``). Never raises; a failed or cut-short listing is an error line."""
+    target = _target(row)
+    problem = ""
+    try:
+        listing = getattr(client_for(row["platform"]), "own_comments", None)
+        if listing is None or not target:
+            problem = "cannot list the post's comments to look for our comment"
+        else:
+            comments, complete = listing(target)
+            if not complete:
+                problem = "too many comments to read them all"
+            for comment_id, said in () if problem else comments:
+                if comment_id and is_full_drive_comment(said):
+                    if adopt_removed_first_comment(
+                        conn, row["id"], str(comment_id), said.strip(), _now_iso()
+                    ):
+                        logger.info(
+                            "first comment: delivery %s: our comment %s is live again; adopted",
+                            row["id"], comment_id,
+                        )  # fmt: skip
+                    return
+    except Exception as exc:  # noqa: BLE001 -- the row stays removed; said, never raised
+        problem = str(exc).strip() or exc.__class__.__name__
+    if problem:
+        logger.warning("first comment: delivery %s: removed-row listing: %s", row["id"], problem)
+        if result is not None:
+            result.errors.append(
+                f"delivery {row['id']}: could not look for our removed comment ({problem}); "
+                "it stays removed and the incident open until a later drain can"
             )
+
+
+def recheck_own_id(
+    conn: sqlite3.Connection,
+    platforms: Iterable[str],
+    client_for: Callable[[str], object],
+    incidents_dir: Optional[Path],
+) -> None:
+    """Close each open own-id incident whose row's recorded comment now reads back with our own
+    id as its author (``client.read_comment`` / ``own_id``). A read that fails, a comment that
+    is gone or another author leaves it open. Never raises."""
+    from ..health.store import default_data_root, default_incidents_dir, load_all, write_row
+
+    wanted = set(platforms)
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    try:
+        rows, _ = load_all(directory)
+    except OSError:
+        logger.exception("first comment: could not read the own-id incidents")
+        return
+    for incident in rows:
+        if (
+            incident.get("kind") != OWN_ID_KIND
+            or incident.get("resolved_at")
+            or incident.get("platform") not in wanted
+        ):
+            continue
+        row = conn.execute(
+            "SELECT platform, platform_upload_id, platform_post_id, first_comment_live_id "
+            "FROM deliveries WHERE id=?",
+            (incident.get("delivery_id"),),
+        ).fetchone()
+        if row is None or not row["first_comment_live_id"]:
+            continue
+        try:
+            client = client_for(row["platform"])
+            said = client.read_comment(row["first_comment_live_id"], object_id=_target(row))
+            ours = said is not None and getattr(said, "author", None) == client.own_id()
+            if ours:
+                incident["resolved_at"] = _now_iso()
+                write_row(directory, incident)
+        except Exception as exc:  # noqa: BLE001 -- it stays open; tried again next drain
+            logger.warning(
+                "first comment: own-id recheck of delivery %s failed: %s",
+                incident.get("delivery_id"), exc,
+            )  # fmt: skip
 
 
 def _resolve_incidents(
@@ -305,7 +408,7 @@ def run_corrections(
     A delete of the row's intended text is never run. A capped row is counted in
     ``result.correction_capped`` and gets the capped incident every pass."""
     platforms = tuple(platforms)
-    restore_removed(conn, platforms, incidents_dir)
+    restore_removed(conn, platforms, incidents_dir, client_for, result)
     _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
         keep = first_comment_intended_texts(row)

@@ -24,7 +24,13 @@ from .first_comment import (
     PostedId,
     PriorCommentLiveError,
 )
-from .first_comment_stale import OWN_ID_KIND, raise_repost_incident, run_corrections
+from .first_comment_stale import (
+    OWN_ID_KIND,
+    UNVERIFIED,
+    raise_repost_incident,
+    recheck_own_id,
+    run_corrections,
+)
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
     first_comment_prior_texts,
@@ -47,20 +53,24 @@ logger = logging.getLogger(__name__)
 _REFUSED_FOR_THE_POST = (FacebookPermanentError, InstagramPermanentError)
 
 
-def _author_mismatch(adapter: object, posted_id: object) -> Optional[str]:
+def _author_mismatch(adapter: object, posted_id: object, object_id: str = "") -> Optional[str]:
     """For a comment this drain just posted: ``None`` when it reads back with our own account id
-    as its author (or the read does not answer: the comment is live and is never touched), else
-    who Graph says wrote it (``"no author"`` when it names none)."""
+    as its author (or it was not posted by this call), else why it is not confirmed: who Graph
+    says wrote it (``"no author"`` when it names none), or ``UNVERIFIED`` plus the reason when the
+    read-back failed or answered gone (confirmed against ``object_id``'s listing). The comment
+    is live either way and is never touched."""
     if type(posted_id) is not PostedId:
         return None  # found already there, so listed with its author: not a fresh post
     try:
-        said = adapter.read_comment(str(posted_id))
+        said = adapter.read_comment(str(posted_id), object_id=object_id or None)
         own = adapter.own_id()
     except Exception as exc:  # noqa: BLE001 -- best effort: the post already landed
         logger.warning("first comment: could not read back comment %s: %s", posted_id, exc)
-        return None
+        return f"{UNVERIFIED}the read-back failed: {str(exc).strip() or exc.__class__.__name__}"
+    if said is None:
+        return f"{UNVERIFIED}the read-back answered that the comment is gone"
     author = getattr(said, "author", None)
-    return None if said is None or author == own else (author or "no author")
+    return None if author == own else (author or "no author")
 
 
 def drain_meta_first_comments(
@@ -98,6 +108,11 @@ def drain_meta_first_comments(
         detail = str(exc).strip() or exc.__class__.__name__
         logger.exception("drain_meta_first_comments: the correction pass failed")
         result.errors.append(f"stale-comment corrections failed: {detail}")
+
+    try:
+        recheck_own_id(conn, tuple(adapter_factories), adapter_for, incidents_dir)
+    except Exception:  # noqa: BLE001 -- a recheck failing never stops the posting
+        logger.exception("drain_meta_first_comments: the own-id recheck failed")
 
     due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     for row in due:
@@ -148,11 +163,16 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        mismatch = _author_mismatch(adapter_for(platform), posted_id)
+        mismatch = _author_mismatch(adapter_for(platform), posted_id, row["comment_target_id"])
         if mismatch:
             result.errors.append(
-                f"delivery {row['id']}: comment {posted_id} posted, but it reads back with "
-                f"author {mismatch}, not our own id; check the platform's own id config"
+                f"delivery {row['id']}: comment {posted_id} posted, but "
+                + (
+                    f"its author could not be verified ({mismatch[len(UNVERIFIED) :]})"
+                    if mismatch.startswith(UNVERIFIED)
+                    else f"it reads back with author {mismatch}, not our own id"
+                )
+                + "; check the platform's own id config"
             )
             logger.warning("first comment: delivery %s: own id mismatch: %s", row["id"], mismatch)
             raise_repost_incident(conn, row["id"], str(mismatch), incidents_dir, kind=OWN_ID_KIND)

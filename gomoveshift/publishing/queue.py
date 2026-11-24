@@ -1714,7 +1714,8 @@ def removed_first_comment_rows(conn: sqlite3.Connection, platforms: Iterable[str
     wanted = list(platforms)
     marks = ",".join("?" for _ in wanted)
     return conn.execute(
-        "SELECT id, project_name, short_index, sidecar_path, scheduled_at, first_comment_text "  # noqa: S608
+        "SELECT id, project_name, short_index, sidecar_path, scheduled_at, first_comment_text, "  # noqa: S608
+        "platform, platform_upload_id, platform_post_id "
         "FROM deliveries WHERE first_comment_posted_at IS NOT NULL "
         f"AND first_comment_removed_at IS NOT NULL AND platform IN ({marks}) ORDER BY id",
         wanted,
@@ -1749,10 +1750,30 @@ def unpost_removed_first_comment(
             conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
                 "first_comment_live_id=NULL, first_comment_error=NULL, "
-                "first_comment_removed_at=NULL, updated_at=? WHERE id=? "
-                "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
-                "AND first_comment_correction IS NULL",
+                "first_comment_removed_at=NULL, first_comment_attempts=0, updated_at=? "
+                "WHERE id=? AND first_comment_removed_at IS NOT NULL "
+                "AND first_comment_posted_at IS NOT NULL AND first_comment_correction IS NULL",
                 (text, now, delivery_id),
+            ).rowcount
+        )
+
+
+def adopt_removed_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, comment_id: str, text: str, now: str
+) -> bool:
+    """A removed row (posted, no text, no correction pending) found OUR comment live again
+    (``comment_id`` saying ``text``): record it as the row's live comment and clear
+    ``removed_at``. ``posted_at`` stays; nothing is reposted."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
+                "first_comment_error=NULL, first_comment_removed_at=NULL, "
+                "first_comment_attempts=0, updated_at=? WHERE id=? "
+                "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
+                "AND first_comment_correction IS NULL "
+                "AND (first_comment_text IS NULL OR first_comment_text='')",
+                (text, comment_id, now, delivery_id),
             ).rowcount
         )
 
