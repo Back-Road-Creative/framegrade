@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,17 @@ def parent_is_public_at(short_at, parent_at) -> bool:
     return short is not None and parent is not None and short >= parent
 
 
+class PriorCommentLiveError(Exception):
+    """A text a relink replaced is already live on the post (``comment_id``, saying ``said``).
+    Nothing was posted: posting the new text beside it would leave two comments, one linking a
+    deleted video. The drain records ``said`` as the live text and reports it."""
+
+    def __init__(self, comment_id: str, said: str):
+        super().__init__(f"a replaced first comment is already live (comment {comment_id})")
+        self.comment_id = comment_id
+        self.said = said
+
+
 def full_drive_comment_text(parent_lf_video_id: str) -> str:
     """The first-comment text linking a short to its parent long-form video."""
     parent = (parent_lf_video_id or "").strip()
@@ -102,12 +113,13 @@ def _existing_graph_comment(
     text_field: str,
     permission: str,
     raise_for_error: Callable[[int, dict], None],
-) -> Optional[str]:
-    """The id of a comment on ``object_id`` whose ``text_field`` is exactly
-    ``text`` (whitespace-trimmed), else ``None``. Reads up to
-    ``COMMENT_CHECK_MAX_PAGES`` pages. A failed read raises like a failed
+    also_accept: Iterable[str] = (),
+) -> Optional[Tuple[str, str]]:
+    """``(comment id, the text it says)`` of a comment on ``object_id`` whose ``text_field`` is
+    exactly ``text`` -- or one of ``also_accept``, the texts a relink replaced --
+    (whitespace-trimmed), else ``None``. Reads up to ``COMMENT_CHECK_MAX_PAGES`` pages. A failed read raises like a failed
     post: the caller must never post on a check that did not finish."""
-    want = text.strip()
+    want = {text.strip(): text, **{t.strip(): t for t in also_accept}}
     # The token rides in a header, never in ``params``: ``requests`` puts
     # params into the URL, and a ConnectionError's message embeds that URL
     # and ends up in the row's ``first_comment_error``.
@@ -126,8 +138,9 @@ def _existing_graph_comment(
                 f"(HTTP {response.status_code}); nothing posted"
             )
         for comment in body["data"]:
-            if isinstance(comment, dict) and str(comment.get(text_field) or "").strip() == want:
-                return str(comment.get("id") or "")
+            said = str(comment.get(text_field) or "").strip() if isinstance(comment, dict) else ""
+            if said in want:
+                return str(comment.get("id") or ""), want[said]
         paging = body.get("paging") or {}
         after = (paging.get("cursors") or {}).get("after")
         if not paging.get("next") or not after:
@@ -151,6 +164,7 @@ def post_graph_comment(
     text_field: str,
     permission: str,
     raise_for_error: Callable[[int, dict], None],
+    also_accept: Iterable[str] = (),
 ) -> str:
     """POST ``{base}/{object_id}/comments``; returns the new comment id.
 
@@ -159,7 +173,8 @@ def post_graph_comment(
     Instagram, ``message`` on Facebook), returns that comment's id without
     posting. So a comment Graph created whose answer was lost to a timeout
     is found on the next try, not posted again. A check that fails raises
-    and posts nothing.
+    and posts nothing. When the comment found is one of ``also_accept`` (a text a relink
+    replaced) it raises ``PriorCommentLiveError`` and posts nothing.
 
     A permission-class Graph error raises ``CommentPermissionError`` naming
     ``permission``; any other error goes through the adapter's own
@@ -173,14 +188,18 @@ def post_graph_comment(
         text_field=text_field,
         permission=permission,
         raise_for_error=raise_for_error,
+        also_accept=also_accept,
     )
     if existing is not None:
+        existing_id, said = existing
+        if said.strip() != text.strip():
+            raise PriorCommentLiveError(existing_id, said)
         logger.info(
             "first comment: %s already carries it (comment %s); not posting it again",
             object_id,
-            existing,
+            existing_id,
         )
-        return existing
+        return existing_id
     response = session.post(
         f"{base}/{object_id}/comments",
         data={"message": text, "access_token": access_token},

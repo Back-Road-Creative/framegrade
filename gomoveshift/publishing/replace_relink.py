@@ -7,8 +7,9 @@ nowhere else: never the journal site / API / KV / photos, never a live comment. 
 first, the queue last, each in its own ``try`` (failures land in ``RelinkReport.errors``).
 See docs/social-publishing-queue.md for each store's rule.
 
-Reported as ``operator_items``, never rewritten: a posted comment still linking the old id and
-journeys to check by hand.
+Reported as ``operator_items``, never rewritten: a posted comment still linking the old id (the
+drains record a stale comment they found live as posted, with the old text), other projects' rows
+naming an old id, a rewritten plan (Gate C/D must be re-confirmed) and journeys to check by hand.
 A rerun reports zero changes; ``dry_run`` reports without writing.
 """
 
@@ -220,9 +221,11 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
         )
         if row["first_comment_posted_at"] is not None:
             reason = "comment already live"
+            stale = row["first_comment_error"] or ""
             report.operator_items.append(
                 f"{_row_label(row)}: comment already live, links OLD id; a live comment is "
                 "never edited, fix it by hand"
+                + (f" ({stale})" if stale.startswith("stale") else "")
             )
         elif row["status"] in _queue.FIRST_COMMENT_FROZEN_STATUSES:
             reason = f"status {row['status']}"
@@ -244,6 +247,19 @@ def _relink_queue(conn, project, pat, id_map, now, report) -> None:
             report.queue_rewritten.append(QueueRewrite(*base, written))
             continue
         report.queue_skipped.append(QueueSkip(*base, reason))
+
+
+def _report_other_projects(conn, project, pat, id_map, report: RelinkReport) -> None:
+    """Rows of OTHER projects whose comment names an old id: reported, never rewritten."""
+    for row in _queue.first_comments_naming_elsewhere(conn, project, id_map):
+        if not pat.search(row["first_comment_text"]):  # the old id only inside a longer token
+            continue
+        state = "already live" if row["first_comment_posted_at"] is not None else "not yet posted"
+        report.operator_items.append(
+            f"delivery {row['id']} (project {row['project_name']}, short {row['short_index']}, "
+            f"{row['platform']}): comment {state}, links OLD id; another project's row, "
+            "not rewritten"
+        )
 
 
 def relink_replaced_lf(
@@ -276,11 +292,19 @@ def relink_replaced_lf(
     )
     for name, step in steps:  # file stores first, the queue last
         try:
-            report.files.append(step())
+            done = step()
+            report.files.append(done)
         except Exception as exc:  # noqa: BLE001 -- one store failing must not hide the others
             report.errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            continue
+        if name == plan_path.name and done.replacements:
+            report.operator_items.append(
+                f"{name} {'would be' if dry_run else 'was'} rewritten: re-confirm Gate C/D "
+                "(enqueue-plan refuses a plan whose reviewed content changed since it was approved)"
+            )
     try:
         _relink_queue(conn, project, pat, id_map, now, report)
+        _report_other_projects(conn, project, pat, id_map, report)
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"queue: {type(exc).__name__}: {exc}")
     return report
