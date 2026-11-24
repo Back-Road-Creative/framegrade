@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.150] - 2026-11-24
+
+### Fixed
+
+- `validate_video` retried nothing: one 30 s ffprobe timeout on a freshly written file called it corrupt, so a finished 92-minute OST burn was discarded and re-encoded from scratch. A timeout is now retried with the same backoff as the other ffprobe calls; a non-zero ffprobe exit still fails at once, and a file whose probe times out on every attempt is still invalid.
+
 ## [0.3.149] - 2026-11-24
 
 ### Fixed
@@ -1758,7 +1764,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.149...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.150...HEAD
+[0.3.150]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.149...v0.3.150
 [0.3.149]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.148...v0.3.149
 [0.3.148]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.147...v0.3.148
 [0.3.147]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.146...v0.3.147
