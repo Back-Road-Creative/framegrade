@@ -5,6 +5,25 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.143] - 2026-11-24
+
+### Added
+
+- `relink_replaced_lf` rewrites a replaced long-form upload's old id in unposted queue first
+  comments, the publish plan, the pending journal and the operator checklist.
+
+### Fixed
+
+- A resume now re-runs a day that was recorded complete with fewer long-forms than planned, even when Phase B/C was checkpointed: the orchestrator drops the checkpoint when a planned long-form index has no non-empty final. A Galley Head style job therefore heals on retry instead of failing Phase D with `shorts_per_lf SPLIT-BRAIN` every time. A full_drive day with no supplied plan now builds a montage instead of dropping its long-form.
+- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress; the montage prepend concat has its own size-based ceiling and `-nostdin`.
+- First-comment drains re-read the text before posting and mark it posted only if unchanged.
+
+- A first comment found live with a replaced text (a relink rewrote the row mid-post, or the
+  response was lost) is recorded as posted with that text, `first_comment_error` set and the
+  drain's `errors` filled, never marked done silently; Meta drains no longer post a new text
+  beside a live old one. Relink reports a rewritten plan (re-confirm Gate C/D) and other
+  projects' rows naming an old id.
+
 ## [0.3.142] - 2026-11-24
 
 ### Fixed
@@ -1620,7 +1639,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.143...HEAD
+[0.3.143]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...v0.3.143
 [0.3.142]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...v0.3.142
 [0.3.141]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...v0.3.141
 [0.3.140]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...v0.3.140
