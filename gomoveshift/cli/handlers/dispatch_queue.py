@@ -575,7 +575,7 @@ def cmd_dispatch_queue(args, config) -> int:
             fc_result = drain_first_comments(
                 conn, service_factory=lambda: _build_youtube_comments_service(config)
             )
-            if any(
+            if fc_result.errors or any(
                 (fc_result.posted, fc_result.failed, fc_result.needs_reauth)
                 + (fc_result.stale, fc_result.corrected, fc_result.correction_capped)
             ):
@@ -600,7 +600,7 @@ def cmd_dispatch_queue(args, config) -> int:
         meta_factories = _meta_comment_factories(config, routed)
         if meta_factories:
             mc_result = drain_meta_first_comments(conn, adapter_factories=meta_factories)
-            if any(
+            if mc_result.errors or any(
                 (mc_result.posted, mc_result.failed, mc_result.needs_reauth)
                 + (mc_result.stale, mc_result.corrected, mc_result.correction_capped)
             ):

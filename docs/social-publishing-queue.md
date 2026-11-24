@@ -760,6 +760,39 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   runs only on an item marked `ours`, not the recorded comment, whose fresh read still says the
   copied text; otherwise it is dropped. A row with no recorded id (older rows) deletes nothing and
   reports the second copy once in `first_comment_error` and the drain's errors.
+- **An empty current text never becomes an edit to "".** `record_stale_live_comment` on an
+  unposted row whose text a private relink dropped queues a `delete` of the live comment and keeps
+  the row's text NULL (`first_comment_posted_at` stays set). When that delete lands the row has no
+  comment live, so `run_corrections` marks the row removed (`first_comment_removed_at`, kept
+  beside `first_comment_posted_at`), adds an error line and keeps a `first_comment_removed`
+  incident open. Restoring the text alone closes nothing: the next pass (`restore_removed`) takes
+  the row's text, or the one the plan gives it now (the backfill's `_backfill_text`), and
+  unposts the row (`unpost_removed_first_comment`), so the drain reposts it or adopts our own copy
+  (a hand re-add) through its scan; a viewer's copy is never adopted. A `first_comment_repost_failed`
+  incident then stays open until a new live id is recorded. With no text anywhere the row stays
+  removed and a hand re-add is the only way.
+- **A Graph "gone" answer is confirmed by listing.** `delete_graph_comment` (and so the Instagram
+  replace) trusts code 100 / subcode 33 on a DELETE only after the listing of the post's comments
+  (`object_id`, passed by `run_corrections`) no longer shows the id: the same answer on
+  `GET /{id}` proves nothing (UNVERIFIED: the pair also covers a comment that cannot be loaded).
+  Still listed, a failed or cut-short listing, or no `object_id` raises, the delete stays pending
+  and nothing is posted or resolved. An edit answered 100/33 is never a success.
+- **A replace records the new comment.** `edit_comment` returns the id of the comment it posted
+  (Instagram, or a Facebook edit Graph refused); `resolve_first_comment_correction(new_live_id=)`
+  makes it the row's `first_comment_live_id` when the replaced one was the recorded one, so a
+  later scan never takes it for a second copy and deletes it.
+- **A private relink keeps its comment findable.** An unposted, published row relinked to a
+  video that is private at its slot loses its text, so the drain never scans it again: the report
+  carries an operator item to check the post by hand for an OLD comment. A posted row's note says
+  to re-add the comment by hand once the video is public; an unposted row's note says the drain posts
+  it by itself once the plan gives it text.
+  `id_map` values must be `(str, str)`; anything else raises `TypeError` before a write.
+- **`drop_private_edit` is a compare-and-set** on the correction JSON, retried, like
+  `rewrite_first_comment_corrections`.
+- **Zero comments live is never silent.** When an Instagram delete lands and the post fails, the
+  row is unposted, the failure counts toward `first_comment_attempts`, and a
+  `first_comment_repost_failed` incident stays open until the row is posted again (closed by the
+  next correction pass). The dispatch-queue CLI prints a drain's errors even when every counter is 0.
 - **A second replace relinks pending corrections.** `queue.first_comments_naming` also matches
   pending `first_comment_correction` items; the relink rewrites their `to` text (a compare-and-set
   on the JSON) and reports the row.

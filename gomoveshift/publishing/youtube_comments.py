@@ -218,7 +218,7 @@ class YouTubeCommentEditor:
         body = {"id": comment_id, "snippet": {"textOriginal": text}}
         self._service.comments().update(part="snippet", body=body).execute()
 
-    def delete_comment(self, comment_id: str) -> None:
+    def delete_comment(self, comment_id: str, object_id: Optional[str] = None) -> None:
         self._service.comments().delete(id=comment_id).execute()
 
 

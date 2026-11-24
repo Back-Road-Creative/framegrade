@@ -19,16 +19,23 @@ from .queue import (
     first_comment_correction_ids,
     first_comment_corrections,
     first_comment_intended_texts,
+    mark_first_comment_removed,
     pending_first_comment_corrections,
     registered_platform_id,
+    removed_first_comment_ids,
+    removed_first_comment_rows,
     resolve_first_comment_correction,
     unpost_first_comment_for_repost,
+    unpost_removed_first_comment,
+    unposted_first_comment_ids,
 )
 
 logger = logging.getLogger(__name__)
 
 KIND = "first_comment_stale"
 CAPPED_KIND = "first_comment_correction_capped"
+REPOST_KIND = "first_comment_repost_failed"
+REMOVED_KIND = "first_comment_removed"
 _DETAIL_MAX = 500
 
 
@@ -143,6 +150,107 @@ def raise_stale_incident(
         )
 
 
+def raise_repost_incident(
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    cause: str,
+    incidents_dir: Optional[Path] = None,
+    kind: str = REPOST_KIND,
+) -> None:
+    """File (or refresh) the open incident for a row whose stale comment was deleted but whose
+    replacement did not post: zero comments are live until the drain reposts. ``kind``
+    ``REMOVED_KIND``: the comment was deleted and the row has no text to post (a private relink
+    left none); the drain restores it by itself once the row has text. Never fatal."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    row = conn.execute(
+        "SELECT project_name, short_index, platform FROM deliveries WHERE id=?", (delivery_id,)
+    ).fetchone()
+    if row is None:
+        return
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    filename = f"{safe_name(_key(delivery_id, kind))}.json"
+    where = f"{row['platform']}#{delivery_id} {row['project_name']} short {row['short_index']}: "
+    if kind == REMOVED_KIND:
+        detail = (
+            f"{where}the comment was deleted and the row has no text to post ({cause}); no "
+            "comment is live. The drain posts it by itself (or adopts yours) as soon as the row "
+            "has text again; add it by hand only if no text will come"
+        )[:_DETAIL_MAX]
+    else:
+        detail = (
+            f"{where}the stale comment was deleted and the replacement did not post ({cause}); "
+            "no comment is live until the drain reposts it"
+        )[:_DETAIL_MAX]
+    try:
+        path = directory / filename
+        prior = json.loads(path.read_text()) if path.is_file() else None
+        if isinstance(prior, dict) and not prior.get("resolved_at"):
+            prior.update(detail=detail, error=cause)
+            write_row(directory, prior)
+            return
+        write_row(
+            directory,
+            new_incident(
+                kind,
+                _key(delivery_id, kind),
+                filename,
+                _now_iso(),
+                delivery_id=delivery_id,
+                platform=row["platform"],
+                project=row["project_name"],
+                error=cause,
+                detail=detail,
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("first comment: could not write the repost incident %s", delivery_id)
+
+
+def _note_removed(
+    conn: sqlite3.Connection, delivery_id: int, result: Any, incidents_dir: Optional[Path]
+) -> None:
+    """A delete landed: when the row now holds no comment text, zero comments are live and
+    nothing can be posted, so mark it removed and keep an incident open. It closes only once a
+    NEW live id is recorded (``restore_removed`` unposts the row once it has text; the drain then
+    reposts or adopts, and the repost incident closes on that)."""
+    if not mark_first_comment_removed(conn, delivery_id, _now_iso()):
+        return
+    cause = "its replacement is private at the short's slot, or the text was dropped"
+    result.errors.append(
+        f"delivery {delivery_id}: the stale comment was deleted and the row has no text to post; "
+        "no comment is live. The drain restores it by itself once the row has text; add it by "
+        "hand only if no text will come"
+    )
+    raise_repost_incident(conn, delivery_id, cause, incidents_dir, kind=REMOVED_KIND)
+
+
+def restore_removed(
+    conn: sqlite3.Connection, platforms: Iterable[str], incidents_dir: Optional[Path]
+) -> None:
+    """Put a removed row back on the drain: with its own text, or the one the plan gives it now
+    (the backfill's source). The row is unposted, so the drain reposts it or adopts our own copy
+    (a hand re-add) through its scan; a repost incident stays open until a new live id is
+    recorded. No text: the row stays removed."""
+    from . import enqueue_from_plan  # lazy: it imports the queue
+
+    cache: dict = {}
+    for row in removed_first_comment_rows(conn, platforms):
+        text = (row["first_comment_text"] or "").strip() or enqueue_from_plan._backfill_text(
+            row, cache
+        )
+        if text and unpost_removed_first_comment(conn, row["id"], text, _now_iso()):
+            raise_repost_incident(
+                conn, row["id"], "the comment text is back; the drain posts it", incidents_dir
+            )
+
+
 def _resolve_incidents(
     platforms: Iterable[str],
     still_pending: set,
@@ -180,7 +288,7 @@ def run_corrections(
     gone: Optional[Callable[[Exception], bool]] = None,
 ) -> None:
     """Apply every pending correction through ``client_for(platform)`` (built lazily; has
-    ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id)``; ``object_id`` is the
+    ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id, object_id=None)``; ``object_id`` is the
     post the comment is on, for a platform that can only replace a comment). ``result`` gains
     ``corrected`` per fix and ``stale`` plus an error line per failure; ``refused(exc)`` counts
     toward the correction cap. After a row's first failure its other items wait for the next
@@ -189,6 +297,7 @@ def run_corrections(
     A delete of the row's intended text is never run. A capped row is counted in
     ``result.correction_capped`` and gets the capped incident every pass."""
     platforms = tuple(platforms)
+    restore_removed(conn, platforms, incidents_dir)
     _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
         keep = first_comment_intended_texts(row)
@@ -226,8 +335,9 @@ def run_corrections(
                         f"{row['platform']} cannot {item.get('action')} comment "
                         f"{item.get('live_id') or '(id unknown)'}"
                     )
+                new_id = None
                 if item["action"] == "edit":
-                    call(item["live_id"], item["to"], object_id=_target(row))
+                    new_id = call(item["live_id"], item["to"], object_id=_target(row))
                 else:
                     if item.get("extra"):
                         # A second copy: re-read it. Only our own, still saying the copied text and
@@ -239,16 +349,21 @@ def run_corrections(
                         # A stale observation: the comment has since been corrected.
                         resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                         continue
-                    call(item["live_id"])
+                    call(item["live_id"], object_id=_target(row))
             except Exception as exc:  # noqa: BLE001 -- graded per correction
                 if isinstance(exc, ReplacePostFailedError):
                     # The delete is confirmed; the row goes back to unposted with the new text
                     # and the normal posting path (attempts, alerts) owns the post.
-                    unpost_first_comment_for_repost(conn, row["id"], item, _now_iso())
+                    # Zero comments are live now: the failure counts toward the attempt cap and
+                    # an incident stays open until the comment is back.
+                    unpost_first_comment_for_repost(
+                        conn, row["id"], item, _now_iso(), count_attempt=True
+                    )
                     result.errors.append(
                         f"delivery {row['id']}: stale comment deleted, the replacement post "
                         f"failed ({exc.cause}); the row is unposted and the drain posts it again"
                     )
+                    raise_repost_incident(conn, row["id"], str(exc.cause), incidents_dir)
                     logger.warning("first comment: delivery %s: %s", row["id"], exc)
                     break
                 if gone is not None and gone(exc):
@@ -258,6 +373,8 @@ def run_corrections(
                         continue
                     resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                     result.corrected += 1
+                    if item["action"] == "delete":
+                        _note_removed(conn, row["id"], result, incidents_dir)
                     continue
                 detail = str(exc).strip() or exc.__class__.__name__
                 fail_first_comment_correction(
@@ -273,8 +390,16 @@ def run_corrections(
                 )
                 raise_stale_incident(conn, row["id"], incidents_dir)
                 break
-            resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+            resolve_first_comment_correction(
+                conn,
+                row["id"],
+                item,
+                _now_iso(),
+                new_live_id=new_id if isinstance(new_id, str) else None,
+            )
             result.corrected += 1
+            if item["action"] == "delete":
+                _note_removed(conn, row["id"], result, incidents_dir)
     capped = capped_first_comment_corrections(conn, platforms)
     result.correction_capped += len(capped)
     for row in capped:
@@ -314,3 +439,9 @@ def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Opti
     pending = first_comment_correction_ids(conn, platforms) - capped
     _resolve_incidents(platforms, pending, incidents_dir)
     _resolve_incidents(platforms, capped, incidents_dir, CAPPED_KIND)
+    _resolve_incidents(
+        platforms, unposted_first_comment_ids(conn, platforms), incidents_dir, REPOST_KIND
+    )
+    _resolve_incidents(
+        platforms, removed_first_comment_ids(conn, platforms), incidents_dir, REMOVED_KIND
+    )

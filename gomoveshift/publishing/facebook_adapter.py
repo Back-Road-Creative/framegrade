@@ -175,10 +175,11 @@ class FacebookReelsAdapter:
             report_duplicates=True,
         )
 
-    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> str | None:
         """Edit the Page's own comment in place (``POST /{comment-id}`` ``message=``). When Graph
         refuses the edit and ``object_id`` is known, delete it and post ``text`` instead (never
-        two comments, never a post before the delete is confirmed)."""
+        two comments, never a post before the delete is confirmed). Returns the id of the comment
+        that now says ``text`` when it is a new one, else ``None`` (edited in place)."""
         kwargs = {
             "permission": "pages_manage_engagement",
             "raise_for_error": _raise_for_graph_error,
@@ -190,10 +191,11 @@ class FacebookReelsAdapter:
         except FacebookPermanentError:
             if not object_id:
                 raise
-            replace_graph_comment(
+            return replace_graph_comment(
                 self._session, self._base, object_id, comment_id, text, self._access_token,
                 text_field="message", own_id=self._page_id, **kwargs,
             )  # fmt: skip
+        return None
 
     def read_comment(self, comment_id: str) -> str | None:
         """The text comment ``comment_id`` says now, or ``None`` when Graph says it is gone."""
@@ -203,11 +205,12 @@ class FacebookReelsAdapter:
             raise_for_error=_raise_for_graph_error,
         )  # fmt: skip
 
-    def delete_comment(self, comment_id: str) -> None:
+    def delete_comment(self, comment_id: str, object_id: str | None = None) -> None:
         """Delete the Page's own comment (``DELETE /{comment-id}``)."""
         delete_graph_comment(
             self._session, self._base, comment_id, self._access_token,
-            permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
+            text_field="message", permission="pages_manage_engagement", raise_for_error=_raise_for_graph_error,
+            object_id=object_id,
         )  # fmt: skip
 
     def start_upload(self) -> UploadHandle:

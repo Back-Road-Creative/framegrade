@@ -554,6 +554,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # NULL when unknown (older rows, or no id). A second own comment saying the same text
             # is told apart from it by this.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_live_id TEXT")
+        if "first_comment_removed_at" not in cols:
+            # Set when a delete of the row's live comment left it with no text to repost; only a
+            # new live id (the drain reposts, or adopts our own copy) clears it.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_removed_at TEXT")
         if "first_comment_correction" not in cols:
             # JSON list ``{live_id, live_text, action: edit|delete, to}`` for the drain to fix.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_correction TEXT")
@@ -1617,13 +1621,20 @@ def record_stale_live_comment(
         else:
             if current == live_text:
                 return None
-            fix = {**item, "action": "edit", "to": current}
+            # An empty current text (a private relink dropped it) never becomes an edit to "":
+            # the live comment goes, and the row keeps no text (a delete of an intended text
+            # never runs, and none is intended).
+            fix = (
+                {**item, "action": "edit", "to": current}
+                if current
+                else {**item, "action": "delete"}
+            )
             done = conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=?, "
                 "first_comment_live_id=?, first_comment_error=?, first_comment_correction=?, "
                 "updated_at=? WHERE id=? AND first_comment_posted_at IS NULL",
                 (
-                    live_text,
+                    live_text if current else None,
                     now,
                     live_id or None,
                     error,
@@ -1683,8 +1694,71 @@ def capped_first_comment_corrections(conn: sqlite3.Connection, platforms: Iterab
     ).fetchall()
 
 
+def unposted_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
+    """Ids of deliveries on ``platforms`` whose first comment is not posted."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM deliveries WHERE first_comment_posted_at IS NULL "  # noqa: S608
+            f"AND platform IN ({marks})",
+            wanted,
+        )
+    }
+
+
+def removed_first_comment_rows(conn: sqlite3.Connection, platforms: Iterable[str]) -> list:
+    """Posted rows on ``platforms`` whose live comment was deleted with no text to replace it
+    (``mark_first_comment_removed``); the incident stays open until a NEW live id is recorded."""
+    wanted = list(platforms)
+    marks = ",".join("?" for _ in wanted)
+    return conn.execute(
+        "SELECT id, project_name, short_index, sidecar_path, scheduled_at, first_comment_text "  # noqa: S608
+        "FROM deliveries WHERE first_comment_posted_at IS NOT NULL "
+        f"AND first_comment_removed_at IS NOT NULL AND platform IN ({marks}) ORDER BY id",
+        wanted,
+    ).fetchall()
+
+
+def removed_first_comment_ids(conn: sqlite3.Connection, platforms: Iterable[str]) -> set:
+    """Ids of ``removed_first_comment_rows``."""
+    return {r["id"] for r in removed_first_comment_rows(conn, platforms)}
+
+
+def mark_first_comment_removed(conn: sqlite3.Connection, delivery_id: int, now: str) -> bool:
+    """A delete landed: when the posted row has no text, mark it removed. ``posted_at`` stays."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_removed_at=COALESCE(first_comment_removed_at, ?) "
+                "WHERE id=? AND first_comment_posted_at IS NOT NULL "
+                "AND (first_comment_text IS NULL OR first_comment_text='')",
+                (now, delivery_id),
+            ).rowcount
+        )
+
+
+def unpost_removed_first_comment(
+    conn: sqlite3.Connection, delivery_id: int, text: str, now: str
+) -> bool:
+    """A removed row has comment text again: unpost it with that text, the way a gone edit does
+    (``unpost_first_comment_for_repost``), so the drain reposts it or adopts our own copy."""
+    with conn:
+        return bool(
+            conn.execute(
+                "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
+                "first_comment_live_id=NULL, first_comment_error=NULL, "
+                "first_comment_removed_at=NULL, updated_at=? WHERE id=? "
+                "AND first_comment_removed_at IS NOT NULL AND first_comment_posted_at IS NOT NULL "
+                "AND first_comment_correction IS NULL",
+                (text, now, delivery_id),
+            ).rowcount
+        )
+
+
 def unpost_first_comment_for_repost(
-    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str
+    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str, *, count_attempt: bool = False
 ) -> None:
     """An ``edit`` found its comment gone (404): unpost the row with the edit's ``to`` as its
     text, so the normal drain posts it. Items for the same dead comment go."""
@@ -1701,11 +1775,12 @@ def unpost_first_comment_for_repost(
         conn.execute(
             "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
             "first_comment_live_id=NULL, first_comment_error=NULL, first_comment_correction=?, "
-            "updated_at=? "
+            "first_comment_attempts=first_comment_attempts+?, updated_at=? "
             "WHERE id=? AND first_comment_correction=?",
             (
                 item.get("to") or "",
                 json.dumps(left) if left else None,
+                int(count_attempt),
                 now,
                 delivery_id,
                 row["first_comment_correction"],
@@ -1767,42 +1842,60 @@ def rewrite_first_comment_corrections(
         return done == 1
 
 
+_CAS_RETRIES = 5
+
+
 def drop_private_edit(conn: sqlite3.Connection, delivery_id: int, item: dict, now: str) -> None:
     """``item`` (an ``edit``) would link a video that is still private at the row's slot: it
     becomes a ``delete`` of the live comment and the row's intended text goes, so the delete
-    (never run against the intended text) can run."""
-    with conn:
-        row = conn.execute(
-            "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
-        ).fetchone()
-        if row is None:
+    (never run against the intended text) can run. A compare-and-set on the JSON, retried when a
+    concurrent drain moved it, so an item it appended is never lost."""
+    for _ in range(_CAS_RETRIES):
+        with conn:
+            row = conn.execute(
+                "SELECT first_comment_correction FROM deliveries WHERE id=?", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                return
+            out = [
+                {"live_id": i.get("live_id"), "live_text": i.get("live_text"), "action": "delete"}
+                if _same_correction(i, item) and i.get("action") == "edit"
+                else i
+                for i in first_comment_corrections(row)
+            ]
+            done = conn.execute(
+                "UPDATE deliveries SET first_comment_correction=?, first_comment_text=NULL, "
+                "updated_at=? WHERE id=? AND first_comment_correction IS ?",
+                (json.dumps(out), now, delivery_id, row["first_comment_correction"]),
+            ).rowcount
+        if done == 1:
             return
-        out = [
-            {"live_id": i.get("live_id"), "live_text": i.get("live_text"), "action": "delete"}
-            if _same_correction(i, item) and i.get("action") == "edit"
-            else i
-            for i in first_comment_corrections(row)
-        ]
-        conn.execute(
-            "UPDATE deliveries SET first_comment_correction=?, first_comment_text=NULL, "
-            "updated_at=? WHERE id=?",
-            (json.dumps(out), now, delivery_id),
-        )
+    raise sqlite3.OperationalError(f"delivery {delivery_id}: the correction JSON kept moving")
 
 
 def resolve_first_comment_correction(
-    conn: sqlite3.Connection, delivery_id: int, item: dict, now: str
+    conn: sqlite3.Connection,
+    delivery_id: int,
+    item: dict,
+    now: str,
+    new_live_id: Optional[str] = None,
 ) -> None:
     """``item`` was applied: drop it (an ``edit`` also sets the row's intended text); the last
-    one clears the error."""
+    one clears the error. ``new_live_id``: the replace (Instagram, or a Facebook edit Graph
+    refused) posted a new comment; it becomes the row's recorded live id when the replaced
+    comment was the recorded one, so a later scan never takes it for a second copy."""
     with conn:
         row = conn.execute(
-            "SELECT first_comment_text, first_comment_correction FROM deliveries WHERE id=?",
+            "SELECT first_comment_text, first_comment_correction, first_comment_live_id "
+            "FROM deliveries WHERE id=?",
             (delivery_id,),
         ).fetchone()
         if row is None:
             return
         items = first_comment_corrections(row)
+        live = row["first_comment_live_id"]
+        if new_live_id and item.get("action") == "edit" and live in (None, item.get("live_id")):
+            live = new_live_id
         left = [i for i in items if not _same_applied(i, item)]
         text = row["first_comment_text"]
         if (
@@ -1812,11 +1905,13 @@ def resolve_first_comment_correction(
         ):
             text = item.get("to") or text
         conn.execute(
-            "UPDATE deliveries SET first_comment_text=?, first_comment_correction=?, "
+            "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
+            "first_comment_correction=?, "
             "first_comment_error=CASE WHEN ? THEN first_comment_error ELSE NULL END, "
             "updated_at=? WHERE id=? AND first_comment_correction=?",
             (
                 text,
+                live,
                 json.dumps(left) if left else None,
                 int(bool(left)),
                 now,

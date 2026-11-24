@@ -373,8 +373,9 @@ def _graph_call(
         url, headers={"Authorization": f"OAuth {access_token}"}, timeout=30, **kwargs
     )
     if method == "delete" and _is_gone(response):
-        # Already deleted (an earlier DELETE landed and its answer was lost): the goal holds.
-        return {"success": True}
+        # Already deleted (an earlier DELETE landed and its answer was lost): the goal holds --
+        # but ``gone`` tells the caller to confirm, since the pair also answers other failures.
+        return {"success": True, "gone": True}
     body = _graph_body(response, permission, raise_for_error)
     if body.get("success") is not True:
         raise CommentCorrectionError(f"Graph {method.upper()} {url.rsplit('/', 1)[-1]}: not ok")
@@ -397,12 +398,37 @@ def edit_graph_comment(
 
 
 def delete_graph_comment(
-    session, base, comment_id, access_token, *, permission, raise_for_error
-) -> None:
-    """Delete one of the account's own comments (``DELETE /{comment-id}``)."""
-    _graph_call(
+    session, base, comment_id, access_token, *, text_field, permission, raise_for_error,
+    object_id=None,
+) -> None:  # fmt: skip
+    """Delete one of the account's own comments (``DELETE /{comment-id}``). A "gone" answer
+    (code 100 / subcode 33, whose generic message UNVERIFIED also covers a comment that cannot
+    be loaded for missing permissions) is trusted only once the listing of ``object_id``'s
+    comments no longer shows ``comment_id``: the same answer on ``GET /{comment-id}`` proves
+    nothing. One still listed, a listing that fails or is cut short, or no ``object_id`` to list,
+    raises: the delete stays pending and nothing is posted or resolved on the answer alone."""
+    body = _graph_call(
         session, "delete", f"{base}/{comment_id}", access_token, permission, raise_for_error
     )  # fmt: skip
+    if not body.get("gone"):
+        return
+    if not object_id:
+        raise CommentCheckError(
+            f"Graph DELETE {comment_id}: answered gone; no post to list, so not confirmed"
+        )
+    comments, complete = _read_graph_comments(
+        session, base, object_id, access_token,
+        text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+        stop=lambda found: any(cid == comment_id for cid, _, _ in found),
+    )  # fmt: skip
+    if any(cid == comment_id for cid, _, _ in comments):
+        raise CommentCheckError(
+            f"Graph DELETE {comment_id}: answered gone but the comment is still listed; not deleted"
+        )
+    if not complete:
+        raise CommentCheckError(
+            f"Graph DELETE {comment_id}: answered gone; too many comments to confirm it is absent"
+        )
 
 
 def replace_graph_comment(
@@ -441,7 +467,8 @@ def replace_graph_comment(
     if any(cid == stale_id and ours for cid, _, ours in comments):
         delete_graph_comment(
             session, base, stale_id, access_token,
-            permission=permission, raise_for_error=raise_for_error,
+            text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+            object_id=object_id,
         )  # fmt: skip
     elif not complete:
         raise CommentCheckError(

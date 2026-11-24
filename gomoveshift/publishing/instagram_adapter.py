@@ -234,12 +234,13 @@ class InstagramReelsAdapter:
             report_duplicates=True,
         )
 
-    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
+    def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> str | None:
         """Instagram cannot edit a comment's text (the IG Comment node only hides/unhides): delete
-        ``comment_id`` on ``object_id``, then post ``text`` once the delete is confirmed."""
+        ``comment_id`` on ``object_id``, then post ``text`` once the delete is confirmed. Returns
+        the id of the comment that now says ``text``."""
         if not object_id:
             raise InstagramPermanentError(f"cannot replace comment {comment_id}: media id unknown")
-        replace_graph_comment(
+        return replace_graph_comment(
             self._session, self._base, object_id, comment_id, text, self._access_token,
             text_field="text", permission="instagram_manage_comments",
             raise_for_error=_raise_for_graph_error, own_id=self._ig_user_id,
@@ -253,11 +254,12 @@ class InstagramReelsAdapter:
             raise_for_error=_raise_for_graph_error,
         )  # fmt: skip
 
-    def delete_comment(self, comment_id: str) -> None:
+    def delete_comment(self, comment_id: str, object_id: str | None = None) -> None:
         """Delete the account's own comment (``DELETE /{comment-id}``)."""
         delete_graph_comment(
             self._session, self._base, comment_id, self._access_token,
-            permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
+            text_field="text", permission="instagram_manage_comments", raise_for_error=_raise_for_graph_error,
+            object_id=object_id,
         )  # fmt: skip
 
     def _check_publishing_limit(self) -> None:

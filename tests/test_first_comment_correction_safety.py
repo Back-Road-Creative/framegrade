@@ -518,7 +518,7 @@ class _Recorder:
     def edit_comment(self, comment_id, text, object_id=None):
         self.calls.append(("edit", comment_id, text))
 
-    def delete_comment(self, comment_id):
+    def delete_comment(self, comment_id, object_id=None):
         self.calls.append(("delete", comment_id))
 
 
