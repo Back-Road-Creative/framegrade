@@ -668,27 +668,46 @@ the old file, and `reviewed_plan_hash` stays a stored field.
 A replace supersedes the project dir and re-renders every Short to the same output path, but the
 replace run emits no `<project>_publish_plan.json` and enqueues nothing, so queued rows pointed at
 a missing sidecar (`TransientMediaError` forever). `replace_rebuild.py::rebuild_replaced_sidecar(conn,
-*, old_sidecar, new_sidecar, project, stages_dir, now, incidents_dir=None)` reads the OLD sidecar
-from `_superseded/<at>/...` and writes the rebuilt one at the ORIGINAL path (tmp file then
-`os.replace`), so rows' `sidecar_path` resolves again with no row edit. **Rebuild, then relink:**
-every other field, `parent_lf_video_id` included, is kept; `relink_replaced_lf` rewrites it after.
-It is not wired into `replace_scheduled`; the wiring unit calls it.
+*, old_sidecar, new_sidecar, project, stages_dir, old_stages_dir, now, incidents_dir=None)` reads
+the OLD sidecar from `_superseded/<at>/...` and writes the rebuilt one at the ORIGINAL path (tmp
+file then `os.replace`), so rows' `sidecar_path` resolves again with no row edit. `old_stages_dir`
+is the set-aside run's stage dir. **Rebuild, then relink:** every other field,
+`parent_lf_video_id` included, is kept; `relink_replaced_lf` rewrites it after. Not wired into
+`replace_scheduled` yet.
 
-A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed with `review_hash`,
-`consent_hash` moved only when it equalled the old derived hash) only when: the re-render is the
-same clip (same parent LF; the stages' `shorts_ost_audit_<date>.json` window and the new media
-agree with the old duration to `DURATION_TOLERANCE_S`); the new run's privacy attestation verifies
-(`privacy_hold_reason`); `mask_frame_refusal` passes; the old hash was the derived one (a hand-set
-hash needs a human re-review); and no queued row is inside the 24 h lead time. Otherwise it is
-refused: its record keeps the OLD fingerprint (dispatch's media check then refuses the stale
-bytes, never uploads them), its rows are unchanged, and one `replace_rebuild_refused` incident
-shows in `gomoveshift status --json` (resolved when a later run swaps it).
+**Gate C/D first.** Before anything moves, the swap calls `assert_gate_cd_approved` on the replace
+run's `<stages>/pipeline_state.json`. A `--no-review` replace never persists a confirmation, so it
+normally passes as unreviewed; a stale confirmation hash or unreadable state refuses EVERY Short
+with one `...:gate_cd` incident ("Gate C/D must be re-confirmed"). Nothing forges a confirmation.
+
+A Short is swapped (fresh `fingerprint_media`, `reviewed_plan_hash` recomputed, `consent_hash`
+moved only when it equalled the old derived hash) only when:
+
+- **Same footage.** The old and new `shorts_ost_audit_<date>.json` name the same source segment
+  (start AND end within `DURATION_TOLERANCE_S`) and parent LF, and the old duration, new window and
+  new media agree. No old audit, no match or a malformed entry refuses that Short only.
+- **Its own day is attested.** `day_<date>/day_<date>_privacy_attestation.json` verifies every
+  class; a missing day is a refusal, never merged to a pass. `mask_frame_refusal` passes; the old
+  hash was the derived one.
+- **The attestations can be placed.** `_sync_privacy_attestations` puts the per-day attestations
+  beside the sidecar in the same write, so a real drain uploads with no hand step; else every swap
+  is refused.
+- **No row blocks it.** A recovery row, an uploaded row ("one Short cannot be half old, half new")
+  or an unfinished row on another sidecar file (matched by resolved path) refuses the Short.
+
+A refused Short keeps the OLD fingerprint (dispatch refuses the stale bytes), rows unchanged, and
+one `replace_rebuild_refused` incident shows in `gomoveshift status --json` (resolved when a later
+run swaps it; not rewritten while open; a failed write is logged). A Short that is only waiting is
+**deferred** (`RebuildResult.deferred`, an incident saying it will be retried): a live lease, an
+in-flight row, or a queued row whose FUTURE slot is inside the 24 h lead time (the incident names
+the retry time). A past or missing slot is already due and
+stalled on old bytes, so it moves; dispatch's own gates still run at upload.
 
 Rows of a swapped Short that are queued, unleased and have no upload id move `plan_hash` in one
-transaction with a `response_log` audit row (compare-and-set; commit, then `os.replace`; a crash
-between leaves the old file or none and a rerun converges). Leased, in-flight and uploaded rows
-are never changed and block that Short's swap; published and awaiting-manual rows are never
-changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
+transaction with a `response_log` audit row (compare-and-set on `status='queued'`; commit, then
+`os.replace`). A crash between leaves rows ahead of the file; a rerun that refuses or defers that
+Short restores them (action `replace_rebuild_restore`), and one that swaps it converges.
+Other rows are never changed and are listed in `RebuildResult.untouched`.
 
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
 ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
