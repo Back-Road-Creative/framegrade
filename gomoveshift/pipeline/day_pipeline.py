@@ -2710,12 +2710,13 @@ def run_day_pipeline(
         segments = list(getattr(lf_plan, "segments", []) or [])
         peaks = list(getattr(lf_plan, "montage_peaks", []) or [])
         if not segments:
-            logger.warning(
-                "Day %s: LF %d has no segments, skipping",
-                date,
-                idx,
+            # A planned long-form is never dropped with a warning: the day would
+            # go on to render its shorts (~1 h) and finish with fewer LFs than
+            # planned, which Phase D then refuses as a split-brain.
+            raise RuntimeError(
+                f"Day {date}: planned LF {idx} has no segments; nothing was rendered "
+                "for the day (a planned long-form is never dropped silently)"
             )
-            continue
         # CONTRACT: segments + peaks must already be day-local when they
         # reach this function. The authoritative remap lives in
         # phase_bc_day_first._partition_lf_plans_by_date, which mutates
@@ -2906,10 +2907,16 @@ def run_day_pipeline(
                     f"({_concat_receipt}); nothing shipped"
                 )
         if concatenated is None:
-            logger.warning("Day %s: LF %d concat failed, skipping", date, idx)
-            continue
+            # Hard failure, before shorts are planned or rendered. A retry redoes
+            # the LF work; the master is reused by its own checks.
+            raise RuntimeError(
+                f"Day {date}: LF {idx} segment extract/concat returned None "
+                f"({raw_concat}); the day is not complete and no shorts were "
+                "rendered (a planned long-form is never dropped silently)"
+            )
 
         with_montage = lf_dir / f"lf_{idx:02d}_with_montage.mp4"
+        _montage_failures: list[str] = []
         prepended = prepend_montage(
             raw_lf_path=concatenated,
             peaks=peaks,
@@ -2917,15 +2924,18 @@ def run_day_pipeline(
             work_dir=work_dir,
             master_path=master_source_for_extract,
             file_boundaries=file_boundaries,
+            failures=_montage_failures,
             **cadence_kwargs(config),
         )
         if prepended is None:
-            logger.warning(
-                "Day %s: LF %d montage prepend failed, skipping",
-                date,
-                idx,
+            # Never ship an LF without its montage (the OST title window tracks the
+            # montage tail) and never drop it quietly either: fail the day now.
+            _cause = "; ".join(_montage_failures) or "no cause reported"
+            raise RuntimeError(
+                f"Day {date}: LF {idx} montage prepend failed: {_cause}; the day is "
+                "not complete and no shorts were rendered (a planned long-form is "
+                "never dropped silently)"
             )
-            continue
 
         _lead_probed = False
         if _lf_cards is not None or _inset_inputs is not None:
