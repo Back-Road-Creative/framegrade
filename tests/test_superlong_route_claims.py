@@ -303,6 +303,7 @@ def test_montage_cannot_burn_place_text_of_its_own():
             "work_dir",
             "master_path",
             "file_boundaries",
+            "failures",  # out-list for the failure cause; carries no text onto the picture
         }
     on = SimpleNamespace(drive=SimpleNamespace(output_cadence="source"))
     assert set(cadence_kwargs(on)) == {"output_fps"}
