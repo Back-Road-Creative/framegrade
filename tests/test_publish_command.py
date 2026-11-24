@@ -443,3 +443,26 @@ def test_reconcile_publishes_also_retires_an_auditing_drive_that_was_uploaded(tm
     rig.audit("ace-basin", status="auditing", recipe=False)
     _receipt(rig, "ace-basin")
     assert publish.reconcile_publishes(rig.store, rig.jobs) == [{"project": "ace-basin", "status": "complete"}]  # fmt: skip
+
+
+def test_a_replace_plan_refuses_a_render_with_a_different_long_form_count(tmp_path):
+    rig = Rig(tmp_path)
+    out = rig.audit(lfs=2)  # the re-render split into 2 long-forms; the plan covers 3
+    plan = {"kept": {"1": {"video_id": "a"}}, "replace": {"2": {"video_id": "b"}, "3": {"video_id": "c"}}}  # fmt: skip
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    before = rig.snapshot()
+    res = rig.run()
+    assert res["action"] == "refused", res
+    assert "replace plan" in res["reason"] and "2" in res["reason"] and "3" in res["reason"]
+    assert rig.store.drive("day-a").lf_count == 1 and rig.store.drive("day-a").status == "auditing"
+    assert rig.snapshot() == before and not rig.launches
+
+
+def test_a_replace_plan_with_a_matching_count_still_publishes(tmp_path):
+    rig = Rig(tmp_path)
+    out = rig.audit(lfs=2)
+    plan = {"kept": {"1": {"video_id": "a"}}, "replace": {"2": {"video_id": "b"}}}
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    assert rig.run()["action"] == "launched"
