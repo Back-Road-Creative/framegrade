@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -41,9 +40,11 @@ from ..health.store import (
 # are unchanged.
 from ..pipeline.blur_gate import (  # noqa: F401
     SOURCE_FRAMES_SCHEMA,
+    can_measure_without_master,
     file_sha256,
     mask_identity,
     persisted_source_count,
+    probe_frames,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,6 @@ REASON_MISMATCH = "mask_frame_count_mismatch"
 #: The sidecar keeps ``source_frame_count`` in its header; no need to parse the whole file.
 _HEADER_BYTES = 4096
 _COUNT_RE = re.compile(r'"source_frame_count"\s*:\s*(\d+)')
-_PROBE_TIMEOUT_S = 180
 #: Container candidates, in order: the raw concat the detect pass read, then the master.
 _CONTAINER_NAMES = ("day_{date}_raw.mp4", "day_{date}_master.mp4")
 
@@ -72,19 +72,6 @@ def sidecar_frame_count(sidecar: Path) -> Optional[int]:
         return None
     found = _COUNT_RE.search(head)
     return int(found.group(1)) if found else None
-
-
-def probe_frames(path: Path) -> Optional[int]:
-    """The video stream's container ``nb_frames`` via ffprobe, or None when unreadable."""
-    try:
-        out = subprocess.run(  # noqa: S603,S607 -- fixed argv
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-             "stream=nb_frames", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S, check=True,
-        ).stdout.strip()  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return int(out) if out.isdigit() else None
 
 
 def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
