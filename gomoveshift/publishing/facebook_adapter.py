@@ -14,6 +14,7 @@ from gomoveshift.publishing.first_comment import (
     delete_graph_comment,
     edit_graph_comment,
     post_graph_comment,
+    read_graph_comment,
     replace_graph_comment,
 )
 from gomoveshift.publishing.meta_auth import graph_error_tag
@@ -170,6 +171,8 @@ class FacebookReelsAdapter:
             raise_for_error=_raise_for_graph_error,
             also_accept=also_accept,
             own_id=self._page_id,
+            post_beside_foreign=True,
+            report_duplicates=True,
         )
 
     def edit_comment(self, comment_id: str, text: str, object_id: str | None = None) -> None:
@@ -191,6 +194,14 @@ class FacebookReelsAdapter:
                 self._session, self._base, object_id, comment_id, text, self._access_token,
                 text_field="message", own_id=self._page_id, **kwargs,
             )  # fmt: skip
+
+    def read_comment(self, comment_id: str) -> str | None:
+        """The text comment ``comment_id`` says now, or ``None`` when Graph says it is gone."""
+        return read_graph_comment(
+            self._session, self._base, comment_id, self._access_token,
+            text_field="message", permission="pages_manage_engagement",
+            raise_for_error=_raise_for_graph_error,
+        )  # fmt: skip
 
     def delete_comment(self, comment_id: str) -> None:
         """Delete the Page's own comment (``DELETE /{comment-id}``)."""

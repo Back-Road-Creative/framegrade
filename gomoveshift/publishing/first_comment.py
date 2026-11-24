@@ -81,6 +81,14 @@ class PriorCommentLiveError(Exception):
         self.duplicates = tuple(duplicates)
 
 
+class ForeignCommentId(str):
+    """A comment id that is NOT positively ours (its author is another account, or unknown): a
+    viewer's comment saying our text. It may satisfy a "is it already there" scan but is never
+    ours: never marked as the row's posted comment, never an edit, delete or adoption target. ``unknown_author`` is set when it had no author."""
+
+    unknown_author = False
+
+
 class CommentCorrectionError(RuntimeError):
     """Graph answered a comment edit/delete with a 2xx that is not ``{"success": true}``."""
 
@@ -144,8 +152,9 @@ def _read_graph_comments(
     stop: Optional[Callable[[List[Tuple[str, str, bool]]], bool]] = None,
 ) -> Tuple[List[Tuple[str, str, bool]], bool]:
     """``(comments, complete)``: ``(id, text, ours)`` of the comments on ``object_id`` (text
-    stripped); ``ours`` only when ``from.id`` is ``own_id``, the Page or IG user (a comment with
-    no ``from``, or no ``own_id``, is never ours). Reads up to ``COMMENT_CHECK_MAX_PAGES``
+    stripped); ``ours`` only when ``from.id`` is ``own_id``, the Page or IG user. Every other
+    comment (someone else's, no ``from``, or no ``own_id``) is a viewer's: its id is a
+    ``ForeignCommentId``. Reads up to ``COMMENT_CHECK_MAX_PAGES``
     pages, or fewer once ``stop(comments)`` holds.
     ``complete`` is ``True`` only when the last page was reached. A failed read raises like a
     failed post: the caller must never post on a check that did not finish."""
@@ -170,8 +179,13 @@ def _read_graph_comments(
         for comment in body["data"]:
             if isinstance(comment, dict):
                 said = str(comment.get(text_field) or "").strip()
-                ours = bool(own_id) and _author_id(comment) == own_id
-                found.append((str(comment.get("id") or ""), said, ours))
+                author = _author_id(comment)
+                ours = bool(own_id) and author == own_id
+                cid = str(comment.get("id") or "")
+                if not ours:
+                    cid = ForeignCommentId(cid)  # not positively ours: never ours to touch
+                    cid.unknown_author = not author
+                found.append((cid, said, ours))
         paging = body.get("paging") or {}
         after = (paging.get("cursors") or {}).get("after")
         if not paging.get("next") or not after:
@@ -210,7 +224,9 @@ def _existing_graph_comment(
     prior_texts = {t.strip(): t for t in also_accept}
 
     def done(found):
-        return not prior_texts and any(said in wanted for _, said, _ in found)
+        return not prior_texts and any(
+            said in wanted and not isinstance(cid, ForeignCommentId) for cid, said, _ in found
+        )
 
     comments, _ = _read_graph_comments(
         session,
@@ -226,6 +242,13 @@ def _existing_graph_comment(
     if not own_id and any(said in prior_texts and said not in wanted for _, said, _ in comments):
         raise _own_id_unknown(object_id)
     hits = [(c, wanted[s], o) for c, s, o in comments if s in wanted]
+    if any(getattr(c, "unknown_author", False) for c, _, _ in hits):
+        logger.warning(
+            "first comment: %s has a comment with no author saying our text; treated as a "
+            "viewer's, never edited or deleted (unverified when Graph omits `from`)",
+            object_id,
+        )
+    # Ours first; a stranger's id is flagged and never stands in for ours.
     current = [(c, s) for c, s, o in hits if o] + [(c, s) for c, s, o in hits if not o]
     prior = [
         (cid, prior_texts[said])
@@ -247,17 +270,22 @@ def post_graph_comment(
     raise_for_error: Callable[[int, dict], None],
     also_accept: Iterable[str] = (),
     own_id: str = "",
+    post_beside_foreign: bool = False,
+    report_duplicates: bool = False,
 ) -> str:
     """POST ``{base}/{object_id}/comments``; returns the new comment id.
 
     Never a second copy: it first reads the post's comments and, when one
     already carries exactly ``text`` (in ``text_field``: ``text`` on
     Instagram, ``message`` on Facebook), returns that comment's id without
-    posting. So a comment Graph created whose answer was lost to a timeout
+    posting (unless ``post_beside_foreign``: a stranger's copy then never counts, ours is posted
+    beside it; a stranger's match otherwise comes back as a ``ForeignCommentId``). So a comment Graph created whose answer was lost to a timeout
     is found on the next try, not posted again. A check that fails raises
     and posts nothing. When a comment found is one of ``also_accept`` (a text a relink
     replaced) it raises ``PriorCommentLiveError`` (naming the new text's comment when that is
-    live too, else the replaced one, plus any further replaced ones) and posts nothing.
+    live too, else the replaced one, plus any further replaced ones) and posts nothing. With
+    ``report_duplicates`` (the drain) the same error reports our second and later copies of
+    ``text`` as ``duplicates``, so each gets a delete and one stays.
 
     A permission-class Graph error raises ``CommentPermissionError`` naming
     ``permission``; any other error goes through the adapter's own
@@ -274,11 +302,14 @@ def post_graph_comment(
         also_accept=also_accept,
         own_id=own_id,
     )
-    if prior:
-        # The new text's comment is the one to keep; with none, the first replaced one stands in
-        # for it and the rest are duplicates.
-        first = current[0] if current else prior[0]
-        dupes = prior if current else prior[1:]
+    ours = [c for c in current if not isinstance(c[0], ForeignCommentId)]
+    if post_beside_foreign:
+        current = ours  # a viewer's copy never stands in for ours: post ours beside it
+    if prior or (report_duplicates and len(ours) > 1):
+        # OUR comment saying the new text is the one to keep; with none, the first replaced one
+        # stands in for it. Our further copies and replaced ones are duplicates.
+        first = ours[0] if ours else prior[0]
+        dupes = [*ours[1:], *prior] if ours else prior[1:]
         raise PriorCommentLiveError(first[0], first[1], dupes)
     if current:
         logger.info(
@@ -313,6 +344,26 @@ def _is_gone(response) -> bool:
         and isinstance(error, dict)
         and (error.get("code"), error.get("error_subcode")) == _GRAPH_GONE
     )
+
+
+def read_graph_comment(
+    session, base, comment_id, access_token, *, text_field, permission, raise_for_error
+) -> Optional[str]:
+    """The text comment ``comment_id`` says now (``GET /{comment-id}``, stripped), or ``None``
+    when Graph says it is gone (:data:`_GRAPH_GONE`). Any other failure raises: a caller never
+    acts on a read that did not answer."""
+    response = session.get(
+        f"{base}/{comment_id}",
+        params={"fields": f"id,{text_field}"},
+        headers={"Authorization": f"OAuth {access_token}"},
+        timeout=30,
+    )
+    if _is_gone(response):
+        return None
+    body = _graph_body(response, permission, raise_for_error)
+    if text_field not in body:
+        raise CommentCheckError(f"comment {comment_id}: the read answered no {text_field}")
+    return str(body.get(text_field) or "").strip()
 
 
 def _graph_call(
@@ -401,7 +452,7 @@ def replace_graph_comment(
         return post_graph_comment(
             session, base, object_id, text, access_token,
             text_field=text_field, permission=permission, raise_for_error=raise_for_error,
-            own_id=own_id,
+            own_id=own_id, post_beside_foreign=True,
         )  # fmt: skip
     except Exception as exc:  # noqa: BLE001 -- the stale comment is gone: the caller must know
         raise ReplacePostFailedError(exc) from exc

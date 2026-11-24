@@ -99,12 +99,25 @@ class _Req:
 class _Comments:
     def __init__(self, fail):
         self.updates, self.deletes, self.fail = [], [], list(fail)
+        self.texts, self.reads, self.read_fail = {}, [], None  # what each comment says now
+
+    def list(self, part, id, **kw):  # noqa: A002 -- the API's own name: comments.list(id=...)
+        self.reads.append(id)
+        if self.read_fail:
+            return _Req(exc=self.read_fail)
+        if id not in self.texts and id != "gone":
+            self.texts[id] = "some stale text"
+        items = (
+            [{"id": id, "snippet": {"textOriginal": self.texts[id]}}] if id in self.texts else []
+        )
+        return _Req({"items": items})
 
     def _go(self):
         return _Req(exc=self.fail.pop(0) if self.fail else None)
 
     def update(self, part, body):
         self.updates.append((body["id"], body["snippet"]["textOriginal"]))
+        self.texts[body["id"]] = body["snippet"]["textOriginal"]
         return self._go()
 
     def delete(self, id):  # noqa: A002 -- the API's own name

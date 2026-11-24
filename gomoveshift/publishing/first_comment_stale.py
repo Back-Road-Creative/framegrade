@@ -196,7 +196,11 @@ def run_corrections(
         for item in first_comment_corrections(row):
             if unposted and item.get("action") != "delete":
                 continue  # the row is reposting: another edit would duplicate it
-            if item.get("action") == "delete" and (item.get("live_text") or "").strip() in keep:
+            if (
+                item.get("action") == "delete"
+                and not item.get("extra")
+                and (item.get("live_text") or "").strip() in keep
+            ):
                 resolve_first_comment_correction(conn, row["id"], item, _now_iso())
                 continue
             if (
@@ -225,6 +229,16 @@ def run_corrections(
                 if item["action"] == "edit":
                     call(item["live_id"], item["to"], object_id=_target(row))
                 else:
+                    if item.get("extra"):
+                        # A second copy: re-read it. Only our own, still saying the copied text and
+                        # not the row's recorded comment, is ever deleted.
+                        if not _extra_is_deletable(client, item, row):
+                            resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                            continue
+                    elif _already_intended(client, item, keep):
+                        # A stale observation: the comment has since been corrected.
+                        resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                        continue
                     call(item["live_id"])
             except Exception as exc:  # noqa: BLE001 -- graded per correction
                 if isinstance(exc, ReplacePostFailedError):
@@ -266,6 +280,31 @@ def run_corrections(
     for row in capped:
         raise_stale_incident(conn, row["id"], incidents_dir, capped=True)
     _resolve_all(conn, platforms, incidents_dir)
+
+
+def _already_intended(client: object, item: dict, keep: set) -> bool:
+    """True when the comment a queued delete names now says an intended text (it was corrected
+    after the delete was queued): deleting it would remove the row's only comment. Reads that one
+    comment; a read that fails raises, so the delete stays pending and is never made blind."""
+    read = getattr(client, "read_comment", None)
+    if read is None:
+        raise CorrectionUnavailableError("cannot confirm what the comment says before deleting it")
+    said = read(item["live_id"])
+    return said is not None and said.strip() in keep
+
+
+def _extra_is_deletable(client: object, item: dict, row: Any) -> bool:
+    """True when a queued second-copy delete may run: the item is marked ours (a viewer's comment
+    is never queued, and a hand-edited or old item without the mark is dropped), its id is not the
+    comment the row recorded, and a fresh read still shows the text it copied. A read that fails
+    raises, so the delete stays pending and is never made blind."""
+    if not item.get("ours") or item.get("live_id") == row["first_comment_live_id"]:
+        return False
+    read = getattr(client, "read_comment", None)
+    if read is None:
+        raise CorrectionUnavailableError("cannot confirm what the comment says before deleting it")
+    said = read(item["live_id"])
+    return said is not None and said.strip() == (item.get("live_text") or "").strip()
 
 
 def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:

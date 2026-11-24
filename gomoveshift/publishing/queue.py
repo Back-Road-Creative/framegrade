@@ -549,6 +549,11 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # JSON list of texts a relink replaced (``rewrite_unposted_first_comment``);
             # the YouTube drain's dedup accepts a live comment saying any of them.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_prior_text TEXT")
+        if "first_comment_live_id" not in cols:
+            # The id of the comment the drain recorded as the row's own when it marked it posted;
+            # NULL when unknown (older rows, or no id). A second own comment saying the same text
+            # is told apart from it by this.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_live_id TEXT")
         if "first_comment_correction" not in cols:
             # JSON list ``{live_id, live_text, action: edit|delete, to}`` for the drain to fix.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_comment_correction TEXT")
@@ -1529,8 +1534,8 @@ def record_stale_live_comment(
     set, or ``None`` when nothing changed."""
     with conn:
         row = conn.execute(
-            "SELECT first_comment_text, first_comment_posted_at, first_comment_correction "
-            "FROM deliveries WHERE id=?",
+            "SELECT first_comment_text, first_comment_posted_at, first_comment_correction, "
+            "first_comment_live_id FROM deliveries WHERE id=?",
             (delivery_id,),
         ).fetchone()
         if row is None:
@@ -1545,7 +1550,41 @@ def record_stale_live_comment(
             said = live_text.strip()
             intended = first_comment_intended_texts(row)
             if said == current.strip() and said in intended:
-                return None
+                known = row["first_comment_live_id"]
+                if live_id and not known:
+                    # An old row: the comment it recorded as posted is unknown, so which copy is
+                    # ours to keep cannot be told. Nothing is deleted; the operator is told once.
+                    error = (
+                        f"a second copy of the comment may be live (comment {live_id}); this "
+                        "row has no recorded comment id, so check and delete one by hand"
+                    )
+                    done = conn.execute(
+                        "UPDATE deliveries SET first_comment_error=?, updated_at=? WHERE id=? "
+                        "AND first_comment_posted_at IS NOT NULL AND first_comment_live_id IS NULL "
+                        "AND (first_comment_error IS NULL OR first_comment_error!=?)",
+                        (error, now, delivery_id, error),
+                    ).rowcount
+                    return error if done == 1 else None
+                if not (live_id and known and live_id != known):
+                    return None
+                # A second comment of ours saying the intended text beside the recorded one:
+                # delete it (``extra``: the delete's own text is an intended one, still to go).
+                error = f"a second copy of the comment is live (comment {live_id}); deleting it"
+                done = conn.execute(
+                    "UPDATE deliveries SET first_comment_error=?, first_comment_correction=?, "
+                    "updated_at=? WHERE id=? AND first_comment_posted_at IS NOT NULL "
+                    "AND first_comment_live_id=?",
+                    (
+                        error,
+                        json.dumps(
+                            [*items, {**item, "action": "delete", "extra": True, "ours": True}]
+                        ),
+                        now,
+                        delivery_id,
+                        known,
+                    ),
+                ).rowcount
+                return error if done == 1 else None
             if said in intended:
                 items = [
                     {**i, "action": "delete"}
@@ -1556,11 +1595,12 @@ def record_stale_live_comment(
                 ]
                 error = stale_live_error(current, live_text) if items else None
                 done = conn.execute(
-                    "UPDATE deliveries SET first_comment_text=?, first_comment_error=?, "
-                    "first_comment_correction=?, updated_at=? WHERE id=? "
+                    "UPDATE deliveries SET first_comment_text=?, first_comment_live_id=?, "
+                    "first_comment_error=?, first_comment_correction=?, updated_at=? WHERE id=? "
                     "AND first_comment_posted_at IS NOT NULL AND first_comment_text=?",
                     (
                         live_text,
+                        live_id or None,
                         error,
                         json.dumps(items) if items else None,
                         now,
@@ -1580,9 +1620,17 @@ def record_stale_live_comment(
             fix = {**item, "action": "edit", "to": current}
             done = conn.execute(
                 "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=?, "
-                "first_comment_error=?, first_comment_correction=?, updated_at=? "
-                "WHERE id=? AND first_comment_posted_at IS NULL",
-                (live_text, now, error, json.dumps([*items, fix]), now, delivery_id),
+                "first_comment_live_id=?, first_comment_error=?, first_comment_correction=?, "
+                "updated_at=? WHERE id=? AND first_comment_posted_at IS NULL",
+                (
+                    live_text,
+                    now,
+                    live_id or None,
+                    error,
+                    json.dumps([*items, fix]),
+                    now,
+                    delivery_id,
+                ),
             ).rowcount
     return error if done == 1 else None
 
@@ -1607,7 +1655,8 @@ def pending_first_comment_corrections(conn: sqlite3.Connection, platforms: Itera
     marks = ",".join("?" for _ in wanted)
     rows = conn.execute(
         "SELECT id, project_name, short_index, platform, first_comment_text, platform_upload_id, "  # noqa: S608
-        "platform_post_id, first_comment_error, first_comment_correction, scheduled_at "
+        "platform_post_id, first_comment_error, first_comment_correction, scheduled_at, "
+        "first_comment_live_id "
         f"FROM deliveries WHERE platform IN ({marks}) AND first_comment_correction IS NOT NULL "
         "AND first_comment_posted_at IS NOT NULL AND first_comment_correction_attempts < ? "
         "ORDER BY id",
@@ -1651,7 +1700,8 @@ def unpost_first_comment_for_repost(
         left = [i for i in items if i.get("live_id") != item.get("live_id")]
         conn.execute(
             "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=NULL, "
-            "first_comment_error=NULL, first_comment_correction=?, updated_at=? "
+            "first_comment_live_id=NULL, first_comment_error=NULL, first_comment_correction=?, "
+            "updated_at=? "
             "WHERE id=? AND first_comment_correction=?",
             (
                 item.get("to") or "",
