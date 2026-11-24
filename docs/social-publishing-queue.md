@@ -677,10 +677,20 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   the replaced text in `first_comment_prior_text`). Other rows are in `queue_skipped`; a posted
   comment is an operator item ("comment already live, links OLD"), never edited.
 - **Drain guard**: both first-comment drains re-read the text right before posting and mark it
-  posted only `WHERE first_comment_text = <posted text>`; a rewrite mid-post leaves the row for
-  the next pass. YouTube's `_existing_first_comment` also accepts any prior text, so a
-  lost-response retry cannot double-post. (Meta has no read-back dedup: a mid-post rewrite there
-  can leave the old comment beside the new one.)
+  posted only `WHERE first_comment_text = <posted text>`. Both also read the post's comments
+  first and accept any prior text (`first_comment_prior_text`) as "already there" (YouTube:
+  `_find_first_comment`; Meta: `post_graph_comment(also_accept=...)`, which raises
+  `PriorCommentLiveError` instead of posting beside it). **No failure is silent:** when a replaced
+  text is found live, or a post succeeded but the text CAS missed (a relink rewrote the row
+  mid-post), the OLD comment is live and links a deleted video, so the drain stores the live
+  text as `first_comment_text`, marks the row posted, sets `first_comment_error` to
+  `stale comment live: links <old id>` and adds it to `result.errors`
+  (`queue.record_stale_live_comment`). The relink then reports that posted row as an operator
+  item ("comment already live, links OLD") and never edits it. Rolling deploy: a drain still
+  running the previous code has no text CAS and no prior-text dedup, so a relink while old
+  drains run can leave a stale comment unreported; run it after the deploy settles.
+- **Lease clock**: `rewrite_unposted_first_comment` judges a lease live or expired by its own
+  clock, not the caller's `now` (which only stamps `updated_at`).
 - **`related_video_worklist_state.json`** (the dedup record) is never rewritten: the NEW
   `RELATED VIDEO` line and one `SUPERSEDED: <old> replaced by <new>` line are appended to
   `operator_checklist.txt`, and only the new line is added to the state.
@@ -691,8 +701,12 @@ run first, the queue last, each in its own `try` (failures land in `report.error
 - **`pending_journal.json`**: no "sent" flag exists (the flush removes entries), so every entry
   is rewritten, then deduped by `(journey_path, youtube_id)`. Journey files are not read; the
   report asks the operator to check each touched journey for the OLD id.
+- **Operator items**: a rewritten plan adds "re-confirm Gate C/D" (`enqueue-plan` refuses a plan
+  whose reviewed content changed since approval, `GateNotApprovedError`), and a report-only
+  query lists other projects' rows naming an old id (`queue.first_comments_naming_elsewhere`),
+  never rewriting them. The plan's compare-and-set has a small window between the sha re-check
+  and `os.replace` (the same convention as the other sidecar writers).
 
-Not done: reporting other projects' rows naming an old id, and a "re-confirm Gate C/D" note.
 The journal site, its API or KV and `/journal-photo/` files are never touched. A rerun reports
 zero changes; an empty map, empty id, old == new, or a chain raises `ValueError`. No CLI yet.
 

@@ -352,3 +352,43 @@ def test_two_ids_swap_independently(conn, tmp_path):
     a, b = _row(conn, 1), _row(conn, 2, vid=OTHER)
     relink_replaced_lf(PROJECT, tmp_path, {OLD: NEW, OTHER: "thirdVid_03"}, conn=conn, now=NOW)
     assert _text(conn, a) == _comment(NEW) and _text(conn, b) == _comment("thirdVid_03")
+
+
+def test_a_live_comment_left_by_a_mid_post_rewrite_is_an_operator_item(conn, tmp_path):
+    # The drain recorded the OLD text as live (posted) with the stale error; relink reports it.
+    did = _row(conn, 1, posted="2026-11-22T11:00:00+00:00")
+    conn.execute(
+        "UPDATE deliveries SET first_comment_error=? WHERE id=?",
+        (f"stale comment live: links {OLD}", did),
+    )
+    conn.commit()
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert _text(conn, did) == _comment(OLD)
+    assert any(f"delivery {did}" in i and "links OLD" in i for i in report.operator_items)
+
+
+def test_a_rewritten_plan_asks_for_gate_c_d_again(conn, tmp_path):
+    out = _drive(tmp_path)
+    report = relink_replaced_lf(PROJECT, out, MAP, conn=conn, now=NOW)
+    assert any("re-confirm Gate C/D" in i for i in report.operator_items)
+    (tmp_path / "d2").mkdir()
+    dry_out = _drive(tmp_path / "d2")
+    dry = relink_replaced_lf(PROJECT, dry_out, MAP, conn=conn, now=NOW, dry_run=True)
+    assert any("re-confirm Gate C/D" in i for i in dry.operator_items)
+
+
+def test_no_plan_change_means_no_gate_c_d_item(conn, tmp_path):
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert not any("Gate C/D" in i for i in report.operator_items)
+
+
+def test_rows_of_other_projects_naming_the_old_id_are_reported_not_rewritten(conn, tmp_path):
+    mine = _row(conn, 1)
+    other = _row(conn, 2, project="other-project")
+    longer = _row(conn, 3, vid=OLD + "X", project="other-project")
+    report = relink_replaced_lf(PROJECT, tmp_path, MAP, conn=conn, now=NOW)
+    assert _text(conn, mine) == _comment(NEW)
+    assert _text(conn, other) == _comment(OLD)
+    items = [i for i in report.operator_items if "other-project" in i]
+    assert len(items) == 1 and f"delivery {other}" in items[0]
+    assert not any(f"delivery {longer}" in i for i in report.operator_items)

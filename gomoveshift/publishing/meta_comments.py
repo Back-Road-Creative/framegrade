@@ -17,10 +17,19 @@ import sqlite3
 from typing import Callable, Mapping, Optional
 
 from .facebook_adapter import FacebookPermanentError
-from .first_comment import CommentPermissionError
+from .first_comment import CommentPermissionError, PriorCommentLiveError
 from .instagram_adapter import InstagramPermanentError
-from .queue import first_comment_still_current, select_due_first_comments
-from .youtube_comments import _ERROR_DETAIL_MAX, FirstCommentResult, _now_iso
+from .queue import (
+    first_comment_prior_texts,
+    first_comment_still_current,
+    select_due_first_comments,
+)
+from .youtube_comments import (
+    _ERROR_DETAIL_MAX,
+    FirstCommentResult,
+    mark_posted,
+    record_live_comment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +64,15 @@ def drain_meta_first_comments(
         try:
             if platform not in adapters:
                 adapters[platform] = adapter_factories[platform]()
-            adapters[platform].post_comment(row["comment_target_id"], text)
+            prior = first_comment_prior_texts(fresh)
+            # Only a relinked row has prior texts; every other row keeps the two-argument call.
+            extra = {"also_accept": prior} if prior else {}
+            adapters[platform].post_comment(row["comment_target_id"], text, **extra)
+        except (
+            PriorCommentLiveError
+        ) as live:  # a replaced text is already live: never post beside it
+            record_live_comment(conn, row["id"], live.said, result)
+            continue
         except Exception as exc:  # noqa: BLE001 -- graded per-row below
             detail = str(exc).strip() or exc.__class__.__name__
             refused = isinstance(exc, _REFUSED_FOR_THE_POST)
@@ -79,14 +96,5 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        with conn:
-            marked = conn.execute(
-                "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL "
-                "WHERE id=? AND first_comment_text=?",
-                (_now_iso(), row["id"], text),
-            ).rowcount
-        if marked:
-            result.posted += 1
-        else:  # rewritten during the post: leave the row for the next pass
-            logger.warning("first comment: delivery %s rewritten mid-post; next pass", row["id"])
+        mark_posted(conn, row["id"], text, result)
     return result
