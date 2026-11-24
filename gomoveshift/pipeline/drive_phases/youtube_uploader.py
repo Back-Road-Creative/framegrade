@@ -701,6 +701,48 @@ class YouTubeUploader:
         )
         logger.info(f"Updated privacy for {video_id} -> {status['privacyStatus']}")
 
+    def video_states(self, video_ids: list[str]) -> dict[str, str]:
+        """``{video_id: privacy}`` (``"scheduled"`` = private with a future ``publishAt``); an id
+        YouTube does not return is absent. Read-only."""
+        from ..playlist_reconciler import fetch_video_privacy
+
+        return fetch_video_privacy(self._build_service(), video_ids)
+
+    def video_schedule(self, video_id: str) -> Optional[dict]:
+        """Live ``{"privacy", "publish_at"}`` of one video (``publish_at`` an aware datetime or
+        ``None``), or ``None`` when YouTube no longer returns it. Read-only; errors propagate."""
+        resp = self._build_service().videos().list(part="status", id=video_id).execute()
+        for item in resp.get("items", []) or []:
+            if item.get("id", video_id) != video_id:
+                continue
+            st = item.get("status") or {}
+            raw, when = st.get("publishAt"), None
+            if raw:
+                when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+            return {"privacy": st.get("privacyStatus"), "publish_at": when}
+        return None
+
+    def add_to_playlist(self, video_id: str, playlist_id: str) -> None:
+        """File ``video_id`` in the NAMED playlist (no resolution): a replacement keeps the old
+        video's playlist. Idempotent: a video already in it is not filed again (a crash can fall
+        between the insert and its record)."""
+        listed = (
+            self._build_service()
+            .playlistItems()
+            .list(part="id", playlistId=playlist_id, videoId=video_id)
+            .execute()
+        )
+        if listed.get("items"):
+            return
+        self._add_video_to_playlist(video_id, playlist_id)
+
+    def delete_video(self, video_id: str) -> None:
+        """Delete one video (``videos.delete``). Irreversible: callers verify first."""
+        service = self._build_service()
+        self._execute_with_retry(service.videos().delete(id=video_id))
+        logger.info(f"Deleted video {video_id}")
+
     # ----------------------------------------------------------- playlist op
 
     # ------------------------------------------------------------- end-screen
