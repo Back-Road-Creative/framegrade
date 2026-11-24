@@ -7,6 +7,7 @@ Tests stall detection, progress parsing, cleanup on failure, and video validatio
 import json
 import logging
 import os
+import subprocess
 import sys
 import textwrap
 import threading
@@ -1385,6 +1386,71 @@ class TestValidateVideo:
 
         assert not result.valid
         assert "video" in result.reason.lower()
+
+
+class TestValidateVideoProbeTimeout:
+    """A probe timeout is load on the disk or CPU, not proof the file is bad.
+
+    Courtmacsherry 2025-09-19 (heal on 0.3.143): a 92-minute OST burn finished,
+    and the single 30 s validation probe timed out on the freshly rewritten file
+    on /mnt/c. validate_video called it corrupt, the partial was discarded, and
+    4.8 h of encode were redone from scratch. The probe now retries a timeout
+    like the OST duration probe and FFprobeClient do; only a file whose probe
+    times out on every attempt is reported invalid.
+    """
+
+    _GOOD = {
+        "format": {"duration": "120.0"},
+        "streams": [
+            {"codec_type": "video", "codec_name": "h264"},
+            {"codec_type": "audio", "codec_name": "aac"},
+        ],
+    }
+
+    def test_timeout_then_success_is_valid(self, tmp_path):
+        f = tmp_path / "slow.mp4"
+        f.write_bytes(b"fake")
+        ok = Mock(returncode=0, stdout=json.dumps(self._GOOD), stderr="")
+        timeout = subprocess.TimeoutExpired(cmd="ffprobe", timeout=30)
+        with (
+            patch(
+                "gomoveshift.pipeline.ffmpeg_runner.subprocess.run", side_effect=[timeout, ok]
+            ) as run,
+            patch("gomoveshift.pipeline.ffmpeg_runner.time.sleep") as sleep,
+        ):
+            result = validate_video(f, expected_duration=120.0)
+        assert result.valid, result.reason
+        assert run.call_count == 2
+        sleep.assert_called_once()
+
+    def test_timeout_on_every_attempt_is_invalid(self, tmp_path):
+        from gomoveshift.pipeline.validation.ffprobe_client import FFPROBE_TIMEOUT_RETRIES
+
+        f = tmp_path / "hung.mp4"
+        f.write_bytes(b"fake")
+        timeout = subprocess.TimeoutExpired(cmd="ffprobe", timeout=30)
+        with (
+            patch("gomoveshift.pipeline.ffmpeg_runner.subprocess.run", side_effect=timeout) as run,
+            patch("gomoveshift.pipeline.ffmpeg_runner.time.sleep"),
+        ):
+            result = validate_video(f)
+        assert not result.valid
+        assert "timed out" in result.reason
+        assert run.call_count == FFPROBE_TIMEOUT_RETRIES
+
+    def test_probe_error_is_not_retried(self, tmp_path):
+        f = tmp_path / "bad.mp4"
+        f.write_bytes(b"fake")
+        bad = Mock(returncode=1, stdout="", stderr="moov atom not found")
+        with (
+            patch("gomoveshift.pipeline.ffmpeg_runner.subprocess.run", return_value=bad) as run,
+            patch("gomoveshift.pipeline.ffmpeg_runner.time.sleep") as sleep,
+        ):
+            result = validate_video(f)
+        assert not result.valid
+        assert "moov atom" in result.reason
+        assert run.call_count == 1
+        sleep.assert_not_called()
 
 
 # ── validate_video A/V drift ────────────────────────────
