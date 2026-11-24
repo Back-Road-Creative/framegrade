@@ -330,6 +330,13 @@ def _trim_peak_to(
     if not any(abs(k - clip_start) <= 1e-3 for k in keyframes):
         # No keyframe fits: `-c copy` would snap back to the prior keyframe and
         # replay pre-peak footage. Cut the centred window accurately instead.
+        # WARNING like the probe-unavailable branch: a montage quietly downgraded
+        # to a CPU re-encode (generational loss) must be visible in the drive log.
+        logger.warning(
+            "montage peak has no keyframe at its start in %s — re-encoding the "
+            "centred window instead of stream-copying (CPU, generational loss)",
+            master_path,
+        )
         return reencode_range(
             master_path,
             clip_start,
@@ -584,6 +591,7 @@ def prepend_montage(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg",
+        "-nostdin",
         "-y",
         "-f",
         "concat",
@@ -605,13 +613,24 @@ def prepend_montage(
     # exit or a start failure it deletes the partial output: a truncated concat
     # left on disk is worse than none, since a resume would ship a half-length
     # long-form. The failure is reported as None with its cause.
-    from .ffmpeg_runner import run_ffmpeg_encode
+    from .ffmpeg_runner import MOOV_REWRITE_MIN_BYTES_PER_SEC, run_ffmpeg_encode
+
+    # The wall-clock ceiling backstops a run whose stats keep advancing for ever. It is
+    # sized from the input bytes at the runner's own throughput floor
+    # (MOOV_REWRITE_MIN_BYTES_PER_SEC), once for the copy pass and once for the
+    # +faststart rewrite, and never below the old fixed 1800 s.
+    try:
+        input_bytes = built.stat().st_size + raw_lf_path.stat().st_size
+    except OSError:
+        input_bytes = 0
+    max_timeout = max(1800, 2 * -(-input_bytes // MOOV_REWRITE_MIN_BYTES_PER_SEC))
 
     result = run_ffmpeg_encode(
         cmd,
         output_path=output_path,
         expected_duration=0.0,
         description="prepend_montage concat",
+        max_timeout=max_timeout,
     )
     if not result.success:
         cause = (
