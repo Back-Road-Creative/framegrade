@@ -175,6 +175,42 @@ def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> i
     return max(stall_timeout, MOOV_REWRITE_MIN_STALL_S, by_size)
 
 
+_STATS_TIME_RE = re.compile(r"time=\s*(\S+)")
+_STATS_SIZE_RE = re.compile(r"size=\s*(\d+)\s*([A-Za-z]*)")
+_STATS_FRAME_RE = re.compile(r"frame=\s*(\d+)")
+_SIZE_UNIT_BYTES = {"": 1, "B": 1, "KB": 1024, "KIB": 1024, "MB": 1024**2, "MIB": 1024**2}
+
+
+def _stats_progress_advanced(line: str, last: Optional[tuple]) -> tuple[bool, Optional[tuple]]:
+    """Did this stats line move past the last COUNTED one? Returns ``(advanced, new_last)``.
+
+    ffmpeg 7 re-prints an identical stats line (frame, size and time frozen; only
+    fps/speed/elapsed vary) while a muxer write blocks, so a line counts as progress only
+    when its ``time=`` or ``size=`` grew; with neither parseable (``size=N/A time=N/A``
+    until the first packet is muxed), when its ``frame=`` grew, and with no ``frame=`` either,
+    when its raw tokens differ.
+    """
+    t_m, s_m = _STATS_TIME_RE.search(line), _STATS_SIZE_RE.search(line)
+    secs = _parse_time_to_seconds(t_m.group(1)) if t_m else None
+    unit = _SIZE_UNIT_BYTES.get(s_m.group(2).upper()) if s_m else None
+    size = int(s_m.group(1)) * unit if unit else None
+    f_m = _STATS_FRAME_RE.search(line)
+    frame = int(f_m.group(1)) if f_m else None
+    cur = (secs, size, (t_m.group(1) if t_m else None, s_m.group(0) if s_m else None), frame)
+    if last is None:
+        return True, cur
+    if secs is None and size is None:
+        if frame is not None and last[3] is not None:
+            advanced = frame > last[3]
+        else:
+            advanced = cur[2] != last[2]
+    else:
+        advanced = (secs is not None and (last[0] is None or secs > last[0])) or (
+            size is not None and (last[1] is None or size > last[1])
+        )
+    return advanced, (cur if advanced else last)
+
+
 def run_ffmpeg_encode(
     cmd: list[str],
     output_path: Path,
@@ -217,6 +253,7 @@ def run_ffmpeg_encode(
     stderr_lines: list[str] = []
     killed_reason = None
     in_moov_rewrite = False
+    last_counted_stats: Optional[tuple] = None
     effective_stall_timeout = stall_timeout
 
     logger.info(f"  {description}: starting (stall={stall_timeout}s, max={max_timeout}s)")
@@ -331,6 +368,11 @@ def run_ffmpeg_encode(
                 # Parse progress lines
                 # ffmpeg outputs: frame= 1234 fps= 142 ... time=00:45:30.00 ... speed=1.2x
                 if "time=" in line and ("frame=" in line or "size=" in line):
+                    advanced, last_counted_stats = _stats_progress_advanced(
+                        line, last_counted_stats
+                    )
+                    if not advanced:
+                        continue
                     last_progress_time = now
 
                     # Reset moov rewrite stall extension once we see frame progress again
