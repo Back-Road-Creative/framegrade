@@ -113,6 +113,75 @@ class TestFreshEncodeBlursMaster:
         assert not (tmp_path / "day_2026-02-24_master.mp4.blurred").exists()
 
 
+class TestPairedMaskPersistsItsSourceFrameCount:
+    """The pairing check is the only moment the source container, the mask and the sidecar
+    are all on disk and proven equal; the count is kept so a purged master can still prove
+    its mask later (``mask_frame_gate``)."""
+
+    def _rig(self, tmp_path, monkeypatch, *, pairing=None):
+        cap = _mock_encode(monkeypatch)
+        mask = tmp_path / "day_2026-02-24_blur_mask.mkv"
+        sidecar = tmp_path / "day_2026-02-24_blur_regions.json"
+
+        def build(raw, cfg, mask_target, sidecar_target, date, **_k):
+            mask.write_bytes(b"mask")
+            sidecar.write_text('{"source_frame_count": 120}')
+            return mask
+
+        monkeypatch.setattr(dme, "_build_day_blur_mask", build)
+        monkeypatch.setattr(blur_gate, "check_day_master_cabin_coverage", lambda c, v, m: None)
+        monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: 120)
+        monkeypatch.setattr(blur_gate, "sidecar_frame_count", lambda p: 120)
+        monkeypatch.setattr(blur_gate, "redactcam_commit", lambda: "abc123")
+        if pairing:
+            monkeypatch.setattr(blur_gate, "frame_pairing_error", pairing)
+        return cap, tmp_path / "day_2026-02-24_source_frames.json"
+
+    def test_paired_mask_persists_source_frame_count(self, tmp_path, monkeypatch):
+        _cap, out = self._rig(tmp_path, monkeypatch)
+        dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        doc = json.loads(out.read_text())
+        assert doc["counts"] == {"container": 120, "mask": 120, "sidecar": 120}
+        sidecar = tmp_path / "day_2026-02-24_blur_regions.json"
+        mask = tmp_path / "day_2026-02-24_blur_mask.mkv"
+        import hashlib
+
+        assert doc["sidecar_sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+        assert doc["mask"] == {"size": mask.stat().st_size, "mtime_ns": mask.stat().st_mtime_ns}
+        assert doc["redactcam_commit"] == "abc123"
+        assert doc["date"] == "2026-02-24" and doc["day_dir"] == tmp_path.name
+        assert doc["renderer"] == blur_gate.renderer_identity()
+        assert "source_fingerprint" in doc
+        assert not list(tmp_path.glob("*.tmp"))  # atomic write leaves no temp file
+
+    def test_refused_pairing_writes_no_source_count(self, tmp_path, monkeypatch):
+        _cap, out = self._rig(tmp_path, monkeypatch, pairing=lambda *a, **k: "BLUR GATE (pairing)")
+        with pytest.raises(blur_gate.BlurGateError, match="pairing"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert not out.exists()
+
+    def test_a_pairing_that_fails_after_the_cabin_repair_writes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        answers = iter([None, "BLUR GATE (pairing) after repair"])
+        _cap, out = self._rig(tmp_path, monkeypatch, pairing=lambda *a, **k: next(answers))
+        with pytest.raises(blur_gate.BlurGateError, match="after repair"):
+            dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert not out.exists()
+
+    def test_uncountable_inputs_write_nothing_and_do_not_block(self, tmp_path, monkeypatch):
+        _cap, out = self._rig(tmp_path, monkeypatch)
+        monkeypatch.setattr(blur_gate, "container_frame_count", lambda p: -1)
+        dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert not out.exists()
+
+    def test_an_absent_redactcam_commit_is_recorded_as_null(self, tmp_path, monkeypatch):
+        _cap, out = self._rig(tmp_path, monkeypatch)
+        monkeypatch.setattr(blur_gate, "redactcam_commit", lambda: None)
+        dme.encode_day_master(_batch(tmp_path), tmp_path, config=Config())
+        assert json.loads(out.read_text())["redactcam_commit"] is None
+
+
 class TestCabinCoverageGateWiredIntoDriveMasterPath:
     """The drive day-master path must run the same occupant-coverage check as the
     legacy per-episode path (``blur_gate.check_cabin_coverage``) — after the day

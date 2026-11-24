@@ -1823,7 +1823,14 @@ def encode_day_master(
                 return err
             # A repair swaps the mask and the sidecar after the first pairing check;
             # prove the pair again before the irreversible encode.
-            return blur_gate.frame_pairing_error(graded_src, mask, regions_sidecar)
+            err = blur_gate.frame_pairing_error(graded_src, mask, regions_sidecar)
+            if err is None:
+                # The count is proven only now: keep it so a purged master still proves
+                # its mask to the publish gate.
+                blur_gate.persist_source_frames(
+                    graded_src, mask, regions_sidecar, source_fingerprint=source_fp
+                )
+            return err
 
         blur_mask_path = _build_mask()
         gate_err = _blur_gates(blur_mask_path)

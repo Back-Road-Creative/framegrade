@@ -10,12 +10,17 @@ publish until a re-render rewrites the sidecar.
 the backlog republish through it, and Phase D's upload run). It compares, per ``day_<date>``
 stage dir, the sidecar's ``source_frame_count`` with the container's ``nb_frames`` (the day's raw
 concat, else its master). A mismatch, a missing sidecar or count, or a container that cannot be
-probed all refuse (fail closed). There is no override: the refusal ends when the counts agree.
+probed all refuse (fail closed). When the raw and the master are both purged, the count the
+pairing check persisted (``day_<date>_source_frames.json``) stands in for the container, but only
+while the sidecar's sha256 and the mask's size/mtime still match disk; otherwise the day stays
+unknown. There is no override: the refusal ends when the counts agree.
 A refused day gets one ``mask_index_mismatch`` incident (``health/store.py`` row) per drive-day,
 and the row is resolved once the day passes."""
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -29,6 +34,7 @@ from ..health.store import (
     utc_iso,
     write_row,
 )
+from ..pipeline.blur_gate import SOURCE_FRAMES_SCHEMA, file_sha256, mask_identity
 
 KIND = "mask_index_mismatch"
 REASON_UNKNOWN = "mask_frame_count_unknown"
@@ -79,6 +85,37 @@ def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
     return None
 
 
+def persisted_source_count(day_dir: Path, date: str) -> Optional[int]:
+    """The source frame count the pairing check persisted, or None unless it still vouches.
+
+    Read only when the raw and the master are both gone. The file is trusted only while the
+    sidecar's sha256 and the mask's size/mtime equal what is on disk now, and only when it
+    recorded container == mask == sidecar. A missing, unreadable, malformed or stale file is
+    None, so the day stays ``mask_frame_count_unknown``."""
+    try:
+        doc = json.loads((day_dir / f"day_{date}_source_frames.json").read_text(encoding="utf-8"))
+        if doc.get("schema") != SOURCE_FRAMES_SCHEMA:
+            return None  # includes a v1 file, which named no day: fail closed
+        if doc.get("date") != date or doc.get("day_dir") != day_dir.name:
+            return None  # a proof copied from another day
+        counts = doc["counts"]
+        values = [counts["container"], counts["mask"], counts["sidecar"]]
+        if any(type(v) is not int or v <= 0 for v in values) or len(set(values)) != 1:
+            return None
+        sidecar = day_dir / f"day_{date}_blur_regions.json"
+        mask = day_dir / f"day_{date}_blur_mask.mkv"
+        if not isinstance(doc.get("sidecar_sha256"), str):
+            return None
+        if doc["sidecar_sha256"] != file_sha256(sidecar):
+            return None
+        recorded = doc["mask"]
+        if not isinstance(recorded, dict) or recorded != mask_identity(mask):
+            return None
+        return values[0]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
     """One row per rendered ``day_<date>`` stage dir (one holding any ``day_<date>_*`` file) that
     must not publish; ``[]`` when every such day agrees."""
@@ -91,6 +128,10 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
             continue  # no render artefacts (only shorts/work dirs): not a rendered day
         sidecar_n = sidecar_frame_count(day_dir / f"day_{date}_blur_regions.json")
         container_n = container_frame_count(day_dir, date)
+        if container_n is None and not any(
+            os.path.lexists(day_dir / name.format(date=date)) for name in _CONTAINER_NAMES
+        ):
+            container_n = persisted_source_count(day_dir, date)
         if sidecar_n is None or container_n is None:
             findings.append({"date": date, "reason": REASON_UNKNOWN,
                              "sidecar_frames": sidecar_n, "container_frames": container_n})  # fmt: skip

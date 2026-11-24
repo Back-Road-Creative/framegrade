@@ -171,6 +171,9 @@ class BlurDetectionStage(BaseStage):
             pairing_err = blur_gate.frame_pairing_error(video, ctx.blur_mask_path, sidecar)
             if pairing_err:
                 return StageResult(success=False, error=pairing_err)
+            blur_gate.persist_source_frames(
+                video, ctx.blur_mask_path, sidecar, source_fingerprint=input_hash
+            )
         except Exception as e:
             return StageResult(success=False, error=f"Blur detection failed: {e}")
         return StageResult(success=True)
