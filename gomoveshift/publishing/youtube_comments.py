@@ -38,10 +38,10 @@ from .queue import (
 logger = logging.getLogger(__name__)
 
 #: HTTP 403 ``reason`` strings meaning the OAuth token lacks the
-#: ``youtube.force-ssl`` scope (``forbidden`` is a refusal that counts to the cap) --
-#: recoverable only by a human re-authorising, never by retrying. Mirrors
-#: ``youtube_uploader.QUOTA_REASONS``' shape for a different 403 class.
-SCOPE_ERROR_REASONS = frozenset({"insufficientPermissions"})
+#: ``youtube.force-ssl`` scope -- recoverable only by a human re-authorising, never by
+#: retrying. Mirrors ``youtube_uploader.QUOTA_REASONS``' shape for a different 403 class.
+#: A correction's ``forbidden`` is a refusal instead (``_refused_for_a_correction``).
+SCOPE_ERROR_REASONS = frozenset({"insufficientPermissions", "forbidden"})
 
 _ERROR_DETAIL_MAX = 500
 
@@ -68,6 +68,8 @@ def _own_channel_id(service) -> str:
         if not own:
             raise ValueError("the authenticated channel has no id")
     except Exception as exc:  # noqa: BLE001 -- any failure means the author is unknown
+        if _is_scope_error(exc):
+            raise  # a token without the scope is a re-auth, not an unknown author
         raise OwnChannelUnknownError(f"cannot tell whose comment it is: {exc}") from exc
     return own
 
@@ -180,7 +182,7 @@ class YouTubeCommentEditor:
         self._service.comments().delete(id=comment_id).execute()
 
 
-def _is_scope_error(exc: Exception) -> bool:
+def _is_scope_error(exc: Exception, reasons: frozenset = SCOPE_ERROR_REASONS) -> bool:
     """True iff ``exc`` is an ``HttpError`` 403 caused by the token's scope
     (``SCOPE_ERROR_REASONS``) -- any other status, or a 403 for an
     unrelated reason (e.g. ``commentsDisabled``), is a genuine per-row
@@ -192,7 +194,7 @@ def _is_scope_error(exc: Exception) -> bool:
     if getattr(exc.resp, "status", None) != 403:
         return False
     details = getattr(exc, "error_details", None) or []
-    return any(isinstance(d, dict) and d.get("reason") in SCOPE_ERROR_REASONS for d in details)
+    return any(isinstance(d, dict) and d.get("reason") in reasons for d in details)
 
 
 def _comment_gone(exc: Exception) -> bool:
@@ -202,7 +204,7 @@ def _comment_gone(exc: Exception) -> bool:
     return isinstance(exc, HttpError) and getattr(exc.resp, "status", None) == 404
 
 
-def _refused_for_the_video(exc: Exception) -> bool:
+def _refused_for_the_video(exc: Exception, reasons: frozenset = SCOPE_ERROR_REASONS) -> bool:
     """True iff YouTube refused this comment because of its video -- a 4xx
     ``HttpError`` such as 404 ``videoNotFound`` (the short was taken down) or
     403 ``commentsDisabled``. Only these count toward
@@ -211,7 +213,7 @@ def _refused_for_the_video(exc: Exception) -> bool:
     a network failure says nothing about the video."""
     from googleapiclient.errors import HttpError
 
-    if not isinstance(exc, HttpError) or _is_scope_error(exc):
+    if not isinstance(exc, HttpError) or _is_scope_error(exc, reasons):
         return False
     status = getattr(exc.resp, "status", None)
     if not isinstance(status, int) or not 400 <= status < 500:
@@ -220,6 +222,12 @@ def _refused_for_the_video(exc: Exception) -> bool:
         return False
     details = getattr(exc, "error_details", None) or []
     return not any(isinstance(d, dict) and d.get("reason") in QUOTA_REASONS for d in details)
+
+
+def _refused_for_a_correction(exc: Exception) -> bool:
+    """:func:`_refused_for_the_video` where only ``insufficientPermissions`` is a scope gap: a
+    correction's 403 ``forbidden`` (not our comment to change) counts toward the cap."""
+    return _refused_for_the_video(exc, frozenset({"insufficientPermissions"}))
 
 
 @dataclass
@@ -286,7 +294,7 @@ def drain_first_comments(
         conn,
         platforms=("youtube",),
         client_for=lambda _platform: YouTubeCommentEditor(service_once()),
-        refused=_refused_for_the_video,
+        refused=_refused_for_a_correction,
         result=result,
         incidents_dir=incidents_dir,
         gone=_comment_gone,
@@ -392,13 +400,14 @@ def mark_posted(
     live_id: str = "",
     incidents_dir: Optional[Path] = None,
 ) -> None:
-    """Mark ``delivery_id`` posted iff its text is still ``posted_text``. When a relink
+    """Mark ``delivery_id`` posted iff its text is still ``posted_text`` and it is not already
+    posted (a second comment found for a posted row is recorded, never absorbed). When a relink
     rewrote it during the post, the comment that went live (``live_id``) is the OLD text:
     :func:`record_live_comment` records and reports that instead."""
     with conn:
         marked = conn.execute(
             "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL "
-            "WHERE id=? AND first_comment_text=?",
+            "WHERE id=? AND first_comment_text=? AND first_comment_posted_at IS NULL",
             (_now_iso(), delivery_id, posted_text),
         ).rowcount
     if marked:
