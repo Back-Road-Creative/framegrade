@@ -25,6 +25,7 @@ production changes.
 
 from __future__ import annotations
 
+import io
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,7 +86,28 @@ def _install_fake_ffmpeg(monkeypatch, *, emit_bytes: bytes = b"FAKE_MP4_BYTES\n"
     import keycut.extract
     import keycut.keyframes
 
+    class _FakePopen:
+        """prepend_montage's concat runs through ``run_ffmpeg_encode`` (Popen)."""
+
+        def __init__(self, cmd, **kwargs):  # noqa: ARG002
+            if cmd and cmd[0] == "ffmpeg":
+                out = Path(cmd[-1])
+                try:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(emit_bytes)
+                except OSError:
+                    pass
+            self.stdout, self.stderr = io.StringIO(""), io.StringIO("")
+            self.returncode = rc
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):  # noqa: ARG002
+            return self.returncode
+
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(keycut.extract.subprocess, "run", fake_run)
     monkeypatch.setattr(keycut.keyframes.subprocess, "run", fake_run)
     keycut.clear_keyframe_cache()
