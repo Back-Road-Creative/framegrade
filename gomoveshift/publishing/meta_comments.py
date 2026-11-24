@@ -19,6 +19,7 @@ from typing import Callable, Mapping, Optional
 
 from .facebook_adapter import FacebookPermanentError
 from .first_comment import CommentPermissionError, PriorCommentLiveError
+from .first_comment_stale import run_corrections
 from .instagram_adapter import InstagramPermanentError
 from .queue import (
     first_comment_prior_texts,
@@ -51,7 +52,9 @@ def drain_meta_first_comments(
     """Post every due IG/FB first comment for the platforms in
     ``adapter_factories`` (platform -> zero-arg factory returning an object
     with ``post_comment(object_id, text)``). A replaced text found live is counted
-    and filed as a ``first_comment_stale`` incident (no Meta edit/delete is wired yet)."""
+    and filed as a ``first_comment_stale`` incident; the next drain corrects it first
+    (``first_comment_stale.run_corrections``: Facebook edits the comment, Instagram deletes it and
+    posts the intended text), so the adapters also carry ``edit_comment`` / ``delete_comment``."""
     result = FirstCommentResult()
     adapters: dict = {}
     warned: set = set()
@@ -60,6 +63,15 @@ def drain_meta_first_comments(
         if platform not in adapters:
             adapters[platform] = adapter_factories[platform]()
         return adapters[platform]
+
+    run_corrections(
+        conn,
+        platforms=tuple(adapter_factories),
+        client_for=adapter_for,
+        refused=lambda exc: isinstance(exc, _REFUSED_FOR_THE_POST),
+        result=result,
+        incidents_dir=incidents_dir,
+    )
 
     due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     for row in due:
@@ -77,7 +89,14 @@ def drain_meta_first_comments(
         except PriorCommentLiveError as live:
             # A replaced text is already live: never post beside it.
             record_found_comments(
-                conn, row["id"], text, live.comment_id, live.said, (), result, incidents_dir
+                conn,
+                row["id"],
+                text,
+                live.comment_id,
+                live.said,
+                live.duplicates,
+                result,
+                incidents_dir,
             )
             continue
         except Exception as exc:  # noqa: BLE001 -- graded per-row below

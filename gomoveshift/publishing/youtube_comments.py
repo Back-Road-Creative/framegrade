@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
+from .first_comment import PriorCommentLiveError
 from .first_comment_stale import raise_stale_incident, run_corrections
 from .queue import (
     first_comment_prior_texts,
@@ -127,11 +128,16 @@ def post_first_comment_reporting(
 
 def post_first_comment(service, video_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
     """POST one top-level comment on ``video_id``; returns the new comment thread id -- or, when
-    the video already carries exactly ``text``, that thread's id, posting nothing.
+    the video already carries exactly ``text``, that thread's id, posting nothing. A replaced text
+    (``also_accept``) found live raises ``first_comment.PriorCommentLiveError`` instead of
+    returning its id as if it were the new comment.
 
     ``service`` is an already-authenticated ``googleapiclient`` YouTube
     Data API v3 client -- this function performs no auth of its own."""
-    return post_first_comment_reporting(service, video_id, text, also_accept)[0]
+    live_id, said, _ = post_first_comment_reporting(service, video_id, text, also_accept)
+    if said.strip() != text.strip():
+        raise PriorCommentLiveError(live_id, said)
+    return live_id
 
 
 class YouTubeCommentEditor:
@@ -142,7 +148,7 @@ class YouTubeCommentEditor:
     def __init__(self, service):
         self._service = service
 
-    def edit_comment(self, comment_id: str, text: str) -> None:
+    def edit_comment(self, comment_id: str, text: str, object_id: Optional[str] = None) -> None:
         body = {"id": comment_id, "snippet": {"textOriginal": text}}
         self._service.comments().update(part="snippet", body=body).execute()
 
