@@ -445,7 +445,12 @@ def run_ffmpeg_encode(
                         in_moov_rewrite = True
                         output_size = _output_size(output_path)
                         last_io_total = _read_io_counters(getattr(proc, "pid", None))
-                        io_mode = last_io_total is not None
+                        # A child already exiting when its trigger line is handled has
+                        # unreadable counters for the same reason as in the loop above: an
+                        # exit, not a counters failure, so it keeps io mode.
+                        io_mode = last_io_total is not None or _child_exiting(
+                            getattr(proc, "pid", None)
+                        )
                         if io_mode:
                             effective_stall_timeout = max(stall_timeout, MOOV_REWRITE_MIN_STALL_S)
                             logger.warning(

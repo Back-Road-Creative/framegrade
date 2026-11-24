@@ -971,6 +971,35 @@ class TestMoovRewriteFollowsOwnProgress:
         fell_back = [r for r in caplog.records if "became unreadable" in r.getMessage()]
         assert len(fell_back) == (0 if exiting else 1)
 
+    @pytest.mark.parametrize("exiting", [True, False])
+    def test_a_child_already_exiting_at_the_trigger_never_takes_the_fallback(
+        self, tmp_path, monkeypatch, caplog, exiting
+    ):
+        # CI 11-23 (#535 shard 4): the trigger line was handled after the real slow-exit child
+        # had written its output and entered do_exit, so the trigger-time read was unreadable.
+        # An exiting child at the trigger is not a counters failure, the same as in the loop.
+        reads = {"n": 0}
+
+        def io(proc):
+            reads["n"] += 1
+            return None if reads["n"] == 1 else proc.io
+
+        monkeypatch.setattr(
+            "gomoveshift.pipeline.ffmpeg_runner._child_exiting", lambda pid: exiting
+        )
+        with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
+            result, proc, _, _ = _run_concat(
+                tmp_path, monkeypatch, io_readable=True, io_fn=io, tick=30.0, copy_s=1797.0,
+                rewrite_s=2516.0, size=GALLEY_LF1_BYTES,
+            )  # fmt: skip
+        assert result.success and proc.terminated is False
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warned) == 1, warned
+        if exiting:
+            assert "own I/O counters" in warned[0], warned
+        else:
+            assert "unreadable: stall window falls back" in warned[0], warned
+
     def test_io_mode_logs_exactly_one_warning_naming_the_mode(self, tmp_path, monkeypatch, caplog):
         with caplog.at_level("WARNING", logger="gomoveshift.pipeline.ffmpeg_runner"):
             result, proc, _, _ = _run_concat(
