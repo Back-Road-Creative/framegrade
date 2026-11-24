@@ -2077,6 +2077,13 @@ def _add_health_parser(subparsers: argparse._SubParsersAction) -> None:
         ("--reason", None, "Why --supersede replaces the earlier run (written to the record)."),
     ):
         b.add_argument(flag, type=kind, default=None, help=text)
+    b.add_argument(
+        "--replace-scheduled",
+        action="store_true",
+        help="With --supersede: accept an output whose upload records are all public (kept) or "
+        "still scheduled (live-checked private with a future publishAt, at least 6 h ahead; "
+        "replaced by Phase D at the same publishAt). Any other record refuses.",
+    )
     b.add_argument("--dry-run", action="store_true", help="Report the plan; change nothing.")
     b.add_argument("--json", action="store_true", help="Print the result as JSON.")
     u = sub.add_parser(
