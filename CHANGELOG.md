@@ -5,6 +5,27 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.140] - 2026-11-24
+
+### Added
+
+- `health backlog --supersede <project> --reason <text> --replace-scheduled` re-renders a drive
+  whose long-form uploads are still scheduled: every upload record must be public (kept) or
+  scheduled at least 6 h ahead and live-confirmed private. Phase D then uploads each replacement
+  with the same publish time and title and deletes the old video only after the new one is up.
+  `superseded.json` is now `backlog-supersede/2` (`/1` still reads).
+
+### Fixed
+
+- `health backlog --replace-scheduled` can now replace the scheduled uploads of a drive whose
+  schedule-store row is `complete`: Waypost's `reopen_for_replace` is asked first (dry run, before
+  any rename) and then called for real in place of `register`; a `claimed` row, or a `complete`
+  row with no replace plan, is still refused.
+- `health publish` refuses a replace whose re-render split into a different number of long-forms
+  than the replace plan covers, leaving the store's long-form count unchanged.
+- The launch anchor gate accepts the past `--lf-publish-date` of a replace run, but only when its
+  `replace_plan.json` keeps an LF1 published on that date.
+
 ## [0.3.139] - 2026-11-22
 
 ### Changed
@@ -1577,7 +1598,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...HEAD
+[0.3.140]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...v0.3.140
 [0.3.139]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.138...v0.3.139
 [0.3.138]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.137...v0.3.138
 [0.3.137]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.136...v0.3.137

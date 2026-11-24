@@ -19,7 +19,7 @@ from typing import Callable, Mapping, Optional
 from .facebook_adapter import FacebookPermanentError
 from .first_comment import CommentPermissionError
 from .instagram_adapter import InstagramPermanentError
-from .queue import select_due_first_comments
+from .queue import first_comment_still_current, select_due_first_comments
 from .youtube_comments import _ERROR_DETAIL_MAX, FirstCommentResult, _now_iso
 
 logger = logging.getLogger(__name__)
@@ -47,10 +47,15 @@ def drain_meta_first_comments(
     warned: set = set()
     for row in due:
         platform = row["platform"]
+        # A relink may have rewritten the text after selection: post what the row says NOW.
+        fresh = first_comment_still_current(conn, row["id"])
+        if fresh is None:
+            continue
+        text = fresh["first_comment_text"]
         try:
             if platform not in adapters:
                 adapters[platform] = adapter_factories[platform]()
-            adapters[platform].post_comment(row["comment_target_id"], row["first_comment_text"])
+            adapters[platform].post_comment(row["comment_target_id"], text)
         except Exception as exc:  # noqa: BLE001 -- graded per-row below
             detail = str(exc).strip() or exc.__class__.__name__
             refused = isinstance(exc, _REFUSED_FOR_THE_POST)
@@ -74,11 +79,14 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        result.posted += 1
         with conn:
-            conn.execute(
+            marked = conn.execute(
                 "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL "
-                "WHERE id=?",
-                (_now_iso(), row["id"]),
-            )
+                "WHERE id=? AND first_comment_text=?",
+                (_now_iso(), row["id"], text),
+            ).rowcount
+        if marked:
+            result.posted += 1
+        else:  # rewritten during the post: leave the row for the next pass
+            logger.warning("first comment: delivery %s rewritten mid-post; next pass", row["id"])
     return result

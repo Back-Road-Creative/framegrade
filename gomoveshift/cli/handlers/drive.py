@@ -140,6 +140,20 @@ def _has_live_upload(uploads) -> bool:
     return any(isinstance(r, dict) and r.get("video_id") for r in uploads.values())
 
 
+def _replace_plan_keeps_anchor(args, source_dir: Path, anchor: str) -> bool:
+    """True when the output dir holds a ``replace_plan.json`` whose kept LF1 aired on ``anchor``
+    (its ``publish_at`` local date, America/New_York). A replace run re-launches on that past
+    date, so only the weekday check applies; with no plan, or another date, nothing changes."""
+    from ...health.launch import plan_kept_lf1_date, read_replace_plan
+
+    out = getattr(args, "output_dir", None)
+    if not isinstance(out, (str, Path)) or not str(out):
+        return False
+    base = Path(out)
+    project = source_dir.stem.replace(" ", "_").lower()
+    return plan_kept_lf1_date(read_replace_plan(base, base / project)) == anchor
+
+
 def _launch_anchor_refusal(args, config, publish_day) -> str | None:
     """Refuse a bad LF date BEFORE any phase runs (a wrong-weekday anchor).
 
@@ -195,6 +209,8 @@ def _launch_anchor_refusal(args, config, publish_day) -> str | None:
     # booked date cannot hurt: only the weekday is checked, like a resumed live drive.
     if getattr(args, "skip_upload", None) and getattr(args, "no_youtube_upload", None):
         resumed = True
+    if not resumed and _replace_plan_keeps_anchor(args, source_dir, anchor):
+        resumed = True  # --replace-scheduled: the anchor is the kept, already-public LF1
     from ...pipeline.content_ledger import ContentLedger
     from ...pipeline.seo_slots import anchor_refusal
 
