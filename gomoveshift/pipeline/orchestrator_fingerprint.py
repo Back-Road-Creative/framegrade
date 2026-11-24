@@ -283,3 +283,64 @@ def invalidate_phase_bc_if_superlong_incomplete(
         state.phases_completed = [p for p in saved if p not in ("phase_bc_day_first", "phase_d")]
         return resumed_phases
     return resumed_phases
+
+
+def invalidate_phase_bc_if_lf_shortfall(
+    state,
+    resumed_phases: list[str],
+    stages_completed: list[str],
+    *,
+    stages_dir: Path,
+    config,
+) -> list[str]:
+    """Re-enter ``phase_bc_day_first`` (and ``phase_d``) when a day it recorded complete
+    is short of a planned long-form final (the Galley Head poisoned state).
+
+    The resume partition guard only runs when phase_bc re-enters; a checkpointed phase_bc
+    never did, so ``phase_d`` raised ``shorts_per_lf SPLIT-BRAIN`` on every retry. The plan
+    is the saved ``drive_plan.json`` plus ``state.episode_dates``; only days with a
+    ``per_day_completed`` record are judged (a ``--day`` run never re-enters for days it
+    skipped). No plan on disk means no verdict: a real phase_bc run applies the guard.
+    """
+    from .drive_phases.phase_bc_day_first import (
+        missing_planned_lf_indices,
+        planned_lf_indices,
+        planned_lf_indices_by_date,
+    )
+
+    if "phase_bc_day_first" not in resumed_phases:
+        return resumed_phases
+    recorded = getattr(state, "per_day_completed", None) or {}
+    if not recorded or not stages_dir.is_dir():
+        return resumed_phases
+    planned = planned_lf_indices_by_date(config, state, stages_dir)
+    if planned is None:
+        logger.warning(
+            "Resume: no usable drive_plan.json in %s — cannot verify that every "
+            "recorded day has all of its planned long-forms.",
+            stages_dir,
+        )
+        return resumed_phases
+    for date in sorted(d for d in recorded if recorded.get(d)):
+        indices = planned.get(date)
+        if indices is None:
+            indices = planned_lf_indices(config, None)
+        missing = missing_planned_lf_indices(stages_dir / f"day_{date}", indices)
+        if not missing:
+            continue
+        logger.warning(
+            "Resume: day %s is recorded complete but is missing %d of %d planned "
+            "long-form final(s) (lf_%s) — re-entering phase_bc_day_first (and phase_d).",
+            date,
+            len(missing),
+            len(indices),
+            ", lf_".join(f"{i:02d}" for i in missing),
+        )
+        resumed_phases = [p for p in resumed_phases if p not in ("phase_bc_day_first", "phase_d")]
+        stages_completed[:] = [
+            p for p in stages_completed if p not in ("phase_bc_day_first", "phase_d")
+        ]
+        saved = getattr(state, "phases_completed", None) or []
+        state.phases_completed = [p for p in saved if p not in ("phase_bc_day_first", "phase_d")]
+        return resumed_phases
+    return resumed_phases

@@ -5,6 +5,49 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.142] - 2026-11-24
+
+### Fixed
+
+- `--replace-scheduled` can no longer leave two scheduled uploads in one slot or delete a public
+  video: durable per-LF state, a private insert, a live recheck before the delete (else the new
+  video goes), and a resume of unfinished LFs on every Phase D entry. A plan run emits no shorts.
+
+## [0.3.141] - 2026-11-24
+
+### Added
+
+- `relink_replaced_lf` rewrites a replaced long-form upload's old id in unposted queue first
+  comments, the publish plan, the pending journal and the operator checklist.
+
+### Fixed
+
+- A planned long-form that fails (no segments, concat returns nothing, or the montage prepend fails) now stops the day with an error naming the day, the LF and the cause, before any short is rendered. It used to log "skipping" and carry on, so a day spent about an hour on shorts and then died in Phase D with `shorts_per_lf SPLIT-BRAIN`. A resume re-runs a day that was recorded complete with fewer long-forms than planned.
+- The montage prepend concat no longer has a fixed 30-minute limit: it runs under the progress-based ffmpeg runner, so a 38 GB `-c copy +faststart` concat that keeps writing is not killed, and a stalled one still is (partial output removed).
+- A montage clip whose start has no usable keyframe is cut with an accurate seek instead of `-c copy`, which replayed up to one GOP and pushed a 15.0 s montage to 16.7 s. The 10% duration check is unchanged.
+- First-comment drains re-read the text before posting and mark it posted only if unchanged.
+
+## [0.3.140] - 2026-11-24
+
+### Added
+
+- `health backlog --supersede <project> --reason <text> --replace-scheduled` re-renders a drive
+  whose long-form uploads are still scheduled: every upload record must be public (kept) or
+  scheduled at least 6 h ahead and live-confirmed private. Phase D then uploads each replacement
+  with the same publish time and title and deletes the old video only after the new one is up.
+  `superseded.json` is now `backlog-supersede/2` (`/1` still reads).
+
+### Fixed
+
+- `health backlog --replace-scheduled` can now replace the scheduled uploads of a drive whose
+  schedule-store row is `complete`: Waypost's `reopen_for_replace` is asked first (dry run, before
+  any rename) and then called for real in place of `register`; a `claimed` row, or a `complete`
+  row with no replace plan, is still refused.
+- `health publish` refuses a replace whose re-render split into a different number of long-forms
+  than the replace plan covers, leaving the store's long-form count unchanged.
+- The launch anchor gate accepts the past `--lf-publish-date` of a replace run, but only when its
+  `replace_plan.json` keeps an LF1 published on that date.
+
 ## [0.3.139] - 2026-11-22
 
 ### Changed
@@ -1577,7 +1620,10 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...HEAD
+[0.3.142]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...v0.3.142
+[0.3.141]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...v0.3.141
+[0.3.140]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...v0.3.140
 [0.3.139]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.138...v0.3.139
 [0.3.138]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.137...v0.3.138
 [0.3.137]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.136...v0.3.137
