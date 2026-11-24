@@ -38,9 +38,11 @@ def _day(tmp_path, *, raw=False) -> Path:
 def _master_probe(monkeypatch, n=N):
     """Answer by file name: the master (and its mask) count ``n``, anything else, the raw
     included, is unreadable. A proof measured from any path but the master is never written."""
-    monkeypatch.setattr(
-        gate, "probe_frames", lambda p: n if Path(p).name.endswith("_master.mp4") else None
-    )
+    # The engine's cleanup asks blur_gate.probe_frames, the gate its own name: patch both.
+    for owner in (gate, blur_gate):
+        monkeypatch.setattr(
+            owner, "probe_frames", lambda p: n if Path(p).name.endswith("_master.mp4") else None
+        )
     monkeypatch.setattr(
         blur_gate,
         "container_frame_count",
@@ -176,9 +178,10 @@ def test_unprobeable_raw_with_a_valid_proof_keeps_the_master(tmp_path, monkeypat
     day = _day(tmp_path)
     persist(day)
     (day / f"day_{DATE}_raw.mp4").write_bytes(b"raw")
-    monkeypatch.setattr(
-        gate, "probe_frames", lambda p: N if Path(p).name.endswith("_master.mp4") else None
-    )
+    for owner in (gate, blur_gate):  # the engine asks blur_gate's name, the gate its own
+        monkeypatch.setattr(
+            owner, "probe_frames", lambda p: N if Path(p).name.endswith("_master.mp4") else None
+        )
     assert _drop(day)["dropped"] is False
     assert not is_unknown(tmp_path / "st")
 
