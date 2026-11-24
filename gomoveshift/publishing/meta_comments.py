@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from .facebook_adapter import FacebookPermanentError
@@ -27,8 +28,7 @@ from .queue import (
 from .youtube_comments import (
     _ERROR_DETAIL_MAX,
     FirstCommentResult,
-    mark_posted,
-    record_live_comment,
+    record_found_comments,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,14 +46,22 @@ def drain_meta_first_comments(
     *,
     adapter_factories: Mapping[str, Callable[[], object]],
     now: Optional[str] = None,
+    incidents_dir: Optional[Path] = None,
 ) -> FirstCommentResult:
     """Post every due IG/FB first comment for the platforms in
     ``adapter_factories`` (platform -> zero-arg factory returning an object
-    with ``post_comment(object_id, text)``)."""
+    with ``post_comment(object_id, text)``). A replaced text found live is counted
+    and filed as a ``first_comment_stale`` incident (no Meta edit/delete is wired yet)."""
     result = FirstCommentResult()
-    due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     adapters: dict = {}
     warned: set = set()
+
+    def adapter_for(platform: str):
+        if platform not in adapters:
+            adapters[platform] = adapter_factories[platform]()
+        return adapters[platform]
+
+    due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     for row in due:
         platform = row["platform"]
         # A relink may have rewritten the text after selection: post what the row says NOW.
@@ -62,16 +70,15 @@ def drain_meta_first_comments(
             continue
         text = fresh["first_comment_text"]
         try:
-            if platform not in adapters:
-                adapters[platform] = adapter_factories[platform]()
             prior = first_comment_prior_texts(fresh)
             # Only a relinked row has prior texts; every other row keeps the two-argument call.
             extra = {"also_accept": prior} if prior else {}
-            adapters[platform].post_comment(row["comment_target_id"], text, **extra)
-        except (
-            PriorCommentLiveError
-        ) as live:  # a replaced text is already live: never post beside it
-            record_live_comment(conn, row["id"], live.said, result)
+            posted_id = adapter_for(platform).post_comment(row["comment_target_id"], text, **extra)
+        except PriorCommentLiveError as live:
+            # A replaced text is already live: never post beside it.
+            record_found_comments(
+                conn, row["id"], text, live.comment_id, live.said, (), result, incidents_dir
+            )
             continue
         except Exception as exc:  # noqa: BLE001 -- graded per-row below
             detail = str(exc).strip() or exc.__class__.__name__
@@ -96,5 +103,7 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        mark_posted(conn, row["id"], text, result)
+        record_found_comments(
+            conn, row["id"], text, str(posted_id or ""), text, (), result, incidents_dir
+        )
     return result
