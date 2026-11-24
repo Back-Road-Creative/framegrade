@@ -445,7 +445,7 @@ class PhaseBCDayFirst:
         endpoint_loss_by_lf = getattr(enrichment, "endpoint_loss_by_lf", None) or {}
 
         recorded, skipped_artifacts, remaining_batches = self._partition_batches_by_resume_state(
-            state, day_batches, stages_dir
+            state, day_batches, stages_dir, lf_plans_by_date=lf_plans_by_date
         )
         # A resumed day keeps its recorded trail outcome, and a recorded skip whose
         # cause is now resolved re-runs the trail step alone (never the day).
@@ -1291,7 +1291,9 @@ class PhaseBCDayFirst:
             produced, required, reconstructed.date, allow, stage="reconstructed"
         )
 
-    def _partition_batches_by_resume_state(self, state, day_batches, stages_dir):
+    def _partition_batches_by_resume_state(
+        self, state, day_batches, stages_dir, lf_plans_by_date=None
+    ):
         # ── Resume safety net: skip days already recorded as done ─────
         # `per_day_completed` is the outer
         # bookkeeping layer on top of the per-stage file-existence +
@@ -1341,6 +1343,24 @@ class PhaseBCDayFirst:
                     if master.is_file()
                     else "ABSENT: it must be re-encoded first — superlong parts can "
                     "only be cut from the day master",
+                )
+                remaining_batches.append(batch)
+                continue
+
+            planned = planned_lf_indices(self.config, (lf_plans_by_date or {}).get(batch.date))
+            missing_lfs = missing_planned_lf_indices(day_dir, planned) if entry else []
+            if missing_lfs:
+                # A day recorded complete with fewer finals than planned (state left by
+                # a run that dropped a long-form) would be skipped for ever and hit the
+                # shorts_per_lf split-brain every retry. Re-run it: the master is reused
+                # by its own checks, fresh finals by their burned-text fingerprint.
+                logger.warning(
+                    "  day-first: day %s is recorded complete but is missing %d of %d "
+                    "planned long-form final(s) (lf_%s) — re-running it",
+                    batch.date,
+                    len(missing_lfs),
+                    len(planned),
+                    ", lf_".join(f"{i:02d}" for i in missing_lfs),
                 )
                 remaining_batches.append(batch)
                 continue
@@ -2677,6 +2697,48 @@ def day_superlong_complete(date: str, day_dir: Path, state) -> bool:
     if not expected:
         return False
     return finalized_superlong_count(day_dir) >= int(expected)
+
+
+def missing_planned_lf_indices(day_dir: Path, planned_indices) -> list[int]:
+    """Plan indices whose ``regular_lfs/lf_NN.mp4`` is absent or zero bytes. The ONE shortfall
+    rule (partition guard and orchestrator invalidator): indices, not a file count, so a
+    stale extra ``lf_03`` cannot hide a missing ``lf_02``."""
+    lf_dir = day_dir / "regular_lfs"
+    missing = []
+    for idx in sorted({int(i) for i in planned_indices or []}):
+        final = lf_dir / f"lf_{idx:02d}.mp4"
+        if not (final.is_file() and final.stat().st_size > 0):
+            missing.append(idx)
+    return missing
+
+
+def planned_lf_indices(config, plans_for_date) -> list[int]:
+    """LF indices a day is planned to produce. A plan-less day is LF-less in ``best_moments``
+    (``run_day_pipeline`` loops over no plans) but ``full_drive`` synthesises ``lf_01`` for it."""
+    if plans_for_date:
+        return [int(lf.index) for lf in plans_for_date]
+    if resolve_lf_mode(config.drive) == "full_drive":
+        return [1]
+    return []
+
+
+def planned_lf_indices_by_date(config, state, stages_dir: Path) -> Optional[dict]:
+    """``{date: [lf index, ...]}`` from the saved ``drive_plan.json`` + ``state.episode_dates``,
+    or None when the plan is missing, unreadable or from other code. The file keeps GLOBAL
+    ``source_file_index``, so an LF's date is ``episode_dates[first segment's index]``, as
+    ``_partition_lf_plans_by_date`` derives it."""
+    plan = _load_current_drive_plan(stages_dir / "drive_plan.json")
+    if plan is None:
+        return None
+    dates = list(getattr(state, "episode_dates", None) or [])
+    by_date: dict = {}
+    for lf in plan.regular_lfs:
+        if not lf.segments:
+            continue
+        gi = int(getattr(lf.segments[0], "source_file_index", 0))
+        if 0 <= gi < len(dates):
+            by_date.setdefault(dates[gi], []).append(lf)
+    return {d: planned_lf_indices(config, lfs) for d, lfs in by_date.items()}
 
 
 def _reconstruct_day_artifacts_from_disk(

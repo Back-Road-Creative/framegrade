@@ -53,6 +53,8 @@ class Rig:
         self.installed = "0.3.25"
         self.latest = "0.3.25"
         self.supersede = None
+        self.replace_scheduled = False
+        self.live = None  # replace_scheduled: video ids -> {id: state}
         self.gate_reason = None
         self.gates: list = []
         self.publish_result = None  # set -> run_backlog gets a publisher returning it
@@ -108,6 +110,7 @@ class Rig:
             installed_version=lambda python: self.installed,
             latest_version=lambda: self.latest,
             **({"supersede": self.supersede} if self.supersede else {}),
+            **({"replace_scheduled": True, "live_status": self.live} if self.replace_scheduled else {}),
             **({"publish": self.publish} if self.publish_result else {}),
             **({"failed_relaunch": self.relaunch} if self.relaunch else {}),
         )  # fmt: skip
@@ -1908,3 +1911,173 @@ def test_a_reopened_shortage_after_resolution_files_a_fresh_unpushed_incident(tm
     _storage_run(rig, tmp_path)
     (row,) = _space_incidents(tmp_path)
     assert not row["resolved_at"] and not row["pushed"]
+
+
+# --supersede --replace-scheduled: an output whose upload records are all public (kept) or still
+# scheduled well ahead (replaced, live-confirmed) is set aside too, with the plan recorded.
+
+
+def _rec(vid, when):
+    return {"video_id": vid, "url": f"https://youtu.be/{vid}", "publish_at": when.isoformat(),
+            "title": f"T {vid}", "playlist_id": "PL1"}  # fmt: skip
+
+
+PAST = NOW - timedelta(days=2)
+FAR = NOW + timedelta(days=9)
+
+
+def _replace_rig(tmp_path, uploads, live=None, flag=True):
+    rig = Rig(tmp_path)
+    _stale(rig, uploads=json.dumps(uploads))
+    rig.supersede = ("day-a", "blur mask was wrong")
+    rig.replace_scheduled = flag
+    rig.live = live or (lambda ids: {i: "scheduled" for i in ids})
+    return rig
+
+
+def test_replace_flag_absent_keeps_the_refusal(tmp_path):
+    rig = _replace_rig(tmp_path, {"2": _rec("b", FAR)}, flag=False)
+    res = rig.run()
+    assert res["action"] == "refused" and "holds upload records" in res["reason"], res
+
+
+def test_replace_all_scheduled_is_accepted_and_the_plan_is_durable(tmp_path):
+    rig = _replace_rig(tmp_path, {"2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))})
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    moved = rig.out / launch.SUPERSEDED_DIR / f"day-a-{STAMP}"
+    record = json.loads((moved / launch.SUPERSEDE_RECORD).read_text())
+    assert record["schema"] == "backlog-supersede/2"
+    assert record["replace"]["replace"]["2"]["video_id"] == "b"
+    assert record["replace"]["replace"]["2"]["playlist_id"] == "PL1"
+    fresh = json.loads((rig.out / "day-a" / "replace_plan.json").read_text())
+    assert set(fresh["replace"]) == {"2", "3"} and fresh["kept"] == {}
+
+
+def test_replace_mix_keeps_the_public_lf(tmp_path):
+    rig = _replace_rig(tmp_path, {"1": _rec("a", PAST), "2": _rec("b", FAR)})
+    res = rig.run()
+    assert res["action"] == "launched", res
+    fresh = json.loads((rig.out / "day-a" / "replace_plan.json").read_text())
+    assert set(fresh["kept"]) == {"1"} and set(fresh["replace"]) == {"2"}
+
+
+@pytest.mark.parametrize("why", ["near", "public", "unreadable", "no_live"])
+def test_replace_refuses_and_moves_nothing(tmp_path, why):
+    uploads = {"2": _rec("b", FAR)}
+    live = None
+    if why == "near":
+        uploads = {"2": _rec("b", NOW + timedelta(hours=2))}
+    elif why == "public":
+        live = lambda ids: {i: "public" for i in ids}  # noqa: E731
+    elif why == "unreadable":
+        uploads = {"2": "bareVideoId"}
+    rig = _replace_rig(tmp_path, uploads, live)
+    if why == "no_live":
+        rig.live = None
+    res = rig.run()
+    assert res["action"] == "refused" and "cannot supersede" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_replace_unreadable_file_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig, uploads="{not json")
+    rig.supersede, rig.replace_scheduled = ("day-a", "x"), True
+    rig.live = lambda ids: {i: "scheduled" for i in ids}
+    assert rig.run()["action"] == "refused"
+
+
+# --replace-scheduled on a ``complete`` store row: Waypost reopens it (``reopen_for_replace``)
+# instead of ``register`` (which refuses complete rows), dry-run first, before any rename.
+
+
+class ReopenStore:
+    """A fake Waypost store: records each ``reopen_for_replace`` and what the disk looked like."""
+
+    def __init__(self, rig, refuse_dry=None, refuse_real=None):
+        self.rig, self.refuse_dry, self.refuse_real, self.calls = rig, refuse_dry, refuse_real, []
+
+    def reopen_for_replace(self, project, **kw):
+        stage_present = (self.rig.stages / project).is_dir()
+        self.calls.append({"project": project, "stage_present": stage_present, **kw})
+        return self.refuse_dry if kw["dry_run"] else self.refuse_real
+
+
+def _complete_run(rig, store):
+    rig.drives.append(drive("day-a", "complete"))
+    kw = rig.kwargs()
+    kw["replace_store"] = lambda: store
+    return launch.run_backlog(**kw)
+
+
+def _three_lfs():
+    return {"1": _rec("a", PAST), "2": _rec("b", FAR), "3": _rec("c", FAR + timedelta(days=7))}
+
+
+def test_complete_row_dry_runs_the_reopen_before_any_rename_then_reopens_for_real(tmp_path):
+    import hashlib
+
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig)
+    res = _complete_run(rig, store)
+    assert res["action"] == "launched", res
+    dry, real = store.calls
+    assert dry["dry_run"] is True and dry["stage_present"] is True  # nothing renamed yet
+    assert real["dry_run"] is False and not real["stage_present"]  # after the renames
+    assert rig.registered == []  # register would raise on a complete row
+    plan_file = rig.out / "day-a" / "replace_plan.json"
+    for call in (dry, real):
+        assert call["expected"] == {1: "a", 2: "b", 3: "c"}
+        assert call["replace"] == {2, 3}
+        assert call["plan_digest"] == hashlib.sha256(plan_file.read_bytes()).hexdigest()
+        assert call["reason"] == "blur mask was wrong"
+        assert call["output_dir"] == str(rig.out / "day-a") and call["now"] == NOW
+
+
+def test_a_dry_run_refusal_moves_nothing_and_never_registers(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig, refuse_dry="LF2 is not booked as expected")
+    res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "LF2 is not booked as expected" in res["reason"], res
+    assert [c["dry_run"] for c in store.calls] == [True]
+    assert (rig.stages / "day-a").is_dir() and (rig.out / "day-a").is_dir()
+    assert not (rig.out / launch.SUPERSEDED_DIR).exists()
+    assert not rig.launches and not rig.registered
+
+
+def test_a_refused_real_reopen_fails_loudly_and_never_registers(tmp_path, caplog):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    store = ReopenStore(rig, refuse_real="drifted")
+    with caplog.at_level("ERROR"):
+        res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "drifted" in res["reason"], res
+    assert launch.exit_code(res) != 0 and rig.registered == []
+    assert "drifted" in caplog.text
+
+
+def test_a_claimed_row_is_still_refused_under_replace(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.drives.append(drive("day-a", "claimed"))
+    store = ReopenStore(rig)
+    kw = rig.kwargs()
+    kw["replace_store"] = lambda: store
+    res = launch.run_backlog(**kw)
+    assert res["action"] == "refused" and "claimed" in res["reason"], res
+    assert not store.calls and (rig.stages / "day-a").is_dir()
+
+
+def test_a_complete_row_with_no_replace_plan_is_still_refused(tmp_path):
+    rig = _replace_rig(tmp_path, {})  # empty uploads file: nothing to plan
+    store = ReopenStore(rig)
+    res = _complete_run(rig, store)
+    assert res["action"] == "refused" and "complete" in res["reason"], res
+    assert not store.calls and (rig.stages / "day-a").is_dir() and not rig.launches
+
+
+def test_a_store_without_reopen_for_replace_is_refused_before_any_rename(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+    res = _complete_run(rig, object())
+    assert res["action"] == "refused" and "reopen_for_replace" in res["reason"], res
+    assert "repin" in res["reason"]
+    assert (rig.stages / "day-a").is_dir() and not rig.launches and rig.registered == []

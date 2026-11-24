@@ -286,8 +286,10 @@ def _trim_peak_to(
     replaying up to one GOP (~2s) of pre-peak footage per clip and
     ballooning the capped montage (segment-join finding). When the keyframe probe is UNAVAILABLE, a `-c copy` would
     snap back on every clip, so the centred window is RE-ENCODED with an
-    accurate seek instead. When keyframes exist but none fit, the centred
-    window is kept — legacy slop beats dropping the peak."""
+    accurate seek instead. The same holds when keyframes exist but none fit
+    inside the peak: the start stays unaligned, so a `-c copy` would snap back up to
+    one GOP per clip (+1.7 s on a 15.0 s plan, Galley Head 2026-11), and the centred
+    window is re-encoded with an accurate seek too."""
     try:
         s, e = segment_to_master_range(to_cut_segment(peak), file_boundaries)
     except IndexError as exc:
@@ -325,10 +327,29 @@ def _trim_peak_to(
     clip_end = min(e, clip_start + clip_duration)
     if clip_end <= clip_start:
         return False
+    if not any(abs(k - clip_start) <= 1e-3 for k in keyframes):
+        # No keyframe fits: `-c copy` would snap back to the prior keyframe and
+        # replay pre-peak footage. Cut the centred window accurately instead.
+        # WARNING like the probe-unavailable branch: a montage quietly downgraded
+        # to a CPU re-encode (generational loss) must be visible in the drive log.
+        logger.warning(
+            "montage peak has no keyframe at its start in %s — re-encoding the "
+            "centred window instead of stream-copying (CPU, generational loss)",
+            master_path,
+        )
+        return reencode_range(
+            master_path,
+            clip_start,
+            clip_end,
+            output,
+            encode_args=reencode_args_for(master_path, output_fps),
+        )
     return stream_copy_range(master_path, clip_start, clip_end, output)
 
 
-def _montage_output_is_sound(output_path: Path, target_duration: float) -> bool:
+def _montage_output_is_sound(
+    output_path: Path, target_duration: float, failures: Optional[list] = None
+) -> bool:
     """Check the assembled montage against the duration the plan asked for.
 
     Uses ``PipelineValidator.validate_montage_output`` (10% tolerance — the
@@ -370,6 +391,8 @@ def _montage_output_is_sound(output_path: Path, target_duration: float) -> bool:
             "prepend it (returning None so the caller skips this LF).",
             result.message,
         )
+        if failures is not None:
+            failures.append(f"assembled montage failed duration verification — {result.message}")
         return False
     return True
 
@@ -383,6 +406,7 @@ def build_montage(
     total_duration: Optional[float] = None,
     max_total_duration: Optional[float] = None,
     output_fps: str = OUTPUT_FPS,
+    failures: Optional[list] = None,
 ) -> Optional[Path]:
     """Assemble a montage from ``peaks`` capped at
     ``max_total_duration`` seconds.
@@ -401,7 +425,8 @@ def build_montage(
     ``_compute_montage_plan``.
 
     Returns the montage file on success, None on failure or when peaks
-    is empty.
+    is empty. A failure's cause is appended to ``failures`` when given, so the
+    caller can name it instead of logging a bare "failed".
     """
     master_path = Path(master_path)
     output_path = Path(output_path)
@@ -446,17 +471,21 @@ def build_montage(
 
     if not clip_files:
         logger.error("build_montage: every peak clip extraction failed")
+        if failures is not None:
+            failures.append("every montage peak clip extraction failed")
         return None
 
     list_file = work_dir / f"{output_path.stem}_montage_concat_list.txt"
     if not concat_demuxer(clip_files, output_path, list_file):
+        if failures is not None:
+            failures.append("montage clip concat failed")
         return None
 
     # Verify what we just assembled BEFORE it is prepended to the LF and
     # encoded. A silently-empty clip extraction or a truncated concat used to
     # ride through here unchecked and only surface after an irreversible
     # multi-hour encode.
-    if not _montage_output_is_sound(output_path, n_used * clip_duration):
+    if not _montage_output_is_sound(output_path, n_used * clip_duration, failures):
         return None
 
     for p in clip_files:
@@ -479,6 +508,7 @@ def prepend_montage(
     master_path: Optional[Path] = None,
     file_boundaries: Optional[list] = None,
     output_fps: str = OUTPUT_FPS,
+    failures: Optional[list] = None,
 ) -> Optional[Path]:
     """Prepend a capped-duration montage built from `peaks` to `raw_lf_path`.
 
@@ -500,7 +530,9 @@ def prepend_montage(
     Takes no text: the montage's only place text is the LF's checked OST,
     which ``apply_ost`` overlays afterwards (D8b).
 
-    Returns the concatenated output path on success, None on failure.
+    Returns the concatenated output path on success, None on failure. Every
+    None return appends its cause to ``failures`` when given (the caller raises
+    with it: a planned long-form is never dropped silently).
     """
     raw_lf_path = Path(raw_lf_path)
     output_path = Path(output_path)
@@ -508,6 +540,8 @@ def prepend_montage(
 
     if not raw_lf_path.exists():
         logger.error("prepend_montage: raw LF missing %s", raw_lf_path)
+        if failures is not None:
+            failures.append(f"raw LF missing: {raw_lf_path}")
         return None
 
     if master_path is None or file_boundaries is None or not peaks:
@@ -524,6 +558,12 @@ def prepend_montage(
         # We still must not return the raw LF silently — that would ship
         # without a montage. Surface the failure so the caller can skip
         # this LF rather than publish a broken one.
+        if failures is not None:
+            failures.append(
+                "montage inputs unavailable "
+                f"(master={master_path is not None}, "
+                f"file_boundaries={file_boundaries is not None}, peaks={len(peaks or [])})"
+            )
         return None
 
     montage = work_dir / f"{output_path.stem}_montage.mp4"
@@ -534,8 +574,11 @@ def prepend_montage(
         output_path=montage,
         work_dir=work_dir,
         output_fps=output_fps,
+        failures=failures,
     )
     if built is None:
+        if failures is not None and not failures:
+            failures.append("build_montage returned None")
         return None
 
     list_file = work_dir / f"{output_path.stem}_prepend_list.txt"
@@ -548,6 +591,7 @@ def prepend_montage(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg",
+        "-nostdin",
         "-y",
         "-f",
         "concat",
@@ -561,22 +605,43 @@ def prepend_montage(
         "+faststart",
         str(output_path),
     ]
-    # Shared robust runner: on timeout or a non-zero exit it deletes the
-    # partial output before raising. A truncated concat left on disk is worse
-    # than none at all — a resume finds a plausible-looking file and ships a
-    # half-length long-form. The failure is still reported as None so the
-    # caller's skip-this-LF contract is unchanged.
-    from .ffmpeg_runner import run_ffmpeg_quick
+    # Stall-detecting runner, not a fixed wall clock: a 38 GB `-c copy
+    # +faststart` concat on a slow volume ran past the old `timeout=1800` while
+    # still writing (Galley Head 2026-11). It is killed only when ffmpeg stops
+    # reporting progress, with the moov-rewrite window sized from the output
+    # actually on disk (`_moov_rewrite_stall_timeout`). On a stall, a non-zero
+    # exit or a start failure it deletes the partial output: a truncated concat
+    # left on disk is worse than none, since a resume would ship a half-length
+    # long-form. The failure is reported as None with its cause.
+    from .ffmpeg_runner import MOOV_REWRITE_MIN_BYTES_PER_SEC, run_ffmpeg_encode
 
+    # The wall-clock ceiling backstops a run whose stats keep advancing for ever. It is
+    # sized from the input bytes at the runner's own throughput floor
+    # (MOOV_REWRITE_MIN_BYTES_PER_SEC), once for the copy pass and once for the
+    # +faststart rewrite, and never below the old fixed 1800 s.
     try:
-        run_ffmpeg_quick(
-            cmd,
-            output_path=output_path,
-            timeout=1800,
-            description="prepend_montage concat",
+        input_bytes = built.stat().st_size + raw_lf_path.stat().st_size
+    except OSError:
+        input_bytes = 0
+    max_timeout = max(1800, 2 * -(-input_bytes // MOOV_REWRITE_MIN_BYTES_PER_SEC))
+
+    result = run_ffmpeg_encode(
+        cmd,
+        output_path=output_path,
+        expected_duration=0.0,
+        description="prepend_montage concat",
+        max_timeout=max_timeout,
+    )
+    if not result.success:
+        cause = (
+            f"prepend concat killed ({result.killed_reason})"
+            if result.killed_reason
+            else f"prepend concat failed (exit {result.returncode})"
         )
-    except Exception as e:
-        logger.error("prepend_montage concat failed: %s", e)
+        tail = (result.stderr_tail or "").strip().splitlines()[-1:]
+        logger.error("prepend_montage concat failed: %s %s", cause, " ".join(tail))
+        if failures is not None:
+            failures.append(cause + (f": {tail[0]}" if tail else ""))
         return None
 
     try:

@@ -29,6 +29,7 @@ from typing import Optional
 
 from ...config import Config
 from ...tracking import MetricsCollector, TrackingStore  # post-upload metrics hook
+from .. import replace_scheduled
 from ..chapters import ChapterGenerator
 from ..csv_generator import CSVGenerator  # noqa: F401 — patched in tests
 from ..exceptions import YouTubeQuotaError  # noqa: F401 — re-exported for tests
@@ -65,6 +66,16 @@ from .external_systems_coordinator import (  # noqa: F401 — re-exported for te
 _LFMeta = LongFormMetadataGenerator
 
 logger = logging.getLogger(__name__)
+
+
+def _skip(**_kwargs):
+    """Stand-in for an emission a ``--replace-scheduled`` plan run must not repeat."""
+    return None
+
+
+def _plan_manifests(*, state, **_kwargs):
+    """A plan run queues no new shorts: keep the first run's Drive manifests, open no uploader."""
+    return dict(state.upload_manifests or {}), None
 
 
 def _claim_native_only() -> bool:
@@ -1407,6 +1418,13 @@ class PhaseD:
         # old, earliest publish_at in past, no YouTube uploads yet) plus
         # two operator backstops (--lf-publish-date, --force-no-rebase).
         # See ``_maybe_rebase_drive_schedule`` docstring.
+        # Under a ``--replace-scheduled`` plan the kept (public) LFs go back into
+        # ``state.youtube_uploads`` FIRST, so the schedule below is built around them.
+        replace_plan = replace_scheduled.load_plan(output_base)
+        replace_lfs: set = set()
+        if replace_plan:
+            replace_scheduled.apply_kept(state, replace_plan)
+            replace_lfs = set(replace_scheduled.replace_map(replace_plan))
         rebase_info = _maybe_rebase_drive_schedule(state, output_base)
         drive_schedule = _build_and_persist_drive_schedule(
             scheduler_cls=PipelineScheduler,
@@ -1543,7 +1561,9 @@ class PhaseD:
         # MUST trigger a re-upload, never a silent skip.
         _assert_shorts_quality_gate(state, validator_cls=PipelineValidator)
 
-        upload_manifests, uploader = _upload_all_lfs_shorts_to_drive(
+        upload_manifests, uploader = (
+            _plan_manifests if replace_plan else _upload_all_lfs_shorts_to_drive
+        )(
             drive_plan=drive_plan,
             state=state,
             project_base=project_base,
@@ -1606,7 +1626,7 @@ class PhaseD:
         # quality gate can inspect it regardless of which branch
         # builds it. ``None`` = skip_csv mode → Rules 5+6 are vacuous.
         consolidated_csv_path: Optional[Path] = None
-        if not skip_csv:
+        if not skip_csv and not replace_plan:
             logger.info("  D-csv: Writing consolidated shorts CSV...")
             consolidated_csv_path = _emit_consolidated_shorts_csv(
                 output_base=output_base,
@@ -1637,7 +1657,7 @@ class PhaseD:
             shorts_paths_by_lf=state.shorts_per_lf,
         )
 
-        _emit_publish_plan_sidecar(
+        (_skip if replace_plan else _emit_publish_plan_sidecar)(
             output_base=output_base,
             project_base=project_base,
             drive_plan=drive_plan,
@@ -1660,7 +1680,7 @@ class PhaseD:
         # the end-screen sidecar — one worklist line per short goes into
         # operator_checklist.txt for a Studio batch pass. Never fails the
         # batch by construction (see the sidecar module docstring).
-        emit_related_video_worklist(
+        (_skip if replace_plan else emit_related_video_worklist)(
             output_base=output_base,
             social_posts_per_lf=social_posts_per_lf,
             youtube_uploads=youtube_uploads,
@@ -1671,13 +1691,20 @@ class PhaseD:
             drive_plan=drive_plan,
             output_base=output_base,
             yt=yt,
-            youtube_uploads=youtube_uploads,
+            # Under a plan only the replacement videos get one; a kept public video is not touched.
+            youtube_uploads=(
+                {k: v for k, v in youtube_uploads.items() if k in replace_lfs}
+                if replace_plan
+                else youtube_uploads
+            ),
             state=state,
         )
-        _attach_superlong_thumbnails(state=state, output_base=output_base, yt=yt)
+        (_skip if replace_plan else _attach_superlong_thumbnails)(
+            state=state, output_base=output_base, yt=yt
+        )
 
         # ── 5c. Upload LF thumbnail JPGs to Drive ──────────────────────────
-        uploader = _upload_lf_thumbnails_to_drive(
+        uploader = (_skip if replace_plan else _upload_lf_thumbnails_to_drive)(
             drive_plan=drive_plan,
             state=state,
             output_base=output_base,
