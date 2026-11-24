@@ -414,10 +414,15 @@ class PhaseBCDayFirst:
                 try:
                     real_plan.save(drive_plan_path)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "  day-first: failed to write drive_plan.json: %s",
-                        exc,
-                    )
+                    # Not a warning: an unsaved plan leaves an unloadable file (or none) on
+                    # disk, so every resume would drop phase_bc/phase_d again after the
+                    # encode. Fail now, before any render, with the cause.
+                    raise RuntimeError(
+                        f"phase_bc: cannot write {drive_plan_path} ({type(exc).__name__}: "
+                        f"{exc}). Without it a resume cannot verify the planned long-forms "
+                        "and re-runs this phase every time. Fix the disk or permissions on "
+                        "the stages directory, then resume."
+                    ) from exc
         # A failed plan build (real_plan None) leaves lf_plans_by_date
         # empty, so the per-LF resolvable gate iterates nothing and run_all_days
         # would encode on the drive-wide fallback cascade. Hard-fail here — but
