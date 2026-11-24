@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1435,10 +1436,63 @@ def first_comments_naming(
     clause = " OR ".join("instr(first_comment_text, ?) > 0" for _ in needles)
     return conn.execute(
         "SELECT id, short_index, platform, status, first_comment_text, "  # noqa: S608
-        "first_comment_posted_at, first_comment_attempts, lease_owner, lease_expires_at "
-        f"FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
+        "first_comment_posted_at, first_comment_attempts, first_comment_error, lease_owner, "
+        f"lease_expires_at FROM deliveries WHERE project_name=? AND ({clause}) ORDER BY id",
         (project_name, *needles),
     ).fetchall()
+
+
+def first_comments_naming_elsewhere(
+    conn: sqlite3.Connection, project_name: str, needles: Iterable[str]
+) -> list:
+    """Deliveries of every project EXCEPT ``project_name`` whose ``first_comment_text``
+    contains a needle (plain substring), in id order. Report-only: a relink never rewrites
+    another project's row, it only names it."""
+    needles = [n for n in needles if n]
+    if not needles:
+        return []
+    clause = " OR ".join("instr(first_comment_text, ?) > 0" for _ in needles)
+    return conn.execute(
+        "SELECT id, project_name, short_index, platform, status, first_comment_text, "  # noqa: S608
+        "first_comment_posted_at FROM deliveries "
+        f"WHERE project_name<>? AND ({clause}) ORDER BY id",
+        (project_name, *needles),
+    ).fetchall()
+
+
+_URL_ID = re.compile(r"(?:youtu\.be/|[?&]v=|/shorts/)([A-Za-z0-9_-]+)")
+
+
+def stale_live_error(live_text: str, current_text: str) -> str:
+    """The ``first_comment_error`` for a comment that is live with a text the row no longer
+    holds: names each video id the live text links that the current text does not."""
+    ids = [i for i in dict.fromkeys(_URL_ID.findall(live_text)) if i not in current_text]
+    return "stale comment live: links " + (", ".join(ids) if ids else "an id the relink replaced")
+
+
+def record_stale_live_comment(
+    conn: sqlite3.Connection, delivery_id: int, live_text: str, now: str
+) -> Optional[str]:
+    """A comment saying ``live_text`` is live on the platform but the row has since been
+    rewritten to different text. Store the live text as ``first_comment_text`` (so the relink
+    and the operator see what is really live), mark the row posted and set
+    ``first_comment_error`` to :func:`stale_live_error`; returns that error, or ``None`` (nothing
+    written) when the row is already posted, gone, or already says ``live_text``."""
+    with conn:
+        row = conn.execute(
+            "SELECT first_comment_text FROM deliveries WHERE id=? "
+            "AND first_comment_posted_at IS NULL",
+            (delivery_id,),
+        ).fetchone()
+        if row is None or row["first_comment_text"] == live_text:
+            return None
+        error = stale_live_error(live_text, row["first_comment_text"] or "")
+        done = conn.execute(
+            "UPDATE deliveries SET first_comment_text=?, first_comment_posted_at=?, "
+            "first_comment_error=?, updated_at=? WHERE id=? AND first_comment_posted_at IS NULL",
+            (live_text, now, error, now, delivery_id),
+        ).rowcount
+    return error if done == 1 else None
 
 
 #: Statuses whose first comment can never post. ``published`` is NOT here: a scheduled
@@ -1463,8 +1517,10 @@ def rewrite_unposted_first_comment(
     only while the comment can still post: unposted, under ``FIRST_COMMENT_MAX_ATTEMPTS``,
     status not in ``FIRST_COMMENT_FROZEN_STATUSES``, no live lease. ``False`` (nothing written)
     when the row moved since it was read. ``old_text`` joins ``first_comment_prior_text`` for
-    the drain's dedup; no other column changes."""
+    the drain's dedup; no other column changes. A lease is live or expired by this process's
+    clock, never by the caller's ``now`` (stored only as ``updated_at``)."""
     frozen = ", ".join("?" for _ in FIRST_COMMENT_FROZEN_STATUSES)
+    clock = _now_iso()
     with conn:
         row = conn.execute(
             "SELECT first_comment_prior_text FROM deliveries WHERE id=?", (delivery_id,)
@@ -1489,7 +1545,7 @@ def rewrite_unposted_first_comment(
                     old_text,
                     FIRST_COMMENT_MAX_ATTEMPTS,
                     *FIRST_COMMENT_FROZEN_STATUSES,
-                    now,
+                    clock,
                 ),
             ).rowcount
             == 1

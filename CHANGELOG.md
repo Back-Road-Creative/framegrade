@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.142] - 2026-11-24
+
+### Fixed
+
+- `--replace-scheduled` can no longer leave two scheduled uploads in one slot or delete a public
+  video: durable per-LF state, a private insert, a live recheck before the delete (else the new
+  video goes), and a resume of unfinished LFs on every Phase D entry. A plan run emits no shorts.
+
 ## [0.3.141] - 2026-11-24
 
 ### Added
@@ -1612,7 +1620,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...HEAD
+[0.3.142]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...v0.3.142
 [0.3.141]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...v0.3.141
 [0.3.140]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...v0.3.140
 [0.3.139]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.138...v0.3.139
