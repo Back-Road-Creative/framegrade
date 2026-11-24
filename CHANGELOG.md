@@ -5,6 +5,52 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.143] - 2026-11-24
+
+### Added
+
+- `relink_replaced_lf` rewrites a replaced long-form upload's old id in unposted queue first
+  comments, the publish plan, the pending journal and the operator checklist.
+
+### Fixed
+
+- A resume now re-runs a day that was recorded complete with fewer long-forms than planned, even when Phase B/C was checkpointed: the orchestrator drops the checkpoint when a planned long-form index has no non-empty final, or when `drive_plan.json` is present but unloadable (phase_bc then rebuilds it). A Galley Head style job therefore heals on retry instead of failing Phase D with `shorts_per_lf SPLIT-BRAIN` every time. The "Phase BC incomplete" error names each failed day and its cause. A full_drive day with no supplied plan now builds a montage instead of dropping its long-form.
+- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress. The montage prepend concat passes `-nostdin` and no ceiling of its own (the runner's 24 h default stands): a size-based ceiling killed a concat that was still advancing on a volume slower than the 20 MB/s floor. The silent `+faststart` moov rewrite is timed by ffmpeg's own progress: growth of its `/proc/<pid>/io` `rchar + wchar` resets the stall clock, and a rewrite whose counters stop is killed after 30 minutes; where the counters cannot be read the window is the larger of the size window and twice the run's elapsed time. The old fixed 20 MB/s floor killed a healthy rewrite of Galley LF1 (38.8 GB) on any volume under 20 MB/s, on every retry. ffmpeg 7 writing to a file prints `frame=    0 ... size=       0KiB time=N/A` before the first packet, judged by `size=`; the `frame=` fallback serves pipe and other non-seekable outputs (`size=N/A time=N/A`).
+- A plan with no `plan_code_version` stamp (written before the stamp existed) now re-enters phase_bc and phase_d on resume, like any plan from other code: it cannot be shown to match the current planner or to confirm every planned long-form. The rebuild costs no encode and stamps the plan. A `drive_plan.json` that cannot be written now stops phase_bc before any encode with the cause, instead of a warning followed by re-dropping the phases on every resume. A day with no score bounds now records its cause in the "Phase BC incomplete" error.
+- A healthy `+faststart` rewrite no longer ends with a false "I/O counters became unreadable" WARNING: an exited ffmpeg's unreadable counters are an exit, not a fallback, so the run logs one WARNING naming the mode; an ffmpeg whose exit waits seconds on flushing a large output (its `/proc/<pid>/stat` shows it exiting) no longer counts either, and only 3 unreadable reads in a row from a child that is not exiting take the fallback. A child that keeps reading or writing during the rewrite is bounded only by `max_timeout`.
+- A second stale duplicate is queued for delete, adopting a comment never deletes it, and a relink
+  during an in-flight edit stays pending for the next pass instead of being lost.
+- A 404 edit still runs the row's pending deletes; `forbidden` is a re-auth when posting again (a
+  refusal only for corrections); a `channels.list` scope gap is a re-auth.
+- A stale first-comment correction never deletes the intended comment and touches only our own
+  comments (fails closed with no own id); a current-text comment counts whoever wrote it.
+- Corrections have their own counter and cap (a 403 `forbidden` counts), a 404 delete resolves, a
+  404 edit reposts, and a capped one stays on the summary line (`first_comment_correction_capped=N`).
+- A second replace rewrites a pending correction's text.
+- A replaced first comment found live on Facebook is edited in place (`POST /{comment-id}`
+  `message=`, else deleted and reposted); on Instagram, which has no comment edit, it is deleted
+  and the intended text posted only once the delete is confirmed, never two comments and never a
+  post before the delete. Both run at the start of the next Meta drain.
+- The Graph scan reads every bounded page when a replaced text exists, prefers the new comment
+  and reports a replaced one live beside it for deletion, never the new one.
+- `relink_replaced_lf`: the lease pre-check uses the process clock, and a failing other-project
+  report is recorded, not raised. Public `post_first_comment` raises for a replaced text.
+- A first comment found live with a replaced text is counted (`stale`, `first_comment_stale=N`
+  on the summary line), filed as a `first_comment_stale` health incident (`gomoveshift status
+  --json`) and, on YouTube, corrected in place on the next pass (edit, or delete a duplicate);
+  the incident clears itself. Meta drains count and file it too (their correction: see
+  `relink-meta-correct.md`).
+- The YouTube scan reads every bounded page and reports a replaced text live beside the new one,
+  and a concurrent drain's comment is reported. Relink lists rewritten published rows for the
+  drain to verify.
+- First-comment drains re-read the text before posting and mark it posted only if unchanged.
+
+- A first comment found live with a replaced text (a relink rewrote the row mid-post, or the
+  response was lost) is recorded as posted with that text, `first_comment_error` set and the
+  drain's `errors` filled, never marked done silently; Meta drains no longer post a new text
+  beside a live old one. Relink reports a rewritten plan (re-confirm Gate C/D) and other
+  projects' rows naming an old id.
+
 ## [0.3.142] - 2026-11-24
 
 ### Fixed
@@ -1620,7 +1666,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.143...HEAD
+[0.3.143]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...v0.3.143
 [0.3.142]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...v0.3.142
 [0.3.141]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...v0.3.141
 [0.3.140]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.139...v0.3.140
