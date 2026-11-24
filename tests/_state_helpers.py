@@ -121,6 +121,46 @@ def make_state(**kwargs: Any) -> PipelineState:
     return PipelineState(**kwargs)
 
 
+def measure_day(day: Path, date: str, count: int = 24) -> None:
+    """Give a rendered ``day_<date>`` stage dir the measurement the mask gate demands.
+
+    The publish gate (``mask_frame_gate``) refuses a day holding finals but no ``day_<date>_*``
+    artefact as ``mask_frame_count_unknown``: nothing to measure, so nothing proves the blur
+    mask matches the picture. A fixture that fakes a rendered day writes what production leaves
+    behind once the raw and master are purged: the sidecar (``source_frame_count`` in its
+    header), the mask, and the ``source_frames`` proof ``blur_gate.persist_source_frames``
+    writes (schema, day binding, three equal counts, sidecar sha256, mask identity). The gate
+    reads these through its own ``persisted_source_count``, so it is not stubbed."""
+    import hashlib
+
+    from gomoveshift.pipeline.blur_gate import SOURCE_FRAMES_SCHEMA
+
+    day.mkdir(parents=True, exist_ok=True)
+    sidecar = day / f"day_{date}_blur_regions.json"
+    sidecar.write_text(
+        json.dumps(
+            {"schema": "redactcam.timeline/v1", "source_frame_count": count, "frame_boxes": {}}
+        )
+    )
+    mask = day / f"day_{date}_blur_mask.mkv"
+    mask.write_bytes(b"mask")
+    (day / f"day_{date}_source_frames.json").write_text(
+        json.dumps(
+            {
+                "schema": SOURCE_FRAMES_SCHEMA,
+                "date": date,
+                "day_dir": day.name,
+                "counts": {"container": count, "mask": count, "sidecar": count},
+                "source_fingerprint": "fixture",
+                "sidecar_sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                "mask": {"size": mask.stat().st_size, "mtime_ns": mask.stat().st_mtime_ns},
+                "renderer": {"redactcam_version": "1", "decode_mode": "auto"},
+                "redactcam_commit": None,
+            }
+        )
+    )
+
+
 def verified_shorts_per_lf(
     stages: Path,
     counts: dict[int, int],
@@ -141,6 +181,7 @@ def verified_shorts_per_lf(
     """
     shorts_dir = stages / f"day_{date}" / "shorts"
     shorts_dir.mkdir(parents=True, exist_ok=True)
+    measure_day(stages / f"day_{date}", date)
     out: dict[int, list[Path]] = {}
     entries = []
     rank = 0

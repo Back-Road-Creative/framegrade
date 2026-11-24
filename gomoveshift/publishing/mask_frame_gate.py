@@ -35,6 +35,7 @@ from ..health.store import (
     utc_iso,
     write_row,
 )
+
 # ``persisted_source_count`` lives engine-side (``cleanup`` needs it and the engine may not import
 # publishing); it and the names it reads are re-exported here so the gate's callers and tests
 # are unchanged.
@@ -152,7 +153,6 @@ def _row_path(incidents_dir: Path, drive: str, date: str) -> Path:
 
 def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> None:
     """One open incident per drive-day: an existing unresolved row is left as it is."""
-    import json
 
     path = _row_path(incidents_dir, drive, row["date"])
     try:
@@ -169,7 +169,6 @@ def _record(incidents_dir: Path, drive: str, row: Dict[str, Any], text: str) -> 
 
 
 def _resolve_passed(incidents_dir: Path, drive: str, failing: set, stages_dir: Path) -> None:
-    import json
 
     for day_dir in Path(stages_dir).glob("day_*"):
         date = day_dir.name[len("day_") :]
