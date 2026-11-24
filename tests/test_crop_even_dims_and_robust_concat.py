@@ -13,8 +13,8 @@
 
 from __future__ import annotations
 
+import io
 import re
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -74,6 +74,14 @@ class TestCropDimensionsAreEven:
         assert "zscale=" in chain and "filter=spline36" in chain
 
 
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+
 class TestPrependMontageCleansPartialOutput:
     """The final concat must not leave a truncated file behind."""
 
@@ -94,18 +102,53 @@ class TestPrependMontageCleansPartialOutput:
             boundaries=[(0.0, 600.0)],
         )
 
-    def _run(self, scratch, fake_run):
-        """Drive prepend_montage with build_montage stubbed to succeed."""
+    def _run(self, scratch, script):
+        """Drive prepend_montage with build_montage stubbed to succeed.
+
+        ``script(cmd, clock)`` is the ffmpeg process: it returns ``(rc, stalls)``
+        after writing whatever output it would have written. The concat runs
+        through ``run_ffmpeg_encode`` (Popen, stall-based), so that is the seam.
+        """
+        from gomoveshift.pipeline import ffmpeg_runner
 
         def _fake_build(master_path, peaks, file_boundaries, output_path, work_dir, **kw):
             Path(output_path).write_bytes(b"MONTAGE")
             return Path(output_path)
 
-        # prepend_montage's concat now runs through ffmpeg_runner, so that is
-        # the seam — montage_builder no longer calls subprocess itself.
+        clock = _Clock()
+
+        class _Proc:
+            def __init__(self, cmd, **kw):
+                self.rc, self.stalls = script(cmd)
+                self.stdout, self.stderr = io.StringIO(""), io.StringIO("")
+                self.returncode = None
+
+            def poll(self):
+                if self.stalls:
+                    clock.t += 700.0  # past the stall window, no progress ever printed
+                    return None
+                self.returncode = self.rc
+                return self.rc
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        real = ffmpeg_runner.run_ffmpeg_encode
         with (
             patch.object(montage_builder, "build_montage", side_effect=_fake_build),
-            patch("gomoveshift.pipeline.ffmpeg_runner.subprocess.run", side_effect=fake_run),
+            patch.object(
+                ffmpeg_runner,
+                "run_ffmpeg_encode",
+                side_effect=lambda *a, **kw: real(*a, time_source=clock, **kw),
+            ),
+            patch.object(ffmpeg_runner.subprocess, "Popen", _Proc),
+            patch.object(ffmpeg_runner.time, "sleep"),
         ):
             return montage_builder.prepend_montage(
                 raw_lf_path=scratch.raw_lf,
@@ -116,32 +159,32 @@ class TestPrependMontageCleansPartialOutput:
                 file_boundaries=scratch.boundaries,
             )
 
-    def test_timeout_removes_the_partial_output(self, scratch):
-        """A concat killed by the timeout leaves a truncated mp4 on disk.
+    def test_stall_removes_the_partial_output(self, scratch):
+        """A concat killed for stalling leaves a truncated mp4 on disk.
 
         Left behind, a resume finds a plausible-looking output and ships a
         half-length long-form.
         """
 
-        def fake_run(cmd, *a, **kw):
+        def script(cmd):
             Path(cmd[-1]).write_bytes(b"PARTIAL")  # ffmpeg wrote some output
-            raise subprocess.TimeoutExpired(cmd, 1800)
+            return -1, True
 
-        assert self._run(scratch, fake_run) is None
+        assert self._run(scratch, script) is None
         assert not scratch.out.exists(), "truncated concat output was left on disk"
 
     def test_nonzero_exit_removes_the_partial_output(self, scratch):
-        def fake_run(cmd, *a, **kw):
+        def script(cmd):
             Path(cmd[-1]).write_bytes(b"PARTIAL")
-            return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="boom")
+            return 1, False
 
-        assert self._run(scratch, fake_run) is None
+        assert self._run(scratch, script) is None
         assert not scratch.out.exists(), "failed concat output was left on disk"
 
     def test_success_keeps_the_output(self, scratch):
-        def fake_run(cmd, *a, **kw):
+        def script(cmd):
             Path(cmd[-1]).write_bytes(b"JOINED")
-            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+            return 0, False
 
-        assert self._run(scratch, fake_run) == scratch.out
+        assert self._run(scratch, script) == scratch.out
         assert scratch.out.read_bytes() == b"JOINED"

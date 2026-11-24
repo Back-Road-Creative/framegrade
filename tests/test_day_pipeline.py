@@ -2128,7 +2128,9 @@ class TestMontageDurationThreadedToApplyOst:
             Path(output_path).write_bytes(b"\x00" * 1024)
             return output_path
 
-        def _fake_prepend(raw_lf_path, peaks, output_path, work_dir, master_path, file_boundaries):
+        def _fake_prepend(
+            raw_lf_path, peaks, output_path, work_dir, master_path, file_boundaries, failures=None
+        ):
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             Path(output_path).write_bytes(b"\x00" * 1024)
             return output_path
