@@ -71,7 +71,7 @@ from keycut import (
 from ..config import resolve_lf_mode
 from . import trail_opening, volume_source
 from .blur_gate import BlurGateError
-from .cleanup import purge_day_intermediates, purge_lf_intermediates
+from .cleanup import purge_day_intermediates, purge_lf_intermediates, release_stale_lf_work
 from .color_filters import OUTPUT_FPS, cadence_kwargs
 from .day_grouper import DayBatch
 from .day_master_encoder import build_master_record, encode_day_master
@@ -2892,26 +2892,58 @@ def run_day_pipeline(
                 ],
             )
 
+        # Short on space with this LF's own leftovers in the way: give their
+        # room back and price again; the last gate raises if the day is still
+        # short. First the work files a burn that died after its montage left
+        # (OST validation, a kill), which this burn rebuilds from scratch
+        # (Courtmacsherry 2025-09-19, 2026-11-24: 103.5 GB of them, 15.2 GB
+        # short). Then a re-burn's old final, which this burn replaces - only
+        # when the work files were not enough, so the old final otherwise stays
+        # until the new one lands (2026-11-13, nctopa-2026-03-05-rec0063: 14.5
+        # GB short beside it).
+        _stale_work = [
+            n
+            for n in (f"lf_{idx:02d}_segments.mp4", f"lf_{idx:02d}_with_montage.mp4",
+                      f"lf_{idx:02d}_map_inset.mov", f".lf_{idx:02d}_work")
+            if (lf_dir / n).exists()
+        ]  # fmt: skip
         try:
             _gate_lf_work_space()
         except RuntimeError as exc:
-            # A re-burn's old final sits on this volume and this burn replaces
-            # it. Short with it in the way: give its room back and price again
-            # (the second gate raises if the day is still short).
-            if not final_lf.is_file():
+            if not _stale_work and not final_lf.is_file():
                 raise
-            logger.warning(
-                "Day %s: LF %d work space is short (%s). Removing its stale final "
-                "%s (%.1f GB), which this burn replaces, and checking again.",
-                date,
-                idx,
-                exc,
-                final_lf,
-                final_lf.stat().st_size / 1024**3,
-            )
-            final_lf.unlink()
-            fp_path.unlink(missing_ok=True)
-            _gate_lf_work_space()
+            _gate_exc = exc
+            if _stale_work:
+                _freed = release_stale_lf_work(lf_dir.parent, idx)["bytes_freed"]
+                logger.warning(
+                    "Day %s: LF %d work space is short (%s). Removed its stale work "
+                    "files %s (%.1f GB), which this burn rebuilds, and checking again.",
+                    date,
+                    idx,
+                    exc,
+                    ", ".join(_stale_work),
+                    _freed / 1024**3,
+                )
+                try:
+                    _gate_lf_work_space()
+                    _gate_exc = None
+                except RuntimeError as exc2:
+                    _gate_exc = exc2
+            if _gate_exc is not None:
+                if not final_lf.is_file():
+                    raise _gate_exc
+                logger.warning(
+                    "Day %s: LF %d work space is short (%s). Removing its stale final "
+                    "%s (%.1f GB), which this burn replaces, and checking again.",
+                    date,
+                    idx,
+                    _gate_exc,
+                    final_lf,
+                    final_lf.stat().st_size / 1024**3,
+                )
+                final_lf.unlink()
+                fp_path.unlink(missing_ok=True)
+                _gate_lf_work_space()
         trail_opening.reset(lf_dir, idx)  # this burn restores the montage lead
         work_dir = lf_dir / f".lf_{idx:02d}_work"
         raw_concat = lf_dir / f"lf_{idx:02d}_segments.mp4"

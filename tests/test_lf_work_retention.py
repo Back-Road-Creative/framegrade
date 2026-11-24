@@ -442,3 +442,75 @@ def test_a_shortfall_the_stale_final_cannot_cover_still_stops_the_day(tmp_path):
 
     lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
     assert not (lf_dir / "lf_01_segments.mp4").exists()
+
+
+def _stale_lf1_work(tmp_path) -> Path:
+    """LF 1's work files left by a burn that failed after its montage (OST
+    validation, a kill): this burn cuts and prepends them again from scratch."""
+    lf_dir = tmp_path / "out" / "day_2026-02-20" / "regular_lfs"
+    (lf_dir / ".lf_01_work").mkdir(parents=True, exist_ok=True)
+    (lf_dir / ".lf_01_work" / "part.ts").write_bytes(b"old")
+    for name in ("lf_01_segments.mp4", "lf_01_segments.mp4.receipt.json", "lf_01_with_montage.mp4"):
+        (lf_dir / name).write_bytes(b"old work")
+    return lf_dir
+
+
+def test_a_shortfall_gives_back_the_stale_work_files_the_burn_rebuilds(tmp_path):
+    """Courtmacsherry 2025-09-19 (2026-11-24): the OST burn's output failed
+    validation, leaving the 51.7 GB concat and the 51.9 GB montage copy on the
+    volume. The resume's gate priced all three artifacts on top of them and
+    stopped 15.2 GB short, though the burn rewrites both. The gate now gives
+    their room back and prices again."""
+    lf_dir = _stale_lf1_work(tmp_path)
+    stale_concat = lf_dir / "lf_01_segments.mp4"
+
+    def _space(lf_index):
+        if lf_index == 1 and stale_concat.exists() and stale_concat.read_bytes() == b"old work":
+            raise RuntimeError("Insufficient work space for LF 1")
+
+    artifacts, lf_dir, trace = _two_lf_day(
+        tmp_path, state=make_state(ost_audit_confirmed=True), space=_space
+    )
+
+    assert artifacts is not None and len(artifacts.regular_lf_paths) == 2
+    lf1 = [e[0] for e in trace if e[0] in ("space", "assemble") and e[1] == 1]
+    assert lf1 == ["space", "space", "assemble"]
+    assert not (lf_dir / "lf_01_segments.mp4.receipt.json").exists()
+
+
+def test_stale_work_is_given_back_before_the_stale_final(tmp_path):
+    """The work files are rebuilt by this burn no matter what, the old final
+    only replaced once it succeeds: when dropping the work files is enough,
+    the old final stays until the new one lands."""
+    stale_final = _stale_lf1_final(tmp_path)
+    lf_dir = _stale_lf1_work(tmp_path)
+    stale_concat = lf_dir / "lf_01_segments.mp4"
+    seen: dict = {}
+
+    def _space(lf_index):
+        if lf_index == 1 and stale_concat.exists():
+            raise RuntimeError("Insufficient work space for LF 1")
+
+    def _on_assemble(idx, lf_dir):
+        if idx == 1:
+            seen["final_at_concat"] = stale_final.read_bytes()
+
+    _two_lf_day(
+        tmp_path,
+        state=make_state(ost_audit_confirmed=True),
+        space=_space,
+        on_assemble=_on_assemble,
+    )
+
+    assert seen == {"final_at_concat": b"old label"}
+
+
+def test_a_shortfall_the_stale_work_cannot_cover_still_stops_the_day(tmp_path):
+    _stale_lf1_work(tmp_path)
+
+    def _space(lf_index):
+        if lf_index == 1:
+            raise RuntimeError("Insufficient work space for LF 1")
+
+    with pytest.raises(RuntimeError, match="work space for LF 1"):
+        _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True), space=_space)
