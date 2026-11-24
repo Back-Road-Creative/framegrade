@@ -139,6 +139,20 @@ def test_supersede_and_reason_reach_run_backlog(tmp_path, capsys, wired):
     assert "superseded /s/ire-a -> /s/_x" in capsys.readouterr().out
 
 
+def test_a_due_replace_retry_is_run_by_the_plain_tick_with_the_replace_flag(tmp_path, wired):
+    from datetime import datetime, timezone
+
+    wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
+    launch.mark_replace_retry(tmp_path / "out", "ire-a", "blur fix", datetime(2020, 1, 1, tzinfo=timezone.utc))  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 0
+    assert wired["supersede"] == ("ire-a", "blur fix") and wired["replace_scheduled"] is True
+    assert callable(wired["live_status"])
+    # a dry run never starts a retry
+    wired["_result"] = {"action": "noop", "reason": "r", "skipped": []}
+    health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace())
+    assert wired["supersede"] is None and wired["replace_scheduled"] is False
+
+
 def test_dry_run_supersede_says_would_supersede(tmp_path, capsys, wired):
     wired["_result"] = {
         "action": "would_launch", "reason": "ire-a for slot", "skipped": [],

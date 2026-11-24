@@ -47,7 +47,7 @@ from seo_manager.core.profile import (
 )
 from seo_manager.scheduling import slots
 from seo_manager.scheduling.shorts_times import drive_share
-from seo_manager.scheduling.store import Booking, ScheduleStore, SlotTaken
+from seo_manager.scheduling.store import Booking, ScheduleStore, SlotTaken, regions_clash
 
 from .schedule_constants import EST, long_form_days
 
@@ -452,12 +452,14 @@ def book_in_store(
     region: Optional[str],
     slot_at: datetime,
     video_id: Optional[str],
+    strict: bool = False,
 ) -> None:
     """Mirror a confirmed LF booking into ``schedule.sqlite3`` beside the ledger.
 
     Best effort: only when the store already exists (the nightly runner creates it), and a
     failure is logged, never raised -- the upload is irreversible, the ledger row is
-    already written, and the audit runner reconciles a missing store row.
+    already written, and the audit runner reconciles a missing store row. ``strict`` (a replaced
+    LF, whose slot was reserved) re-raises instead, so a refused booking never reads as done.
     """
     db = Path(ledger_path).parent / STORE_FILENAME
     if not db.exists():
@@ -476,6 +478,52 @@ def book_in_store(
             db,
             exc,
         )
+        if strict:
+            raise
+
+
+def reserve_lf_slot(
+    ledger_path: Path,
+    config,
+    *,
+    project: str,
+    lf_index: int,
+    region: Optional[str],
+    slot_at: datetime,
+    video_id: str,
+) -> None:
+    """Hold ``slot_at`` for ``project``'s LF ``lf_index`` before anything is sent to YouTube.
+
+    Idempotent. Under the ledger lock: refuse (``SlotTaken``) a date another long-form entry
+    holds, book ``schedule.sqlite3`` atomically when it exists (its own check refuses a date
+    another row holds), then move the ledger entry of ``video_id`` (the old video, still booked)
+    to the slot, so the allocator no longer offers it to another LF or drive. Raises, never
+    swallows: a slot that is not reserved must not be used.
+    """
+    from .content_ledger import ContentLedger, _ledger_lock
+
+    local = slot_at.astimezone(EST)
+    day, clock = local.strftime("%Y-%m-%d"), local.strftime("%H:%M:%S")
+    with _ledger_lock(ledger_path):
+        ledger = ContentLedger.load(ledger_path)
+        for e in ledger.entries:
+            if (
+                e.content_type == "longform"
+                and e.video_id != video_id
+                and e.date == day
+                and regions_clash(e.region, region)
+            ):
+                raise SlotTaken(f"{day} ({region or 'any region'}) is held by {e.project_name}")
+        db = Path(ledger_path).parent / STORE_FILENAME
+        if db.exists():
+            ScheduleStore(db, EST, cadence_for(config, region).regions).book(
+                project, lf_index, canon_region(region), slot_at, video_id
+            )
+        mine = [e for e in ledger.entries if e.video_id == video_id]
+        for e in mine:
+            e.date, e.time = day, clock
+        if mine:
+            ledger.save(ledger_path)
 
 
 def move_claims(ledger_path: Path, config, *, project: str, region: Optional[str], slots) -> None:

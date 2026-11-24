@@ -57,10 +57,16 @@ from its state, spaced by the heal retry backoff (1 h doubling, capped at 24 h).
 the old record's `playlist_id`, falling back to the metadata-resolved playlist when the old record has none.
 `upload_if_needed` flushes the checkpoint right after `videos.insert` on both of its branches, so the new
 id is in the plan even though a replace passes no `config`. Shorts follow their normal per-LF Drive
-upload, unchanged by the flag. If the real reopen of the store row raises (a locked database), it is
-retried; if it still fails the audit already running keeps its fresh dirs and an incident names the
-`_superseded/<project>-<stamp>` run holding the old uploads, from which a repeat of `--replace-scheduled`
-plans. The quality gate runs beside the replace check, so a quality failure is not hidden by it.
+upload, unchanged by the flag. The real reopen of the store row runs after preflight and BEFORE the
+launch (a locked database is retried): a refusal or a failed launch puts the old run back (a failed launch
+also gives the row back `complete` from the set-aside receipts, else `retire_uploaded` closes it), writes
+`<output-root>/.replace-retry/<project>.json` and opens `reopen_refused` / `replace_retry` incidents.
+The next `health backlog` tick picks the marker up (`launch.due_replace_retry`, heal backoff) and repeats
+`--replace-scheduled` itself; a launch clears it. An LF whose slot is inside the 6 h margin is kept (its old
+video publishes on its own; `margin_kept` incident) and the rest are replaced. A slot that passed is
+rebooked and RESERVED (ledger entry and Waypost row, `SlotTaken` searches again) before any YouTube call and
+re-verified on re-entry, so two LFs never share a date. A failed replace drive whose manifest row was removed
+is still published again, never given up. The quality gate runs beside the replace check, so a quality failure is not hidden by it.
 Two checks keep the replace consistent. `health publish` refuses a drive whose output dir holds a
 `replace_plan.json` when the render's long-form count differs from the plan's total (kept plus
 replaced): a different split would upload other content under the old titles and slots, and the

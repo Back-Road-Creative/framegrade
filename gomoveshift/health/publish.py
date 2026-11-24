@@ -263,13 +263,13 @@ def reconcile_publishes(
         # a replace with an unfinished LF closes ``failed`` even over kept receipts: ``health
         # backlog`` republishes a failed drive, which resumes the LF; only done/abandoned is clean
         row = {"project": d.project, "status": store.finish_claim(d.claim_id, ok=held and not left)}  # fmt: skip
-        names = {d.project, Path(d.output_dir).name} if d.output_dir else {d.project}
         if left:
             why = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
             row["partial"] = f"replace not finished: {why}"
-            for name in names:
-                record_incident(name, "partial_finish", f"claim closed {row['status']} but {row['partial']}; the publish is retried automatically")  # fmt: skip
-        elif not left:
+            # one key (the project): the drive's incident is opened once, not once per alias
+            record_incident(d.project, "partial_finish", f"claim closed {row['status']} but {row['partial']}; the publish is retried automatically")  # fmt: skip
+        else:
+            names = {d.project, Path(d.output_dir).name} if d.output_dir else {d.project}
             for name in names:
                 resolve_incidents(name, drive_level=True)
         done.append(row)

@@ -48,10 +48,18 @@ def test_public_and_scheduled_mix_keeps_the_public_lf():
     assert why == "" and set(plan["kept"]) == {"1"} and set(plan["replace"]) == {"2", "3"}
 
 
-def test_a_record_inside_the_margin_refuses():
+def test_a_record_inside_the_margin_alone_has_nothing_to_replace():
     near = _rec("n", NOW + timedelta(hours=rs.REPLACE_MARGIN_H - 1))
     plan, why = rs.classify_uploads({"1": near}, NOW, _live({"n": "scheduled"}))
-    assert plan is None and "margin" in why
+    assert plan is None and "nothing to replace" in why
+
+
+def test_a_record_inside_the_margin_is_kept_beside_the_replaced_ones():
+    # SPEC CHANGE (fixup 4): it used to refuse the whole plan; the old video is kept instead
+    near = _rec("n", NOW + timedelta(hours=rs.REPLACE_MARGIN_H - 1))
+    plan, why = rs.classify_uploads({"1": near, "2": _rec("a", SOON)}, NOW, _live({"a": "scheduled"}))  # fmt: skip
+    assert why == "" and set(plan["kept"]) == {"1"} and set(plan["replace"]) == {"2"}
+    assert plan["margin_kept"] == ["1"]
 
 
 def test_a_live_check_that_says_public_refuses():
