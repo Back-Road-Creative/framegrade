@@ -246,13 +246,18 @@ class InstagramReelsAdapter:
             raise_for_error=_raise_for_graph_error, own_id=self._ig_user_id,
         )  # fmt: skip
 
-    def read_comment(self, comment_id: str) -> str | None:
-        """The text comment ``comment_id`` says now, or ``None`` when Graph says it is gone."""
+    def read_comment(self, comment_id: str, object_id: str | None = None) -> str | None:
+        """The text comment ``comment_id`` says now (``.author`` is who wrote it), or ``None``
+        when Graph says it is gone (confirmed by listing ``object_id`` when given)."""
         return read_graph_comment(
             self._session, self._base, comment_id, self._access_token,
             text_field="text", permission="instagram_manage_comments",
-            raise_for_error=_raise_for_graph_error,
+            raise_for_error=_raise_for_graph_error, object_id=object_id,
         )  # fmt: skip
+
+    def own_id(self) -> str:
+        """Our own account id: what a comment's author must be for it to be ours."""
+        return self._ig_user_id
 
     def delete_comment(self, comment_id: str, object_id: str | None = None) -> None:
         """Delete the account's own comment (``DELETE /{comment-id}``)."""

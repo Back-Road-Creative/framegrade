@@ -36,6 +36,7 @@ KIND = "first_comment_stale"
 CAPPED_KIND = "first_comment_correction_capped"
 REPOST_KIND = "first_comment_repost_failed"
 REMOVED_KIND = "first_comment_removed"
+OWN_ID_KIND = "first_comment_own_id_mismatch"
 _DETAIL_MAX = 500
 
 
@@ -182,6 +183,13 @@ def raise_repost_incident(
             f"{where}the comment was deleted and the row has no text to post ({cause}); no "
             "comment is live. The drain posts it by itself (or adopts yours) as soon as the row "
             "has text again; add it by hand only if no text will come"
+        )[:_DETAIL_MAX]
+    elif kind == OWN_ID_KIND:
+        detail = (
+            f"{where}the comment we just posted reads back with author {cause}, not our own id; "
+            "the configured page_id / ig_user_id is wrong or Graph's from.id differs for this "
+            "token (UNVERIFIED which). It is left alone, never deleted; until the id is right a "
+            "lost answer can post a second copy. Check the platform config by hand"
         )[:_DETAIL_MAX]
     else:
         detail = (
@@ -340,10 +348,21 @@ def run_corrections(
                     new_id = call(item["live_id"], item["to"], object_id=_target(row))
                 else:
                     if item.get("extra"):
-                        # A second copy: re-read it. Only our own, still saying the copied text and
-                        # not the row's recorded comment, is ever deleted.
-                        if not _extra_is_deletable(client, item, row):
+                        # A second copy: re-read it. Only our own (its author is our account),
+                        # still saying the copied text and not the row's recorded comment, is
+                        # ever deleted; any other drop that is not a plain "it is gone" is said.
+                        left = _extra_check(client, item, row)
+                        if left is not True:
                             resolve_first_comment_correction(conn, row["id"], item, _now_iso())
+                            if left:
+                                result.errors.append(
+                                    f"delivery {row['id']}: second comment {item['live_id']} "
+                                    f"not deleted: {left}"
+                                )
+                                logger.warning(
+                                    "first comment: delivery %s: extra %s left alone: %s",
+                                    row["id"], item["live_id"], left,
+                                )  # fmt: skip
                             continue
                     elif _already_intended(client, item, keep):
                         # A stale observation: the comment has since been corrected.
@@ -418,18 +437,29 @@ def _already_intended(client: object, item: dict, keep: set) -> bool:
     return said is not None and said.strip() in keep
 
 
-def _extra_is_deletable(client: object, item: dict, row: Any) -> bool:
-    """True when a queued second-copy delete may run: the item is marked ours (a viewer's comment
-    is never queued, and a hand-edited or old item without the mark is dropped), its id is not the
-    comment the row recorded, and a fresh read still shows the text it copied. A read that fails
-    raises, so the delete stays pending and is never made blind."""
+def _extra_check(client: object, item: dict, row: Any):
+    """Whether a queued second-copy delete may run: ``True`` to delete; ``False`` to drop it
+    with nothing to say (not marked ours -- a viewer's comment is never queued, and a hand-edited
+    or old item is dropped -- the row's own recorded comment, or the comment is confirmed gone);
+    else the reason it is dropped with an error line (it now says other text, or its author is
+    not positively our account). Reads that one comment through the client: a read that fails,
+    a "gone" the post's listing does not confirm, or a client that cannot tell the author or
+    our own id raises, so the delete stays pending and is never made blind."""
     if not item.get("ours") or item.get("live_id") == row["first_comment_live_id"]:
         return False
     read = getattr(client, "read_comment", None)
-    if read is None:
+    own = getattr(client, "own_id", None)
+    if read is None or own is None:
         raise CorrectionUnavailableError("cannot confirm what the comment says before deleting it")
-    said = read(item["live_id"])
-    return said is not None and said.strip() == (item.get("live_text") or "").strip()
+    said = read(item["live_id"], object_id=_target(row))
+    if said is None:
+        return False
+    if said.strip() != (item.get("live_text") or "").strip():
+        return "it now says other text, so it is left alone"
+    author = getattr(said, "author", None)
+    if not author or author != own():
+        return "its author is not positively our account, so it is left alone"
+    return True
 
 
 def _resolve_all(conn: sqlite3.Connection, platforms: tuple, incidents_dir: Optional[Path]) -> None:

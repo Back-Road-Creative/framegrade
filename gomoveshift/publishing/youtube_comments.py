@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
-from .first_comment import ForeignCommentId, PriorCommentLiveError
+from .first_comment import AuthoredText, ForeignCommentId, PriorCommentLiveError
 from .first_comment_stale import raise_stale_incident, run_corrections
 from .queue import (
     first_comment_prior_texts,
@@ -202,17 +202,24 @@ class YouTubeCommentEditor:
     def __init__(self, service):
         self._service = service
 
-    def read_comment(self, comment_id: str) -> Optional[str]:
-        """The text comment ``comment_id`` says now (``comments.list(id=...)``), or ``None`` when
-        it is gone. A failed read raises: a caller never acts on a read that did not answer."""
+    def read_comment(self, comment_id: str, object_id: Optional[str] = None) -> Optional[str]:
+        """The text comment ``comment_id`` says now (``comments.list(id=...)``; ``.author`` is
+        its ``authorChannelId``, ``None`` when it names none), or ``None`` when it is gone. A failed read raises: a caller never acts on a read that did not answer."""
         response = self._service.comments().list(part="snippet", id=comment_id).execute()
         items = response.get("items") or []
         if not items:
             return None
-        said = (items[0].get("snippet") or {}).get("textOriginal")
+        snippet = items[0].get("snippet") or {}
+        said = snippet.get("textOriginal")
         if said is None:
             raise ValueError(f"comment {comment_id}: the read answered no text")
-        return str(said).strip()
+        text = AuthoredText(str(said).strip())
+        text.author = str((snippet.get("authorChannelId") or {}).get("value") or "") or None
+        return text
+
+    def own_id(self) -> str:
+        """Our channel's id (``OwnChannelUnknownError`` when it cannot be read)."""
+        return _own_channel_id(self._service)
 
     def edit_comment(self, comment_id: str, text: str, object_id: Optional[str] = None) -> None:
         body = {"id": comment_id, "snippet": {"textOriginal": text}}

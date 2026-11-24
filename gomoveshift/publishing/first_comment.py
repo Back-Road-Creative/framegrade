@@ -89,6 +89,18 @@ class ForeignCommentId(str):
     unknown_author = False
 
 
+class AuthoredText(str):
+    """The text a single-comment read answered, with its author's id (``None`` when the read gave
+    none): a deletion that must be ours checks ``author`` against our own account id."""
+
+    author: Optional[str] = None
+
+
+class PostedId(str):
+    """The id of a comment this call just posted (not one found already there): the drain reads
+    it back once and reports an author other than our own account id."""
+
+
 class CommentCorrectionError(RuntimeError):
     """Graph answered a comment edit/delete with a 2xx that is not ``{"success": true}``."""
 
@@ -273,7 +285,8 @@ def post_graph_comment(
     post_beside_foreign: bool = False,
     report_duplicates: bool = False,
 ) -> str:
-    """POST ``{base}/{object_id}/comments``; returns the new comment id.
+    """POST ``{base}/{object_id}/comments``; returns the new comment id (a :class:`PostedId` when
+    this call posted it).
 
     Never a second copy: it first reads the post's comments and, when one
     already carries exactly ``text`` (in ``text_field``: ``text`` on
@@ -324,7 +337,7 @@ def post_graph_comment(
         timeout=30,
     )
     body = _graph_body(response, permission, raise_for_error)
-    return str(body["id"])
+    return PostedId(str(body["id"]))
 
 
 #: Graph's answer to a DELETE of a comment that no longer exists: code 100, subcode 33 ("Object
@@ -346,24 +359,57 @@ def _is_gone(response) -> bool:
     )
 
 
+def _confirm_gone(
+    session, base, comment_id, object_id, access_token, *, text_field, permission, raise_for_error,
+    what,
+) -> None:  # fmt: skip
+    """A "gone" answer (code 100 / subcode 33, whose generic message UNVERIFIED also covers a
+    comment that cannot be loaded for missing permissions) is trusted only once the listing of
+    ``object_id``'s comments no longer shows ``comment_id``. One still listed, a listing that
+    fails or is cut short, or no ``object_id`` to list, raises: nothing is resolved on the
+    answer alone."""
+    if not object_id:
+        raise CommentCheckError(f"{what}: answered gone; no post to list, so not confirmed")
+    comments, complete = _read_graph_comments(
+        session, base, object_id, access_token,
+        text_field=text_field, permission=permission, raise_for_error=raise_for_error,
+        stop=lambda found: any(cid == comment_id for cid, _, _ in found),
+    )  # fmt: skip
+    if any(cid == comment_id for cid, _, _ in comments):
+        raise CommentCheckError(f"{what}: answered gone but the comment is still listed")
+    if not complete:
+        raise CommentCheckError(f"{what}: answered gone; too many comments to confirm it is absent")
+
+
 def read_graph_comment(
-    session, base, comment_id, access_token, *, text_field, permission, raise_for_error
-) -> Optional[str]:
-    """The text comment ``comment_id`` says now (``GET /{comment-id}``, stripped), or ``None``
-    when Graph says it is gone (:data:`_GRAPH_GONE`). Any other failure raises: a caller never
-    acts on a read that did not answer."""
+    session, base, comment_id, access_token, *, text_field, permission, raise_for_error,
+    object_id=None,
+) -> Optional[AuthoredText]:  # fmt: skip
+    """The text comment ``comment_id`` says now (``GET /{comment-id}``, stripped; its
+    ``.author`` is ``from.id``), or ``None`` when Graph says it is gone (:data:`_GRAPH_GONE`).
+    With ``object_id`` a "gone" is confirmed against that post's listing first (see
+    :func:`_confirm_gone`): still listed or unconfirmable raises. Any other failure raises: a
+    caller never acts on a read that did not answer."""
     response = session.get(
         f"{base}/{comment_id}",
-        params={"fields": f"id,{text_field}"},
+        params={"fields": f"id,{text_field},from"},
         headers={"Authorization": f"OAuth {access_token}"},
         timeout=30,
     )
     if _is_gone(response):
+        if object_id:
+            _confirm_gone(
+                session, base, comment_id, object_id, access_token, text_field=text_field,
+                permission=permission, raise_for_error=raise_for_error,
+                what=f"read of {comment_id}",
+            )  # fmt: skip
         return None
     body = _graph_body(response, permission, raise_for_error)
     if text_field not in body:
         raise CommentCheckError(f"comment {comment_id}: the read answered no {text_field}")
-    return str(body.get(text_field) or "").strip()
+    said = AuthoredText(str(body.get(text_field) or "").strip())
+    said.author = _author_id(body) or None
+    return said
 
 
 def _graph_call(
@@ -412,23 +458,11 @@ def delete_graph_comment(
     )  # fmt: skip
     if not body.get("gone"):
         return
-    if not object_id:
-        raise CommentCheckError(
-            f"Graph DELETE {comment_id}: answered gone; no post to list, so not confirmed"
-        )
-    comments, complete = _read_graph_comments(
-        session, base, object_id, access_token,
-        text_field=text_field, permission=permission, raise_for_error=raise_for_error,
-        stop=lambda found: any(cid == comment_id for cid, _, _ in found),
+    _confirm_gone(
+        session, base, comment_id, object_id, access_token, text_field=text_field,
+        permission=permission, raise_for_error=raise_for_error,
+        what=f"Graph DELETE {comment_id}",
     )  # fmt: skip
-    if any(cid == comment_id for cid, _, _ in comments):
-        raise CommentCheckError(
-            f"Graph DELETE {comment_id}: answered gone but the comment is still listed; not deleted"
-        )
-    if not complete:
-        raise CommentCheckError(
-            f"Graph DELETE {comment_id}: answered gone; too many comments to confirm it is absent"
-        )
 
 
 def replace_graph_comment(
