@@ -184,11 +184,13 @@ def test_forbidden_is_a_refusal_not_a_scope_gap_and_counts_to_the_cap(conn, inc)
     assert after.comments_api.updates == [] and after.comments_api.deletes == []
 
 
-def test_only_insufficient_permissions_is_a_scope_gap():
+def test_only_insufficient_permissions_is_a_scope_gap_for_a_correction():
     assert youtube_comments._is_scope_error(_make_http_error(403, "insufficientPermissions"))
     forbidden = _make_http_error(403, "forbidden")
-    assert not youtube_comments._is_scope_error(forbidden)
-    assert youtube_comments._refused_for_the_video(forbidden)
+    assert youtube_comments._refused_for_a_correction(forbidden)
+    assert not youtube_comments._refused_for_a_correction(
+        _make_http_error(403, "insufficientPermissions")
+    )
 
 
 @pytest.mark.parametrize("platform", ["facebook", "instagram"])
