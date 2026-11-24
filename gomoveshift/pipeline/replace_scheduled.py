@@ -4,22 +4,37 @@
 ``youtube_uploads.json`` holds records, when every record is either public (its LF is kept) or
 still scheduled well ahead (its LF is replaced). ``classify_uploads`` decides that, failing closed;
 the plan it returns is written beside the superseded run and into the fresh output dir as
-``REPLACE_PLAN_FILENAME``, which Phase D reads (``load_plan``):
+``REPLACE_PLAN_FILENAME``, which Phase D reads (``load_plan``).
 
-* a kept LF is put back into ``state.youtube_uploads`` (``apply_kept``), so ``upload_if_needed``
-  never uploads it again;
-* a replaced LF is re-checked live (``old_still_scheduled``); still scheduled -> the new video is
-  uploaded with the SAME ``publishAt`` and title, and only then the old id is deleted
-  (``finish_replacement``); gone public meanwhile -> the old video is kept and nothing is uploaded.
+Two failures must never happen on the live channel: two scheduled videos in one slot, and deleting
+a video that is already public. So each replaced LF walks ONE durable sequence, its state kept in
+the plan under ``progress`` (written atomically BEFORE each external call and after each step)::
+
+    pending     insert the replacement PRIVATE, no publishAt, old title (the title-decision gate
+                runs unchanged: a refusal leaves the LF pending and the old video untouched)
+    uploaded    recheck LIVE: old is private, scheduled, publishAt more than REPLACE_MARGIN_H away.
+                Failed or errored -> delete the NEW video, ``abandoned``; the old is never deleted
+    old_deleted delete the old; set its publishAt (tz-aware) on the NEW video, file it in the old
+                record's playlist, swap the ledger id, book the store
+    scheduled   -> ``done`` once everything is recorded
+
+Every Phase D entry resumes each plan LF from its state before any upload
+(``resume_replacements``); a failed delete or swap is retried. A passed slot is never rescheduled
+under a plan (the old video is kept). Kept (public) LFs get no insert, booking, shorts, Metricool
+or superlong emission, and replaced LFs get no new shorts/Metricool/superlong either.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+
+PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED = (
+    "pending", "uploaded", "old_deleted", "scheduled", "done", "abandoned")  # fmt: skip
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +99,12 @@ def classify_uploads(
 
 
 def write_plan(out_dir: Path, plan: Dict[str, Any]) -> Path:
+    """Write the plan atomically (temp file, then ``os.replace``): a crash never leaves half."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / REPLACE_PLAN_FILENAME
-    path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
     return path
 
 
@@ -103,26 +121,78 @@ def _lf(key: Any) -> int:
     return int("".join(ch for ch in str(key) if ch.isdigit()))
 
 
+def replace_map(plan: Mapping[str, Any]) -> Dict[int, Dict[str, Any]]:
+    """``{lf: old record}`` of the LFs to replace, keys normalised to int."""
+    return {_lf(k): dict(v) for k, v in (plan.get("replace") or {}).items()}
+
+
+def kept_map(plan: Mapping[str, Any]) -> Dict[int, Dict[str, Any]]:
+    return {_lf(k): dict(v) for k, v in (plan.get("kept") or {}).items()}
+
+
+def progress_map(plan: Mapping[str, Any]) -> Dict[int, Dict[str, Any]]:
+    return {_lf(k): dict(v) for k, v in (plan.get("progress") or {}).items()}
+
+
+def set_progress(plan_dir: Path, lf: int, **fields: Any) -> Dict[str, Any]:
+    """Merge ``fields`` into LF ``lf``'s progress entry and write the plan atomically."""
+    plan = load_plan(plan_dir)
+    if not plan:  # unreadable: writing back would replace the plan with a stub
+        raise RuntimeError(f"replace plan under {plan_dir} is unreadable; refusing to rewrite it")
+    prog = plan.setdefault("progress", {})
+    entry = prog.setdefault(str(lf), {})
+    entry.update(fields)
+    write_plan(plan_dir, plan)
+    return dict(entry)
+
+
+def init_progress(plan_dir: Path) -> Dict[int, Dict[str, Any]]:
+    """Give each replaced LF without one a ``pending`` entry; return the progress map."""
+    plan = load_plan(plan_dir)
+    changed = False
+    prog = plan.setdefault("progress", {})
+    for lf, old in replace_map(plan).items():
+        if str(lf) not in prog:
+            prog[str(lf)] = {"old_id": old["video_id"], "new_id": None, "state": PENDING}
+            changed = True
+    if changed:
+        write_plan(plan_dir, plan)
+    return progress_map(plan)
+
+
 def apply_kept(state: Any, plan: Mapping[str, Any]) -> list:
     """Put each kept LF's record into ``state.youtube_uploads`` unless it holds one; returns the
     LF indices kept. ``upload_if_needed`` then skips them."""
     if state.youtube_uploads is None:
         state.youtube_uploads = {}
     kept = []
-    for key, rec in (plan.get("kept") or {}).items():
-        idx = _lf(key)
-        state.youtube_uploads.setdefault(idx, dict(rec))
+    for idx, rec in kept_map(plan).items():
+        if idx not in state.youtube_uploads and str(idx) not in state.youtube_uploads:
+            state.youtube_uploads[idx] = dict(rec)
         kept.append(idx)
     return kept
 
 
-def old_still_scheduled(live_status: LiveStatus, old: Mapping[str, Any]) -> bool:
-    """True only when YouTube says the old video is private with a future ``publishAt`` now."""
+def check_old(yt: Any, old: Mapping[str, Any], now: datetime, margin_h: float = REPLACE_MARGIN_H):
+    """Live check of the old video: ``(verdict, why)``.
+
+    ``ok`` private, scheduled, live publishAt more than ``margin_h`` ahead; ``gone`` YouTube no
+    longer has it; ``refuse`` it is public, unscheduled or too close; ``error`` the lookup failed
+    (not decidable, so never replaceable)."""
     try:
-        return live_status([old["video_id"]]).get(old["video_id"]) == "scheduled"
-    except Exception as exc:  # noqa: BLE001 -- not decidable means not replaceable
-        logger.warning("replace: live check of %s failed: %s", old.get("video_id"), exc)
-        return False
+        live = yt.video_schedule(old["video_id"])
+    except Exception as exc:  # noqa: BLE001
+        return "error", f"live check failed ({type(exc).__name__}: {exc})"
+    if live is None:
+        return "gone", "not found on YouTube"
+    when = live.get("publish_at")
+    if live.get("privacy") != "private" or when is None:
+        return "refuse", f"is {live.get('privacy')} on YouTube, not scheduled"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    if when - now <= timedelta(hours=margin_h):
+        return "refuse", f"publishes {when.isoformat()}, inside the {margin_h} h margin"
+    return "ok", ""
 
 
 def swap_ledger_video_id(ledger_path: Path, old_id: str, new_id: str) -> bool:
@@ -139,28 +209,91 @@ def swap_ledger_video_id(ledger_path: Path, old_id: str, new_id: str) -> bool:
     return bool(hits)
 
 
-def finish_replacement(
-    yt: Any, *, old: Mapping[str, Any], new_id: str, ledger_path: Path, plan_dir: Path
-) -> None:
-    """After the new upload succeeded and was booked: re-point the ledger at it, then delete the
-    old video. A failed delete is logged loudly and left in the plan for the next run."""
-    old_id = old["video_id"]
-    try:
-        swap_ledger_video_id(ledger_path, old_id, new_id)
-    except Exception:  # noqa: BLE001 -- the live upload is already irreversible
-        logger.error("REPLACE-LEDGER-UNSWAPPED: %s -> %s", old_id, new_id, exc_info=True)
-    try:
-        yt.delete_video(old_id)
-    except Exception:  # noqa: BLE001
-        logger.error("REPLACE-OLD-UNDELETED: old video %s still exists; delete it", old_id, exc_info=True)  # fmt: skip
-        return
-    plan = load_plan(plan_dir)
-    plan.setdefault("deleted", []).append(old_id)
-    write_plan(plan_dir, plan)
-
-
 def note_kept_live(plan_dir: Path, lf: int, why: str) -> None:
-    """Record that a replaced LF's old video was kept (``kept_live``), so the run says why."""
+    """Record why a replaced LF's old video was kept (``kept_live``)."""
     plan = load_plan(plan_dir)
+    if not plan:
+        raise RuntimeError(f"replace plan under {plan_dir} is unreadable; refusing to rewrite it")
     plan.setdefault("kept_live", {})[str(lf)] = {"why": why, "at": datetime.now(timezone.utc).isoformat()}  # fmt: skip
     write_plan(plan_dir, plan)
+
+
+def abandon(yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable, why: str) -> None:  # fmt: skip
+    """The replacement cannot take the slot: delete the NEW video (private, unscheduled, so safe),
+    keep the old record on state, never touch the old video."""
+    prog = progress_map(load_plan(plan_dir)).get(lf, {})
+    new_id = prog.get("new_id")
+    new_gone = new_id is None
+    if new_id:
+        try:
+            yt.delete_video(new_id)
+            new_gone = True
+        except Exception:  # noqa: BLE001
+            logger.error("REPLACE-NEW-UNDELETED: private unscheduled %s remains; delete it", new_id, exc_info=True)  # fmt: skip
+    logger.error("REPLACE-ABANDONED lf=%s: old %s kept, new %s removed=%s: %s", lf, old["video_id"], new_id, new_gone, why)  # fmt: skip
+    state.youtube_uploads[lf] = dict(old)
+    save_state(state)
+    note_kept_live(plan_dir, lf, why)
+    set_progress(plan_dir, lf, state=ABANDONED, why=why, new_deleted=new_gone)
+
+
+def advance(
+    yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable,
+    now: datetime, ledger_path: Path, book: Callable[[dict], None], metadata: Optional[dict] = None,
+    config: Any = None,
+) -> str:  # fmt: skip
+    """Move one LF from its recorded state as far as it will go; returns the state reached.
+
+    Safe to call on every entry: each branch checks the durable state first, and a failed delete or
+    swap stays where it is (logged loudly) to be retried."""
+    st = progress_map(load_plan(plan_dir)).get(lf, {})
+    new_id = st.get("new_id")
+    if st.get("state") == UPLOADED:
+        verdict, why = check_old(yt, old, now)
+        if verdict in ("refuse", "error"):
+            abandon(yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, why=f"recheck: {why}")  # fmt: skip
+            return ABANDONED
+        if verdict == "ok":
+            try:
+                yt.delete_video(old["video_id"])
+            except Exception:  # noqa: BLE001
+                logger.error("REPLACE-OLD-UNDELETED lf=%s: %s still holds the slot; retried next entry", lf, old["video_id"], exc_info=True)  # fmt: skip
+                return UPLOADED
+        # "gone": an earlier run deleted it and died before writing the state; the slot is free
+        set_progress(plan_dir, lf, state=OLD_DELETED)
+    if progress_map(load_plan(plan_dir)).get(lf, {}).get("state") == OLD_DELETED:
+        when = _when(old.get("publish_at"))
+        pid = old.get("playlist_id")
+        if when is None or (not pid and metadata is None):
+            logger.error("REPLACE-UNSCHEDULED lf=%s: new %s needs a publish_at/playlist by hand", lf, new_id)  # fmt: skip
+            return OLD_DELETED
+        try:
+            if not st.get("publish_set"):
+                yt.update_privacy(new_id, privacy="private", publish_at=when)
+                set_progress(plan_dir, lf, publish_set=True)
+            if not st.get("playlist_set"):
+                if pid:
+                    yt.add_to_playlist(new_id, pid)
+                else:
+                    logger.warning("replace lf=%s: old record has no playlist_id; resolving fresh", lf)  # fmt: skip
+                    pid = yt.assign_video_to_resolved_playlist(new_id, metadata=metadata, config=config)  # fmt: skip
+                set_progress(plan_dir, lf, playlist_set=True, playlist_id=pid)
+            if not st.get("ledger_swapped"):
+                swap_ledger_video_id(ledger_path, old["video_id"], new_id)
+                set_progress(plan_dir, lf, ledger_swapped=True)
+        except Exception:  # noqa: BLE001
+            logger.error("REPLACE-SCHEDULE-FAILED lf=%s: new %s retried next entry", lf, new_id, exc_info=True)  # fmt: skip
+            return OLD_DELETED
+        set_progress(plan_dir, lf, state=SCHEDULED)
+    cur = progress_map(load_plan(plan_dir)).get(lf, {})
+    if cur.get("state") == SCHEDULED:
+        rec = dict(state.youtube_uploads.get(lf) or {})
+        rec.update(video_id=new_id, url=f"https://youtu.be/{new_id}", title=rec.get("title") or old.get("title"),  # fmt: skip
+                   publish_at=_when(old.get("publish_at")).isoformat(),
+                   playlist_id=cur.get("playlist_id") or old.get("playlist_id"))  # fmt: skip
+        state.youtube_uploads[lf] = rec
+        save_state(state)
+        book(rec)
+        set_progress(plan_dir, lf, state=DONE)
+        return DONE
+    return cur.get("state", PENDING)

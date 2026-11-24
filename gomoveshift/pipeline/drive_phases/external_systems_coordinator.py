@@ -825,6 +825,94 @@ def _lf_publish_times(drive_schedule) -> list:
     ]
 
 
+def _replace_advance(yt, *, lf, old, plan_dir, state, config, save_state, project_base, now, metadata=None):  # fmt: skip
+    return replace_scheduled.advance(
+        yt, lf=lf, old=old, plan_dir=plan_dir, state=state, save_state=save_state, now=now,
+        ledger_path=Path(config.seo.storage_path) / ".content_ledger.json",
+        book=lambda rec: _book_lf_upload_in_ledger(
+            record=rec, state=state, config=config, project_base=project_base, lf_index=lf
+        ),
+        metadata=metadata, config=config,
+    )  # fmt: skip
+
+
+def resume_replacements(yt, *, plan_dir, state, config, save_state, project_base, metadata_per_lf=None, clock=None):  # fmt: skip
+    """Phase D entry, before any upload: resume every plan LF from its durable state (a pending LF
+    whose replacement is already on state, a crash after the insert, is adopted as uploaded)."""
+    now = (clock or _utc_now)()
+    plan = replace_scheduled.load_plan(plan_dir)
+    old_by_lf = replace_scheduled.replace_map(plan)
+    for lf, prog in sorted(replace_scheduled.progress_map(plan).items()):
+        st, old = prog.get("state"), old_by_lf.get(lf)
+        if old is None or st in (replace_scheduled.DONE, replace_scheduled.ABANDONED):
+            continue
+        if st == replace_scheduled.PENDING:
+            rec = (state.youtube_uploads or {}).get(lf) or {}
+            if not rec.get("video_id") or rec["video_id"] == old["video_id"]:
+                continue
+            replace_scheduled.set_progress(plan_dir, lf, new_id=rec["video_id"], state=replace_scheduled.UPLOADED)  # fmt: skip
+        _replace_advance(
+            yt, lf=lf, old=old, plan_dir=plan_dir, state=state, config=config,
+            save_state=save_state, project_base=project_base, now=now,
+            metadata=(metadata_per_lf or {}).get(lf),
+        )  # fmt: skip
+
+
+def _replace_pending_lf(yt, *, lf, lf_path, old, meta, plan_dir, state, config, save_state, project_base, clock):  # fmt: skip
+    """Insert one pending LF's replacement PRIVATE (no publishAt, old title), then ``advance`` it.
+    Whatever cannot proceed leaves the LF pending or abandoned and the old video untouched."""
+    now = (clock or _utc_now)()
+    when = replace_scheduled._when(old.get("publish_at"))
+    if when is None or when <= now:  # never rescheduled under a plan: the old video is kept
+        replace_scheduled.abandon(
+            yt, lf=lf.index, old=old, plan_dir=plan_dir, state=state, save_state=save_state,
+            why=f"slot {old.get('publish_at')} has passed; not rescheduled under a replace plan",
+        )  # fmt: skip
+        return
+    verdict, why = replace_scheduled.check_old(yt, old, now)
+    if verdict == "refuse":
+        replace_scheduled.abandon(
+            yt, lf=lf.index, old=old, plan_dir=plan_dir, state=state, save_state=save_state,
+            why=f"before upload: {why}",
+        )  # fmt: skip
+        return
+    if verdict == "error":  # not decidable: upload nothing, stay pending for the next entry
+        logger.error("REPLACE-DEFERRED lf=%s: %s; nothing uploaded", lf.index, why)
+        return
+    if not meta or not meta.get("title"):
+        raise ValueError(f"LF {lf.index}: no gated metadata in metadata_per_lf for the replacement")
+    metadata = dict(meta)
+    if old.get("title_decision"):  # the decision the old title shipped under
+        metadata["title_decision"] = old["title_decision"]
+    try:
+        record = _upload_lf_to_youtube(
+            yt=yt, state=state, lf=lf, lf_path=lf_path, title=old.get("title") or meta["title"],
+            description=meta.get("description", ""), tags=meta.get("tags", []), publish_at=None,
+            metadata=metadata,
+            config=None,  # no playlist now: it is filed later from the OLD record
+            persist=lambda: save_state(state),
+        )  # fmt: skip
+    except (TitleDecisionMismatchError, TitleDecisionMissingError) as exc:
+        logger.error(
+            "REPLACE-TITLE-GATE lf=%s: the title gate refused the old title %r (%s); the LF stays "
+            "pending and the old video %s is untouched", lf.index, old.get("title"), exc, old["video_id"],
+        )  # fmt: skip
+        return
+    except YouTubeQuotaError:
+        save_state(state)
+        raise
+    save_state(state)
+    new = record or (state.youtube_uploads or {}).get(lf.index) or {}
+    if not new.get("video_id") or new["video_id"] == old["video_id"]:
+        logger.error("REPLACE-NOT-UPLOADED lf=%s: nothing was inserted; old %s untouched", lf.index, old["video_id"])  # fmt: skip
+        return
+    replace_scheduled.set_progress(plan_dir, lf.index, new_id=new["video_id"], state=replace_scheduled.UPLOADED)  # fmt: skip
+    _replace_advance(
+        yt, lf=lf.index, old=old, plan_dir=plan_dir, state=state, config=config,
+        save_state=save_state, project_base=project_base, now=(clock or _utc_now)(), metadata=meta,
+    )  # fmt: skip
+
+
 def _upload_lfs_to_youtube(
     *,
     drive_plan,
@@ -883,12 +971,17 @@ def _upload_lfs_to_youtube(
     if state.youtube_uploads is None:
         state.youtube_uploads = youtube_uploads or {}
     youtube_uploads = state.youtube_uploads
-    # ``health backlog --replace-scheduled``: a kept (public) LF is put back as uploaded, so
-    # ``upload_if_needed`` skips it; a replaced LF is handled in the loop below.
+    # ``health backlog --replace-scheduled``: the plan's durable per-LF state (see the
+    # ``replace_scheduled`` docstring) decides what is in flight. Kept LFs are put back as
+    # uploaded; under a plan ONLY the replaced LFs are touched.
     replace_plan = replace_scheduled.load_plan(output_base)
     replace_plan_dir = Path(output_base)
-    replace_kept = set(replace_scheduled.apply_kept(state, replace_plan))
-    replace_old = {replace_scheduled._lf(k): v for k, v in (replace_plan.get("replace") or {}).items()}  # fmt: skip
+    replace_kept: set = set()
+    replace_old: dict = {}
+    if replace_plan:
+        replace_kept = set(replace_scheduled.apply_kept(state, replace_plan))
+        replace_old = replace_scheduled.replace_map(replace_plan)
+        replace_scheduled.init_progress(replace_plan_dir)
 
     # Refuse before the FIRST upload of a batch this run cannot
     # complete within the configured daily quota, rather than discovering
@@ -920,17 +1013,27 @@ def _upload_lfs_to_youtube(
         operator_checklist_path,
     )
 
+    if replace_plan:  # before any upload: finish what a previous entry left half done
+        resume_replacements(
+            yt, plan_dir=replace_plan_dir, state=state, config=config, save_state=save_state,
+            project_base=project_base, metadata_per_lf=metadata_per_lf, clock=clock,
+        )  # fmt: skip
+
     for i, (lf, lf_path) in enumerate(zip(drive_plan.regular_lfs, regular_lf_paths)):
-        if lf.index in replace_kept:
+        if replace_plan:
+            # Only a replaced LF still pending is uploaded here; the rest resumed above or is kept.
+            progress = replace_scheduled.progress_map(replace_scheduled.load_plan(replace_plan_dir))
+            if (
+                lf.index in replace_old
+                and lf.index not in replace_kept
+                and progress.get(lf.index, {}).get("state") == replace_scheduled.PENDING
+            ):
+                _replace_pending_lf(
+                    yt, lf=lf, lf_path=Path(lf_path), old=replace_old[lf.index],
+                    meta=metadata_per_lf.get(lf.index), plan_dir=replace_plan_dir, state=state,
+                    config=config, save_state=save_state, project_base=project_base, clock=clock,
+                )  # fmt: skip
             continue
-        old = replace_old.get(lf.index)
-        if old and (youtube_uploads.get(lf.index) or {}).get("video_id") in (None, old["video_id"]):
-            if not replace_scheduled.old_still_scheduled(yt.video_states, old):
-                # gone public (or unreadable) since the plan: keep it, upload nothing
-                youtube_uploads[lf.index] = dict(old)
-                replace_scheduled.note_kept_live(replace_plan_dir, lf.index, "no longer scheduled")
-                save_state(state)
-                continue
         meta = metadata_per_lf.get(lf.index)
         if not meta or not meta.get("title"):
             raise ValueError(
@@ -945,10 +1048,6 @@ def _upload_lfs_to_youtube(
         description = meta.get("description", "")
         tags = meta.get("tags", [])
         publish_at = schedule_dates[i] if i < len(schedule_dates) else None
-        replacing = bool(old) and not (youtube_uploads.get(lf.index) or {}).get("video_id")
-        if replacing:  # the new video takes the old one's slot and title
-            publish_at = datetime.fromisoformat(old["publish_at"])
-            title = old.get("title") or title
         if publish_at is not None and not (youtube_uploads.get(lf.index) or {}).get("video_id"):
             # A past ``publishAt`` cannot be taken back once inserted: check the
             # slot against the clock here, as late as the loop allows.
@@ -1046,11 +1145,9 @@ def _upload_lfs_to_youtube(
             project_base=project_base,
             lf_index=lf.index,
         )
-        if replacing:  # only now, with the new video live and booked, does the old one go
-            replace_scheduled.finish_replacement(
-                yt, old=old, new_id=record["video_id"], plan_dir=replace_plan_dir,
-                ledger_path=Path(config.seo.storage_path) / ".content_ledger.json",
-            )  # fmt: skip
+
+    if replace_plan:  # the first run already queued the superlong parts
+        return yt, youtube_uploads
 
     # Parts are excluded from lf_plans/drive_plan — reachable only here.
     _upload_superlong_parts_to_youtube(
