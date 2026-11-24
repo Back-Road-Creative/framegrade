@@ -729,12 +729,36 @@ def validate_video(
         "-show_streams",
         str(video_path),
     ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except subprocess.TimeoutExpired:
+    # A probe timeout is load (a concurrent encode, or a just-written file on
+    # /mnt/c still being scanned or flushed), not proof of corruption: a
+    # corrupt MP4 makes ffprobe exit non-zero, not hang. Retry ONLY
+    # TimeoutExpired with the FFprobeClient backoff, as the OST duration probe
+    # does; a non-zero exit stays fatal on the first attempt. A file whose
+    # probe times out on every attempt is still invalid. (Courtmacsherry
+    # 2025-09-19: one 30 s timeout discarded a finished 92-minute OST burn.)
+    from .validation.ffprobe_client import (
+        FFPROBE_TIMEOUT_BACKOFF_SEC,
+        FFPROBE_TIMEOUT_RETRIES,
+    )
+
+    result = None
+    for attempt in range(1, FFPROBE_TIMEOUT_RETRIES + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            break
+        except subprocess.TimeoutExpired:
+            if attempt < FFPROBE_TIMEOUT_RETRIES:
+                logger.warning(
+                    "validate_video: ffprobe timed out for %s (attempt %d/%d) — load, not corruption; retrying",
+                    video_path.name,
+                    attempt,
+                    FFPROBE_TIMEOUT_RETRIES,
+                )
+                time.sleep(FFPROBE_TIMEOUT_BACKOFF_SEC * attempt)
+    if result is None:
         return VideoValidation(
             valid=False,
-            reason="ffprobe timed out (possible corrupt file)",
+            reason=f"ffprobe timed out on all {FFPROBE_TIMEOUT_RETRIES} attempts (possible corrupt file)",
             file_size=file_size,
         )
 
