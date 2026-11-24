@@ -177,6 +177,7 @@ def _moov_rewrite_stall_timeout(output_size_bytes: int, stall_timeout: int) -> i
 
 _STATS_TIME_RE = re.compile(r"time=\s*(\S+)")
 _STATS_SIZE_RE = re.compile(r"size=\s*(\d+)\s*([A-Za-z]*)")
+_STATS_FRAME_RE = re.compile(r"frame=\s*(\d+)")
 _SIZE_UNIT_BYTES = {"": 1, "B": 1, "KB": 1024, "KIB": 1024, "MB": 1024**2, "MIB": 1024**2}
 
 
@@ -185,17 +186,24 @@ def _stats_progress_advanced(line: str, last: Optional[tuple]) -> tuple[bool, Op
 
     ffmpeg 7 re-prints an identical stats line (frame, size and time frozen; only
     fps/speed/elapsed vary) while a muxer write blocks, so a line counts as progress only
-    when its ``time=`` or ``size=`` grew; with neither parseable, when its raw tokens differ.
+    when its ``time=`` or ``size=`` grew; with neither parseable (``size=N/A time=N/A``
+    until the first packet is muxed), when its ``frame=`` grew, and with no ``frame=`` either,
+    when its raw tokens differ.
     """
     t_m, s_m = _STATS_TIME_RE.search(line), _STATS_SIZE_RE.search(line)
     secs = _parse_time_to_seconds(t_m.group(1)) if t_m else None
     unit = _SIZE_UNIT_BYTES.get(s_m.group(2).upper()) if s_m else None
     size = int(s_m.group(1)) * unit if unit else None
-    cur = (secs, size, (t_m.group(1) if t_m else None, s_m.group(0) if s_m else None))
+    f_m = _STATS_FRAME_RE.search(line)
+    frame = int(f_m.group(1)) if f_m else None
+    cur = (secs, size, (t_m.group(1) if t_m else None, s_m.group(0) if s_m else None), frame)
     if last is None:
         return True, cur
     if secs is None and size is None:
-        advanced = cur[2] != last[2]
+        if frame is not None and last[3] is not None:
+            advanced = frame > last[3]
+        else:
+            advanced = cur[2] != last[2]
     else:
         advanced = (secs is not None and (last[0] is None or secs > last[0])) or (
             size is not None and (last[1] is None or size > last[1])

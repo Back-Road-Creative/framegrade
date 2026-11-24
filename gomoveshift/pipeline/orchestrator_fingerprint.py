@@ -285,6 +285,17 @@ def invalidate_phase_bc_if_superlong_incomplete(
     return resumed_phases
 
 
+def _drop_phase_bc(state, resumed_phases: list[str], stages_completed: list[str]) -> list[str]:
+    """Drop ``phase_bc_day_first`` and ``phase_d`` from the resume bookkeeping (all three lists)."""
+    resumed_phases = [p for p in resumed_phases if p not in ("phase_bc_day_first", "phase_d")]
+    stages_completed[:] = [
+        p for p in stages_completed if p not in ("phase_bc_day_first", "phase_d")
+    ]
+    saved = getattr(state, "phases_completed", None) or []
+    state.phases_completed = [p for p in saved if p not in ("phase_bc_day_first", "phase_d")]
+    return resumed_phases
+
+
 def invalidate_phase_bc_if_lf_shortfall(
     state,
     resumed_phases: list[str],
@@ -299,8 +310,14 @@ def invalidate_phase_bc_if_lf_shortfall(
     The resume partition guard only runs when phase_bc re-enters; a checkpointed phase_bc
     never did, so ``phase_d`` raised ``shorts_per_lf SPLIT-BRAIN`` on every retry. The plan
     is the saved ``drive_plan.json`` plus ``state.episode_dates``; only days with a
-    ``per_day_completed`` record are judged (a ``--day`` run never re-enters for days it
-    skipped). No plan on disk means no verdict: a real phase_bc run applies the guard.
+    ``per_day_completed`` record are judged (a day with no record is never judged). A MISSING
+    plan file means no verdict: the artifact gate owns that case and a real phase_bc run
+    applies the guard. A plan file that is present but cannot be loaded (corrupt, or stamped
+    by another ``PHASE_BC_CODE_VERSION``) also gives no verdict, so it drops
+    ``phase_bc_day_first`` and ``phase_d`` like a shortfall: phase_bc then rebuilds the plan
+    (``_load_current_drive_plan`` returns None, ``_build_drive_plan_from_state`` runs, and the
+    rebuilt plan is stamped with the current version, so the next resume loads it). A failed
+    rebuild raises ``_assert_drive_plan_built`` rather than looping.
     """
     from .drive_phases.phase_bc_day_first import (
         missing_planned_lf_indices,
@@ -315,12 +332,20 @@ def invalidate_phase_bc_if_lf_shortfall(
         return resumed_phases
     planned = planned_lf_indices_by_date(config, state, stages_dir)
     if planned is None:
+        if not (stages_dir / "drive_plan.json").exists():
+            logger.warning(
+                "Resume: no drive_plan.json in %s — cannot verify that every "
+                "recorded day has all of its planned long-forms.",
+                stages_dir,
+            )
+            return resumed_phases
         logger.warning(
-            "Resume: no usable drive_plan.json in %s — cannot verify that every "
-            "recorded day has all of its planned long-forms.",
+            "Resume: drive_plan.json in %s cannot be loaded (corrupt, or built by other "
+            "code), so the planned long-forms of the recorded days cannot be verified — "
+            "re-entering phase_bc_day_first (and phase_d) to rebuild the plan.",
             stages_dir,
         )
-        return resumed_phases
+        return _drop_phase_bc(state, resumed_phases, stages_completed)
     for date in sorted(d for d in recorded if recorded.get(d)):
         indices = planned.get(date)
         if indices is None:
@@ -336,11 +361,5 @@ def invalidate_phase_bc_if_lf_shortfall(
             len(indices),
             ", lf_".join(f"{i:02d}" for i in missing),
         )
-        resumed_phases = [p for p in resumed_phases if p not in ("phase_bc_day_first", "phase_d")]
-        stages_completed[:] = [
-            p for p in stages_completed if p not in ("phase_bc_day_first", "phase_d")
-        ]
-        saved = getattr(state, "phases_completed", None) or []
-        state.phases_completed = [p for p in saved if p not in ("phase_bc_day_first", "phase_d")]
-        return resumed_phases
+        return _drop_phase_bc(state, resumed_phases, stages_completed)
     return resumed_phases

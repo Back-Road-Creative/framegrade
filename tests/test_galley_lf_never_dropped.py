@@ -346,7 +346,7 @@ class _Clock:
         return self.t
 
 
-_BIG_INPUT = 40 * 10**9  # sparse: a 40 GB raw LF, so the concat ceiling (4000 s) sits above 1800 s
+_BIG_INPUT = 40 * 10**9  # sparse: a 40 GB raw LF
 
 
 def _prepend(tmp_path, proc_factory, failures=None, raw_bytes=3):
@@ -398,6 +398,19 @@ def test_concat_that_keeps_reporting_progress_past_1800s_is_not_killed(tmp_path)
     assert out.exists()
 
 
+def test_concat_still_advancing_past_the_old_size_based_ceiling_is_not_killed(tmp_path):
+    """Galley LF1 was 38,824,572,047 B: the old ceiling was 3884 s. A concat under load that
+    keeps reporting progress for 4500 s (fake clock) must finish, not be clocked out."""
+    result, out, proc, clock = _prepend(
+        tmp_path,
+        lambda clock, out: _Proc(clock, tick=300.0, progress=True, exit_after=14, out=out),
+        raw_bytes=38_824_572_047,
+    )
+    assert clock.t > 3884.0, "the fake run must outlast the old size-based ceiling"
+    assert proc.terminated is False
+    assert result == out
+
+
 def test_concat_that_stalls_is_killed_and_its_partial_output_removed(tmp_path):
     failures: list = []
     result, out, proc, clock = _prepend(
@@ -430,21 +443,12 @@ def test_concat_repeating_an_identical_stats_line_is_killed_as_a_stall(tmp_path)
     assert clock.t < 86400.0, "ended by the stall rule, not the 86400 s ceiling"
 
 
-@pytest.mark.parametrize(
-    ("raw_bytes", "expected"),
-    [
-        (3, 1800),  # tiny input: the 1800 s floor
-        # 40 GB: one pass to copy and one for the +faststart rewrite, each at the runner's
-        # own throughput floor (MOOV_REWRITE_MIN_BYTES_PER_SEC)
-        (
-            _BIG_INPUT,
-            2 * -(-(_BIG_INPUT + len(b"MONTAGE")) // _runner.MOOV_REWRITE_MIN_BYTES_PER_SEC),
-        ),
-    ],
-)
-def test_concat_uses_the_stall_runner_with_a_size_based_ceiling(tmp_path, raw_bytes, expected):
-    """Through run_ffmpeg_encode (never run_ffmpeg_quick's fixed wall clock), `-nostdin`, and
-    max_timeout = max(1800, 2 * ceil(input_bytes / MOOV_REWRITE_MIN_BYTES_PER_SEC))."""
+@pytest.mark.parametrize("raw_bytes", [3, _BIG_INPUT])
+def test_concat_uses_the_stall_runner_without_a_wall_clock_ceiling(tmp_path, raw_bytes):
+    """Through run_ffmpeg_encode (never run_ffmpeg_quick's fixed wall clock) and `-nostdin`,
+    and with NO `max_timeout` of its own: a size-based ceiling killed a still-advancing concat
+    on a slow volume (Galley LF1 measured ~21.6 MB/s against a 20 MB/s floor), so the runner's
+    default 24 h ceiling stands and the stall rule is the only clock."""
     raw = tmp_path / "raw_lf.mp4"
     with open(raw, "wb") as fh:
         fh.truncate(raw_bytes)
@@ -477,7 +481,7 @@ def test_concat_uses_the_stall_runner_with_a_size_based_ceiling(tmp_path, raw_by
         )
     assert result == tmp_path / "out.mp4"
     quick.assert_not_called()
-    assert seen["max_timeout"] == expected
+    assert "max_timeout" not in seen, "the concat sets no wall-clock ceiling of its own"
     assert "-nostdin" in seen["cmd"]
 
 
@@ -573,6 +577,65 @@ def test_full_drive_peaks_come_from_the_score_pool_inside_the_plan():
     peaks = _fd_peaks(scores)
     assert 1 <= len(peaks) <= 6  # DriveConfig.montage_peak_count
     assert {p.source_file_index for p in peaks} <= {0, 1}, "indices stay day-local"
+
+
+def test_full_drive_peaks_are_score_pool_windows_inside_the_plan_never_outside_it(tmp_path):
+    """The best pool window outside the plan is never chosen, and a chosen peak is a window
+    of the pool (shorter than its parent segment), not the plan segment itself."""
+    import numpy as np
+
+    from gomoveshift.config import DriveConfig
+    from gomoveshift.models import LFSegment
+    from gomoveshift.pipeline.longform_assembler import COL_COMPOSITE, COL_MOTION_ENERGY
+
+    n = 600
+    scores = np.zeros((n, 9), dtype=np.float64)
+    scores[:, 0] = np.arange(n)
+    scores[:, COL_MOTION_ENERGY] = 0.05  # above any motion floor, as the real scorer's output
+    # Exactly half the rows are high, so the pool's p50 threshold sits between low and high
+    # and only the high rows form windows.
+    scores[100:140, COL_COMPOSITE] = 0.9  # file 0, inside the plan
+    scores[140:200, COL_COMPOSITE] = 0.6
+    scores[240:300, COL_COMPOSITE] = 0.7
+    scores[390:450, COL_COMPOSITE] = 0.95  # file 1, in the gap the plan does not cover
+    scores[500:580, COL_COMPOSITE] = 0.8  # file 1, inside the plan
+    bounds = [(0.0, 300.0), (300.0, 600.0)]
+    eps = [SimpleNamespace(concat_path=str(tmp_path / f"e{i}.mp4")) for i in range(2)]
+
+    def seg(gi, start, end):
+        return LFSegment(
+            source_file_index=gi,
+            source_path=Path("/x"),
+            start_time=start - bounds[gi][0],
+            end_time=end - bounds[gi][0],
+            original_start_time=start,
+            original_end_time=end,
+            composite_score=0.3,
+            gps_center_lat=0,
+            gps_center_lon=0,
+            terrain_type="full_drive",
+            contiguous_with_previous=False,
+        )
+
+    plan = [seg(0, 0.0, 300.0), seg(1, 300.0, 380.0), seg(1, 460.0, 600.0)]
+    peaks = day_pipeline._full_drive_montage_peaks(DriveConfig(), scores, bounds, eps, plan)
+    assert peaks
+
+    def parent(p):
+        return next(
+            g
+            for g in plan
+            if g.source_file_index == p.source_file_index
+            and g.original_start_time <= p.original_start_time
+            and p.original_end_time <= g.original_end_time
+        )  # StopIteration = a peak outside every plan segment
+
+    assert not any(p.original_start_time < 450 and p.original_end_time > 390 for p in peaks)
+    assert any(
+        p.original_end_time - p.original_start_time
+        < parent(p).original_end_time - parent(p).original_start_time
+        for p in peaks
+    ), "peaks are pool windows, not the plan's own segments"
 
 
 def test_full_drive_peaks_fall_back_to_the_plans_own_segments():

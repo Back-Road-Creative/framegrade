@@ -669,7 +669,9 @@ class PhaseBCDayFirst:
                 computed = _lf_chapters(self.config, lf, state, lf_location, stages_dir)
                 return computed[0] if computed else []
 
+            failed_day_causes: dict = {}
             fresh_artifacts = run_all_days(
+                failed_days=failed_day_causes,
                 day_batches=remaining_batches,
                 drive_scores=state.drive_scores,
                 file_boundaries=state.file_boundaries or [],
@@ -709,6 +711,7 @@ class PhaseBCDayFirst:
             )
         else:
             fresh_artifacts = []
+            failed_day_causes = {}
         artifacts = skipped_artifacts + fresh_artifacts
         logger.info(
             "  day-first: %d day(s) produced artifacts (%d skipped via per_day_completed, %d fresh)",
@@ -728,7 +731,11 @@ class PhaseBCDayFirst:
         if failed_dates:
             raise RuntimeError(
                 f"Phase BC incomplete — {len(failed_dates)} day(s) produced no artifacts: "
-                f"{sorted(failed_dates)}. Check per-day errors above, fix the root cause, then resume."
+                + "; ".join(
+                    f"{d} ({failed_day_causes.get(d) or 'no cause recorded'})"
+                    for d in sorted(failed_dates)
+                )
+                + ". Fix the root cause, then resume."
             )
 
         # ── Per-day bookkeeping: record successful day masters ────────
