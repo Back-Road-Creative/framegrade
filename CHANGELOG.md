@@ -14,8 +14,15 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
-- A resume now re-runs a day that was recorded complete with fewer long-forms than planned, even when Phase B/C was checkpointed: the orchestrator drops the checkpoint when a planned long-form index has no non-empty final. A Galley Head style job therefore heals on retry instead of failing Phase D with `shorts_per_lf SPLIT-BRAIN` every time. A full_drive day with no supplied plan now builds a montage instead of dropping its long-form.
-- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress; the montage prepend concat has its own size-based ceiling and `-nostdin`.
+- A resume now re-runs a day that was recorded complete with fewer long-forms than planned, even when Phase B/C was checkpointed: the orchestrator drops the checkpoint when a planned long-form index has no non-empty final, or when `drive_plan.json` is present but unloadable (phase_bc then rebuilds it). A Galley Head style job therefore heals on retry instead of failing Phase D with `shorts_per_lf SPLIT-BRAIN` every time. The "Phase BC incomplete" error names each failed day and its cause. A full_drive day with no supplied plan now builds a montage instead of dropping its long-form.
+- A repeated identical ffmpeg stats line (frozen time and size) now counts as a stall, not progress; stats lines with `time=N/A size=N/A` count `frame=` advancing as progress. The montage prepend concat passes `-nostdin` and no ceiling of its own (the runner's 24 h default stands): a size-based ceiling killed a concat that was still advancing on a volume slower than the 20 MB/s floor.
+- A first comment found live with a replaced text is counted (`stale`, `first_comment_stale=N`
+  on the summary line), filed as a `first_comment_stale` health incident (`gomoveshift status
+  --json`) and, on YouTube, corrected in place on the next pass (edit, or delete a duplicate);
+  the incident clears itself. Meta drains count and file it; their edit/delete is not wired yet.
+- The YouTube scan reads every bounded page and reports a replaced text live beside the new one,
+  and a concurrent drain's comment is reported. Relink lists rewritten published rows for the
+  drain to verify.
 - First-comment drains re-read the text before posting and mark it posted only if unchanged.
 
 - A first comment found live with a replaced text (a relink rewrote the row mid-post, or the

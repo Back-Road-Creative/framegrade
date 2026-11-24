@@ -987,6 +987,20 @@ class TestValidateVideoAVDrift:
             ["size=N/A time=00:00:01.00 frame=1\n", "size=N/A time=00:00:02.00 frame=1\n"],
             [True, True],
         ),
+        # Neither time= nor size= parses (no packet muxed yet): frame= advancing is progress,
+        # a frozen frame= is not.
+        (
+            [
+                "frame=1 fps=1 q=0.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+                "frame=2 fps=1 q=0.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+                "frame=3 fps=1 q=0.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+                "frame=3 fps=9 q=0.0 size=N/A time=N/A bitrate=N/A speed=N/A\n",
+            ],
+            [True, True, True, False],
+        ),
+        # No frame=, time= or size= that parses: the raw tokens decide (identical = no progress).
+        (["time=N/A bitrate=1\n", "time=N/A bitrate=2\n"], [True, False]),
+        (["size=5XB speed=1\n", "size=6XB speed=1\n"], [True, True]),
     ],
 )
 def test_stats_progress_advanced_counts_only_a_moved_time_or_size(lines, expected):

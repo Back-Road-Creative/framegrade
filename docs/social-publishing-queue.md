@@ -675,18 +675,28 @@ run first, the queue last, each in its own `try` (failures land in `report.error
   `FIRST_COMMENT_MAX_ATTEMPTS`, status not `failed_permanent` / `cancelled` / `missing_remote`,
   and no live lease (`queue.rewrite_unposted_first_comment`, a compare-and-set that also records
   the replaced text in `first_comment_prior_text`). Other rows are in `queue_skipped`; a posted
-  comment is an operator item ("comment already live, links OLD"), never edited.
+  comment is an operator item ("comment already live, links OLD"), never edited by a relink (when a
+  drain recorded it as stale the item says the drain corrects it).
 - **Drain guard**: both first-comment drains re-read the text right before posting and mark it
   posted only `WHERE first_comment_text = <posted text>`. Both also read the post's comments
   first and accept any prior text (`first_comment_prior_text`) as "already there" (YouTube:
   `_find_first_comment`; Meta: `post_graph_comment(also_accept=...)`, which raises
-  `PriorCommentLiveError` instead of posting beside it). **No failure is silent:** when a replaced
-  text is found live, or a post succeeded but the text CAS missed (a relink rewrote the row
-  mid-post), the OLD comment is live and links a deleted video, so the drain stores the live
-  text as `first_comment_text`, marks the row posted, sets `first_comment_error` to
-  `stale comment live: links <old id>` and adds it to `result.errors`
-  (`queue.record_stale_live_comment`). The relink then reports that posted row as an operator
-  item ("comment already live, links OLD") and never edits it. Rolling deploy: a drain still
+  `PriorCommentLiveError` instead of posting beside it). The YouTube scan reads every bounded
+  page when a prior text exists, so a replaced text live beside the new one is seen.
+- **A stale comment is counted, filed and (YouTube) fixed.** When a replaced text is found live,
+  or a post succeeded but the text CAS missed (a relink rewrote the row mid-post, or another
+  drain already marked the row posted), the OLD comment links a deleted video.
+  `queue.record_stale_live_comment` stores the live text, marks the row posted, sets
+  `first_comment_error` to `stale comment live: links <old id>` and queues the fix in
+  `first_comment_correction` (live comment id, `edit` to the intended NEW text, or `delete` for a
+  duplicate). The drain counts it (`stale`, `first_comment_stale=N` on the summary line), adds an
+  `errors` line and files one `first_comment_stale` health incident per delivery (visible in
+  `gomoveshift status --json`). The NEXT YouTube drain (`first_comment_stale.run_corrections`,
+  before it posts) edits the comment to the intended text or deletes the duplicate, clears the
+  error and resolves the incident; a failure retries every pass, and only a platform refusal
+  counts toward `FIRST_COMMENT_MAX_ATTEMPTS`. Meta drains count and file it but have no
+  edit/delete wired yet: the incident stays open.
+  Rolling deploy: a drain still
   running the previous code has no text CAS and no prior-text dedup, so a relink while old
   drains run can leave a stale comment unreported; run it after the deploy settles.
 - **Lease clock**: `rewrite_unposted_first_comment` judges a lease live or expired by its own
