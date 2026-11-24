@@ -5,6 +5,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.144] - 2026-11-24
+
+### Fixed
+
+- `relink_replaced_lf` takes `{old: (new, new_publish_at)}` and never links a private video: an
+  unposted row drops the link, a pending edit becomes a delete, and the drain re-checks the gate
+  before editing or posting.
+- A Meta replace never ends at zero comments: after a confirmed delete a refused post returns the
+  row to unposted with the new text; a delete answered "does not exist" counts as success; a
+  failing correction pass no longer stops Meta posting; a capped incident never says the drain
+  will edit.
+
 ## [0.3.143] - 2026-11-24
 
 ### Added
@@ -1666,7 +1678,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.143...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.144...HEAD
+[0.3.144]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.143...v0.3.144
 [0.3.143]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.142...v0.3.143
 [0.3.142]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.141...v0.3.142
 [0.3.141]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.140...v0.3.141
