@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.151] - 2026-11-24
+
+### Fixed
+
+- A long-form re-burn whose work-space gate is short now first removes that LF's own leftover work files (concat, montage copy, map inset, work dir) from a burn that died after its montage, which the new burn rebuilds anyway, and prices again; the old final is dropped only if that is still not enough (Courtmacsherry 2025-09-19 stopped 15.2 GB short beside 103.5 GB of them).
+
 ## [0.3.150] - 2026-11-24
 
 ### Fixed
@@ -1764,7 +1770,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.150...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.151...HEAD
+[0.3.151]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.150...v0.3.151
 [0.3.150]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.149...v0.3.150
 [0.3.149]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.148...v0.3.149
 [0.3.148]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.147...v0.3.148
