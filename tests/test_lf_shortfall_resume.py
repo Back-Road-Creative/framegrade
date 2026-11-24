@@ -150,9 +150,32 @@ def test_no_plan_on_disk_leaves_phase_bc_and_says_it_cannot_verify(tmp_path, cap
     assert "cannot verify" in " ".join(r.getMessage() for r in caplog.records)
 
 
-def test_a_plan_from_other_code_is_not_trusted(tmp_path):
+def test_a_plan_from_other_code_re_enters_phase_bc_where_it_is_rebuilt(tmp_path, caplog):
+    """A present but unloadable plan is not "no verdict": phase_bc rebuilds it (a rebuilt plan
+    is stamped with the current version, so it loads next time and this cannot loop)."""
     _write_plan(tmp_path, [_lf(1, 0), _lf(2, 1)], version=PHASE_BC_CODE_VERSION + 1)
     _finals(tmp_path, DATE)
+    with caplog.at_level(logging.WARNING):
+        out, done, state = _invalidate(tmp_path, _state())
+    assert out == ["phase_a"]
+    assert done == ["phase_a"]
+    assert state.phases_completed == ["phase_a"]
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "drive_plan.json" in msg and "rebuild" in msg
+
+
+def test_a_corrupt_plan_re_enters_phase_bc(tmp_path):
+    (tmp_path / "drive_plan.json").write_text("{not json")
+    _finals(tmp_path, DATE)
+    out, _, _ = _invalidate(tmp_path, _state())
+    assert out == ["phase_a"]
+
+
+def test_a_plan_rebuilt_by_phase_bc_loads_so_the_re_entry_cannot_loop(tmp_path):
+    """phase_bc stamps a rebuilt plan with PHASE_BC_CODE_VERSION; with its finals present the
+    next resume has a verdict and keeps phase_bc."""
+    _write_plan(tmp_path, [_lf(1, 0), _lf(2, 1)])  # the stamp phase_bc gives a rebuilt plan
+    _finals(tmp_path, DATE, indices=(1, 2))
     out, _, _ = _invalidate(tmp_path, _state())
     assert out == ["phase_a", "phase_bc_day_first", "phase_d"]
 
@@ -165,7 +188,7 @@ def test_every_planned_final_present_keeps_phase_bc(tmp_path):
 
 
 def test_a_day_not_recorded_complete_is_never_judged(tmp_path):
-    """A --day filtered run has plan LFs for days it never processed: no re-entry loop."""
+    """The plan holds LFs for days this run never recorded complete: no re-entry loop."""
     _write_plan(tmp_path, [_lf(1, 0), _lf(2, 2)])
     _finals(tmp_path, DATE, indices=(1,))
     _finals(tmp_path, OTHER)
@@ -332,6 +355,29 @@ def _run_resume(tmp_path, *, finals):
 
 def test_orchestrator_resume_reenters_phase_bc_for_the_galley_state(tmp_path):
     assert _run_resume(tmp_path, finals=()) == ["phase_bc_day_first"]
+
+
+def test_orchestrator_resume_reenters_phase_bc_when_the_plan_cannot_be_loaded(tmp_path):
+    """Galley-shaped checkpoint whose drive_plan.json is from other code: phase_bc runs."""
+    orch = DrivePipelineOrchestrator(config=Config())
+    source, output_base, stages = _resume_state(orch, tmp_path, finals=())
+    _write_plan(stages, [_lf(1, 0), _lf(2, 1)], version=PHASE_BC_CODE_VERSION + 1)
+    ran = []
+
+    def _bc(state):
+        ran.append("phase_bc_day_first")
+        state["day_artifacts"] = [object()]
+        state["regular_lf_paths"] = []
+        state["shorts_per_lf"] = {}
+
+    with (
+        patch.object(DrivePipelineOrchestrator, "_phase_a_ingest_and_analyze"),
+        patch.object(DrivePipelineOrchestrator, "_phase_bc_day_first", side_effect=_bc),
+        patch.object(DrivePipelineOrchestrator, "_phase_d_metadata_and_publish"),
+        patch("gomoveshift.pipeline.drive_orchestrator.ReviewGate"),
+    ):
+        orch.run(source_dir=source, output_base=output_base, region="usa", publish_day="wed")
+    assert ran == ["phase_bc_day_first"]
 
 
 def test_orchestrator_resume_keeps_phase_bc_when_every_lf_is_on_disk(tmp_path):

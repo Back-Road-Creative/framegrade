@@ -3549,6 +3549,7 @@ def run_all_days(
     all_day_batches: Optional[list] = None,
     all_gps_points_by_date: Optional[dict] = None,
     kit: Optional[TitleKit] = None,
+    failed_days: Optional[dict] = None,
 ) -> list:
     """Run the day-first pipeline for every day in `day_batches`.
 
@@ -3605,6 +3606,9 @@ def run_all_days(
             against all of them (a photo of a finished day is still placed,
             the clip stays on the drive's first day) and gated only for the
             days in `day_batches`. Omitted: `day_batches` is the whole drive.
+        failed_days: Optional dict the caller passes in; each day that raised
+            or returned None is recorded as ``{date: cause}`` so the caller's
+            "incomplete" error can name it.
 
     Returns:
         List of `DayArtifacts`, one per successful day.
@@ -3794,6 +3798,8 @@ def run_all_days(
                 day_batch.date,
                 exc,
             )
+            if failed_days is not None:
+                failed_days[day_batch.date] = str(exc)
             _maybe_fire_recovery_callback(day_batch.date, day_dir, state, on_day_complete)
             continue
         if artifacts is None:
@@ -3804,6 +3810,8 @@ def run_all_days(
             # Soft failure. Same recovery logic as the exception path —
             # if finals or a raw concat survived, mark the day so the
             # next resume picks it up via the finals-only fast-path.
+            if failed_days is not None:
+                failed_days[day_batch.date] = "run_day_pipeline produced no artifacts"
             _maybe_fire_recovery_callback(day_batch.date, day_dir, state, on_day_complete)
             continue
         results.append(artifacts)
