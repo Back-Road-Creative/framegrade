@@ -22,10 +22,14 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, List, Optional
+from typing import Callable, Iterable, List, Optional
 
 from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
-from .queue import select_due_first_comments
+from .queue import (
+    first_comment_prior_texts,
+    first_comment_still_current,
+    select_due_first_comments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +52,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _existing_first_comment(service, video_id: str, text: str) -> Optional[str]:
+def _existing_first_comment(
+    service, video_id: str, text: str, also_accept: Iterable[str] = ()
+) -> Optional[str]:
     """The id of a top-level comment thread on ``video_id`` that already says
-    exactly ``text`` (stripped), else None -- so a comment YouTube created
+    exactly ``text`` -- or exactly one of ``also_accept``, the texts a relink replaced
+    (``queue.first_comment_prior_texts``) -- (stripped), else None -- so a comment YouTube created
     whose answer was lost (googleapiclient reads with a 60 s timeout) is
     found on the next pass, not posted again. Any error raises, so the
     caller posts nothing."""
-    want = text.strip()
+    want = {text.strip(), *(t.strip() for t in also_accept)}
     request = {
         "part": "snippet",
         "videoId": video_id,
@@ -66,7 +73,7 @@ def _existing_first_comment(service, video_id: str, text: str) -> Optional[str]:
         for thread in response.get("items") or []:
             top = (thread.get("snippet") or {}).get("topLevelComment") or {}
             said = top.get("snippet") or {}
-            if want in {str(said.get(f) or "").strip() for f in ("textOriginal", "textDisplay")}:
+            if want & {str(said.get(f) or "").strip() for f in ("textOriginal", "textDisplay")}:
                 return str(thread.get("id") or "")
         token = response.get("nextPageToken")
         if not token:
@@ -80,14 +87,15 @@ def _existing_first_comment(service, video_id: str, text: str) -> Optional[str]:
     return None
 
 
-def post_first_comment(service, video_id: str, text: str) -> str:
+def post_first_comment(service, video_id: str, text: str, also_accept: Iterable[str] = ()) -> str:
     """POST one top-level comment on ``video_id``; returns the new comment
     thread id -- or, when the video already carries exactly ``text``
-    (``_existing_first_comment``), that thread's id, posting nothing.
+    (``_existing_first_comment``) or one of ``also_accept``, that thread's id, posting
+    nothing.
 
     ``service`` is an already-authenticated ``googleapiclient`` YouTube
     Data API v3 client -- this function performs no auth of its own."""
-    existing = _existing_first_comment(service, video_id, text)
+    existing = _existing_first_comment(service, video_id, text, also_accept)
     if existing is not None:
         logger.info(
             "first comment: video %s already carries it (thread %s); not posting it again",
@@ -190,8 +198,18 @@ def drain_first_comments(
     service = service_factory()
     logged_scope_error = False
     for row in due:
+        # A relink may have rewritten the text after selection: post what the row says NOW.
+        fresh = first_comment_still_current(conn, row["id"])
+        if fresh is None:
+            continue
+        text = fresh["first_comment_text"]
         try:
-            post_first_comment(service, row["comment_target_id"], row["first_comment_text"])
+            post_first_comment(
+                service,
+                row["comment_target_id"],
+                text,
+                also_accept=first_comment_prior_texts(fresh),
+            )
         except Exception as exc:  # noqa: BLE001 -- graded per-row below
             detail = str(exc).strip() or exc.__class__.__name__
             refused = _refused_for_the_video(exc)
@@ -212,11 +230,14 @@ def drain_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        result.posted += 1
         with conn:
-            conn.execute(
+            marked = conn.execute(
                 "UPDATE deliveries SET first_comment_posted_at=?, first_comment_error=NULL "
-                "WHERE id=?",
-                (_now_iso(), row["id"]),
-            )
+                "WHERE id=? AND first_comment_text=?",
+                (_now_iso(), row["id"], text),
+            ).rowcount
+        if marked:
+            result.posted += 1
+        else:  # rewritten during the post: the new text is still owed, next pass dedups
+            logger.warning("first comment: delivery %s rewritten mid-post; next pass", row["id"])
     return result
