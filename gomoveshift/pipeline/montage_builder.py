@@ -44,7 +44,9 @@ logged so operators can grep it out of the drive log.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -165,6 +167,196 @@ def concat_copy_argv(list_file, out, *, ffmpeg_bin: str = "ffmpeg") -> list[str]
         "+faststart",
         str(out),
     ]
+
+
+# A stream-copy join of MP4 pieces keeps only the FIRST piece's decoder
+# configuration (the ``hvcC``/``avcC`` box holding the VPS/SPS/PPS). A piece
+# from another encoder (a libx265 join-repair or no-keyframe re-encode next to
+# NVENC master footage) then cannot be decoded past the join: the container
+# still reports the full length, so duration checks pass, and only a decoder
+# finds out (Galley Head 2026-11-25: 12.95 s of a 65 min long-form decoded, the
+# OST burn failed on A/V drift on every heal). Converting each piece to Annex B
+# writes its parameter sets in front of its own keyframes, so the joined
+# stream carries them and every piece decodes. Still lossless: no re-encode.
+_ANNEXB_BSF = {"hevc": "hevc_mp4toannexb", "h264": "h264_mp4toannexb"}
+# MP4 sample entries whose parameter sets already travel in-band.
+_IN_BAND_TAGS = {"hev1", "avc3"}
+# An Annex B join that feeds another one (a mixed montage, then its prepend)
+# is written as MPEG-TS, never MP4: the remux of an MP4 piece writes that
+# file's FIRST parameter sets in front of every keyframe, so a later clip's
+# open-GOP keyframe would lose the reference pictures its leading frames need.
+# A TS piece is already Annex B and passes through the remux untouched.
+
+
+def video_parameter_sets(path, *, ffprobe_bin: str = "ffprobe") -> Optional[tuple[str, str]]:
+    """``(codec, configuration)`` of the first video stream, or None when unreadable.
+
+    The configuration is the sha256 of the decoder configuration record;
+    pieces with different values cannot be joined by a plain stream copy. A
+    piece whose parameter sets travel in-band (``hev1``/``avc3`` or MPEG-TS,
+    e.g. the output of :func:`annexb_join`) is marked ``in-band`` so it never
+    compares equal to an out-of-band piece.
+    """
+    try:
+        res = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_data_hash", "sha256"]
+            + ["-show_entries", "stream=codec_name,codec_tag_string,extradata_hash"]
+            + ["-show_entries", "format=format_name"]
+            + ["-of", "json", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        info = json.loads(res.stdout or "{}") if res.returncode == 0 else {}
+    except Exception:  # noqa: BLE001 - any probe failure is "unreadable": the caller warns
+        return None
+    streams = info.get("streams") or []
+    container = (info.get("format") or {}).get("format_name", "")
+    if not streams or not streams[0].get("codec_name"):
+        return None
+    codec = streams[0]["codec_name"]
+    digest = streams[0].get("extradata_hash") or ""
+    if streams[0].get("codec_tag_string") in _IN_BAND_TAGS or "mpegts" in container:
+        return codec, f"in-band:{digest}"
+    return (codec, digest) if digest else None
+
+
+def annexb_join_codec(parts, description: str) -> tuple[Optional[str], Optional[str]]:
+    """How ``parts`` must be stream-copy joined: ``(codec, None)`` for
+    :func:`annexb_join`, ``(None, None)`` for the plain concat, or
+    ``(None, cause)`` when no stream-copy join of them can decode.
+
+    Unreadable parameter sets keep the plain concat with a WARNING, as
+    ``_montage_output_is_sound`` does when it cannot probe.
+    """
+    sets = [video_parameter_sets(p) for p in parts]
+    unreadable = [str(p) for p, got in zip(parts, sets) if got is None]
+    if unreadable:
+        logger.warning(
+            "⚠ %s: video parameter sets unreadable for %s — keeping the plain "
+            "stream-copy join (pieces from different encoders would not decode "
+            "past the first one)",
+            description,
+            unreadable,
+        )
+        return None, None
+    if len(set(sets)) == 1:
+        return None, None
+    codecs = sorted({codec for codec, _ in sets})
+    if len(codecs) != 1 or codecs[0] not in _ANNEXB_BSF:
+        return (
+            None,
+            f"{description}: pieces cannot be joined by stream copy (video codecs {codecs})",
+        )
+    logger.info(
+        "%s: pieces carry different %s parameter sets — joining through Annex B",
+        description,
+        codecs[0],
+    )
+    return codecs[0], None
+
+
+def _format_duration(path, ffprobe_bin: str) -> float:
+    try:
+        res = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]
+            + [str(path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return float(res.stdout.strip()) if res.returncode == 0 else 0.0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0.0
+
+
+def annexb_join(
+    parts,
+    output_path,
+    list_file,
+    codec: str,
+    *,
+    description: str,
+    container: str = "mp4",
+    ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
+) -> Optional[str]:
+    """Stream-copy join ``parts`` whose parameter sets differ; None on success, else the cause.
+
+    Each piece is remuxed to Annex B MPEG-TS by its own ffmpeg writing to a
+    pipe (no extra disk I/O on a 38 GB body), and the concat demuxer reads
+    ``pipe:N`` in order, told each piece's length so the timeline stays
+    contiguous. ``container`` is ``"mp4"`` (faststart) for a finished file or
+    ``"mpegts"`` for one another join reads. The join runs under the
+    stall-detecting runner. Any failure, of the join or of a piece's remux,
+    deletes the output.
+    """
+    from .ffmpeg_runner import run_ffmpeg_encode
+
+    parts = [Path(p) for p in parts]
+    output_path, list_file = Path(output_path), Path(list_file)
+    durations = [_format_duration(p, ffprobe_bin) for p in parts[:-1]]
+    short = [str(p) for p, d in zip(parts, durations) if d <= 0]
+    if short:
+        return f"{description}: no duration for {short}"
+
+    producers = []
+    try:
+        for i, part in enumerate(parts):
+            err = list_file.with_name(f"{list_file.stem}_part{i:02d}.err")
+            with open(err, "w") as err_file:
+                proc = subprocess.Popen(
+                    [ffmpeg_bin, "-nostdin", "-v", "error", "-i", str(part)]
+                    + ["-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]
+                    + ["-bsf:v", _ANNEXB_BSF[codec], "-f", "mpegts", "pipe:1"],
+                    stdout=subprocess.PIPE,
+                    stderr=err_file,
+                )
+            producers.append((part, proc, err))
+        lines = []
+        for i, (_part, proc, _err) in enumerate(producers):
+            lines.append(f"file 'pipe:{proc.stdout.fileno()}'")
+            if i < len(durations):
+                lines.append(f"duration {durations[i]}")
+        list_file.write_text("\n".join(lines) + "\n")
+        result = run_ffmpeg_encode(
+            [ffmpeg_bin, "-nostdin", "-y", "-protocol_whitelist", "file,pipe"]
+            + ["-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy"]
+            + (["-movflags", "+faststart"] if container == "mp4" else ["-f", container])
+            + [str(output_path)],
+            output_path=output_path,
+            expected_duration=0.0,
+            description=description,
+            pass_fds=tuple(proc.stdout.fileno() for _, proc, _ in producers),
+        )
+    finally:
+        broken = []
+        for part, proc, err in producers:
+            proc.stdout.close()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            if proc.returncode != 0:
+                tail = err.read_text(errors="replace").strip().splitlines()[-1:]
+                broken.append(f"{part} (exit {proc.returncode}{': ' + tail[0] if tail else ''})")
+            err.unlink(missing_ok=True)
+
+    cause = None
+    if broken:
+        cause = f"{description}: Annex B remux failed for " + "; ".join(broken)
+    elif not result.success:
+        tail = (result.stderr_tail or "").strip().splitlines()[-1:]
+        cause = (
+            f"{description} killed ({result.killed_reason})"
+            if result.killed_reason
+            else f"{description} failed (exit {result.returncode})"
+        ) + (f": {tail[0]}" if tail else "")
+    if cause:
+        output_path.unlink(missing_ok=True)
+        logger.error("%s", cause)
+    return cause
 
 
 def keyframe_span(
@@ -476,7 +668,26 @@ def build_montage(
         return None
 
     list_file = work_dir / f"{output_path.stem}_montage_concat_list.txt"
-    if not concat_demuxer(clip_files, output_path, list_file):
+    # A re-encoded clip (no keyframe at its peak) carries other parameter sets
+    # than the copied master clips: join those through Annex B or the montage
+    # stops decoding at the first such seam.
+    codec, refused = annexb_join_codec(clip_files, "montage clip concat")
+    if refused or codec:
+        # Written as MPEG-TS: the prepend joins it again (see _ANNEXB_BSF).
+        output_path = output_path.with_suffix(".ts")
+        cause = refused or annexb_join(
+            clip_files,
+            output_path,
+            list_file,
+            codec,
+            description="montage clip concat",
+            container="mpegts",
+        )
+        if cause:
+            if failures is not None:
+                failures.append(cause)
+            return None
+    elif not concat_demuxer(clip_files, output_path, list_file):
         if failures is not None:
             failures.append("montage clip concat failed")
         return None
@@ -582,6 +793,31 @@ def prepend_montage(
         return None
 
     list_file = work_dir / f"{output_path.stem}_prepend_list.txt"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # The montage may hold libx265 re-encodes, the body is NVENC master
+    # footage: with different parameter sets the plain copy below would decode
+    # only the montage (Galley Head 2026-11-25), so that pair joins through
+    # Annex B instead.
+    codec, refused = annexb_join_codec([built, raw_lf_path], "prepend_montage concat")
+    if refused or codec:
+        cause = refused or annexb_join(
+            [built, raw_lf_path],
+            output_path,
+            list_file,
+            codec,
+            description="prepend_montage concat",
+        )
+        if cause:
+            if failures is not None:
+                failures.append(cause)
+            return None
+        for p in (built, list_file):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        return output_path
+
     lines = []
     for p in [built, raw_lf_path]:
         escaped = str(p.resolve()).replace("'", "'\\''")
