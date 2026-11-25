@@ -3764,6 +3764,19 @@ def _add_metrics_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Minimum Shorts-feed share a day must meet (default: 0.70)",
     )
 
+    growth = metrics_sub.add_parser(
+        "growth-review",
+        help=(
+            "Weekly suggest-only review: distance to each YouTube Partner tier, "
+            "formats falling behind, and failed, stuck or duplicate posts. Report-only."
+        ),
+    )
+    growth.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip the live Partner Program counts; review stored data only",
+    )
+
     report = metrics_sub.add_parser(
         "report",
         help=(
