@@ -285,6 +285,7 @@ def run_ffmpeg_encode(
     progress_callback: Optional[Callable] = None,
     log_interval: int = 30,
     time_source: Callable[[], float] = time.monotonic,
+    pass_fds: tuple[int, ...] = (),
 ) -> FFmpegResult:
     """
     Run a long FFmpeg encode with real-time progress monitoring and stall detection.
@@ -303,6 +304,8 @@ def run_ffmpeg_encode(
         log_interval: Seconds between progress log lines (default 30s)
         time_source: Monotonic clock used for stall/timeout decisions. Defaults
             to time.monotonic; injectable so tests can drive time deterministically.
+        pass_fds: File descriptors ffmpeg inherits (``pipe:N`` inputs), as
+            ``subprocess.Popen``'s ``pass_fds``. Default: none.
 
     Returns:
         FFmpegResult with success status and details
@@ -331,6 +334,7 @@ def run_ffmpeg_encode(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            pass_fds=pass_fds,
         )
     except Exception as e:
         _cleanup_output(output_path)
