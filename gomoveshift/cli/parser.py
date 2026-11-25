@@ -1597,6 +1597,31 @@ def _add_enqueue_asset_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_day_reels_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "day-reels",
+        help="Queue owner phone reels from the Drive request folder, privacy-blurred "
+        "(dry-run by default; 'authorize' is the one-time read-only Drive sign-in)",
+    )
+    p.add_argument(
+        "action",
+        nargs="?",
+        choices=("run", "authorize"),
+        default="run",
+        help="run (default): handle new requests. authorize: one-time Google sign-in.",
+    )
+    p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Download, blur and queue. Without this, only lists and validates requests.",
+    )
+    p.add_argument(
+        "--folder-id",
+        default=None,
+        help="With authorize: the Drive folder id that holds the request files.",
+    )
+
+
 def _add_dispatch_queue_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "dispatch-queue",
@@ -3947,7 +3972,7 @@ command groups (run `gomoveshift <command> --help` for any of them):
   review and console server, console, doctor, health, status, library-hygiene
   analyze a video    analyze, process, scan, review-set
   route story        route-story-prepare, route-story-proof, route-story-verify, route-story-film
-  publishing queue   enqueue-plan, enqueue-asset, dispatch-queue, queue, publishing-status,
+  publishing queue   enqueue-plan, enqueue-asset, day-reels, dispatch-queue, queue, publishing-status,
                      publish-journal, schedule, sync-site, reconcile-playlists, clip-claims,
                      youtube-auth
   catalog            catalog-inventory, catalog-classify, catalog-fetch
@@ -4022,6 +4047,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_publish_journal_parser(subparsers)
     _add_enqueue_plan_parser(subparsers)
     _add_enqueue_asset_parser(subparsers)
+    _add_day_reels_parser(subparsers)
     _add_dispatch_queue_parser(subparsers)
     _add_queue_parser(subparsers)
     _add_review_set_parser(subparsers)

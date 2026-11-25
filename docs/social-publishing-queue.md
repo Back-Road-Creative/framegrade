@@ -940,6 +940,29 @@ publisher (Metricool is retired); it is then spooled via
 The console's Publishing tab has a matching "Enqueue a standalone asset" form
 (`POST /publishing/enqueue-asset`), containment-checked like `/publishing/enqueue`.
 
+## Day reels from Drive
+
+`gomoveshift day-reels --apply` (`publishing/day_reels.py`) queues an owner's phone reel for
+Facebook and Instagram. The hourly dispatch cron runs it just before `dispatch-queue --apply`.
+The request is a JSON file in one private Drive folder: `{"schema": "gms.day_reel_request/v1",
+"video_file_id": "<Drive id>", "caption": "<verbatim on both platforms>", "recording_date":
+"YYYY-MM-DD", "platforms": ["facebook", "instagram"]}`, plus an optional `"at"` with a UTC offset
+(default: due now). Unknown fields or bad values refuse it.
+
+**Privacy is the night private-video blur pass, never self-attested.** If any required class is
+not `verified` by `attestable_privacy_classes(blur=True)`, the request is held for the next hour
+with nothing downloaded. Otherwise the reel is downloaded, blurred by `_render_private_video`
+(cabin check included) under the shared GPU lock, checked for location tags, and only the
+blurred file is spooled through `asset_plan.build_asset_sidecar(..., caption=...)`. A failed
+render or leftover location tag refuses it for good; the original is deleted after the render.
+A ledger under `<gms_data_home>/day_reels/requests/` makes each request file run once.
+
+**Drive access is a one-time read-only sign-in**: `day-reels authorize --folder-id <id>` runs
+`rclone authorize` with the `drive.readonly` scope and SOPS-encrypts the token and folder id to
+`day_reels_drive.json.enc` beside the pipeline's Drive token (`GMS_DAY_REELS_DRIVE_ENC`
+overrides). The token is never printed or put in argv. With no sign-in the step prints
+`DAY_REELS skipped`. Anyone who can write to the request folder is trusted as the owner.
+
 ## Real go-public time, held rows and one Short per hour
 
 - **`platform_live`.** `platform_published_at` holds the scheduled slot only while `published_at_source=platform_scheduled`. `youtube_adapter.confirm_scheduled_live(conn, service)` asks `videos.list(part=status,snippet)` for each such row whose slot has passed; `live_publish_time` accepts an item only when `status.privacyStatus` is `public` and returns `snippet.publishedAt`. `queue.record_live_publish` then rewrites the row to `platform_live` with that time in `platform_published_at`; a video still private stays on the scheduled source. `recorded_publish_time` hands tracking the confirmed time, so `posted_at` stops being the upload moment. Every non-dry-run `dispatch-queue` tick runs the sweep once after dispatch, with the tick's own queue connection and the same YouTube credential path as the first-comment drain (built lazily, only when a row is due), and logs `CONFIRMED_LIVE count=<n>`. A dry run makes no API call; a tick without YouTube routed `first_party` logs `CONFIRMED_LIVE skipped`; an API or auth error logs one `CONFIRMED_LIVE failed` warning, leaves the exit code alone, and is retried on the next tick.

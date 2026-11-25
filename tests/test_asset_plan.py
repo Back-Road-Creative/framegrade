@@ -144,3 +144,17 @@ def test_privacy_attestation_loader_reads_the_bundle_dir(tmp_path, video):
 def test_unknown_platform_raises(video):
     with pytest.raises(ValueError, match="unknown platform"):
         _build(video, platforms=("myspace",))
+
+
+def test_caption_is_the_whole_instagram_and_facebook_text(video):
+    caption = "Up on Peakeen Ridge, Sheep's Head. #Ireland"
+    record = _build(video, platforms=("instagram", "facebook"), caption=caption)["shorts"][0]
+    assert record["payloads"]["instagram"] == {"caption": caption}
+    assert record["payloads"]["facebook"] == {"description": caption}
+
+
+def test_without_caption_instagram_keeps_title_and_description(video):
+    record = _build(video, platforms=("instagram",))["shorts"][0]
+    assert record["payloads"]["instagram"] == {
+        "caption": "Driving the Wicklow Way\n\nA scenic loop through the mountains."
+    }
