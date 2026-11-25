@@ -23,7 +23,10 @@ The job runner is the process supervisor named by `$GMS_JOB_RUNNER` (default `bi
    A job that ended exit 5 (`EXIT_WAITING_AT_GATE`) with `DRIVE WAITING:` as its log's last
    closing line stopped at a human gate (the OST audit) and is not a failure: no row is filed, an
    open one is resolved, so `health heal` never re-resumes it onto the same gate. `health
-   backlog` resumes it once the gate is confirmed (below).
+   backlog` resumes it once the gate is confirmed (below). The `DRIVE WAITING:` line ends with `[gomoveshift <version>]`, the code that stopped. When the
+   drive's recipe carries `--ost-system-review` and that version differs from the installed one (or the line
+   records none, a legacy stop), `health backlog` resumes it once per installed version so the gate re-checks;
+   it never writes or bypasses a `.confirmed` marker, and the gate inside the drive decides.
 2. **LF slot inside 48 h with nothing booked while a drive is ready.** A free slot is a
    `next_available` row of `build_schedule_report` (the scheduler already excludes booked slots);
    "ready" is `ScheduleStore.ready_depth(region) > 0` over `<seo.storage_path>/schedule.sqlite3`.

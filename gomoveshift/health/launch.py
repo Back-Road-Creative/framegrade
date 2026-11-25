@@ -807,13 +807,53 @@ def _failed_audit(jobs_dir: Path, project: str, hint: bool = True) -> Optional[s
     )
 
 
-def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple[str, bool]]:
-    """``(reason, confirmed)`` when the newest audit of ``project`` stopped at the OST audit gate
+_WAIT_VERSION_RE = re.compile(r"\[gomoveshift (\d+(?:\.\d+)*)\]\s*$")
+
+
+def waiting_version(line: Optional[str]) -> Optional[str]:
+    """The gomoveshift version a ``DRIVE WAITING:`` line records, or None (a legacy stop)."""
+    m = _WAIT_VERSION_RE.search(line or "")
+    return m.group(1) if m else None
+
+
+def _version_retry(
+    rec, jobs_dir, stages_root, project, code_root, installed_version
+) -> Optional[str]:
+    """Why a drive parked at the OST gate may be resumed once more with no person: its resume
+    recipe asks for the automatic system review (so code alone can clear the gate) and the version
+    that stopped it differs from the installed one, or is unrecorded (a legacy stop). None when
+    it may not (same version, no flag, no recipe, an unreadable installed version)."""
+    if installed_version is None or code_root is None:
+        return None
+    recipes = sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json"))
+    recipe = resume.read_recipe(recipes[0]) if recipes else None
+    if recipe is None or "--ost-system-review" not in recipe["argv"]:
+        return None
+    bound, _cwd = bind_to_code_root(code_root, recipe["argv"])
+    if bound is None:
+        return None
+    now = installed_version(Path(bound[0]))
+    if not now:
+        return None
+    then = waiting_version(_gate_wait(jobs_dir, rec))
+    if then == now:
+        return None
+    since = f"under gomoveshift {then}" if then else "under an earlier gomoveshift"
+    return f"{project}: stopped at the OST gate {since}, now {now} installed; resuming once so the gate re-checks"  # fmt: skip
+
+
+def _ost_gate(jobs_dir: Path, stages_root: Path, project: str,
+              code_root=None, installed_version=None) -> Optional[Tuple[str, bool, Optional[str]]]:  # fmt: skip
+    """``(reason, resumable, retry)`` when the newest audit of ``project`` stopped at the OST audit gate
     (every placeless drive does: no GPS, no system review), else None.
 
     Confirmed: each ``ost_audit_<date>.json`` sidecar has its ``.confirmed`` marker and one was
     made after the run stopped. Markers all older than the stop did not pass the gate (the audit
-    changed since), so resuming would only stop at the same gate again, every tick."""
+    changed since), so resuming would only stop at the same gate again, every tick.
+
+    Otherwise a drive whose recipe carries ``--ost-system-review`` is resumed once per installed
+    version (``_version_retry``): a code fix can make the parked day passable by the system review.
+    The resume never touches a marker; the gate inside the drive decides."""
     rec = _newest_audit(jobs_dir, project)
     if rec is None or not _gate_wait(jobs_dir, rec):
         return None
@@ -823,10 +863,20 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple
     pending = [m for m in markers if not m.exists()]
     fresh = any(m.exists() and m.stat().st_mtime > ended for m in markers)
     if sidecars and not pending and fresh:
-        return f"{project}: OST audit confirmed since job {rec.get('run_id')} stopped at it", True
+        return (
+            f"{project}: OST audit confirmed since job {rec.get('run_id')} stopped at it",
+            True,
+            None,
+        )
+    if why := _version_retry(rec, jobs_dir, stages_root, project, code_root, installed_version):
+        return why, True, why
     head = f"audit waiting at the OST audit gate: {project} job {rec.get('run_id')} stopped for a person's review; "  # fmt: skip
     if not sidecars:
-        return head + f"no ost_audit_<date>.json sidecar under {Path(stages_root) / project}", False
+        return (
+            head + f"no ost_audit_<date>.json sidecar under {Path(stages_root) / project}",
+            False,
+            None,
+        )
     todo = pending or markers  # every marker predates the stop: the audit changed, re-review it
     again = "" if pending else " (replace the existing marker: the audit changed after it)"
     return (
@@ -834,6 +884,7 @@ def _ost_gate(jobs_dir: Path, stages_root: Path, project: str) -> Optional[Tuple
         + " and create " + ", ".join(str(m) for m in todo) + again
         + "; the next backlog tick resumes it from its stages",
         False,
+        None,
     )  # fmt: skip
 
 
@@ -877,15 +928,17 @@ def _publish_audited(res, project: str, publish, dry_run: bool) -> Dict[str, Any
 
 
 def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_dir, dry_run,
-                      launcher, installed_version, latest_version):  # fmt: skip
-    """Resume a drive whose OST audit was confirmed, from its own recipe, under its backlog job
-    name; the store row is already ``auditing``, so nothing is registered."""
+                      launcher, installed_version, latest_version, why=None):  # fmt: skip
+    """Resume a drive whose OST audit was confirmed (or, with ``why``, parked at the gate under
+    another version), from its own recipe, under its backlog job name; the store row is already
+    ``auditing``, so nothing is registered."""
+    lead = why or f"{project}: OST audit confirmed"
     recipes = sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json"))
     if any(is_held(r) for r in recipes):
-        return {**res, "reason": f"{project}: OST audit confirmed, but an operator hold ({HOLD_NAME}) keeps it where it is"}  # fmt: skip
+        return {**res, "reason": f"{lead}, but an operator hold ({HOLD_NAME}) keeps it where it is"}  # fmt: skip
     recipe = resume.read_recipe(recipes[0]) if recipes else None
     if recipe is None:
-        return {**res, "action": "refused", "reason": f"{project}: OST audit confirmed, but no readable resume.json under {Path(stages_root) / project}"}  # fmt: skip
+        return {**res, "action": "refused", "reason": f"{lead}, but no readable resume.json under {Path(stages_root) / project}"}  # fmt: skip
     bound, cwd = bind_to_code_root(code_root, recipe["argv"])
     if bound is None:
         return {**res, "action": "refused", "reason": f"{project}: {cwd}"}
@@ -903,7 +956,7 @@ def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_di
     ok, detail = launcher(argv, cwd, env)
     if not ok:
         return {**res, "action": "refused", "reason": f"launch failed: {detail}"}
-    return {**res, "action": "launched", "reason": f"{project}: OST audit confirmed; resuming it from its stages"}  # fmt: skip
+    return {**res, "action": "launched", "reason": f"{lead}; resuming it from its stages" if not why else why}  # fmt: skip
 
 
 def _job_argv(code_root, jobs_dir, project: str, out_dir: Path, drive_argv: List[str]) -> List[str]:
@@ -1099,7 +1152,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     relaunch, auto = None, False
     for proj in auditing:
         failed = _failed_audit(jobs_dir, proj)
-        gate = None if failed else _ost_gate(jobs_dir, stages_root, proj)
+        gate = (
+            None if failed else _ost_gate(jobs_dir, stages_root, proj, code_root, installed_version)
+        )
         if gate and proj == target:
             failed = gate[0]  # superseding an audit waiting at its gate sets it aside the same way
         elif gate:
@@ -1108,7 +1163,8 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 return {**res, "reason": gate[0]}
             return _resume_confirmed(res, proj, stages_root, output_root, code_root,
                                      jobs_dir, dry_run, launcher, installed_version,
-                                     latest_version)  # fmt: skip
+                                     latest_version,
+                                     why=gate[2])  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
             return _publish_audited(res, proj, publish, dry_run)
         if (
