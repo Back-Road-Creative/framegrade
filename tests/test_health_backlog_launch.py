@@ -1783,6 +1783,73 @@ def test_a_confirmed_waiting_drive_dry_run_launches_nothing(tmp_path):
     assert not rig.launches
 
 
+# A drive parked at the gate can pass with no person (the automatic system review), once the code
+# that stopped it is fixed. Heal resumes it ONCE per installed version; the gate inside the drive
+# still decides, and nothing here writes or bypasses a marker.
+def _parked(rig, *, version, system_review=True):
+    stages, sidecar = _waiting(rig)
+    if system_review:
+        recipe = json.loads((stages / "resume.json").read_text())
+        recipe["argv"] += ["--ost-system-review"]
+        (stages / "resume.json").write_text(json.dumps(recipe))
+    if version is not None:
+        out = rig.tmp / "jobs" / "1a3f8a41" / "output.log"
+        out.write_text(out.read_text().replace("resume\n", f"resume [gomoveshift {version}]\n"))
+    return stages, sidecar
+
+
+def test_a_legacy_waiting_line_with_no_version_resumes_once(tmp_path):
+    rig = Rig(tmp_path)
+    _parked(rig, version=None)
+    res = rig.run()
+    assert res["action"] == "launched" and res["project"] == "day-a", res
+    assert "resum" in res["reason"] and "OST gate" in res["reason"]
+    assert len(rig.launches) == 1
+
+
+def test_a_waiting_line_from_the_installed_version_stays_waiting(tmp_path):
+    rig = Rig(tmp_path)
+    _parked(rig, version=rig.installed)
+    res = rig.run()
+    assert res["action"] == "noop" and "stopped for a person" in res["reason"], res
+    assert not rig.launches
+
+
+def test_a_waiting_line_from_an_older_version_resumes(tmp_path):
+    rig = Rig(tmp_path)
+    _parked(rig, version="0.3.1")
+    res = rig.run()
+    assert res["action"] == "launched", res
+    assert "0.3.1" in res["reason"] and rig.installed in res["reason"]
+    assert len(rig.launches) == 1
+
+
+def test_a_parked_drive_without_the_system_review_flag_never_retries(tmp_path):
+    rig = Rig(tmp_path)
+    _parked(rig, version="0.3.1", system_review=False)
+    res = rig.run()
+    assert res["action"] == "noop" and "stopped for a person" in res["reason"], res
+    assert not rig.launches
+
+
+def test_an_unknown_installed_version_never_retries_a_parked_drive(tmp_path):
+    rig = Rig(tmp_path)
+    _parked(rig, version="0.3.1")
+    rig.installed = None
+    res = rig.run()
+    assert res["action"] == "noop" and not rig.launches, res
+
+
+def test_a_parked_drive_retry_still_honours_the_operator_hold(tmp_path):
+    rig = Rig(tmp_path)
+    stages, _ = _waiting(rig, hold=True)
+    recipe = json.loads((stages / "resume.json").read_text())
+    recipe["argv"] += ["--ost-system-review"]
+    (stages / "resume.json").write_text(json.dumps(recipe))
+    res = rig.run()
+    assert not rig.launches, res
+
+
 def test_a_waiting_audit_with_no_backlog_row_is_never_retired(tmp_path):
     rig = Rig(tmp_path)
     _waiting(rig)

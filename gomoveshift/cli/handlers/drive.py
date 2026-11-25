@@ -474,14 +474,18 @@ def gate_wait_line(result, orchestrator) -> str | None:
     """``DRIVE WAITING: ...`` when the run stopped at a human gate, else None.
 
     The gate is never auto-confirmed; the line names the audit file, the
-    ``.confirmed`` marker or ``--ost-audit-confirmed``, and the next action.
+    ``.confirmed`` marker or ``--ost-audit-confirmed``, and the next action. It ends with
+    ``[gomoveshift <version>]``, the code that stopped, so heal can resume a parked drive once
+    per new version (``health.launch.waiting_version``).
     """
+    from ... import __version__
+
     detail = getattr(orchestrator, "waiting_gate", None)
     if not (getattr(result, "success", False) and isinstance(detail, str) and detail):
         return None
     return (
         f"DRIVE WAITING: ost_audit — {detail} — next: review the audit, "
-        "confirm it, then re-run the same command to resume"
+        f"confirm it, then re-run the same command to resume [gomoveshift {__version__}]"
     )
 
 

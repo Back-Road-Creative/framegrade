@@ -152,6 +152,16 @@ def test_gate_wait_line_names_gate_files_and_next_action():
     assert "next:" in line
 
 
+def test_gate_wait_line_carries_the_running_version_and_stays_recognised():
+    import gomoveshift
+    from gomoveshift.health import drives
+
+    orch = MagicMock(waiting_gate="OST audit pending for day d")
+    line = drive_handler.gate_wait_line(MagicMock(success=True), orch)
+    assert line.endswith(f" [gomoveshift {gomoveshift.__version__}]")
+    assert drives.gate_wait(drive_handler.EXIT_WAITING_AT_GATE, ["x", line]) == line
+
+
 def test_gate_wait_line_none_for_a_finished_or_mocked_run():
     assert drive_handler.gate_wait_line(MagicMock(success=True), MagicMock()) is None
     assert (
