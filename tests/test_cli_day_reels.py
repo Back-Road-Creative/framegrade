@@ -52,7 +52,9 @@ def test_authorize_asks_read_only_scope_and_stores_the_token_encrypted(
     assert handler.cmd_day_reels(args, _config(tmp_path)) == 0
 
     assert seen["argv"][1:3] == ["authorize", "drive"]
-    blob = json.loads(base64.b64decode(seen["argv"][3]))
+    arg = seen["argv"][3]
+    assert "=" not in arg and "+" not in arg and "/" not in arg, "rclone wants URL-safe, unpadded"
+    blob = json.loads(base64.urlsafe_b64decode(arg + "=" * (-len(arg) % 4)))
     assert blob == {"scope": "drive.readonly"}
     assert seen["kwargs"]["stdout"] == subprocess.PIPE
     assert stored["path"] == enc
