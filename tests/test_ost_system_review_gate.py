@@ -123,17 +123,66 @@ def test_b3_one_changed_character_stays_pending(tmp_path, gate):
         gate(tmp_path, state)
 
 
-# --- B4: a re-reviewed label still reopens a confirmed day ----------------
+# --- B4: a changed label reopens a passed day like a new day --------------
+# The stored pass covers the old text only. A day whose text changed passes
+# again only on what passes a never-reviewed day: a fresh system review that
+# agrees on the exact new text (JP, 2026-11-25). Anything less stays pending.
+
+_NEW_TEXT = "Harrow to Westmark via R9, County Clare"
 
 
-@GATES
-def test_b4_label_change_after_a_pass_is_stale_even_when_re_reviewed(tmp_path, gate):
+def _passed_then_changed(tmp_path, gate):
     state = _state()
     _record(state)
     gate(tmp_path, state)
-    state["per_lf_ost_text"] = {1: "Harrow to Westmark via R9, County Clare"}
-    _record(state)  # route claims re-ran and agree on the new text
-    with pytest.raises(OstAuditPendingError):
+    old_hash = state["ost_audit_hash"][D]
+    state["per_lf_ost_text"] = {1: _NEW_TEXT}
+    return state, old_hash
+
+
+@GATES
+def test_b4_label_change_after_a_pass_passes_on_a_fresh_agreeing_review(tmp_path, gate, caplog):
+    state, old_hash = _passed_then_changed(tmp_path, gate)
+    record = _record(state)  # route claims re-ran and agree on the new text
+    with caplog.at_level(logging.INFO):
+        gate(tmp_path, state)
+    assert state["ost_audit_hash"][D] != old_hash
+    assert _no_markers(tmp_path)
+    copy = tmp_path / "out" / f"ost_system_review_{D}.json"
+    assert json.loads(copy.read_text())["ost_hash"] == record["ost_hash"]
+    assert "earlier pass covered different text" in caplog.text
+
+
+@GATES
+def test_b4_label_change_after_a_pass_without_a_fresh_review_stays_pending(tmp_path, gate):
+    state, _ = _passed_then_changed(tmp_path, gate)  # nothing re-reviewed the new text
+    with pytest.raises(OstAuditPendingError, match="earlier pass covered different text"):
+        gate(tmp_path, state)
+
+
+@GATES
+def test_b4_label_change_after_a_pass_without_the_opt_in_stays_pending(tmp_path, gate):
+    state, _ = _passed_then_changed(tmp_path, gate)
+    _record(state)
+    state["ost_system_review_this_run"] = None
+    with pytest.raises(OstAuditPendingError, match="earlier pass covered different text"):
+        gate(tmp_path, state)
+
+
+@GATES
+def test_b4_label_change_after_a_pass_with_a_disagreeing_review_stays_pending(tmp_path, gate):
+    state, _ = _passed_then_changed(tmp_path, gate)
+    _record(state)
+    _reseal(state, lambda r: r["reviews"]["1"].__setitem__("verdict", "disagree"))
+    with pytest.raises(OstAuditPendingError, match="system review did not pass"):
+        gate(tmp_path, state)
+
+
+@GATES
+def test_b4_label_change_after_a_pass_with_a_refused_claim_stays_pending(tmp_path, gate):
+    state, _ = _passed_then_changed(tmp_path, gate)
+    _record(state, refused=(1,))
+    with pytest.raises(OstAuditPendingError, match="system review did not pass"):
         gate(tmp_path, state)
 
 

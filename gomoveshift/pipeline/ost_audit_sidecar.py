@@ -102,6 +102,24 @@ def confirmation_is_stale(prior_hash, current_hash) -> bool:
     return prior_hash != current_hash
 
 
+STALE_TEXT_REASON = "an earlier pass covered different text"
+
+
+def stale_pass_rereviewed(review: tuple) -> tuple:
+    """``(passes, reason)`` for a day whose text changed since its stored pass.
+
+    The stored pass covers the old text only, so the day is gated like a
+    never-reviewed one, on the one signal that can speak for the NEW text:
+    the opt-in system review (``review`` is its ``(passes, reason)``), which
+    must agree on that exact text and refuse nothing (JP, 2026-11-25). A
+    marker or flag from the earlier pass never carries over.
+    """
+    passes, why = review
+    if passes:
+        return True, f"{why}; {STALE_TEXT_REASON}"
+    return False, STALE_TEXT_REASON + (f"; {why}" if why else "")
+
+
 def read_confirmed_hash(confirmed_file):
     """Audit hash a ``.confirmed`` marker is bound to, or ``None``.
 
@@ -406,8 +424,9 @@ def lf_gate_or_raise(
     ``ost_audit_hash`` (resume), an ``ost_audit_<date>.confirmed`` marker, or
     ``state["ost_audit_confirmed_this_run"]`` (``--ost-audit-confirmed`` passed
     on THIS run — a persisted-only confirmation no longer bypasses). A
-    material burn-text change reopens the gate (``confirmation_is_stale``); empty
-    ``lf_indices`` → no gate. A pass persists the markers a later per-day call
+    material burn-text change reopens the gate (``confirmation_is_stale``) like a
+    new day's: only a fresh system review of the exact new text passes it
+    (:func:`stale_pass_rereviewed`); empty ``lf_indices`` → no gate. A pass persists the markers a later per-day call
     fast-passes on. The ``audit_state`` assembly mirrors ``run_day_pipeline``
     EXACTLY so the front-load hash equals the per-day recompute.
     """
@@ -440,7 +459,10 @@ def lf_gate_or_raise(
     gate_passes = False
     reason = ""
     if stale:
-        gate_passes = False  # explicit: a material label change reopens the gate
+        # A material label change reopens the gate like a new day's.
+        gate_passes, reason = stale_pass_rereviewed(
+            system_review_passes(state, date, _payload_text(payload))
+        )
     elif cli_confirmed:
         gate_passes = True
         reason = "--ost-audit-confirmed"
@@ -496,7 +518,9 @@ def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:
     persisted hash (resume short-circuit), or the shared
     ``state["ost_audit_confirmed_this_run"]`` (``--ost-audit-confirmed`` on THIS
     run) bypass — one operator signal covers both surfaces. A material change to
-    any short's burned text reopens the gate (``confirmation_is_stale``); empty
+    any short's burned text (or re-picked moment) reopens the gate
+    (``confirmation_is_stale``) like a new day's: only a fresh system review of
+    the exact new Shorts passes it (:func:`stale_pass_rereviewed`); empty
     ``entries`` (no shorts) → no gate.
     """
     if not entries:
@@ -518,7 +542,10 @@ def shorts_gate_or_raise(output_base: Path, date: str, entries, state) -> None:
     gate_passes = False
     reason = ""
     if stale:
-        gate_passes = False  # explicit: a material burn-text change reopens the gate
+        # A material burn-text change reopens the gate like a new day's.
+        gate_passes, reason = stale_pass_rereviewed(
+            surface_review_passes(state, "shorts", date, entries)
+        )
     elif cli_confirmed:
         gate_passes = True
         reason = "--ost-audit-confirmed"
