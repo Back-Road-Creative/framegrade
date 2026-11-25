@@ -18,6 +18,7 @@ from .handlers.cleanup import cmd_cleanup
 from .handlers.clip_claims import cmd_clip_claims
 from .handlers.comments import cmd_comments
 from .handlers.console import cmd_console
+from .handlers.day_reels import cmd_day_reels
 from .handlers.dispatch_queue import cmd_dispatch_queue
 from .handlers.doctor import cmd_doctor
 from .handlers.drive import cmd_drive
@@ -74,6 +75,7 @@ __all__ = [
     "cmd_dispatch_queue",
     "cmd_queue",
     "cmd_review_set",
+    "cmd_day_reels",
     "cmd_enqueue_asset",
     "cmd_enqueue_plan",
     "cmd_catalog_classify",
@@ -123,6 +125,7 @@ _COMMAND_MAP = {
     "review-set": cmd_review_set,
     "enqueue-plan": cmd_enqueue_plan,
     "enqueue-asset": cmd_enqueue_asset,
+    "day-reels": cmd_day_reels,
     "publishing-status": cmd_publishing_status,
     "catalog-classify": cmd_catalog_classify,
     "catalog-inventory": cmd_catalog_inventory,

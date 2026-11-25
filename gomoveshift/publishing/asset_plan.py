@@ -110,6 +110,7 @@ def build_asset_sidecar(
     project_name: Optional[str] = None,
     format: Optional[str] = None,
     tiktok_privacy_level: str = DEFAULT_TIKTOK_PRIVACY_LEVEL,
+    caption: Optional[str] = None,
 ) -> dict:
     """Build a ``{"shorts": [record]}`` document ``load_publish_plan``
     accepts for a single standalone asset. Raises ``ValueError`` on an
@@ -119,7 +120,12 @@ def build_asset_sidecar(
     ``format`` defaults to ``None`` ("not stated"), not a new ``"asset"``
     string: ``models.KNOWN_FORMATS`` is a closed set this door doesn't own,
     and ``plan_io`` treats ``None`` as a distinct valid state. Pass an
-    explicit ``models.FORMAT_PHOTO``/``FORMAT_LONG_FORM`` when known."""
+    explicit ``models.FORMAT_PHOTO``/``FORMAT_LONG_FORM`` when known.
+
+    ``caption``, when given, is the whole post text for Instagram (its
+    ``caption``) and Facebook (its ``description``), byte for byte, instead
+    of the title + description composition. A day reel's caption is one
+    owner-written line, not a title with a body."""
     unknown = sorted(set(platforms) - KNOWN_PLATFORMS)
     if unknown:
         raise ValueError(f"build_asset_sidecar: unknown platform(s): {unknown}")
@@ -134,9 +140,11 @@ def build_asset_sidecar(
     if "youtube" in platforms:
         payloads["youtube"] = _youtube_payload(title, description, tags)
     if "instagram" in platforms:
-        payloads["instagram"] = _instagram_payload(title, description)
+        payloads["instagram"] = (
+            {"caption": caption} if caption is not None else _instagram_payload(title, description)
+        )
     if "facebook" in platforms:
-        payloads["facebook"] = _facebook_payload(description)
+        payloads["facebook"] = _facebook_payload(caption if caption is not None else description)
     if "tiktok" in platforms:
         payloads["tiktok"] = _tiktok_payload(title, tiktok_privacy_level)
 
