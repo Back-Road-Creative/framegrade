@@ -340,6 +340,50 @@ def test_g2b8_superlong_keeps_no_pass_so_a_resume_without_the_flag_parks(tmp_pat
     _pending(tmp_path, "superlong", SURFACES["superlong"][1](), state)
 
 
+# --- a passed day whose Shorts changed passes again like a new day ------
+# The stored pass covers the old Shorts only (re-picked moments change the
+# hash). A fresh system review agreeing on the exact new Shorts passes them,
+# as it would a never-reviewed day (JP, 2026-11-25); anything less waits.
+
+
+def _shorts_passed_then_repicked(tmp_path):
+    state = _state()
+    _record(state, "shorts", SURFACES["shorts"][1]())
+    _gate(tmp_path, "shorts", SURFACES["shorts"][1](), state)
+    repicked = [_short(1), _short(2, start=120.0, end=158.0)]
+    return state, state["shorts_ost_audit_hash"][D], repicked
+
+
+def test_g2b12_repicked_shorts_pass_on_a_fresh_agreeing_review(tmp_path, caplog):
+    state, old_hash, repicked = _shorts_passed_then_repicked(tmp_path)
+    record = _record(state, "shorts", repicked)
+    with caplog.at_level(logging.INFO):
+        _gate(tmp_path, "shorts", repicked, state)
+    assert state["shorts_ost_audit_hash"][D] not in (None, old_hash)
+    assert _no_markers(tmp_path)
+    copy = tmp_path / "out" / f"shorts_ost_system_review_{D}.json"
+    assert json.loads(copy.read_text())["text_hash"] == record["text_hash"]
+    assert "earlier pass covered different text" in caplog.text
+
+
+def test_g2b12_repicked_shorts_without_a_fresh_review_stay_pending(tmp_path):
+    state, _, repicked = _shorts_passed_then_repicked(tmp_path)  # record still the old Shorts
+    _pending(tmp_path, "shorts", repicked, state, match="earlier pass covered different text")
+
+
+def test_g2b12_repicked_shorts_without_the_opt_in_stay_pending(tmp_path):
+    state, _, repicked = _shorts_passed_then_repicked(tmp_path)
+    _record(state, "shorts", repicked)
+    state["ost_system_review_this_run"] = None
+    _pending(tmp_path, "shorts", repicked, state, match="earlier pass covered different text")
+
+
+def test_g2b12_repicked_shorts_with_a_refused_claim_stay_pending(tmp_path):
+    state, _, repicked = _shorts_passed_then_repicked(tmp_path)
+    _record(state, "shorts", repicked, refused=(2,))
+    _pending(tmp_path, "shorts", repicked, state, match="system review did not pass")
+
+
 # --- through the measuring loops, no marker, no confirmation --------
 
 

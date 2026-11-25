@@ -112,6 +112,7 @@ from .ost_audit_sidecar import (
     postburn_ost_gate_or_raise,
     read_confirmed_hash,
     shorts_gate_or_raise,
+    stale_pass_rereviewed,
     stamp_confirmed,
     superlong_gate_or_raise,
     system_review_passes,
@@ -2684,7 +2685,10 @@ def run_day_pipeline(
         gate_passes = False
         reason = ""
         if _stale:
-            gate_passes = False  # explicit: a material label change reopens the gate
+            # A material label change reopens the gate like a new day's.
+            gate_passes, reason = stale_pass_rereviewed(
+                system_review_passes(state, date, _gate_lf_text)
+            )
         elif _cli_confirmed:
             gate_passes = True
             reason = "--ost-audit-confirmed"
