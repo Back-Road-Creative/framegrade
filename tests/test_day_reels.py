@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -293,3 +294,18 @@ def test_authorize_token_is_parsed_from_rclone_output():
     assert day_reels.parse_authorize_output(out) == '{"access_token":"a","refresh_token":"r"}'
     with pytest.raises(ValueError):
         day_reels.parse_authorize_output("no token here")
+
+
+def test_authorize_token_is_unwrapped_from_rclone_base64_reply():
+    # rclone v1.60 answers a base64 config blob with a base64 (URL-safe, unpadded)
+    # {"token": "<token JSON>"} -- captured from a real run against a fake token server.
+    inner = '{"access_token":"FAKEACCESS","token_type":"Bearer","refresh_token":"FAKEREFRESH"}'
+    wrapped = base64.urlsafe_b64encode(json.dumps({"token": inner}).encode()).decode().rstrip("=")
+    out = f"Paste the following into your remote machine --->\n{wrapped}\n<---End paste\n"
+    assert day_reels.parse_authorize_output(out) == inner
+    junk = base64.urlsafe_b64encode(b"[1, 2]").decode()
+    with pytest.raises(ValueError) as caught:
+        day_reels.parse_authorize_output(
+            f"Paste the following into your remote machine --->\n{junk}\n<---End paste"
+        )
+    assert junk not in str(caught.value)

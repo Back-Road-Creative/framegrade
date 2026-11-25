@@ -7,6 +7,7 @@ has no location tags. See ``docs/social-publishing-queue.md`` ("Day reels from D
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -128,14 +129,30 @@ def parse_request(name: str, text: str) -> DayReelRequest:
 
 
 def parse_authorize_output(stdout: str) -> str:
-    """The token JSON ``rclone authorize`` prints between its paste markers."""
+    """The token JSON from what ``rclone authorize`` prints between its paste markers.
+
+    Given a base64 config blob, rclone v1.60 answers in kind: base64 (URL-safe,
+    unpadded) of ``{"token": "<token JSON>"}``. Plain token JSON (older form) is
+    accepted too. Errors never echo the reply: it is a credential."""
     start = stdout.find(_PASTE_START)
     end = stdout.find(_PASTE_END)
     if start < 0 or end <= start:
         raise ValueError("rclone authorize printed no token")
-    token = stdout[start + len(_PASTE_START) : end].strip()
-    json.loads(token)
-    return token
+    reply = stdout[start + len(_PASTE_START) : end].strip()
+    if not reply.startswith("{"):
+        try:
+            padded = reply + "=" * (-len(reply) % 4)
+            wrapper = json.loads(base64.urlsafe_b64decode(padded))
+            reply = wrapper["token"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise ValueError("rclone authorize reply is not a token") from exc
+    try:
+        token = json.loads(reply)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("rclone authorize reply is not a token") from exc
+    if not isinstance(token, dict) or not token.get("refresh_token"):
+        raise ValueError("rclone authorize reply has no refresh token")
+    return reply
 
 
 class RcloneDrive:
