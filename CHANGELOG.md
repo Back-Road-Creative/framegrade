@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.153] - 2026-11-25
+
+### Fixed
+
+- A drive parked at the OST gate is resumed once per new installed version when its recipe asks for the system review, so a code fix can clear a parked day without a person; the `DRIVE WAITING:` line now records the version that stopped.
+
 ## [0.3.152] - 2026-11-25
 
 ### Fixed
@@ -1776,7 +1782,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.152...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.153...HEAD
+[0.3.153]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.152...v0.3.153
 [0.3.152]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.151...v0.3.152
 [0.3.151]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.150...v0.3.151
 [0.3.150]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.149...v0.3.150
