@@ -73,6 +73,29 @@ class PhotoReadbackUnknownError(Exception):
         self.story_id = story_id
 
 
+class PhotoCommentUnknownError(Exception):
+    """The first comment is unconfirmed; nothing about the photo post changed.
+
+    Raised when the existing-comment read fails (nothing was posted) or when a
+    comment write returned no trustworthy ID. Either way the next attempt reads
+    first, so a comment Graph created whose answer was lost is found, not
+    posted twice. Carries no response, request, token or comment text.
+    """
+
+    def __init__(self, page_id: str, story_id: str):
+        super().__init__("Facebook first comment unconfirmed; the post itself is unchanged")
+        self.page_id = page_id
+        self.story_id = story_id
+
+
+#: Comment text bound for the approved first comment.
+COMMENT_LIMIT = 1000
+#: Pages of comments (100 each) read for an existing copy before posting.
+COMMENT_CHECK_MAX_PAGES = 10
+_COMMENT_ID = re.compile(r"[0-9]+(?:_[0-9]+)*")
+_CURSOR = re.compile(r"[A-Za-z0-9_=-]{1,512}")
+
+
 class _UnconfirmedError(Exception):
     """Internal marker carrying no untrusted response details."""
 
@@ -217,3 +240,58 @@ class FacebookPagePhotoClient:
         except Exception:  # noqa: BLE001 -- readback cannot authorize repeating a write
             pass
         raise PhotoReadbackUnknownError(self._page_id, receipt.photo_id, story_id)
+
+    def post_comment(self, story_id: str, text: str) -> str:
+        """Post ``text`` once as this Page's comment on its own photo post.
+
+        Reads the post's comments first and returns the ID of this Page's
+        comment that already says exactly ``text``, without posting. Otherwise
+        sends one comment write. Validation errors precede network access; any
+        later failure raises ``PhotoCommentUnknownError``. Requires the Page
+        token to hold ``pages_manage_engagement``.
+        """
+        if not isinstance(story_id, str) or not re.fullmatch(rf"{self._page_id}_[0-9]+", story_id):
+            raise ValueError("Story ID must belong to this Page")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or len(text) > COMMENT_LIMIT
+            or any((ord(c) < 32 and c != "\n") or ord(c) == 127 for c in text)
+        ):
+            raise ValueError("Comment must be 1-1000 characters without control characters")
+        try:
+            after = None
+            for _ in range(COMMENT_CHECK_MAX_PAGES):
+                params = {"fields": "id,message,from", "filter": "stream", "limit": "100"}
+                if after is not None:
+                    params["after"] = after
+                page, _ = self._request("GET", f"{story_id}/comments", params=params)
+                comments = page.get("data")
+                if not isinstance(comments, list):
+                    raise _UnconfirmedError
+                for comment in comments:
+                    if not isinstance(comment, dict):
+                        raise _UnconfirmedError
+                    source = comment.get("from")
+                    if (
+                        comment.get("message") == text
+                        and isinstance(source, dict)
+                        and source.get("id") == self._page_id
+                        and _matches(comment.get("id"), _COMMENT_ID)
+                    ):
+                        return comment["id"]
+                paging = page.get("paging")
+                cursors = paging.get("cursors") if isinstance(paging, dict) else None
+                after = cursors.get("after") if isinstance(cursors, dict) else None
+                if not (isinstance(paging, dict) and paging.get("next")) or not _matches(
+                    after, _CURSOR
+                ):
+                    break
+            body, _ = self._request("POST", f"{story_id}/comments", data={"message": text})
+            comment_id = body.get("id")
+            if not _matches(comment_id, _COMMENT_ID):
+                raise _UnconfirmedError
+            return comment_id
+        except Exception:  # noqa: BLE001 -- an unconfirmed comment must stay unknown
+            pass
+        raise PhotoCommentUnknownError(self._page_id, story_id)

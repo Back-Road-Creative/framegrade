@@ -8,6 +8,7 @@ import requests
 
 from gomoveshift.publishing.facebook_photo_client import (
     FacebookPagePhotoClient,
+    PhotoCommentUnknownError,
     PhotoReadbackUnknownError,
     PhotoUploadUnknownError,
 )
@@ -301,3 +302,78 @@ def test_readback_can_be_repeated_without_repeating_upload():
     assert caught.value.__context__ is None
     assert instance.read_status(receipt).is_published is False
     assert sum(call[0] == "POST" for call in session.calls) == 1
+
+
+COMMENT = "Day 9 on the journal: https://gomoveshift.com/journeys/ireland-2026-11/#day-9"
+
+
+def comments(*items, after=None):
+    body = {"data": list(items)}
+    if after:
+        body["paging"] = {"cursors": {"after": after}, "next": "https://elsewhere.example/x"}
+    return Response(body)
+
+
+def test_comment_reads_then_posts_once_with_bearer_and_no_redirects():
+    instance, session = client(comments(), Response({"id": "902_77"}))
+    assert instance.post_comment("123_902", COMMENT) == "902_77"
+    (read, _, read_opts), (write, url, write_opts) = session.calls
+    assert read == "GET" and read_opts["params"]["fields"] == "id,message,from"
+    assert (write, url) == ("POST", "https://graph.facebook.com/v21.0/123_902/comments")
+    assert write_opts["data"] == {"message": COMMENT}
+    for _, call_url, options in session.calls:
+        assert options["allow_redirects"] is False
+        assert options["headers"] == {"Authorization": f"Bearer {TOKEN}"}
+        assert TOKEN not in call_url and "access_token" not in str(options.get("params"))
+
+
+def test_existing_own_comment_is_returned_without_posting_across_pages():
+    stranger = {"id": "902_1", "message": COMMENT, "from": {"id": "999"}}
+    ours = {"id": "902_2", "message": COMMENT, "from": {"id": "123"}}
+    instance, session = client(comments(stranger, after="NEXT"), comments(ours))
+    assert instance.post_comment("123_902", COMMENT) == "902_2"
+    assert [c[0] for c in session.calls] == ["GET", "GET"]
+    assert session.calls[1][2]["params"]["after"] == "NEXT"
+    # The cursor is sent to our own base URL; the "next" link is never followed.
+    assert all(c[1].startswith("https://graph.facebook.com/") for c in session.calls)
+
+
+@pytest.mark.parametrize(
+    "story,text",
+    [
+        ("999_902", COMMENT),
+        ("123", COMMENT),
+        ("123_902", ""),
+        ("123_902", "  \n"),
+        ("123_902", "x" * 1001),
+        ("123_902", "tab\there"),
+        ("123_902", None),
+    ],
+)
+def test_invalid_comment_input_fails_before_network(story, text):
+    instance, session = client()
+    with pytest.raises(ValueError):
+        instance.post_comment(story, text)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [Response({"error": {"message": TOKEN}}, status=403)],
+        [Response({"nope": []})],
+        [requests.ConnectionError(TOKEN)],
+        [comments(), Response({"error": {"code": 200}}, status=400)],
+        [comments(), Response({"id": "not an id"})],
+        [comments(), requests.Timeout(TOKEN)],
+    ],
+)
+def test_unconfirmed_comment_raises_without_sensitive_details(responses):
+    instance, session = client(*responses)
+    with pytest.raises(PhotoCommentUnknownError) as caught:
+        instance.post_comment("123_902", COMMENT)
+    assert caught.value.story_id == "123_902" and caught.value.__cause__ is None
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert TOKEN not in rendered and COMMENT not in rendered
+    if responses[0].__class__ is not Response or responses[0].status_code != 200:
+        assert len(session.calls) == 1  # a failed read never posts
