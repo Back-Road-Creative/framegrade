@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,8 @@ from ...tracking import (
     MetricRow,
     MetricsCollector,
     TrackingStore,
+    growth_review,
+    partner_progress,
     upsert_audience_online,
     upsert_from_metrics,
 )
@@ -111,9 +114,11 @@ def cmd_metrics(args, config):
         return _cmd_metrics_enrol_channel()
     if args.metrics_command == "feed-share":
         return _cmd_metrics_feed_share(args, config)
+    if args.metrics_command == "growth-review":
+        return _cmd_metrics_growth_review(args, config)
 
     print(
-        "Usage: gomoveshift metrics {collect,backfill-ids,best-times,report,feed-share,analytics-probe,enrol-channel,export-evidence}",
+        "Usage: gomoveshift metrics {collect,backfill-ids,best-times,report,feed-share,growth-review,analytics-probe,enrol-channel,export-evidence}",
         file=sys.stdout,
     )
     return 1
@@ -880,6 +885,46 @@ def _cmd_metrics_feed_share(args, config) -> int:
         print(f"  verdict: MET ({met}/{measured} days >= {threshold})")
     else:
         print(f"  verdict: NOT MET ({met}/{measured} days >= {threshold})")
+    return 0
+
+
+def _cmd_metrics_growth_review(args, config) -> int:
+    """``metrics growth-review``: the weekly suggest-only review (docs/pipeline/186).
+
+    Prints ``PARTNER_PROGRESS`` lines (live, unless ``--offline``), one
+    ``GROWTH_FORMAT``/``GROWTH_UNDERPERFORMER`` line per format group, one
+    ``POST_FAILED``/``POST_STUCK``/``POST_DUPLICATE`` line per problem, and a
+    closing ``GROWTH_REVIEW`` summary. Reads only; always exits 0, like
+    ``feed-share``: thin data is the normal case, never a fault.
+    """
+    today = date.today()
+    now = datetime.now(timezone.utc)
+    records = TrackingStore().load_all_records()
+
+    if getattr(args, "offline", False):
+        print("PARTNER_PROGRESS skipped=offline")
+    else:
+        counts = partner_progress.fetch_channel_counts(YouTubeCollector(), records, today)
+        for line in partner_progress.report_lines(counts, today):
+            print(line)
+
+    scores = growth_review.format_scorecard(growth_review.samples_from_records(records, today))
+    for score in scores:
+        print(score.line())
+
+    db_path = Path(config.seo.storage_path) / "social_queue.sqlite3"
+    problems: list = []
+    if db_path.is_file():
+        try:
+            problems = growth_review.post_problems(db_path, now)
+        except sqlite3.Error as exc:
+            print(f"POST_CHECK_FAILED reason={exc}")
+    else:
+        print(f"POST_CHECK_SKIPPED reason=no queue at {db_path}")
+    for problem in problems:
+        print(problem.line())
+
+    print(growth_review.summary_line(scores, problems))
     return 0
 
 
