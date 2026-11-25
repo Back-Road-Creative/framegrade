@@ -77,6 +77,21 @@ across crashes, leases and retry limits. Fresh privacy/account checks and truste
 approval remain mandatory. This client provides neither approval validation,
 idempotency nor exactly-once delivery.
 
+## Approved first comment
+
+`post_comment(story_id, text)` adds one Page comment to this Page's own photo
+post (`{page_id}_N`). Text is 1–1000 characters with no control characters but
+newlines; invalid input fails before network access. It first reads up to ten
+pages of the post's comments through the same Bearer, no-redirect transport
+(cursors are sent to the Graph base URL; a returned `next` link is never
+followed) and returns the ID of this Page's comment that already says exactly
+`text`, without posting. Otherwise it sends one comment write. A failed read
+posts nothing; any failure raises `PhotoCommentUnknownError`, which carries no
+response, token or comment text. Because the next attempt reads first, a lost
+answer is found rather than posted twice. The comment never changes the photo,
+its receipt or status. The Page token needs `pages_manage_engagement`. The
+caller supplies the approved text; this client does not validate approval.
+
 ## Qualification evidence
 
 The previously authorized single synthetic JPEG diagnostic verified multipart
