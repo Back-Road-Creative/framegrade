@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.152] - 2026-11-25
+
+### Fixed
+
+- A day whose on-screen text changed after it passed the OST gate (including Shorts re-picked onto new moments) is now gated like a new day: a fresh `--ost-system-review` record that agrees on the exact new text, refusing nothing, passes it. Before, the stale pass blocked even a fully agreeing review, so an unattended heal parked at the gate for good. Without the opt-in, or with any refused or disagreeing claim, the day still waits for a person, and nothing from the earlier pass carries over. Applies to the per-day, front-load and Shorts gates; superlong is unchanged.
+
 ## [0.3.151] - 2026-11-24
 
 ### Fixed
@@ -1770,7 +1776,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.151...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.152...HEAD
+[0.3.152]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.151...v0.3.152
 [0.3.151]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.150...v0.3.151
 [0.3.150]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.149...v0.3.150
 [0.3.149]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.148...v0.3.149
