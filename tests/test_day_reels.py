@@ -66,13 +66,21 @@ def _renderer(calls):
     return render
 
 
+PROBE = {"width": 1080, "height": 1920, "duration": "21.0"}
+
+
 @pytest.fixture(autouse=True)
 def _fake_ffprobe(monkeypatch):
-    stream = {"codec_type": "video", "codec_name": "h264", "width": 1080, "height": 1920}
-    probe = json.dumps({"format": {"duration": "21.0"}, "streams": [stream]})
-    monkeypatch.setattr(
-        subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, probe, "")
-    )
+    probe = dict(PROBE)
+
+    def run(cmd, **kw):
+        stream = {"codec_type": "video", "codec_name": "h264"}
+        stream.update(width=probe["width"], height=probe["height"])
+        body = json.dumps({"format": {"duration": probe["duration"]}, "streams": [stream]})
+        return subprocess.CompletedProcess(cmd, 0, body, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return probe
 
 
 def _run(tmp_path, drive, *, privacy=None, renderer=None, apply=True, location_free=True):
@@ -123,7 +131,9 @@ def test_parse_request_accepts_a_valid_request():
         ({"caption": "x" * 2201}, "caption"),
         ({"recording_date": "25/11/2026"}, "recording_date"),
         ({"platforms": []}, "platforms"),
-        ({"platforms": ["youtube"]}, "platforms"),
+        ({"platforms": ["tiktok"]}, "platforms"),
+        ({"journal_url": "http://gomoveshift.com/x"}, "journal_url"),
+        ({"journal_url": "https://evil.example/gomoveshift.com/"}, "journal_url"),
         ({"at": "2026-11-25T10:00:00"}, "at"),
     ],
 )
@@ -147,7 +157,7 @@ def test_verified_render_enqueues_blurred_reel_with_exact_caption(tmp_path):
     assert [o.state for o in outcomes] == ["enqueued"]
     assert len(calls) == 1
     rows = _rows(tmp_path)
-    assert [r[0] for r in rows] == ["facebook", "instagram"]
+    assert [r[0] for r in rows] == ["facebook", "instagram", "youtube"]
     assert {r[1] for r in rows} == {f"day-reel-{VIDEO_ID}"}
     assert rows[0][2].startswith("2026-11-25T23:00:00")
 
@@ -202,7 +212,7 @@ def test_location_metadata_left_in_render_is_refused(tmp_path):
 
 
 def test_invalid_request_is_refused_once(tmp_path):
-    drive = FakeDrive({"bad.json": _request(platforms=["youtube"])})
+    drive = FakeDrive({"bad.json": _request(platforms=["tiktok"])})
     outcomes, calls = _run(tmp_path, drive)
     assert [o.state for o in outcomes] == ["refused"]
     assert drive.downloads == [] and calls == []
@@ -214,7 +224,7 @@ def test_a_handled_request_is_never_processed_twice(tmp_path):
     outcomes, calls = _run(tmp_path, drive)
     assert [o.state for o in outcomes] == ["done"]
     assert calls == [] and drive.downloads == [VIDEO_ID]
-    assert len(_rows(tmp_path)) == 2
+    assert len(_rows(tmp_path)) == 3
 
 
 def test_dry_run_reads_requests_but_downloads_and_writes_nothing(tmp_path):
@@ -293,3 +303,87 @@ def test_authorize_token_is_parsed_from_rclone_output():
     assert day_reels.parse_authorize_output(out) == '{"access_token":"a","refresh_token":"r"}'
     with pytest.raises(ValueError):
         day_reels.parse_authorize_output("no token here")
+
+
+# --- YouTube Shorts ----------------------------------------------------------
+
+
+def _record(tmp_path):
+    sidecar = Path(_rows(tmp_path)[0][3])
+    return json.loads(sidecar.read_text())["shorts"][0]
+
+
+def test_every_reel_also_goes_to_youtube_as_a_short(tmp_path):
+    drive = FakeDrive(
+        {"day10.json": _request(journal_url="https://gomoveshift.com/journal/day-10/")}
+    )
+    outcomes, calls = _run(tmp_path, drive)
+
+    assert [o.state for o in outcomes] == ["enqueued"]
+    assert "youtube" in outcomes[0].reason
+    youtube = _record(tmp_path)["payloads"]["youtube"]
+    assert youtube["title"] == "Up on Peakeen Ridge, Sheep's Head."
+    assert youtube["description"] == (
+        CAPTION + "\n\nRead the full day: https://gomoveshift.com/journal/day-10/\n\n#Shorts"
+    )
+    assert youtube["tags"] == ["Ireland", "CountyCork", "WestCork", "SheepsHead"]
+    # The YouTube upload guard admits only canonical short names.
+    assert calls[0][1].name == "short_01.mp4"
+    # Facebook and Instagram keep the caption byte for byte.
+    record = _record(tmp_path)
+    assert record["payloads"]["instagram"] == {"caption": CAPTION}
+    assert record["payloads"]["facebook"] == {"description": CAPTION}
+
+
+def test_youtube_listed_in_the_request_is_queued_once(tmp_path):
+    drive = FakeDrive({"day10.json": _request(platforms=["instagram", "youtube"])})
+    _run(tmp_path, drive)
+    assert [r[0] for r in _rows(tmp_path)] == ["instagram", "youtube"]
+
+
+@pytest.mark.parametrize(
+    "probe, needle",
+    [({"width": 1920, "height": 1080}, "landscape"), ({"duration": "181.0"}, "180s")],
+)
+def test_a_reel_that_is_not_a_short_stays_off_youtube(tmp_path, _fake_ffprobe, probe, needle):
+    _fake_ffprobe.update(probe)
+    drive = FakeDrive({"day10.json": _request()})
+    outcomes, _ = _run(tmp_path, drive)
+    assert [o.state for o in outcomes] == ["enqueued"]
+    assert needle in outcomes[0].reason
+    assert [r[0] for r in _rows(tmp_path)] == ["facebook", "instagram"]
+
+
+def test_youtube_title_is_the_first_line_without_hashtags():
+    assert day_reels.youtube_title("Cliffs at <Slieve League> #Donegal", "2026-12-01") == (
+        "Cliffs at Slieve League"
+    )
+    assert day_reels.youtube_title("#Ireland #Donegal", "2026-12-01") == (
+        "GoMoveShift day reel, 01 Dec 2026"
+    )
+    long = day_reels.youtube_title("word " * 40, "2026-12-01")
+    assert len(long) <= 100 and long.endswith("\u2026")
+
+
+def test_youtube_description_keeps_an_existing_shorts_tag_once():
+    text = day_reels.youtube_description("Rain on the Gap #Shorts", None)
+    assert text == "Rain on the Gap #Shorts"
+
+
+def test_the_queued_short_passes_the_youtube_upload_gates(tmp_path):
+    """What the drain checks before ``videos.insert``: the filename guard and
+    the final-text review (a GPS-less Short has none to refuse)."""
+    import re
+
+    from gomoveshift.config import DriveConfig
+    from gomoveshift.publishing.plan_io import load_publish_plan
+    from gomoveshift.publishing.youtube_adapter import short_review_refusal
+
+    drive = FakeDrive({"day10.json": _request()})
+    _run(tmp_path, drive)
+    youtube_row = [r for r in _rows(tmp_path) if r[0] == "youtube"][0]
+    record = load_publish_plan(Path(youtube_row[3])).shorts[0]
+
+    assert re.match(DriveConfig().youtube_upload_filename_pattern, Path(record.media.path).name)
+    assert short_review_refusal(record) is None
+    assert record.payloads.youtube.title == "Up on Peakeen Ridge, Sheep's Head."

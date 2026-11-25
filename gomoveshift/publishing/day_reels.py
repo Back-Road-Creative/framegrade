@@ -24,16 +24,30 @@ from ..pipeline.orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, rel
 from .asset_plan import build_asset_sidecar, write_asset_bundle
 from .dispatch import PRIVACY_REQUIRED_CLASSES, PRIVACY_VERIFIED
 from .enqueue_from_plan import enqueue_from_plan_sidecar
-from .media_fingerprint import verify_media
+from .media_fingerprint import fingerprint_media, verify_media
 from .plan_io import load_publish_plan
 from .queue import open_queue_db
 
 REQUEST_SCHEMA = "gms.day_reel_request/v1"
-PLATFORMS = ("facebook", "instagram")
+PLATFORMS = ("facebook", "instagram", "youtube")
+#: Every day reel also goes to YouTube as a Short, whether or not the request
+#: lists it (owner, 2026-11-25): only a reel YouTube would not treat as a Short
+#: (landscape, or longer than ``MAX_SHORT_SECONDS``) stays off it.
+YOUTUBE = "youtube"
+#: YouTube Shorts: vertical or square, up to three minutes.
+MAX_SHORT_SECONDS = 180.0
+#: ``videos.insert`` limits: title 100 characters, tags 500 in total.
+MAX_YOUTUBE_TITLE_CHARS = 100
+MAX_YOUTUBE_TAG_CHARS = 450
+#: The YouTube upload guard (``drive.youtube_upload_filename_pattern``) admits
+#: only canonical names, so the one render every platform shares is a short.
+RENDER_NAME = "short_01.mp4"
 #: Instagram's caption limit; Facebook's is far larger.
 MAX_CAPTION_CHARS = 2200
 REMOTE = "gmsdayreels"
-_FIELDS = {"schema", "video_file_id", "caption", "recording_date", "platforms", "at"}
+_FIELDS = {"schema", "video_file_id", "caption", "recording_date", "platforms", "at", "journal_url"}
+_JOURNAL_URL = re.compile(r"https://(?:www\.)?gomoveshift\.com/[^\s<>\"]{0,300}")
+_HASHTAG = re.compile(r"#(\w+)")
 _DRIVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{9,127}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _PASTE_START = "Paste the following into your remote machine --->"
@@ -52,6 +66,7 @@ class DayReelRequest:
     recording_date: str
     platforms: Tuple[str, ...]
     at: Optional[str]
+    journal_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +132,12 @@ def parse_request(name: str, text: str) -> DayReelRequest:
             raise ValueError(f"{name}: at must be an ISO-8601 time with a UTC offset")
         at = parsed.astimezone(timezone.utc).isoformat()
 
+    journal_url = doc.get("journal_url")
+    if journal_url is not None and (
+        not isinstance(journal_url, str) or not _JOURNAL_URL.fullmatch(journal_url)
+    ):
+        raise ValueError(f"{name}: journal_url must be an https://gomoveshift.com/ page")
+
     return DayReelRequest(
         name=name,
         video_file_id=video_file_id,
@@ -124,7 +145,56 @@ def parse_request(name: str, text: str) -> DayReelRequest:
         recording_date=recording_date,
         platforms=tuple(platforms),
         at=at,
+        journal_url=journal_url,
     )
+
+
+def youtube_title(caption: str, recording_date: str) -> str:
+    """The Short's title: the caption's first line without hashtags, at most
+    100 characters (cut at a word), no angle brackets (``videos.insert``
+    refuses them). A caption that is only hashtags names the day."""
+    first = caption.strip().splitlines()[0] if caption.strip() else ""
+    text = " ".join(_HASHTAG.sub("", first).replace("<", "").replace(">", "").split())
+    text = text.strip(" ,;:-")
+    if not text:
+        text = f"GoMoveShift day reel, {date.fromisoformat(recording_date):%d %b %Y}"
+    if len(text) <= MAX_YOUTUBE_TITLE_CHARS:
+        return text
+    cut = text[: MAX_YOUTUBE_TITLE_CHARS - 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return cut + "\u2026"
+
+
+def youtube_tags(caption: str) -> Tuple[str, ...]:
+    """The caption's hashtags, in order, deduplicated, within the tag limit."""
+    tags, total = [], 0
+    for tag in dict.fromkeys(_HASHTAG.findall(caption)):
+        if total + len(tag) + 1 > MAX_YOUTUBE_TAG_CHARS:
+            break
+        tags.append(tag)
+        total += len(tag) + 1
+    return tuple(tags)
+
+
+def youtube_description(caption: str, journal_url: Optional[str]) -> str:
+    """The caption verbatim, the journal page when the request names one,
+    and ``#Shorts``. Angle brackets go: ``videos.insert`` refuses them."""
+    parts = [caption.strip().replace("<", "").replace(">", "")]
+    if journal_url:
+        parts.append(f"Read the full day: {journal_url}")
+    if "#shorts" not in caption.lower():
+        parts.append("#Shorts")
+    return "\n\n".join(parts)
+
+
+def _short_platforms(request: DayReelRequest, media) -> Tuple[Tuple[str, ...], str]:
+    """The request's platforms plus YouTube, unless the render is not a Short.
+    Returns ``(platforms, note)``; ``note`` says why YouTube was left out."""
+    base = tuple(p for p in request.platforms if p != YOUTUBE)
+    if media.width > media.height:
+        return base, "YouTube skipped: landscape is not a Short"
+    if float(media.duration_seconds) > MAX_SHORT_SECONDS:
+        return base, f"YouTube skipped: over {int(MAX_SHORT_SECONDS)}s is not a Short"
+    return base + (YOUTUBE,), ""
 
 
 def parse_authorize_output(stdout: str) -> str:
@@ -360,7 +430,7 @@ def _process_one(
     if work.exists():
         shutil.rmtree(work)
     incoming = work / "incoming"
-    output = work / "day_reel.mp4"
+    output = work / RENDER_NAME
     mask = work / "privacy-mask.mkv"
     try:
         try:
@@ -380,13 +450,14 @@ def _process_one(
     if not location_check(output):
         return _refuse(ledger, request, "location metadata is still present in the render")
 
+    platforms, note = _short_platforms(request, fingerprint_media(output))
     doc = build_asset_sidecar(
         output,
-        title=request.caption,
-        description=request.caption,
-        tags=(),
+        title=youtube_title(request.caption, request.recording_date),
+        description=youtube_description(request.caption, request.journal_url),
+        tags=youtube_tags(request.caption),
         recording_date=request.recording_date,
-        platforms=request.platforms,
+        platforms=platforms,
         scheduled_at_utc=request.at or now_utc,
         project_name=f"day-reel-{request.video_file_id}",
         caption=request.caption,
@@ -405,7 +476,7 @@ def _process_one(
     present = result.already_present_count
     record = {"name": request.name, "state": "enqueued", "sidecar": str(sidecar_path)}
     record.update(video_file_id=request.video_file_id, delivery_ids=list(delivery_ids))
+    record.update(platforms=list(platforms))
     _write_json(ledger, record)
-    return Outcome(
-        request.name, "enqueued", f"{len(delivery_ids)} new, {present} already queued", delivery_ids
-    )
+    reason = f"{len(delivery_ids)} new, {present} already queued ({', '.join(platforms)})"
+    return Outcome(request.name, "enqueued", reason + (f"; {note}" if note else ""), delivery_ids)
