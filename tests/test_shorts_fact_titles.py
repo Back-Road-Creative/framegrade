@@ -18,7 +18,7 @@ from gomoveshift.pipeline import longform_metadata as lm
 from gomoveshift.pipeline import social_generator as sg
 from gomoveshift.pipeline.social_generator import SocialGenerator, TitleFacts, title_stamp
 from gomoveshift.pipeline.title_decision import short_place_facts
-from gomoveshift.publishing.anti_spam_gate import shared_prefix_groups
+from gomoveshift.publishing.anti_spam_gate import shared_prefix_groups, title_prefix_key
 
 LABEL = "Polk County, NC"
 REGIONS = ["Polk County, North Carolina"]
@@ -135,6 +135,22 @@ def test_a_published_title_is_never_repeated(monkeypatch):
     monkeypatch.setattr(lm, "load_published_titles", lambda: {"Tryon"})
     (post,) = _run([_route("Tryon")])
     assert post.youtube_title == "Polk County"
+
+
+@pytest.mark.parametrize("published", [set(), {"Virginia to Pennsylvania in 4K — Part 1 of 3"}])
+def test_a_place_title_never_shares_its_first_three_words_with_a_published_title(
+    monkeypatch, published
+):
+    # 2026-11-25: the nightly sync gave the VA->PA 20th Short the bare title
+    # "Virginia to Pennsylvania", the opener of the published long-forms, while
+    # its neighbours kept "Mar 5, Nth stretch: Virginia to Pennsylvania".
+    monkeypatch.setattr(lm, "load_published_titles", lambda: published)
+    (post,) = _run([_route("Virginia to Pennsylvania")])
+    blocked = {k for k in map(title_prefix_key, published) if k}
+    if not blocked:
+        assert post.youtube_title == "Virginia to Pennsylvania"
+    for title in (post.youtube_title, post.tiktok_title):
+        assert title_prefix_key(title) not in blocked, title
 
 
 def test_unverified_place_keeps_the_place_free_stamped_title():

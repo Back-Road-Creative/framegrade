@@ -1297,14 +1297,17 @@ class SocialGenerator:
     def _fact_title(self, seed_suffix: str, max_len: int, bodies: "Sequence[str]") -> str:
         """The first of ``bodies`` (measured places, most specific first) that fits
         ``max_len`` whole and is not a published title, not already used by this
-        batch's ``seed_suffix`` titles and shares no first-3-word prefix with one;
-        ``""`` when none is left."""
+        batch's ``seed_suffix`` titles and shares no first-3-word prefix with one
+        or with a published title (a long-form's "Virginia to Pennsylvania in 4K"
+        keeps a Short off the bare "Virginia to Pennsylvania"); ``""`` when none
+        is left."""
         from ..publishing.anti_spam_gate import text_opener_key, title_prefix_key
         from .longform_metadata import load_published_titles
 
-        published = {t.strip().lower() for t in load_published_titles()}
+        published_titles = load_published_titles()
+        published = {t.strip().lower() for t in published_titles}
         used = self._used_titles.get(seed_suffix, set())
-        used_prefixes = {k for k in map(title_prefix_key, used) if k}
+        used_prefixes = {k for k in map(title_prefix_key, [*used, *published_titles]) if k}
         # The queue gate refuses a title whose whole opener key a spooled text already holds.
         spooled = set(self._spooled_opener_keys().get("youtube", []))
         for body in dict.fromkeys(b.strip() for b in bodies if b and b.strip()):
