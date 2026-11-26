@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.161] - 2026-11-25
+
+### Fixed
+
+- A day whose shorts are re-rendered now removes the earlier plan's `short_NN.mp4` files first. A rank the new plan dropped (or a short whose render failed) was left on disk, counted by phase_d as an unattributed short, and failed the drive with `shorts_per_lf SPLIT-BRAIN` on every retry.
+
 ## [0.3.160] - 2026-11-25
 
 ### Added
@@ -1846,7 +1852,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...HEAD
+[0.3.161]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...v0.3.161
 [0.3.160]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...v0.3.160
 [0.3.159]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...v0.3.159
 [0.3.158]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.157...v0.3.158
