@@ -962,8 +962,13 @@ render is saved as `short_01.mp4` (the YouTube filename guard) and queued for Yo
 other platforms, unless it is landscape or longer than 180 s (the outcome line says
 `YouTube skipped: ...`). The Short's title is the caption's first line without hashtags (at most
 100 characters), its tags are the caption's hashtags, and its description is the caption, then
-`Read the full day: <journal_url>` when the request carries the optional `"journal_url"` (an
-`https://gomoveshift.com/` page), then `#Shorts`. It has no clip GPS votes, so no final-text
+`Read the full day: <link>`, then `#Shorts`. The link is the request's optional `"journal_url"`
+(an `https://gomoveshift.com/` page); without one it is the live journal day the reel was filmed
+on, read from the site's public `/journal-trips.json` (day *n* is the trip's `start` + *n* - 1,
+as on the journal page: `/journeys/<trip>/#day-<n>`). A date in no trip, two trips on one date or
+an unreachable site simply leaves the line out. A queue refusal (for example an active YouTube
+row for the same clip with a different plan) is recorded as `refused` for that request and never
+stops the requests after it. It has no clip GPS votes, so no final-text
 review applies; the drain's one-Short-per-hour rule may move it to the next free hour.
 
 **Drive access is a one-time read-only sign-in**: `day-reels authorize --folder-id <id>` runs

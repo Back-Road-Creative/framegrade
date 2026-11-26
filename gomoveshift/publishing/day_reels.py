@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -24,7 +25,11 @@ from typing import Callable, Iterator, Optional, Tuple
 from ..pipeline.orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, release_gpu_lock
 from .asset_plan import build_asset_sidecar, write_asset_bundle
 from .dispatch import PRIVACY_REQUIRED_CLASSES, PRIVACY_VERIFIED
-from .enqueue_from_plan import enqueue_from_plan_sidecar
+from .enqueue_from_plan import (
+    DeliveryPlanConflictError,
+    PublishPlanSidecarError,
+    enqueue_from_plan_sidecar,
+)
 from .media_fingerprint import fingerprint_media, verify_media
 from .plan_io import load_publish_plan
 from .queue import open_queue_db
@@ -185,6 +190,75 @@ def youtube_description(caption: str, journal_url: Optional[str]) -> str:
     if "#shorts" not in caption.lower():
         parts.append("#Shorts")
     return "\n\n".join(parts)
+
+
+JOURNAL_SITE = "https://gomoveshift.com"
+JOURNAL_TRIPS_URL = JOURNAL_SITE + "/journal-trips.json"
+MAX_JOURNAL_TRIPS_BYTES = 256 * 1024
+_TRIP_SLUG = re.compile(r"[a-z0-9-]{1,60}")
+
+
+def journal_day_link(trips_text: str, recording_date: str) -> Optional[str]:
+    """The live journal page for the trip day a reel was filmed on, or None.
+
+    ``trips_text`` is the site's ``/journal-trips.json``: ``{"trips": [{slug,
+    start, days, ...}]}``. Day *n* of a trip is ``start + n - 1``, the numbering
+    the journal page itself uses for its ``#day-n`` sections. A date that falls
+    in no trip's window, a malformed list, or two trips claiming the same date
+    give None: a reel without a link is fine, a link to the wrong day is not.
+    """
+    try:
+        filmed = date.fromisoformat(recording_date)
+        trips = json.loads(trips_text).get("trips")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(trips, list):
+        return None
+    links = []
+    for trip in trips:
+        if not isinstance(trip, dict):
+            continue
+        slug, start, days = trip.get("slug"), trip.get("start"), trip.get("days")
+        if not (isinstance(slug, str) and _TRIP_SLUG.fullmatch(slug)):
+            continue
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 366:
+            continue
+        try:
+            first = date.fromisoformat(start) if isinstance(start, str) else None
+        except ValueError:
+            continue
+        if first is None:
+            continue
+        n = (filmed - first).days + 1
+        if 1 <= n <= days:
+            links.append(f"{JOURNAL_SITE}/journeys/{slug}/#day-{n}")
+    return links[0] if len(links) == 1 else None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a redirect is a refusal: never follow it off the site
+
+
+def fetch_journal_trips(timeout_s: float = 20.0) -> Optional[str]:
+    """GET the site's public trip list (first-party, no data sent), or None."""
+    opener = urllib.request.build_opener(_NoRedirect())
+    request = urllib.request.Request(JOURNAL_TRIPS_URL, headers={"Accept": "application/json"})
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
+            if response.status != 200:
+                return None
+            data = response.read(MAX_JOURNAL_TRIPS_BYTES + 1)
+    except Exception:  # any network failure only means "no link this time"
+        return None
+    if len(data) > MAX_JOURNAL_TRIPS_BYTES:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def lookup_journal_link(recording_date: str) -> Optional[str]:
+    trips = fetch_journal_trips()
+    return journal_day_link(trips, recording_date) if trips else None
 
 
 def _short_platforms(request: DayReelRequest, media) -> Tuple[Tuple[str, ...], str]:
@@ -371,6 +445,7 @@ def process_requests(
     renderer: Callable = _default_renderer,
     location_check: Callable[[Path], bool] = _default_location_check,
     gpu_lock: Callable = shared_gpu_lock,
+    journal_link: Callable[[str], Optional[str]] = lookup_journal_link,
 ) -> list:
     """Handle every request in the folder once. Returns one :class:`Outcome`
     per request. A dry run (``apply=False``) reads and validates requests
@@ -419,6 +494,7 @@ def process_requests(
                     privacy=privacy,
                     renderer=renderer,
                     location_check=location_check,
+                    journal_link=journal_link,
                 )
         except GpuLockBusyError as exc:
             outcome = Outcome(name, "held", f"shared GPU lock busy: {exc}")
@@ -443,6 +519,7 @@ def _process_one(
     privacy: dict,
     renderer: Callable,
     location_check: Callable[[Path], bool],
+    journal_link: Callable[[str], Optional[str]],
 ) -> Outcome:
     if work.exists():
         shutil.rmtree(work)
@@ -468,10 +545,13 @@ def _process_one(
         return _refuse(ledger, request, "location metadata is still present in the render")
 
     platforms, note = _short_platforms(request, fingerprint_media(output))
+    link = request.journal_url
+    if not link and YOUTUBE in platforms:
+        link = journal_link(request.recording_date)
     doc = build_asset_sidecar(
         output,
         title=youtube_title(request.caption, request.recording_date),
-        description=youtube_description(request.caption, request.journal_url),
+        description=youtube_description(request.caption, link),
         tags=youtube_tags(request.caption),
         recording_date=request.recording_date,
         platforms=platforms,
@@ -487,6 +567,10 @@ def _process_one(
     conn = open_queue_db(storage_path)
     try:
         result = enqueue_from_plan_sidecar(conn, sidecar_path)
+    except (DeliveryPlanConflictError, PublishPlanSidecarError) as exc:
+        # Recorded so this one request is not retried every hour, and never
+        # stops the requests after it in the folder.
+        return _refuse(ledger, request, f"queue refused the reel: {exc}")
     finally:
         conn.close()
     delivery_ids = tuple(int(entry[3]) for entry in result.enqueued)

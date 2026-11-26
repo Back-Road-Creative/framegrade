@@ -84,7 +84,16 @@ def _fake_ffprobe(monkeypatch):
     return probe
 
 
-def _run(tmp_path, drive, *, privacy=None, renderer=None, apply=True, location_free=True):
+def _run(
+    tmp_path,
+    drive,
+    *,
+    privacy=None,
+    renderer=None,
+    apply=True,
+    location_free=True,
+    journal_link=lambda recording_date: None,
+):
     calls = []
     outcomes = day_reels.process_requests(
         drive,
@@ -96,6 +105,7 @@ def _run(tmp_path, drive, *, privacy=None, renderer=None, apply=True, location_f
         renderer=renderer or _renderer(calls),
         location_check=lambda path: location_free,
         gpu_lock=day_reels.no_gpu_lock,
+        journal_link=journal_link,
     )
     return outcomes, calls
 
@@ -403,3 +413,132 @@ def test_the_queued_short_passes_the_youtube_upload_gates(tmp_path):
     assert re.match(DriveConfig().youtube_upload_filename_pattern, Path(record.media.path).name)
     assert short_review_refusal(record) is None
     assert record.payloads.youtube.title == "Up on Peakeen Ridge, Sheep's Head."
+
+
+# --- Journal day link --------------------------------------------------------
+
+TRIPS = json.dumps(
+    {
+        "trips": [
+            {
+                "slug": "ireland-2026-11",
+                "title": "Ireland",
+                "start": "2026-11-16",
+                "days": 46,
+                "timezone": "Europe/Dublin",
+                "finished": False,
+            }
+        ]
+    }
+)
+DAY_10 = "https://gomoveshift.com/journeys/ireland-2026-11/#day-10"
+
+
+@pytest.mark.parametrize(
+    "recording_date, expected",
+    [
+        ("2026-11-25", DAY_10),
+        ("2026-11-16", "https://gomoveshift.com/journeys/ireland-2026-11/#day-1"),
+        ("2026-12-31", "https://gomoveshift.com/journeys/ireland-2026-11/#day-46"),
+        ("2026-11-15", None),
+        ("2027-01-01", None),
+        ("25/11/2026", None),
+    ],
+)
+def test_journal_day_link_numbers_days_from_the_trip_start(recording_date, expected):
+    assert day_reels.journal_day_link(TRIPS, recording_date) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        "[]",
+        json.dumps({"trips": "x"}),
+        json.dumps({"trips": [{"slug": "Bad Slug", "start": "2026-11-16", "days": 46}]}),
+        json.dumps({"trips": [{"slug": "a", "start": "2026-13-01", "days": 46}]}),
+        json.dumps({"trips": [{"slug": "a", "start": "2026-11-16", "days": "46"}]}),
+        json.dumps({"trips": [{"slug": "a", "start": "2026-11-16", "days": True}]}),
+    ],
+)
+def test_journal_day_link_is_none_for_a_bad_trip_list(text):
+    assert day_reels.journal_day_link(text, "2026-11-25") is None
+
+
+def test_journal_day_link_is_none_when_two_trips_claim_the_day():
+    trips = json.loads(TRIPS)["trips"]
+    both = json.dumps({"trips": trips + [{**trips[0], "slug": "other-trip"}]})
+    assert day_reels.journal_day_link(both, "2026-11-25") is None
+
+
+def test_unreachable_trip_list_gives_no_link(monkeypatch):
+    class Refusing:
+        def open(self, *args, **kwargs):
+            raise OSError("no route to host")
+
+    monkeypatch.setattr(day_reels.urllib.request, "build_opener", lambda *h: Refusing())
+    assert day_reels.fetch_journal_trips() is None
+    assert day_reels.lookup_journal_link("2026-11-25") is None
+
+
+def test_a_short_without_a_journal_url_links_its_journal_day(tmp_path):
+    asked = []
+
+    def link(recording_date):
+        asked.append(recording_date)
+        return DAY_10
+
+    outcomes, _ = _run(tmp_path, FakeDrive({"day10.json": _request()}), journal_link=link)
+    assert [o.state for o in outcomes] == ["enqueued"]
+    assert asked == ["2026-11-25"]
+    youtube = _record(tmp_path)["payloads"]["youtube"]
+    assert f"Read the full day: {DAY_10}" in youtube["description"]
+    # The Facebook and Instagram caption stays the owner's words only.
+    assert _record(tmp_path)["payloads"]["instagram"] == {"caption": CAPTION}
+
+
+def test_the_request_journal_url_wins_over_the_lookup(tmp_path):
+    own = "https://gomoveshift.com/journeys/ireland-2026-11/#day-9"
+
+    def link(recording_date):
+        raise AssertionError("the lookup must not run when the request names a page")
+
+    drive = FakeDrive({"day10.json": _request(journal_url=own)})
+    _run(tmp_path, drive, journal_link=link)
+    assert f"Read the full day: {own}" in _record(tmp_path)["payloads"]["youtube"]["description"]
+
+
+def test_no_journal_day_means_no_link_line(tmp_path):
+    _run(tmp_path, FakeDrive({"day10.json": _request()}))
+    description = _record(tmp_path)["payloads"]["youtube"]["description"]
+    assert "Read the full day" not in description and description.endswith("#Shorts")
+
+
+def test_a_queue_refusal_is_recorded_and_later_requests_still_run(tmp_path, monkeypatch):
+    real = day_reels.enqueue_from_plan_sidecar
+    seen = []
+
+    def enqueue(conn, sidecar_path):
+        seen.append(sidecar_path)
+        if len(seen) == 1:
+            raise day_reels.DeliveryPlanConflictError("an ACTIVE delivery already exists")
+        return real(conn, sidecar_path)
+
+    monkeypatch.setattr(day_reels, "enqueue_from_plan_sidecar", enqueue)
+    drive = FakeDrive(
+        {
+            "day10.json": _request(),
+            "day11.json": _request(
+                video_file_id="2-OtherClipIdForDay11xx", recording_date="2026-11-26"
+            ),
+        }
+    )
+    outcomes, _ = _run(tmp_path, drive)
+    assert [(o.name, o.state) for o in outcomes] == [
+        ("day10.json", "refused"),
+        ("day11.json", "enqueued"),
+    ]
+    assert "queue refused the reel" in outcomes[0].reason
+    # Recorded, so the next hourly run does not retry it.
+    again, _ = _run(tmp_path, drive)
+    assert [o.state for o in again] == ["done", "done"]
