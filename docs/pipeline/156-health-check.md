@@ -415,7 +415,13 @@ Before, the tick skipped it `in the schedule store (failed)` and the audited dri
 (Kerry-to-Cork, 2026-11-19). The retry first keyed on `failed` or a non-zero exit code, so a publish
 job the runner ended with no exit code was never retried (unproven as Kerry's exact end state). It
 retries the PUBLISH only (`publish_only` class): never a render, and never a drive that already
-holds an upload receipt. Tests: `tests/test_health_backlog_launch.py`.
+holds an upload receipt. A refused retry (anything but `no claim:`) no longer ends the tick: it is
+listed under `publish_refusals` (printed `publish retry refused <project>: <reason>`) and the tick
+goes on to the `auditing` drives, so one drive's standing refusal never starves the region's next
+passed audit; the tick still exits 2 while the refusal stands. Before, Kerry-to-Cork's blur-mask
+frame-gate refusal returned first every hour and Old Head to Courtmacsherry, audited 2026-11-24,
+never published (2026-11-25). Tests: `tests/test_health_backlog_launch.py`,
+`tests/test_health_backlog_cli.py`.
 
 **Storage.** Need is summed per physical device (`st_dev`), so two roots on one drive share one
 free-space figure. Staging needs `max(30 GB, sources × 3.0)` and output 50 GB; free equal to need

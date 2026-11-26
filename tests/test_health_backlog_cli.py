@@ -198,6 +198,18 @@ def test_failed_audits_reach_the_cron_log_and_a_launch_exits_zero(tmp_path, caps
     assert out.rstrip().endswith("launched: ire-b for slot")
 
 
+def test_a_refused_publish_retry_reaches_the_cron_log_and_exits_two(tmp_path, capsys, wired):
+    # the tick went on to publish ire-b; ire-a's standing refusal stays visible and fails the tick
+    wired["_result"] = {
+        "action": "launched", "reason": "published: ire-b for slot", "skipped": [],
+        "publish_refusals": [{"project": "ire-a", "reason": "publish refused: frame gate"}],
+    }  # fmt: skip
+    assert health.cmd_health(_args(tmp_path), SimpleNamespace()) == 2
+    out = capsys.readouterr().out
+    assert "publish retry refused ire-a: publish refused: frame gate" in out
+    assert out.rstrip().endswith("launched: published: ire-b for slot")
+
+
 def test_replace_scheduled_reaches_run_backlog(tmp_path, wired):
     wired["_result"] = {"action": "launched", "reason": "r", "skipped": []}
     args = _args(tmp_path, "--supersede", "ire-a", "--reason", "x", "--replace-scheduled")
