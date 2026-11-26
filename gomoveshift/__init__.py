@@ -8,4 +8,4 @@ Automated driving video processing with:
 - Web UI for review and approval
 """
 
-__version__ = "0.3.157"
+__version__ = "0.3.158"

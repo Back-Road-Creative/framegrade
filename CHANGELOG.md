@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.158] - 2026-11-25
+
+### Added
+
+- Owner lines: an optional `social/owner_lines.yaml` beside `titles.yaml` holds one sentence in the owner's own voice per Short (opens its Facebook and Instagram captions) and per long-form (opens its YouTube description, inside Waypost's review). See docs/pipeline/187-owner-lines.md.
+
+### Changed
+
+- Facebook and Instagram Short captions now end on "The long version is on our YouTube channel." once the parent long-form is public, so each Short reads as a trailer for its drive. TikTok, the YouTube description and the CSV path are unchanged. See docs/social-publishing-plan-builder.md.
+- Brand policy key `shorts_per_drive` caps the Shorts planned per drive (the planner keeps its best-ranked clips) without feeding the enqueue batch gate, so several drives in one region still enqueue together. The GoMoveShift brand now plans one Short per drive. See docs/pipeline/136-brand-policy.md.
+
 ## [0.3.157] - 2026-11-25
 
 ### Added
@@ -1815,7 +1826,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.157...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...HEAD
+[0.3.158]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.157...v0.3.158
 [0.3.157]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.156...v0.3.157
 [0.3.156]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.155...v0.3.156
 [0.3.155]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.154...v0.3.155
