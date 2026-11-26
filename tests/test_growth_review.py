@@ -123,3 +123,20 @@ def test_summary_line_counts():
     assert line == (
         "GROWTH_REVIEW window_days=28 groups=0 underperforming=0 failed=0 stuck=1 duplicate=0"
     )
+
+
+def test_day_reels_and_drive_shorts_are_scored_as_separate_sources():
+    posted = TODAY - timedelta(days=12)
+    reels = SimpleNamespace(
+        project="day-reel-abc", location="", shorts=[_short(posted, 50, 21) for _ in range(5)]
+    )
+    drive = SimpleNamespace(
+        project="2026-03-05-va-pa", location="", shorts=[_short(posted, 10, 21) for _ in range(5)]
+    )
+    by_group = {
+        s.group: s for s in gr.format_scorecard(gr.samples_from_records([reels, drive], TODAY))
+    }
+    assert by_group["source:day-reel"].n == 5 and by_group["source:day-reel"].median == 350
+    assert by_group["source:drive"].n == 5 and by_group["source:drive"].median == 70
+    assert gr.source_group("day-reel-x") == "source:day-reel"
+    assert gr.source_group("") == "source:drive"

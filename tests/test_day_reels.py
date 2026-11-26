@@ -628,3 +628,48 @@ def test_a_plain_timeout_still_says_it_timed_out():
     drive = day_reels.RcloneDrive(folder_id="FOLDER123", token=EMPTY, runner=runner)
     with pytest.raises(day_reels.DriveReadError, match="timed out"):
         drive.list_requests()
+
+
+# --- tracking record ---------------------------------------------------------
+
+
+def test_a_queued_reel_gets_a_tracking_record_its_publish_can_update(tmp_path):
+    from gomoveshift.tracking import TrackingStore
+
+    drive = FakeDrive({"day10.json": _request()})
+    outcomes, calls = _run(tmp_path, drive)
+    assert [o.state for o in outcomes] == ["enqueued"]
+
+    store = TrackingStore()
+    project = f"day-reel-{VIDEO_ID}"
+    record = store.load(project)
+    assert [s.index for s in record.shorts] == [0]
+    assert record.shorts[0].content.duration_sec == 21.0
+    assert Path(record.shorts[0].file) == calls[0][1]
+
+    # The publish hook's one write into tracking now finds the reel.
+    store.update_platform_id(project, 0, "youtube", "abc123")
+    assert store.load(project).shorts[0].platform_ids == {"youtube": "abc123"}
+
+
+def test_a_tracking_failure_never_undoes_a_queued_reel(tmp_path):
+    def broken(*args):
+        raise OSError("disk full")
+
+    drive = FakeDrive({"day10.json": _request()})
+    outcomes = day_reels.process_requests(
+        drive,
+        state_dir=tmp_path / "state",
+        storage_path=tmp_path / "queue",
+        apply=True,
+        now_utc="2026-11-25T23:00:00+00:00",
+        privacy_reporter=_verified(),
+        renderer=_renderer([]),
+        location_check=lambda path: True,
+        gpu_lock=day_reels.no_gpu_lock,
+        journal_link=lambda recording_date: None,
+        register_tracking=broken,
+    )
+    assert [o.state for o in outcomes] == ["enqueued"]
+    assert "tracking record not written: disk full" in outcomes[0].reason
+    assert len(_rows(tmp_path)) == 3

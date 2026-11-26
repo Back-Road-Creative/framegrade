@@ -466,6 +466,34 @@ def _unverified(privacy: dict) -> list:
     ]
 
 
+def _default_register_tracking(project: str, index: int, file: str, duration_sec: float) -> None:
+    from ..tracking import TrackingStore
+
+    TrackingStore().register_short(project, index, file=file, duration_sec=duration_sec)
+
+
+def _register_tracking_safely(register: Callable, project: str, short: dict) -> Optional[str]:
+    """Give the reel a tracking record, so the publish step can store its
+    platform ids and ``metrics collect`` and the growth review can see it.
+
+    ``enqueue-plan --apply`` does the same for drive Shorts
+    (``cli.handlers.enqueue_plan._register_enqueued_shorts_in_tracking``);
+    this route enqueued straight from its sidecar and so had no record, which
+    left every published reel's ids unregistered. Never fails the reel: it is
+    already queued. Returns a note on failure."""
+    media = short.get("media") or {}
+    try:
+        register(
+            project,
+            int(short.get("short_index", 0)),
+            str(media.get("path") or ""),
+            float(media.get("duration_seconds") or 0.0),
+        )
+    except Exception as exc:  # noqa: BLE001 -- tracking must never undo a queued reel
+        return f"tracking record not written: {exc}"
+    return None
+
+
 def process_requests(
     drive,
     *,
@@ -478,6 +506,7 @@ def process_requests(
     location_check: Callable[[Path], bool] = _default_location_check,
     gpu_lock: Callable = shared_gpu_lock,
     journal_link: Callable[[str], Optional[str]] = lookup_journal_link,
+    register_tracking: Callable = _default_register_tracking,
 ) -> list:
     """Handle every request in the folder once. Returns one :class:`Outcome`
     per request. A dry run (``apply=False``) reads and validates requests
@@ -527,6 +556,7 @@ def process_requests(
                     renderer=renderer,
                     location_check=location_check,
                     journal_link=journal_link,
+                    register_tracking=register_tracking,
                 )
         except GpuLockBusyError as exc:
             outcome = Outcome(name, "held", f"shared GPU lock busy: {exc}")
@@ -552,6 +582,7 @@ def _process_one(
     renderer: Callable,
     location_check: Callable[[Path], bool],
     journal_link: Callable[[str], Optional[str]],
+    register_tracking: Callable = _default_register_tracking,
 ) -> Outcome:
     if work.exists():
         shutil.rmtree(work)
@@ -607,6 +638,11 @@ def _process_one(
         conn.close()
     delivery_ids = tuple(int(entry[3]) for entry in result.enqueued)
     present = result.already_present_count
+    tracking_note = _register_tracking_safely(
+        register_tracking, doc["shorts"][0]["project_name"], doc["shorts"][0]
+    )
+    if tracking_note:
+        note = f"{note}; {tracking_note}" if note else tracking_note
     record = {"name": request.name, "state": "enqueued", "sidecar": str(sidecar_path)}
     record.update(video_file_id=request.video_file_id, delivery_ids=list(delivery_ids))
     record.update(platforms=list(platforms))
