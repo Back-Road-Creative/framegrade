@@ -32,6 +32,7 @@ class Rig:
         self.launches: list = []
         self.launch_ok = True
         self.running = False
+        self.manifest_row = None  # the drive's drive_backlog.yaml row; None = not found
 
     def audit(self, project="day-a", status="auditing", recipe=True, lfs=1):
         out = self.out / project
@@ -42,12 +43,15 @@ class Rig:
         if recipe:
             stages = self.stages / project / project / "_stages"
             stages.mkdir(parents=True)
+            (self.out / "_sources" / project).mkdir(parents=True)  # the drive's source subset
+            (self.tmp / "gpx").mkdir(exist_ok=True)
+            (self.tmp / "gpx" / "a.gpx").write_text("<gpx/>")
             argv = [
                 "/old/py", "-m", "gomoveshift", "drive", str(self.out / "_sources" / project),
                 "--region", "usa", "--publish", "mon", "--lf-day", "mon", "--ingest-mode",
                 "gopro", "--lf-mode", "full_drive", "--output-dir", str(out), "--skip-upload",
                 "--no-youtube-upload", "--no-review", "--force", "--no-tmux",
-                "--day-gpx", "/gpx/a.gpx", "--camera-utc-offset-hours", "-4",
+                "--day-gpx", str(self.tmp / "gpx" / "a.gpx"), "--camera-utc-offset-hours", "-4",
             ]  # fmt: skip
             body = {"argv": argv, "cwd": "/old", "env": {"GMS_INTERMEDIATE_DIR": str(self.stages / project)}}  # fmt: skip
             (stages / "resume.json").write_text(json.dumps(body))
@@ -64,6 +68,7 @@ class Rig:
             project=project, region="usa", store=self.store, cadence=CAD, stages_root=self.stages,
             code_root=self.tmp, jobs_dir=self.jobs, now=NOW, dry_run=dry_run,
             drive_running=lambda jobs: self.running, launcher=self.launcher,
+            manifest_row_fn=lambda row: self.manifest_row,
         )  # fmt: skip
 
     def snapshot(self):

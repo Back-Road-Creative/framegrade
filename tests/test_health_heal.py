@@ -50,9 +50,11 @@ class Rig:
         self.manifest = None  # sha of the drive's manifest row; None = unknown
         self.manifest_row = None  # the drive's ``drive_backlog.yaml`` row; None = not found
         stages = tmp_path / "stages"
+        for src in ("demo-drive-a", "demo-drive-b"):  # the recipes' source dirs, under code_root
+            (tmp_path / "in" / src).mkdir(parents=True, exist_ok=True)
         resume.write_recipe(
             stages,
-            drive_args or ["drive", "/in/demo-drive-a", "--publish", "fri"],
+            drive_args or ["drive", "in/demo-drive-a", "--publish", "fri"],
             cwd="/work",
             sha="old",
             now_iso="t",
@@ -109,7 +111,7 @@ def test_launches_audit_only_resume_with_exact_argv_and_records_attempt(tmp_path
     argv, cwd = rig.launches[0]
     tail = argv[argv.index("--") + 1 :]
     assert tail[-2:] == ["--skip-upload", "--no-youtube-upload"] and "--phase" not in tail
-    assert "--fresh" not in tail and tail[3:6] == ["drive", "/in/demo-drive-a", "--publish"]
+    assert "--fresh" not in tail and tail[3:6] == ["drive", "in/demo-drive-a", "--publish"]
     assert argv[argv.index("--name") + 1] == "gms-heal-demo-drive-a-abcdef1"
     assert "--heavy" in argv and "--detach" in argv and argv[argv.index("--stall") + 1] == "86400"
     assert argv[argv.index("--log-root") + 1] == str(rig.jobs)
@@ -282,7 +284,7 @@ def test_guard_a_is_once_per_recipe_not_once_per_row(tmp_path):
 
 def test_a_heal_of_a_heal_does_not_repeat_the_audit_only_flags(tmp_path):
     rig = Rig(
-        tmp_path, drive_args=["drive", "/in/demo-drive-a", "--skip-upload", "--no-youtube-upload"]
+        tmp_path, drive_args=["drive", "in/demo-drive-a", "--skip-upload", "--no-youtube-upload"]
     )
     rig.run()
     tail = rig.launches[0][0][rig.launches[0][0].index("--") + 1 :]
@@ -457,11 +459,11 @@ def test_resume_runs_code_root_interpreter_not_the_recipe_writers(tmp_path):
 
 
 def test_cross_fs_override_is_not_carried_into_a_resume(tmp_path):
-    rig = Rig(tmp_path, drive_args=["drive", "/in/demo-drive-a", "--allow-cross-fs-source"])
+    rig = Rig(tmp_path, drive_args=["drive", "in/demo-drive-a", "--allow-cross-fs-source"])
     rig.run()
     argv, _cwd = rig.launches[0]
     assert "--allow-cross-fs-source" not in argv
-    assert argv[argv.index("--") + 4 : argv.index("--") + 6] == ["drive", "/in/demo-drive-a"]
+    assert argv[argv.index("--") + 4 : argv.index("--") + 6] == ["drive", "in/demo-drive-a"]
 
 
 def test_refuses_when_code_root_has_no_service_interpreter(tmp_path):
@@ -476,7 +478,7 @@ def test_refuses_when_code_root_has_no_service_interpreter(tmp_path):
 def test_refuses_a_recipe_that_is_not_a_gomoveshift_module_run(tmp_path):
     rig = Rig(tmp_path)
     recipe = json.loads((tmp_path / "stages" / "resume.json").read_text())
-    recipe["argv"] = ["/usr/bin/bash", "/old/launcher.sh", "drive", "/in/demo-drive-a"]
+    recipe["argv"] = ["/usr/bin/bash", "/old/launcher.sh", "drive", "in/demo-drive-a"]
     (tmp_path / "stages" / "resume.json").write_text(json.dumps(recipe))
     rig.run()
     assert rig.launches == []
@@ -492,7 +494,7 @@ def test_refuses_a_recipe_that_is_not_a_gomoveshift_module_run(tmp_path):
 
 def _second_recipe(tmp_path: Path, phase="phase_a") -> Path:
     stages = tmp_path / "ev" / "stages" / "demo-drive-b" / "_stages"
-    resume.write_recipe(stages, ["drive", "/in/demo-drive-b"], cwd="/w", sha="old", now_iso="t")
+    resume.write_recipe(stages, ["drive", "in/demo-drive-b"], cwd="/w", sha="old", now_iso="t")
     if phase:
         resume.mark_phase(stages, phase)
     return stages / "resume.json"
@@ -506,7 +508,7 @@ def test_recipe_target_registers_one_row_and_heals_only_that_drive(tmp_path):
     assert out["launched"] == [key] and len(rig.launches) == 1
     argv, cwd = rig.launches[0]
     tail = argv[argv.index("--") + 1 :]
-    assert tail[3:5] == ["drive", "/in/demo-drive-b"] and "--phase" not in tail
+    assert tail[3:5] == ["drive", "in/demo-drive-b"] and "--phase" not in tail
     assert cwd == str(rig.svc)
     other = next(r for r in load_all(rig.inc)[0] if r["drive"] == "demo-drive-a")
     assert other["resume_attempts"] == []
@@ -554,7 +556,7 @@ def test_recipe_target_still_obeys_the_backoff_and_holds(tmp_path):
 
 def test_dry_run_reports_the_exact_launch_it_would_make(tmp_path):
     rig = Rig(
-        tmp_path, drive_args=["drive", "/in/demo-drive-a", "--allow-cross-fs-source", "--force"]
+        tmp_path, drive_args=["drive", "in/demo-drive-a", "--allow-cross-fs-source", "--force"]
     )
     recipe = json.loads((tmp_path / "stages" / "resume.json").read_text())
     recipe["argv"][0] = "/old/worktree/service/.venv/bin/python"
@@ -1303,7 +1305,7 @@ def test_past_the_interrupted_cap_an_interrupted_attempt_counts_like_a_failure()
 
 
 def _gpx_rig(tmp_path, recipe_gpx, flag="--day-gpx"):
-    args = ["drive", "/in/demo-drive-a", "--publish", "fri", flag, *recipe_gpx]
+    args = ["drive", "in/demo-drive-a", "--publish", "fri", flag, *recipe_gpx]
     return Rig(tmp_path, drive_args=args)
 
 
@@ -1339,7 +1341,7 @@ def test_a_recipe_bracket_gpx_pair_that_is_gone_is_taken_from_the_backlog_row(tm
 
 
 @pytest.mark.parametrize("case", ["recipe file exists", "row file missing too", "no row"])
-def test_a_recipe_gpx_is_kept_unless_it_is_gone_and_the_row_has_one(tmp_path, case):
+def test_a_recipe_gpx_is_kept_unless_it_is_gone(tmp_path, case):
     old = tmp_path / "old.gpx"
     if case == "recipe file exists":
         old.write_text("<gpx/>")
@@ -1350,9 +1352,14 @@ def test_a_recipe_gpx_is_kept_unless_it_is_gone_and_the_row_has_one(tmp_path, ca
     if case != "no row":
         rig.manifest_row = SimpleNamespace(day_gpx=str(other), bracket_gpx=())
     rig.run()
+    att = rig.row()["resume_attempts"][0]
+    assert "gpx_refreshed" not in att
+    if case != "recipe file exists":  # gone with nothing to replace it: refused, never launched
+        assert not rig.launches and att["action"] == "refused"
+        assert f"--day-gpx {old} no longer exists" in att["reason"]
+        return
     tail = _tail(rig)
     assert tail[tail.index("--day-gpx") + 1] == str(old)
-    assert "gpx_refreshed" not in rig.row()["resume_attempts"][0]
 
 
 def test_default_manifest_row_reads_the_backlog_row_of_the_heals_origin(monkeypatch, tmp_path):
