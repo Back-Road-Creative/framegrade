@@ -18,8 +18,12 @@ A Short is refused whole (nothing written) when any delivery row of it, on any p
 is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at``, or has a
 slot inside the lead time, or when a recovery row exists. A Short with a hand title
 (``<plan dir>/social/titles.yaml``, as Phase D reads it) is reported ``unchanged`` /
-``hand_title``. The no-repeated-place chain is seeded from the STORED text of the Short
-before each rewritten one, and the generator's date is pinned to the LF's publish date.
+``hand_title``, and so is one whose stored title differs from the ``generator_title`` the
+plan recorded (a hand edit in the sidecar). A Short carrying a stored arm of a factor the
+generator no longer renders (``UNRENDERED_FACTORS``) is ``unchanged`` too: it posts its stored
+text, and regenerating it could only drop the arm. The no-repeated-place chain is seeded
+from the STORED text of the Short before each rewritten one, and the generator's date is
+pinned to the LF's publish date.
 
 Each rewritten Short must pass ``short_review_refusal``, ``models.validate_payloads`` and
 ``anti_spam_gate.check_batch`` (the gates enqueue runs, with the queue's recent text);
@@ -70,6 +74,12 @@ from .plan_bracket_sync import (
 )
 from .plan_io import load_publish_plan, plan_from_raw
 from .queue import TERMINAL_STATUSES
+
+#: Shorts-experiment factors the generator no longer renders at all (``SocialGenerator.
+#: _shorts_arm_factors``: a fact title has no body variant, so ``yt_title_body`` is never
+#: carried). A Short queued with such an arm posts its stored text; the sync leaves it as stored
+#: instead of refusing it every night.
+UNRENDERED_FACTORS = ("yt_title_body",)
 
 #: A row whose slot is closer than this is left alone: the platform may already be
 #: preparing the upload, and a late text change would race the dispatcher.
@@ -247,6 +257,8 @@ def _rewrite(short: dict, text: dict) -> Tuple[dict, Tuple[str, ...]]:
             fields.append(f"youtube.{name}")
     if fields:
         yt = new["payloads"]["youtube"]
+        # what the generator wrote, so a later hand edit is told apart (``generated_title``)
+        new["generator_title"] = yt["title"]
         new["reviewed_plan_hash"] = review_hash(
             yt["title"], yt["description"], yt["tags"], new["media"]["sha256"]
         )
@@ -619,6 +631,15 @@ def _sidecar_changes(
             settle(row, pos, "refused", forced[(row["project_name"], int(row["short_index"]))])
         elif int(shorts[pos]["short_index"]) in hand:
             settle(row, pos, "unchanged", "hand_title")
+        elif shorts[pos].get("generator_title") and not generated_title(shorts[pos]):
+            # the stored title is not the one the generator recorded: someone set it by hand
+            settle(row, pos, "unchanged", "hand_title (edited in the plan)")
+        elif any(
+            a in SHORTS_ARMS.get(f, ())
+            for f, a in _stored_arms(shorts[pos]).items()
+            if f in UNRENDERED_FACTORS
+        ):
+            settle(row, pos, "unchanged", "stored arm the generator no longer renders: kept")
         else:
             targets[pos] = row
             siblings[pos] = sib
