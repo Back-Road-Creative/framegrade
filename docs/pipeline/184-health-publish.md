@@ -47,3 +47,12 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
 
 `--dry-run` runs every check, then reports the four steps and Waypost's own dry-run answer
 (`next_claim`); it writes nothing and launches nothing.
+
+**A refused publish retry does not end the backlog tick.** `health backlog` retries the publish
+of a drive whose publish job failed (`156-health-check.md`, `publish_only`). A retry refused
+for anything but `no claim:` is listed under `publish_refusals` (printed `publish retry refused
+<project>: <reason>`) and the tick goes on to the `auditing` drives, so one drive's standing
+refusal never starves the region's next passed audit; the tick still exits 2 while the refusal
+stands. Before, Kerry-to-Cork's blur-mask frame-gate refusal returned first every hour and Old
+Head to Courtmacsherry, audited 2026-11-24, never published (2026-11-25). Tests:
+`tests/test_health_backlog_launch.py`, `tests/test_health_backlog_cli.py`.

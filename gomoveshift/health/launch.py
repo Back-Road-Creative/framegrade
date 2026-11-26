@@ -273,7 +273,8 @@ def default_replace_store(config: Any) -> Callable[[], Any]:
 
 
 def exit_code(result: Dict[str, Any]) -> int:
-    return 2 if result.get("action") == "refused" else 0
+    """2 for a refused tick, or one that went on past a refused publish retry."""
+    return 2 if result.get("action") == "refused" or result.get("publish_refusals") else 0
 
 
 def staging_need_gb(sources: Iterable[str]) -> float:
@@ -1145,10 +1146,17 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if drive_running():
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     # a passed audit whose publish failed (``health check`` closed the claim ``failed``) is
-    # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork)
+    # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork).
+    # A refused retry is recorded and the tick goes on, so one drive's standing refusal never
+    # starves the region's next passed audit (2026-11-25, Kerry-to-Cork held Old Head); the tick
+    # still exits 2 while the refusal stands (``exit_code``).
     for proj in sorted(d.project for d in mine if d.status == "failed" and d.project in listed):
         if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
-            return _publish_audited(res, proj, publish, dry_run)
+            done = _publish_audited(dict(res), proj, publish, dry_run)
+            if done.get("action") != "refused":
+                return done
+            refused = {"project": proj, "reason": done["reason"]}
+            res.setdefault("publish_refusals", []).append(refused)
     relaunch, auto = None, False
     for proj in auditing:
         failed = _failed_audit(jobs_dir, proj)

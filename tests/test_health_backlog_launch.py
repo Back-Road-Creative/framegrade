@@ -339,6 +339,46 @@ def test_a_failed_publish_of_a_listed_drive_is_published_again(tmp_path):
     assert not rig.launches and not rig.registered
 
 
+# 2026-11-25: Kerry-to-Cork's publish retry was refused every hour by the blur-mask frame gate
+# (its stages hold no raw or master to count frames in), and the refusal returned before the
+# auditing loop, so Old Head to Courtmacsherry, whose audit passed 11-24, never published. A
+# refused retry is recorded and the tick goes on; the exit stays 2 while the refusal stands.
+
+
+def test_a_refused_publish_retry_does_not_starve_a_passed_audit(tmp_path):
+    rig = Rig(tmp_path)
+    rig.drives.append(drive("day-a", "failed"))
+    job(rig, "ok-a", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "pub-a", "day-a", "failed", 200.0, name="gms-publish-day-a")
+    rig.drives.append(drive("day-b", "auditing"))
+    job(rig, "ok-b", "day-b", "succeeded", 300.0, exit_code=0)
+    replies = {
+        "day-a": {"action": "refused", "reason": "blur-mask frame gate: frame count unknown"},
+        "day-b": {"action": "launched", "reason": "day-b for 2026-10-23T09:00:00-04:00"},
+    }
+    rig.publish_result = {"action": "unused"}
+    rig.publish = lambda project, dry_run: (
+        rig.publishes.append((project, dry_run)) or {"project": project, **replies[project]}
+    )
+    res = rig.run()
+    assert rig.publishes == [("day-a", False), ("day-b", False)], res
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert res["publish_refusals"] == [
+        {"project": "day-a", "reason": "publish refused: blur-mask frame gate: frame count unknown"}
+    ]
+    assert launch.exit_code(res) == 2  # Kerry's refusal still shows in the tick's exit
+
+
+def test_a_refused_publish_retry_alone_is_still_the_ticks_refusal(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_publish(rig, action="refused", reason="blur-mask frame gate: frame count unknown")
+    rig.slots = []  # nothing else to publish or launch
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)]
+    assert res["publish_refusals"][0]["project"] == "day-a", res
+    assert launch.exit_code(res) == 2
+
+
 def test_a_failed_publish_retry_dry_run_asks_for_the_dry_run(tmp_path):
     rig = Rig(tmp_path)
     _failed_publish(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
