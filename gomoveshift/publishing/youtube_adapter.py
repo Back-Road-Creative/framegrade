@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from seo_manager.analytics.final_text_surfaces import compose_description
 
@@ -506,17 +507,26 @@ def confirm_scheduled_live(
     return confirmed
 
 
-def _utc_midnight(*, plus_days: int = 0) -> datetime:
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=plus_days)
+#: YouTube's quota day starts at midnight Pacific time, not UTC.
+_QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 
 
-def _uploads_today(conn, platform: str = PLATFORM) -> int:
-    # Read from the queue, not an in-memory counter, so this survives a restart.
+def _quota_day_start(*, plus_days: int = 0, now: Optional[datetime] = None) -> datetime:
+    """Midnight Pacific opening today's (``plus_days`` later's) quota day, in UTC."""
+    local = (now or datetime.now(timezone.utc)).astimezone(_QUOTA_TZ)
+    day = local.date() + timedelta(days=plus_days)
+    return datetime(day.year, day.month, day.day, tzinfo=_QUOTA_TZ).astimezone(timezone.utc)
+
+
+def _uploads_today(conn, platform: str = PLATFORM, now: Optional[datetime] = None) -> int:
+    """Uploads made this quota day, counted by when each got its upload id
+    (``uploaded_at``), not when its row was enqueued: a row queued days ahead
+    uploads on its slot's day. ``created_at`` stands in for a row older than
+    ``uploaded_at``. Read from the queue, so this survives a restart."""
     row = conn.execute(
         "SELECT COUNT(*) FROM deliveries WHERE platform=? "
-        "AND platform_upload_id IS NOT NULL AND created_at >= ?",
-        (platform, _utc_midnight().isoformat()),
+        "AND platform_upload_id IS NOT NULL AND COALESCE(uploaded_at, created_at) >= ?",
+        (platform, _quota_day_start(now=now).isoformat()),
     ).fetchone()
     return int(row[0]) if row is not None else 0
 
@@ -683,7 +693,7 @@ class YouTubeShortsAdapter:
         budget = getattr(self._config.drive, "youtube_video_insert_daily_uploads", None)
         if not isinstance(budget, int) or _uploads_today(conn) < budget:
             return None
-        next_attempt = _utc_midnight(plus_days=1).isoformat()
+        next_attempt = _quota_day_start(plus_days=1).isoformat()
         transition(
             conn,
             delivery_id,

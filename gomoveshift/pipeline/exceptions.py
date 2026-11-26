@@ -207,6 +207,11 @@ class YouTubeQuotaError(RuntimeError):
                 "resets. Already-uploaded LFs are safe; "
                 "``upload_if_needed`` skips them on resume."
             )
+        elif reason == "uploadLimitExceeded":
+            hint = (
+                " — the channel's daily video upload limit is reached (a YouTube "
+                "limit, not API quota); retry once YouTube lifts it."
+            )
         elif reason == "userRateLimitExceeded":
             hint = (
                 " — YouTube Data API per-user rate limit hit; "

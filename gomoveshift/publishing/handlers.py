@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from ..pipeline.exceptions import YouTubeQuotaError
 from .dispatch import (
     PermanentDeliveryError,
     ThrottledDeliveryError,
@@ -103,10 +104,13 @@ def make_youtube_handler(
     """``AmbiguousUploadMatchError`` is terminal — two or more channel
     uploads match a retrying short by title/recency, and adopting either
     risks stealing the wrong video; a human must resolve it, retrying never
-    will (see the adapter's own docstring). Everything else — including
-    ``YouTubeQuotaError``, which the adapter already treats as retryable by
-    transitioning its own row and re-raising — propagates unrecognised,
-    handled by ``drain_queue``'s default retryable path."""
+    will (see the adapter's own docstring). ``YouTubeQuotaError`` (spent API
+    quota, or the channel's daily upload limit) is a
+    :class:`ThrottledDeliveryError`: the platform refuses more until its day
+    resets, so the row waits and is never failed on ``max_attempts`` for it
+    -- eight quota refusals used to fail a sound Short.
+    Everything else propagates unrecognised, handled by ``drain_queue``'s
+    default retryable path."""
 
     def handler(row: Dict[str, Any]) -> None:
         record = record_loader(row["project_name"], row["short_index"])
@@ -115,6 +119,8 @@ def make_youtube_handler(
             adapter.publish(record, conn=conn, delivery_id=row["id"], video_path=video_path)
         except AmbiguousUploadMatchError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
+        except YouTubeQuotaError as exc:
+            raise ThrottledDeliveryError(str(exc)) from exc
 
     return handler
 

@@ -520,6 +520,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             # never moved). A YouTube retry looks for its own lost upload from
             # here, not from "now". NULL for rows that predate it: never guessed.
             conn.execute("ALTER TABLE deliveries ADD COLUMN first_submitted_at TEXT")
+        if "uploaded_at" not in cols:
+            # When ``platform_upload_id`` was first written (``transition``): the
+            # upload moment the YouTube daily budget counts by. NULL for older rows.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN uploaded_at TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -1029,6 +1033,9 @@ def transition(
     if new_status == "submitting":
         # The first submit only: every later attempt keeps it (COALESCE).
         set_clause += ", first_submitted_at=COALESCE(first_submitted_at, ?)"
+        params.append(_now_iso())
+    if fields.get("platform_upload_id"):
+        set_clause += ", uploaded_at=COALESCE(uploaded_at, ?)"
         params.append(_now_iso())
     params += [delivery_id, expected_status]
     account_guard = ""

@@ -236,6 +236,32 @@ def test_daily_budget_defers_rather_than_fails(mock_service, queue_conn, tmp_pat
     assert row["next_attempt_reason"] == "platform_deferral"
 
 
+def test_daily_budget_counts_uploads_on_the_pacific_quota_day(queue_conn):
+    """YouTube's quota day starts at midnight Pacific. An upload at 23:30 PST
+    (07:30Z) belongs to the day before 01:00 PST (09:00Z), and a row enqueued
+    days ago that uploaded today counts today, by its upload time."""
+    from gomoveshift.publishing import youtube_adapter as ya
+
+    now = datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc)
+
+    def _uploaded(index, created, uploaded):
+        did = enqueue(queue_conn, "proj", index, "youtube", f"h{index}")
+        transition(queue_conn, did, "queued", "uploaded", platform_upload_id=f"V{index}")
+        queue_conn.execute(
+            "UPDATE deliveries SET created_at=?, uploaded_at=? WHERE id=?",
+            (created.isoformat(), uploaded.isoformat(), did),
+        )
+        queue_conn.commit()
+
+    _uploaded(0, now - timedelta(hours=2), datetime(2026, 11, 26, 7, 30, tzinfo=timezone.utc))
+    assert ya._uploads_today(queue_conn, now=now) == 0
+    _uploaded(1, now - timedelta(days=3), datetime(2026, 11, 26, 8, 30, tzinfo=timezone.utc))
+    assert ya._uploads_today(queue_conn, now=now) == 1
+    assert ya._quota_day_start(plus_days=1, now=now) == datetime(
+        2026, 11, 27, 8, 0, tzinfo=timezone.utc
+    )
+
+
 def test_lost_response_reconciles_and_does_not_double_insert(mock_service, queue_conn, tmp_path):
     """A retry/duplicate-dispatch of an already-completed delivery must not
     re-issue ``videos.insert`` — it reconciles the persisted id via

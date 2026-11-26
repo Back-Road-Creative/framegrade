@@ -31,9 +31,10 @@ than re-implementing its upload/retry/token/quota handling.
 - **Daily budget:** `videos.insert` has its own bucket
   (`config.drive.youtube_video_insert_daily_uploads`, default 100/day),
   separate from `youtube_quota_daily_budget` (unchanged, still governs
-  `playlistItems.insert`). Once today's (UTC) uploads reach it, the
-  adapter defers to next UTC midnight (`status=deferred`) rather than
-  failing — `publishAt` tolerates the delay.
+  `playlistItems.insert`). Uploads are counted by when each got its id (the
+  queue's `uploaded_at`) on YouTube's quota day, which starts at midnight
+  Pacific. Once that day's uploads reach it, the adapter defers to the next
+  Pacific midnight (`status=deferred`) rather than failing.
 - **Reconciliation:** a timeout or lost response after `videos.insert` is an
   unknown outcome, never a failure. Before any new create call, `publish()`
   looks up the persisted `video_id` for the delivery (`find_delivery`) and,
@@ -71,8 +72,11 @@ than re-implementing its upload/retry/token/quota handling.
 - **Queue states:** `queued` → `submitting` (worker lease held, insert in
   flight) → `uploaded` (id persisted) → `published` (playlist assigned), or
   `uploaded` → `missing_remote` (terminal; the channel returns no such video).
-  `YouTubeQuotaError` lands in `retry_wait` (`error_class="quota"`), not a
-  permanent failure — the daily quota window resets.
+  `YouTubeQuotaError` (a quota-class 403, or the 400 `uploadLimitExceeded`
+  of the channel's daily upload limit) lands in `retry_wait`, and the handler
+  raises it on as `ThrottledDeliveryError`: the row waits the drain's throttle
+  backoff, and that branch never fails a row on `max_attempts` (it still adds
+  to `attempt_count`).
 - **Worker lease:** a `submitting` delivery holds a lease
   (`queue.acquire_lease`, 15-minute ceiling); a live lease refuses a racing
   second insert, and an expired lease (killed worker) is reclaimable by the
