@@ -233,3 +233,61 @@ class TestNeverDeletes:
         # Reconciliation is additive; pre-existing state is NOT wiped
         # just because disk happens to be empty.
         assert state["shorts_per_lf"] == {1: ghost_paths}
+
+
+def _recorded_day(stages: Path, date: str, short_names: list[str]) -> dict:
+    """The per-day render record Phase B/C writes (``per_day_completed``)."""
+    day = stages / f"day_{date}"
+    return {
+        date: {
+            "deliverables": {
+                "date": date,
+                "regular_lf_paths": [str(day / "regular_lfs" / "lf_01.mp4")],
+                "regular_lf_indices": [1],
+                "short_paths": [str(day / "shorts" / n) for n in short_names],
+            }
+        }
+    }
+
+
+class TestLeftoverFromAnEarlierPlan:
+    """Galley Head 2026-11-25: the 11-22 render left ``short_13.mp4``; the
+    11-25 plan dropped rank 13 and its render record lists 14 shorts, all
+    attributed. An audit-only resume never re-renders, so the leftover stays
+    on disk, and every hourly retry died on SPLIT-BRAIN."""
+
+    def test_a_short_the_render_did_not_record_is_a_leftover_not_split_brain(
+        self, tmp_path, caplog
+    ):
+        stages = tmp_path / "_stages"
+        stages.mkdir()
+        day = _seed_day(stages, "2025-09-20", n_lfs=1, n_shorts=4)
+        recorded = ["short_01.mp4", "short_02.mp4", "short_03.mp4"]
+        attributed = [day / "shorts" / n for n in recorded]
+        state = make_state(
+            stages_base=str(stages),
+            per_day_completed=_recorded_day(stages, "2025-09-20", recorded),
+            shorts_per_lf={1: list(attributed)},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _reconcile_shorts_per_lf_against_disk(state)
+
+        assert state["shorts_per_lf"] == {1: attributed}
+        assert (day / "shorts" / "short_04.mp4").is_file(), "compare-only: never deletes"
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "short_04.mp4" in msgs and "earlier" in msgs
+
+    def test_a_recorded_short_left_unattributed_still_hard_fails(self, tmp_path):
+        stages = tmp_path / "_stages"
+        stages.mkdir()
+        day = _seed_day(stages, "2025-09-20", n_lfs=1, n_shorts=3)
+        recorded = ["short_01.mp4", "short_02.mp4", "short_03.mp4"]
+        state = make_state(
+            stages_base=str(stages),
+            per_day_completed=_recorded_day(stages, "2025-09-20", recorded),
+            shorts_per_lf={1: [day / "shorts" / "short_01.mp4", day / "shorts" / "short_02.mp4"]},
+        )
+
+        with pytest.raises(RuntimeError, match="short_03.mp4"):
+            _reconcile_shorts_per_lf_against_disk(state)

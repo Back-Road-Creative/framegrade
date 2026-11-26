@@ -390,6 +390,14 @@ def _reconcile_shorts_per_lf_against_disk(state) -> None:
     crash). Equal-splitting those burns the wrong location into each
     short, so it **hard-fails** (``RuntimeError``) upstream of any upload.
 
+    A day's render record (``per_day_completed[date].deliverables.short_paths``)
+    names the shorts that render produced. A ``short_NN.mp4`` on disk that the
+    record does not list is a leftover from an earlier plan: an audit-only
+    resume never re-renders, so the re-render cleanup cannot remove it. It is
+    WARN-logged and ignored (never attributed, never deleted). A recorded short
+    the dict misses still hard-fails, and a day with no recorded shorts is
+    checked against everything on disk.
+
     Disk layout: ``<stages_base>/day_<YYYY-MM-DD>/shorts/short_NN.mp4``.
     """
     stages_base = state.stages_base
@@ -401,20 +409,37 @@ def _reconcile_shorts_per_lf_against_disk(state) -> None:
 
     # Scope to days THIS run assembles day-first (the Deliverables' dates). A
     # run whose LFs live elsewhere owns no day-first shorts here.
-    dayfirst_dates: set[str] = {d.date for d in deliverables_for_publish(state) if d.date}
-
-    if not dayfirst_dates:
+    deliverables = [d for d in deliverables_for_publish(state) if d.date]
+    if not deliverables:
         return
 
-    # Flat set of on-disk day-first shorts for those days.
+    # Flat set of on-disk day-first shorts for those days. A day whose render
+    # record lists its shorts owns exactly those: a file it does not list is a
+    # leftover from an earlier plan (a dropped rank the audit-only resume never
+    # re-renders away), never attributed and never uploaded, so it is logged,
+    # not counted. A day with no recorded shorts falls back to disk.
     disk_paths: set[str] = set()
-    for date in dayfirst_dates:
-        shorts_dir = stages_dir / f"day_{date}" / "shorts"
+    leftovers: list[str] = []
+    for d in deliverables:
+        shorts_dir = stages_dir / f"day_{d.date}" / "shorts"
         if not shorts_dir.is_dir():
             continue
+        recorded = {str(p) for p in d.short_paths or []}
         for p in shorts_dir.glob("short_[0-9][0-9].mp4"):
-            if p.is_file():
+            if not p.is_file():
+                continue
+            if recorded and str(p) not in recorded:
+                leftovers.append(str(p))
+            else:
                 disk_paths.add(str(p))
+
+    if leftovers:
+        logger.warning(
+            "phase_d: %d short(s) on disk are not in their day's render record "
+            "(left by an earlier shorts plan); not attributed, not uploaded, left on disk:\n    %s",
+            len(leftovers),
+            "\n    ".join(sorted(leftovers)),
+        )
 
     if not disk_paths:
         return  # No on-disk shorts — nothing to reconcile; leave state.
