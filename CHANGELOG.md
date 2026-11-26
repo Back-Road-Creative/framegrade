@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.168] - 2026-11-26
+
+### Fixed
+
+- A Short's place title no longer shares its first three words with a published title. The
+  nightly sync gave the Virginia to Pennsylvania 20th Short the bare title "Virginia to
+  Pennsylvania", the opener of the published long-forms, while its neighbours kept their
+  stamped "Mar 5, Nth stretch" titles; such a Short now takes its stamped title.
+
 ## [0.3.167] - 2026-11-26
 
 ### Fixed
@@ -1913,7 +1922,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.168...HEAD
+[0.3.168]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...v0.3.168
 [0.3.167]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...v0.3.167
 [0.3.166]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.165...v0.3.166
 [0.3.165]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...v0.3.165
