@@ -576,6 +576,13 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
                 "ALTER TABLE deliveries ADD COLUMN first_comment_correction_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        for identity_col in ("content_sha256", "content_title_key"):
+            # What the row publishes, so ``content_twin`` can see the same
+            # footage queued under another project or index. NULL on every
+            # row queued before these columns existed, and never backfilled:
+            # such a row is simply not compared.
+            if identity_col not in cols:
+                conn.execute(f"ALTER TABLE deliveries ADD COLUMN {identity_col} TEXT")
         for recovery_col, recovery_type in (
             # ``recover_terminal_delivery``: NULL on every row that is not a
             # recovery row -- an honest "not a recovery", never backfilled.
@@ -613,6 +620,8 @@ def enqueue(
     sidecar_path: Optional[str] = None,
     scheduled_at: Optional[str] = None,
     first_comment_text: Optional[str] = None,
+    content_sha256: Optional[str] = None,
+    content_title_key: Optional[str] = None,
 ) -> int:
     """Insert a delivery, or return the existing id for the same 4-tuple
     (idempotent). Raises ``sqlite3.IntegrityError`` if a different
@@ -655,7 +664,11 @@ def enqueue(
     Facebook short carries (``first_comment.full_drive_comment_text``),
     posted ``FIRST_COMMENT_DELAY_S`` after publish -- see
     ``select_due_first_comments``. The TEXT is generated elsewhere; this
-    module only stores and schedules it. ``NULL`` means no first comment is scheduled for this delivery."""
+    module only stores and schedules it. ``NULL`` means no first comment is scheduled for this delivery.
+
+    ``content_sha256`` / ``content_title_key`` are what the row publishes (the
+    plan's media sha256, and on YouTube its normalised title), stored for
+    ``content_twin``. Neither is checked here: the caller refuses a twin first."""
     now = _now_iso()
     with conn:
         existing = conn.execute(
@@ -676,8 +689,8 @@ def enqueue(
             "INSERT INTO deliveries "
             "(project_name, short_index, platform, plan_hash, status, "
             " attempt_count, shadow, sidecar_path, scheduled_at, first_comment_text, "
-            " created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)",
+            " content_sha256, content_title_key, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_name,
                 short_index,
@@ -687,11 +700,51 @@ def enqueue(
                 sidecar_path,
                 scheduled_at,
                 first_comment_text,
+                content_sha256,
+                content_title_key,
                 now,
                 now,
             ),
         )
         return int(cur.lastrowid)
+
+
+def content_twin(
+    conn: sqlite3.Connection,
+    project_name: str,
+    short_index: int,
+    platform: str,
+    *,
+    content_sha256: Optional[str],
+    content_title_key: Optional[str],
+) -> Optional[sqlite3.Row]:
+    """Another live row on ``platform`` that publishes the same content, or ``None``.
+
+    The queue's own uniqueness knows a row only by ``(project_name, short_index,
+    platform)``, so the same footage queued under another name -- a day reel
+    (``day-reel-<drive file id>``) and a drive Short of the same clip, or two reels
+    from two Drive files -- never collided and both published. A twin is a row with
+    a DIFFERENT ``(project_name, short_index)`` holding the same media sha256, or the
+    same normalised title, whose status is active, ``published`` or
+    ``missing_remote``: a ``cancelled`` or ``failed_permanent`` row never went out,
+    so it blocks nothing. A shadow row is a rehearsal and blocks nothing either.
+    Rows queued before the identity columns existed hold NULL and are not compared."""
+    clauses, params = [], []
+    if content_sha256:
+        clauses.append("content_sha256 = ?")
+        params.append(content_sha256)
+    if content_title_key:
+        clauses.append("content_title_key = ?")
+        params.append(content_title_key)
+    if not clauses:
+        return None
+    return conn.execute(
+        "SELECT * FROM deliveries WHERE platform = ? AND shadow = 0 "  # noqa: S608
+        "AND status NOT IN ('cancelled', 'failed_permanent') "
+        "AND NOT (project_name = ? AND short_index = ?) "
+        f"AND ({' OR '.join(clauses)}) ORDER BY id LIMIT 1",
+        (platform, project_name, short_index, *params),
+    ).fetchone()
 
 
 def registered_platform_id(

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from test_cli_enqueue_plan import _REAL_MEDIA, _approved_state, _args, _config
+from test_cli_enqueue_plan import _approved_state, _args, _config, _media_for
 from test_publishing_plan_builder import _build, _post
 from test_publishing_youtube_adapter import _measured_route_record
 from test_publishing_models import _record as _base_record
@@ -39,7 +39,7 @@ def _short(short_index, *, tags=(), title=TITLE):
         short_index=short_index,
         payloads=dataclasses.replace(record.payloads, youtube=yt),
         route_record=_measured_route_record(),
-        media=_REAL_MEDIA,
+        media=_media_for(short_index),
     )
 
 
@@ -80,7 +80,9 @@ def test_plan_builder_drops_an_unreviewable_tag_and_the_short_passes():
 
 
 def test_refused_short_is_not_enqueued_and_raises_an_incident(tmp_path, conn, incidents):
-    sidecar = _sidecar(tmp_path, _short(1), _short(2, tags=(BAD_TAG,)), _short(3))
+    # Its own title: enqueue refuses a second Short with one already queued.
+    third = _short(3, title="Drive County Kerry")
+    sidecar = _sidecar(tmp_path, _short(1), _short(2, tags=(BAD_TAG,)), third)
     result = enqueue_from_plan_sidecar(conn, sidecar)
     assert _indexes(conn) == [1, 3]
     assert [(r[0], r[1]) for r in result.refused] == [("example-2026-08", 2)]
