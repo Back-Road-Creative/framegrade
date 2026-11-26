@@ -241,7 +241,9 @@ Candidates are ordered town, county, then the Short's `location_short`
 (`_title_place_bodies`). `_fact_title` takes the first one that fits, is not in the
 published ledger, is not already used by this batch (`used_titles`, shared across the
 LFs of one drive when the caller passes `generate_all(used_titles=...)`), shares no
-first-3-word prefix with a batch title, and does not open like a spooled YouTube text
+first-3-word prefix with a batch title or a published one (the long-form "Virginia to
+Pennsylvania in 4K" keeps a Short off the bare "Virginia to Pennsylvania"; 2026-11-25 the
+nightly sync gave the 20th that title between stamped neighbours), and does not open like a spooled YouTube text
 (the queue gate's `cross-batch-repeat`). On a collision the next measured place is
 used, never the previous Short's title place; when none is left that one Short takes
 its stamped title (below) and the generator logs `no unused measured place for the ...
