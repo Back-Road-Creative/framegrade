@@ -777,14 +777,18 @@ def _raise_held_incident(
     """One incident per delivery held past its slot by more than the margin.
 
     Never rewritten while open (the row is skipped if its file exists unresolved),
-    never fatal: an unwritable incidents dir must not stop the drain. ``pushed``
-    stays False; ``health check``'s generic ``detail`` fallback pushes it."""
+    never fatal: an unwritable incidents dir, or a ``scheduled_at`` written
+    before ``queue.normalise_slot`` (unreadable, or with no zone, which made the
+    subtraction raise ``TypeError``), must not stop the drain. A zoneless time
+    is read as UTC, as ``parse_response_log_at`` reads one. ``pushed`` stays
+    False; ``health check``'s generic ``detail`` fallback pushes it."""
     scheduled_at = row.get("scheduled_at")
     if not scheduled_at:
         return
     try:
-        late = datetime.fromisoformat(now) - datetime.fromisoformat(scheduled_at)
-    except ValueError:
+        late = parse_response_log_at(now) - parse_response_log_at(scheduled_at)
+    except (TypeError, ValueError):
+        logger.warning("dispatch: delivery %s has an unreadable slot %r", row["id"], scheduled_at)
         return
     if late <= HELD_PAST_SLOT_MARGIN:
         return

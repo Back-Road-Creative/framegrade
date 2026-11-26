@@ -536,6 +536,11 @@ called by the drain, and writes nothing to YouTube. `recover-terminal` uses the 
 for a review-refused row (previous section). A refused row prints `REFUSED: <id>: <reason>` and
 the exit code is 1; the others are still processed.
 
+The console's "Move this slot" (`pubqueue.reschedule`) takes the same two steps through
+`plan_title_sync.move_delivery_slot`: the plan first (YouTube's shared `scheduled_at_utc`, or
+the platform's own `scheduled_at_utc_by_platform` entry, which its adapter publishes at), then
+the row. `reschedule_delivery` stores every slot as UTC and refuses a time with no zone.
+
 ## A Short with no measured route (`queue remeasure-short-route`)
 
 A Short planned before the zero-tolerance place gate has no `route_record` with `bins` in its

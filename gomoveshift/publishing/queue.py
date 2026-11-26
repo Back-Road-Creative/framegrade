@@ -1143,6 +1143,26 @@ def record_live_publish(
     return True
 
 
+def normalise_slot(value: Any) -> str:
+    """``value`` as a UTC ISO-8601 string, the one form ``scheduled_at`` holds.
+
+    ``dispatch._select_due`` compares ``scheduled_at`` with its own UTC ``now``
+    as TEXT, so "09:00-05:00", "14:00Z" or "14:00" with a space would all sort
+    wrong against it even where they parse. A time with no zone is refused, not
+    guessed: it could be Eastern or UTC, and the drain's arithmetic on it raised
+    ``TypeError``."""
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"scheduled_at must be an ISO-8601 timestamp; got {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"scheduled_at must name its time zone (for example +00:00 or -05:00); "
+            f"got {value!r}, which could be any zone"
+        )
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def reschedule_delivery(
     conn: sqlite3.Connection,
     delivery_id: int,
@@ -1166,18 +1186,16 @@ def reschedule_delivery(
     fire the row before its own wait (backoff, throttle, or deferral) has
     actually elapsed.
 
-    ``scheduled_at`` must be a readable timestamp. The column is TEXT
-    and ``dispatch._select_due`` compares it as a string, so an unparseable
-    value does not fail loudly -- it makes the row never due, or due for ever.
-    Refusing here rather than at any one caller means no caller can write one;
-    ``transition`` guards ``platform_published_at`` the same way."""
+    ``scheduled_at`` must be a readable timestamp with a zone, and is stored
+    as UTC (``normalise_slot``). The column is TEXT and
+    ``dispatch._select_due`` compares it as a string, so an unparseable or
+    differently written value does not fail loudly -- it makes the row never
+    due, or due for ever. Refusing here rather than at any one caller means no
+    caller can write one; ``transition`` guards ``platform_published_at`` the
+    same way. This writes the row only: ``plan_title_sync.move_delivery_slot``
+    moves the publish plan's slot with it."""
     now = now or _now_iso()
-    try:
-        datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"scheduled_at must be an ISO-8601 timestamp; got {scheduled_at!r}"
-        ) from exc
+    scheduled_at = normalise_slot(scheduled_at)
     if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     with conn:
