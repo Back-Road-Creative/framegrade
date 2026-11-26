@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.160] - 2026-11-25
+
+### Added
+
+- Day reels: a YouTube Short whose request has no `journal_url` now links its live journal day (`Read the full day: https://gomoveshift.com/journeys/<trip>/#day-<n>`), looked up from the site's public trip list by the reel's recording date. A queue refusal for one request is recorded and no longer stops the requests after it.
+
 ## [0.3.159] - 2026-11-25
 
 ### Added
@@ -1840,7 +1846,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...HEAD
+[0.3.160]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...v0.3.160
 [0.3.159]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...v0.3.159
 [0.3.158]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.157...v0.3.158
 [0.3.157]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.156...v0.3.157
