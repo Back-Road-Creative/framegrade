@@ -5,6 +5,20 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.159] - 2026-11-25
+
+### Added
+
+- `gomoveshift day-reels`: every day reel is also queued as a YouTube Short (title from the
+  caption's first line, hashtags as tags, caption plus an optional `journal_url` and `#Shorts` as
+  the description); a landscape reel or one over 180 s stays off YouTube. The shared render is
+  now `short_01.mp4`, the name the YouTube upload guard admits.
+- A 50/50 licensed-music test on Facebook and Instagram Shorts (`policy.shorts_music`): half the Shorts get a ledger-licensed track added at upload, the master stays muted, a Short with its own audio is refused, and the weekly growth review compares `music:on` and `music:off`. See docs/pipeline/188-shorts-music-test.md.
+
+### Changed
+
+- GoMoveShift's seed brand no longer declares `policy.shorts_music`: the owner adds music in the Meta apps from their own library, which the publishing APIs cannot attach. See docs/pipeline/188-shorts-music-test.md.
+
 ## [0.3.158] - 2026-11-25
 
 ### Added
@@ -1826,7 +1840,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...HEAD
+[0.3.159]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...v0.3.159
 [0.3.158]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.157...v0.3.158
 [0.3.157]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.156...v0.3.157
 [0.3.156]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.155...v0.3.156
