@@ -73,3 +73,12 @@ def test_an_unreadable_youtube_sibling_does_not_end_the_drain(conn, tmp_path):
     posted = []
     drain_queue(conn, {"youtube": _record(posted)}, now=NOW, incidents_dir=tmp_path / "i")
     assert posted == [ok]
+
+
+def test_a_platforms_one_turn_goes_to_its_oldest_slot_not_its_lowest_id(conn, tmp_path):
+    newer = _row(conn, "newer", "facebook", "2026-11-19T09:00:00+00:00")
+    older = _row(conn, "older", "facebook", "2026-11-12T09:00:00-05:00")
+    posted = []
+    drain_queue(conn, {"facebook": _record(posted)}, now=NOW, incidents_dir=tmp_path / "i")
+    assert posted == [older]
+    assert newer < older

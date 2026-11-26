@@ -67,6 +67,8 @@ HELD_PAST_SLOT_KIND = "delivery_held_past_slot"
 #: A due row whose ``scheduled_at`` cannot be read as a time at all. It is held
 #: (never sent: nobody knows when it was meant to go) and named once.
 UNREADABLE_SLOT_KIND = "delivery_slot_unreadable"
+#: Where a row with no ``scheduled_at`` sorts: due now, so oldest of all.
+_NO_SLOT = datetime.min.replace(tzinfo=timezone.utc)
 
 #: Backoff base/cap and the retry bound. Instagram's 100-posts/24h quota is
 #: account-wide — a stuck delivery must cost
@@ -339,6 +341,11 @@ def _slot_time(value: Any) -> Optional[datetime]:
         return None
     parsed = parse_slot(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _slot_order(row: Dict[str, Any]) -> Tuple[datetime, int]:
+    """Oldest slot first (no slot is oldest of all), then ``id``."""
+    return (_slot_time(row.get("scheduled_at")) or _NO_SLOT, row["id"])
 
 
 def _select_due(
@@ -1027,7 +1034,8 @@ def drain_queue(
     Two YouTube Shorts are never released in one clock hour: the second due row
     moves to the next free slot (row and sidecar ``publishAt``).
 
-    At most one delivery per platform is sent in one pass, on every platform.
+    At most one delivery per platform is sent in one pass, on every platform,
+    oldest slot first.
     After an outage every overdue row is due at once, and Facebook, Instagram
     and TikTok post the moment they are called, so a single pass used to post
     a whole backlog together, which the platforms read as spam. The rest stay
@@ -1067,7 +1075,9 @@ def drain_queue(
         _write_delivery_incident(
             row, now, UNREADABLE_SLOT_KIND, f"{row['platform']}#{row['id']} {reason}", incidents_dir
         )
-    for row in due:
+    # Oldest slot first, so each platform's one turn this pass goes to the row
+    # that has waited longest, not to the lowest id.
+    for row in sorted(due, key=_slot_order):
         delivery_id, platform, status = row["id"], row["platform"], row["status"]
 
         # Confirm a handler exists BEFORE acquiring the lease — otherwise a
