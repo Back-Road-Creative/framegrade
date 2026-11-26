@@ -45,6 +45,22 @@ finish started or which Page was used. Those rows require operator investigation
 the worker never fills old provenance from current credentials. Missing retained
 IDs cannot be reconciled by guessing or creating a replacement.
 
+One case proves no finish ran, and only then is the ID dropped (row back to
+`queued`, `platform_upload_id` cleared) so a fresh upload starts. In the same
+pass, a byte upload that raises (write timeout, reset, refused host) drops it,
+since finish is sent only after the bytes land; the failure then counts toward
+`max_attempts` like any ordinary one. On a retained ID, a status read whose
+`uploading_phase.status` is `not_started` or `in_progress` and whose
+`publishing_phase.status` is `not_started` (`check_video_status` returns
+`finish_never_ran: True`) drops it and uploads again in the same pass: Graph
+refuses a finish before every byte lands, and publishing begins once one is
+accepted. A missing phase, a complete upload or publishing under way stays a
+read-only unknown. A worker that dies mid-upload still leaves the ID retained.
+Before, the Day 10 reel's byte upload timed out (2026-11-26) and its row re-read
+the never-finished video every hour for good. Tests:
+`tests/test_publishing_facebook_reconcile.py` (`test_a_byte_upload_*`,
+`test_a_broken_byte_upload_*`, `test_a_retained_id_*`).
+
 The dispatcher preserves this state beyond normal retry limits, including expired
 worker leases, and keeps the existing retry backoff and lease release. A retained
 ID protects the unknown outcome even if the handler fails before reaching the

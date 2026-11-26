@@ -318,17 +318,28 @@ class InstagramReelsAdapter:
             raise UnsafeUploadHostError(
                 f"refusing upload to {parsed.scheme}://{parsed.hostname}: not an allowlisted host"
             )
-        graph_post(
-            self._session,
-            upload_url,
-            _raise_for_rupload_error,
-            headers={
-                "Authorization": f"OAuth {self._access_token}",
-                "offset": "0",
-                "file_size": str(len(video_bytes)),
-            },
-            data=video_bytes,
-        )
+        # A transfer that breaks off (write or read timeout, reset) is an
+        # upload failure like a rupload error reply: ``_create_and_upload``
+        # then starts over on a fresh container. Raised raw, it skipped that
+        # retry and left the bare container IN_PROGRESS until the row ran
+        # out of attempts (Day 10 reel, 2026-11-26).
+        try:
+            graph_post(
+                self._session,
+                upload_url,
+                _raise_for_rupload_error,
+                headers={
+                    "Authorization": f"OAuth {self._access_token}",
+                    "offset": "0",
+                    "file_size": str(len(video_bytes)),
+                },
+                data=video_bytes,
+            )
+        except requests.RequestException as exc:
+            detail = " ".join(str(exc).split())[:300]
+            raise InstagramUploadError(
+                f"[rupload transport={type(exc).__name__}] {detail}"
+            ) from exc
 
     def _fetch_permalink(self, media_id: str) -> Optional[str]:
         """Best-effort permalink lookup on a published media object.

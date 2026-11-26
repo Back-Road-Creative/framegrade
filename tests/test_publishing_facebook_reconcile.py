@@ -4,6 +4,7 @@ from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
+import requests
 from freezegun import freeze_time
 from test_publishing_facebook_adapter import (
     CREDS,
@@ -340,3 +341,121 @@ def test_destination_is_checkpointed_before_start_and_retained_after_lost_finish
         )
     assert row(queue_conn, record)["upload_account"] == "page-1"
     assert row(queue_conn, record)["destination_account"] is None
+
+
+# --- A byte upload that broke off never reached finish, so it starts over ---
+
+#: Graph's answer for a reel whose byte upload broke off before finish: the
+#: shape the Day 10 reel (2026-11-26) read for hours while its row re-read it.
+UNSENT_STATUS_BODY = {
+    "id": "v-1",
+    "status": {
+        "video_status": "upload_failed",
+        "uploading_phase": {"status": "in_progress", "bytes_transferred": 0},
+        "processing_phase": {"status": "not_started"},
+        "publishing_phase": {"status": "not_started"},
+    },
+}
+
+
+def _fresh_upload_post(seen, *, video_id="v-2", bytes_reply=None):
+    def post(url, **kwargs):
+        data = kwargs.get("data", {})
+        phase = data.get("upload_phase") if isinstance(data, dict) else None
+        seen.append(phase)
+        if phase == "start":
+            return _resp(
+                200, {"video_id": video_id, "upload_url": "https://rupload.facebook.com/x"}
+            )
+        if phase == "finish":
+            return _resp(200, {"success": True})
+        if isinstance(bytes_reply, Exception):
+            raise bytes_reply
+        return _resp(200, {})
+
+    return post
+
+
+def test_a_byte_upload_that_breaks_off_drops_its_id_so_the_next_try_starts_over(queue_conn):
+    record = _record()
+    delivery = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+    seen = []
+    broke = requests.exceptions.ConnectionError("('Connection aborted.', write timed out)")
+    session = Mock(
+        post=Mock(side_effect=_fresh_upload_post(seen, video_id="v-1", bytes_reply=broke))
+    )
+    adapter = facebook.FacebookShortsAdapter(facebook.FacebookReelsAdapter(CREDS, session=session))
+    with pytest.raises(requests.exceptions.ConnectionError):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery, video_bytes=b"x")
+    state = row(queue_conn, record)
+    # finish was never sent, so this reel can never publish: nothing to reconcile.
+    assert seen == ["start", None]
+    assert state["status"] == "queued" and state["platform_upload_id"] is None
+    assert state["upload_account"] == "page-1"
+
+
+def test_a_broken_byte_upload_counts_toward_max_attempts_instead_of_waiting_forever(queue_conn):
+    record = _record()
+    delivery = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+    seen = []
+    broke = requests.exceptions.ConnectionError("write timed out")
+    session = Mock(
+        post=Mock(side_effect=_fresh_upload_post(seen, video_id="v-1", bytes_reply=broke))
+    )
+    adapter = facebook.FacebookShortsAdapter(
+        facebook.FacebookReelsAdapter(CREDS, session=session), worker_id="test"
+    )
+
+    def handler(_):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery, video_bytes=b"x")
+
+    outcome = drain_queue(queue_conn, {"facebook": handler}, owner="test", now=NOW, max_attempts=1)
+    state = row(queue_conn, record)
+    assert outcome.failed_permanent == 1
+    assert state["status"] == "failed_permanent" and state["platform_upload_id"] is None
+
+
+@freeze_time(NOW)
+def test_a_retained_id_whose_upload_never_finished_starts_a_fresh_upload(queue_conn):
+    record, delivery = seed(queue_conn, status=UNKNOWN, attempts=4)
+    seen = []
+    session = Mock(
+        post=Mock(side_effect=_fresh_upload_post(seen)),
+        get=Mock(return_value=_resp(200, UNSENT_STATUS_BODY)),
+    )
+    adapter = facebook.FacebookShortsAdapter(facebook.FacebookReelsAdapter(CREDS, session=session))
+    result = adapter.publish(record, conn=queue_conn, delivery_id=delivery, video_bytes=b"x")
+    state = row(queue_conn, record)
+    assert seen == ["start", None, "finish"]
+    assert result.video_id == "v-2"
+    assert state["status"] == "published" and state["platform_upload_id"] == "v-2"
+    assert state["platform_post_id"] == "v-2"
+    assert session.get.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "status_body",
+    [
+        # Bytes all landed: a finish may have been sent, so never start over.
+        {"uploading_phase": {"status": "complete"}, "publishing_phase": {"status": "not_started"}},
+        # Publishing has begun: the finish was accepted.
+        {
+            "uploading_phase": {"status": "in_progress"},
+            "publishing_phase": {"status": "in_progress"},
+        },
+        # Phases missing: nothing proves the finish was never sent.
+        {"publishing_phase": {"status": "not_started"}},
+        {"uploading_phase": {"status": "in_progress"}},
+    ],
+)
+def test_a_retained_id_is_only_dropped_when_the_live_read_proves_finish_never_ran(
+    queue_conn, status_body
+):
+    record, delivery = seed(queue_conn, status=UNKNOWN)
+    session = Mock(post=Mock(), get=Mock(return_value=_resp(200, {"status": status_body})))
+    adapter = facebook.FacebookShortsAdapter(facebook.FacebookReelsAdapter(CREDS, session=session))
+    with pytest.raises(facebook.FacebookRetryableError, match="unconfirmed"):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery, video_bytes=b"x")
+    state = row(queue_conn, record)
+    assert state["status"] == UNKNOWN and state["platform_upload_id"] == "v-1"
+    session.post.assert_not_called()

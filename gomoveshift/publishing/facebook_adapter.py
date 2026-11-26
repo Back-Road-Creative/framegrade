@@ -292,11 +292,25 @@ class FacebookReelsAdapter:
             f"{self._base}/{video_id}",
             params={"fields": "status,permalink_url", "access_token": self._access_token},
         )
-        phase = ((body.get("status") or {}).get("publishing_phase") or {}).get("publish_status")
-        return {
+        status = body.get("status") if isinstance(body.get("status"), dict) else {}
+        publishing = status.get("publishing_phase")
+        publishing = publishing if isinstance(publishing, dict) else {}
+        uploading = status.get("uploading_phase")
+        uploading = uploading if isinstance(uploading, dict) else {}
+        phase = publishing.get("publish_status")
+        result = {
             "published": str(phase).lower() == "published",
             "permalink": absolute_permalink(body.get("permalink_url")) or reel_permalink(video_id),
         }
+        # Only both phases read explicitly prove no finish ran: Graph refuses
+        # a finish before every byte lands, and publishing starts once one is
+        # accepted. A missing phase proves nothing, so the key is absent.
+        if (
+            uploading.get("status") in ("not_started", "in_progress")
+            and publishing.get("status") == "not_started"
+        ):
+            result["finish_never_ran"] = True
+        return result
 
 
 # --- Durable queue wiring (see queue.py; pattern mirrors instagram_adapter.py) ---
@@ -396,7 +410,10 @@ class FacebookShortsAdapter:
             or existing.get("platform_post_id")
             or existing["status"] == STATUS_AWAITING_FACEBOOK_RECONCILE
         ):
-            return self._reconcile(existing, conn=conn, delivery_id=delivery_id)
+            reconciled = self._reconcile(existing, conn=conn, delivery_id=delivery_id)
+            if reconciled is not None:
+                return reconciled
+            existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
         payload = record.payloads.facebook
         if payload is None:
             raise ValueError(f"short_index={record.short_index} carries no Facebook payload")
@@ -438,7 +455,16 @@ class FacebookShortsAdapter:
             raise FacebookFinishUnknownError(
                 "Facebook upload checkpoint changed; outcome unconfirmed"
             )
-        self._reels.upload_video(handle.upload_url, video_bytes)
+        try:
+            self._reels.upload_video(handle.upload_url, video_bytes)
+        except Exception:
+            # The bytes broke off and finish was never sent, so this reel can
+            # never publish: drop its id and the next try starts a fresh
+            # upload. Kept, dispatch read it as an unknown finish and re-read
+            # its status every hour for good (Day 10 reel, 2026-11-26). A
+            # worker that dies here (no exception) still leaves the id.
+            transition(conn, delivery_id, STATUS_UPLOADED, STATUS_QUEUED, platform_upload_id=None)
+            raise
         # Commit BEFORE the irreversible finish call, including if the worker
         # dies without returning an exception. An uncertain finish is never retried.
         if not transition(conn, delivery_id, STATUS_UPLOADED, STATUS_AWAITING_FACEBOOK_RECONCILE):
@@ -484,12 +510,17 @@ class FacebookShortsAdapter:
 
         return FacebookPublishResult(video_id=post_id, permalink=permalink)
 
-    def _reconcile(self, existing: dict, *, conn, delivery_id: int) -> FacebookPublishResult:
+    def _reconcile(self, existing: dict, *, conn, delivery_id: int) -> FacebookPublishResult | None:
         """Poll a retained ID only; no negative/unknown answer permits a write.
 
         Legacy uploaded rows did not checkpoint finish, so their phase is
         ambiguous. They also enter this read-only state rather than guessing
         whether an old finish call ran. Only confirmed publication closes it.
+
+        The one exception: a live read proving the bytes never all landed and
+        publishing never began (``finish_never_ran``) means no finish ran, so
+        the reel can never publish. The id is dropped (row back to queued) and
+        ``None`` returned so the caller starts a fresh upload.
         """
         video_id = existing.get("platform_upload_id")
         if existing.get("platform_post_id"):
@@ -515,6 +546,22 @@ class FacebookShortsAdapter:
             raise FacebookFinishUnknownError(
                 "Facebook status unconfirmed; retain video ID and retry the read"
             ) from None
+        if (
+            isinstance(status, dict)
+            and status.get("published") is not True
+            and status.get("finish_never_ran") is True
+        ):
+            if transition(
+                conn,
+                delivery_id,
+                STATUS_AWAITING_FACEBOOK_RECONCILE,
+                STATUS_QUEUED,
+                platform_upload_id=None,
+            ):
+                return None
+            raise FacebookFinishUnknownError(
+                "Facebook reconciliation checkpoint changed; outcome unconfirmed"
+            )
         if not isinstance(status, dict) or status.get("published") is not True:
             raise FacebookFinishUnknownError(
                 "Facebook status unconfirmed; retain video ID and retry the read"
