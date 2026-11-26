@@ -17,10 +17,15 @@ from test_publishing_models import _record
 from gomoveshift.health.check import auth_blocked_incidents
 from gomoveshift.publishing.dispatch import drain_queue
 from gomoveshift.publishing.facebook_adapter import FacebookAuthBlockedError
-from gomoveshift.publishing.handlers import TikTokCredentials, build_handlers
+from gomoveshift.publishing.handlers import (
+    PlatformAuthPausedError,
+    TikTokCredentials,
+    build_handlers,
+)
 from gomoveshift.publishing.instagram_adapter import InstagramAuthBlockedError
 from gomoveshift.publishing.queue import (
     AUTH_BLOCKED_PAUSE_REASON,
+    AUTH_PAUSED_ERROR_CLASS,
     enqueue,
     open_queue_db,
     resume_platform,
@@ -93,7 +98,7 @@ def test_an_auth_error_pauses_the_platform_and_leaves_every_row_queued(
     assert result.failed_permanent == 0
     rows = [dict(conn.execute("SELECT * FROM deliveries WHERE id=?", (i,)).fetchone()) for i in ids]
     assert [r["status"] for r in rows] == ["queued"] * ROWS
-    assert rows[0]["error_class"] == "ThrottledDeliveryError"
+    assert rows[0]["error_class"] == AUTH_PAUSED_ERROR_CLASS
     for untouched in rows[1:]:
         assert untouched["attempt_count"] == 0 and untouched["error_class"] is None
     pause = conn.execute(
@@ -112,6 +117,46 @@ def test_an_auth_error_pauses_the_platform_and_leaves_every_row_queued(
     # Resuming the platform (after re-authorizing) resolves the incident.
     resume_platform(conn, platform)
     assert auth_blocked_incidents(tmp_path / "seo" / "social_queue.sqlite3", NOW) == []
+
+
+def test_the_paused_error_class_name_is_the_one_resume_looks_for():
+    assert PlatformAuthPausedError.__name__ == AUTH_PAUSED_ERROR_CLASS
+
+
+@pytest.mark.parametrize("platform", ["facebook", "instagram", "tiktok"])
+def test_resuming_makes_the_row_that_hit_the_refusal_due_on_the_next_pass(
+    conn, tmp_path, platform, monkeypatch
+):
+    """Row 1 got the 6 h throttle delay when the token was refused. Once the
+    platform is resumed it goes on the next pass with the rest, not 6 h later."""
+    ids = [enqueue(conn, "example-2026-08", i, platform, "hash-a") for i in range(ROWS)]
+    handlers, _calls = _handlers(conn, platform, monkeypatch)
+    drain_queue(conn, handlers, now=NOW, incidents_dir=tmp_path / "incidents")
+
+    assert resume_platform(conn, platform) is True
+    seen = []
+    after = drain_queue(
+        conn,
+        {platform: lambda row: seen.append(row["id"])},
+        now="2026-11-26T13:00:00+00:00",  # 1 h later, well inside the 6 h delay
+        incidents_dir=tmp_path / "incidents",
+    )
+
+    assert sorted(seen) == sorted(ids)
+    assert after.attempted == ROWS
+
+
+def test_resume_leaves_other_throttled_rows_on_their_delay(conn):
+    held = enqueue(conn, "example-2026-08", 0, "facebook", "hash-a")
+    with conn:
+        conn.execute(
+            "UPDATE deliveries SET next_attempt_at=?, next_attempt_reason='platform_throttle', "
+            "error_class='ThrottledDeliveryError' WHERE id=?",
+            ("2026-11-26T18:00:00+00:00", held),
+        )
+    resume_platform(conn, "facebook")
+    row = conn.execute("SELECT next_attempt_at FROM deliveries WHERE id=?", (held,)).fetchone()
+    assert row["next_attempt_at"] == "2026-11-26T18:00:00+00:00"
 
 
 def test_a_manual_pause_raises_no_auth_incident(conn, tmp_path):

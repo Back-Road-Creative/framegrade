@@ -101,6 +101,12 @@ _MAX_PENDING_INBOX_DRAFTS = 3
 _AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT
 
 
+class PlatformAuthPausedError(ThrottledDeliveryError):
+    """A throttle whose cause is a refused access token: the platform is now
+    paused. Its own class name (``queue.AUTH_PAUSED_ERROR_CLASS``) is what lets
+    ``queue.resume_platform`` drop the throttle delay from the row it hit."""
+
+
 def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliveryError:
     """The error a handler raises when the platform refused its access token.
 
@@ -127,7 +133,7 @@ def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliv
         and not live["platform_post_id"]
     ):
         transition(conn, row["id"], "submitting", "queued")
-    return ThrottledDeliveryError(f"{row['platform']} paused, access token refused: {detail}")
+    return PlatformAuthPausedError(f"{row['platform']} paused, access token refused: {detail}")
 
 
 def make_youtube_handler(

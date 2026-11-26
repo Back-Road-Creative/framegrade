@@ -462,6 +462,10 @@ def rows_by_state(rows: List[Dict[str, Any]]) -> List[tuple]:
 _ERROR_CLASS_EXPLANATIONS = {
     "PermanentDeliveryError": "The platform rejected this outright; it will not retry.",
     "ThrottledDeliveryError": "The platform rate-limited this; retrying after a fixed delay.",
+    "PlatformAuthPausedError": (
+        "The platform refused its access token, so it is paused; re-authorize, then "
+        "resume it here and this goes on the next pass."
+    ),
     "TransientMediaError": "A transient media problem; retrying with backoff.",
     "quota": "YouTube's daily upload quota was exhausted; this retries once it resets.",
     "tiktok_publish_failed": "TikTok reported this manually-published draft failed to publish.",

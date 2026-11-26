@@ -1211,6 +1211,12 @@ def reschedule_delivery(
 #: platform paused this way and resolves it once the pause is lifted.
 AUTH_BLOCKED_PAUSE_REASON = "auth:blocked"
 
+#: ``deliveries.error_class`` of a row the drain held back because its platform
+#: was auth-paused (``handlers.PlatformAuthPausedError``). That row is pushed out
+#: by the throttle delay like any other throttle; ``resume_platform`` makes it due
+#: again at once.
+AUTH_PAUSED_ERROR_CLASS = "PlatformAuthPausedError"
+
 
 def pause_platform(
     conn: sqlite3.Connection,
@@ -1253,9 +1259,19 @@ def resume_platform(conn: sqlite3.Connection, platform: str) -> bool:
     while paused simply become due again on the next drain pass; if that
     pass is large, that is a real, visible consequence of how long the
     platform was paused, not a bug to mask here. Returns ``False`` (not an
-    error) if the platform wasn't paused."""
+    error) if the platform wasn't paused.
+
+    One exception: the row the drain was on when the platform refused its
+    access token (``error_class`` ``AUTH_PAUSED_ERROR_CLASS``) was given the
+    6 h throttle delay. Lifting the pause means the token was fixed, so that
+    row loses the delay here and is due on the next pass with the rest."""
     with conn:
         cur = conn.execute("DELETE FROM platform_pauses WHERE platform=?", (platform,))
+        conn.execute(
+            f"UPDATE deliveries SET next_attempt_at=NULL, next_attempt_reason=NULL, "  # noqa: S608
+            f"updated_at=? WHERE platform=? AND error_class=? AND status NOT IN {_TERMINAL_SQL}",
+            (_now_iso(), platform, AUTH_PAUSED_ERROR_CLASS),
+        )
         return cur.rowcount == 1
 
 
