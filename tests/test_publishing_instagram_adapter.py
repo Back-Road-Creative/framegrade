@@ -842,6 +842,26 @@ def test_a_rupload_message_is_bounded_and_single_line():
     assert len(message) < 700
 
 
+@pytest.mark.parametrize(
+    "broke",
+    [
+        requests.exceptions.ConnectionError("('Connection aborted.', write operation timed out)"),
+        requests.exceptions.ReadTimeout("read timed out"),
+    ],
+)
+def test_a_byte_upload_that_breaks_off_is_an_upload_error_so_it_starts_over(broke):
+    # Day 10 reel, 2026-11-26: a raw write timeout skipped the fresh-container
+    # retry and left the bare container IN_PROGRESS, retried until max attempts.
+    adapter = InstagramReelsAdapter(CREDS, session=Mock(post=Mock(side_effect=broke)))
+    with pytest.raises(InstagramUploadError) as exc_info:
+        adapter.upload_video("https://rupload.facebook.com/ig-api-upload/v21.0/c-1", b"xx")
+    message = str(exc_info.value)
+    assert message.startswith(f"[rupload transport={type(broke).__name__}] ")
+    assert "timed out" in message and "\n" not in message
+    assert FAKE_TOKEN not in message
+    assert exc_info.value.__cause__ is broke
+
+
 class _FlakyUploadReels(_FakeReels):
     """Every container gets its own id; the first ``failures`` uploads fail."""
 

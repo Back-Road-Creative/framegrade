@@ -41,7 +41,11 @@ about 49 s on CPU.
 answers a failed upload with a `debug_info` envelope (`type`, `message`,
 `retriable`), never a Graph `error` object. `upload_video` classifies it
 as `InstagramUploadError`, tagged `[rupload http=.. type=.. retriable=..]`
-with the bounded one-line message. A container that never got its bytes can
+with the bounded one-line message. A transfer that breaks off (a `requests`
+write or read timeout, a reset) is the same failure, tagged
+`[rupload transport=<exception>]`; before, it surfaced raw, skipped this retry
+and left the Day 10 reel's bare container `IN_PROGRESS` while the row spent
+its attempts (2026-11-26). A container that never got its bytes can
 never publish (it sits `IN_PROGRESS` until it expires), so
 `InstagramShortsAdapter` creates a new container, persists it and uploads
 again, `UPLOAD_ATTEMPTS` = 3 tries in all, sleeping
