@@ -1,8 +1,9 @@
 """Every pass that talks to a platform pauses it on a refused access token. Before, these
-caught it per row (or as an unknown outcome) and went on."""
+caught it per row (or as an unknown outcome) and went on. The last tests guard the next pass."""
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 from pathlib import Path
 from unittest.mock import Mock
@@ -282,3 +283,79 @@ def test_a_refused_token_on_a_carousel_pauses_instagram(conn, tmp_path, fail_at)
     # Nothing created: it waits for the resume. Part-built: it stays failed, as
     # any partial carousel does, for a person to look at its orphaned items.
     assert _status(conn, did)["status"] == ("queued" if fail_at == 0 else "failed_permanent")
+
+
+# --- the guard for the next pass -------------------------------------------------
+
+_ROOT = Path(__file__).resolve().parents[1] / "gomoveshift"
+_SCANNED = ("publishing", "cli/handlers")
+_ROUTES = {"is_auth_blocked", "pause_for_auth", "_pause_for_auth", "youtube_auth_refused"}
+
+#: Per-row broad ``except`` clauses that need no auth routing, and why. A new
+#: pass that talks to a platform does not belong here: route the refusal.
+_NO_PLATFORM_CALL = {
+    "cli/handlers/analysis.py:cmd_find_stops": "local stop analysis",
+    "cli/handlers/enqueue_plan.py:_register_enqueued_shorts_in_tracking": "local tracking files",
+    "cli/handlers/publish_journal.py:run_replay_pending": "local journey files",
+    "cli/handlers/queue_recover.py:_cmd_sync_plan_titles": "local plan sidecars",
+    "publishing/anti_spam_gate.py:recent_text_entries": "local plan sidecars",
+    "publishing/dispatch.py:drain_queue": "every handler is wrapped in _pause_on_auth",
+    "publishing/plan_bracket_sync.py:sync_bracket_short_text": "the local text generator",
+    "publishing/queue_repair.py:repair_queued_shorts": "local plans and the geocoder",
+    "publishing/queue_short_text.py:_generate": "the local text generator",
+    "publishing/queue_short_text.py:sync_short_text": "local sidecar writes",
+    "publishing/queue_slot_refill.py:refill_slots": "local plan review",
+    "publishing/replace_relink.py:relink_replaced_lf": "local stores",
+    "publishing/tiktok_pack.py:sweep_queued": "local pack files",
+    "publishing/tiktok_pack.py:reconcile_packed": (
+        "only local reads are caught; list_videos raises to the caller, and pack mode "
+        "needs no token to pack, so a refusal must not pause TikTok's packing"
+    ),
+}
+
+
+def _broad(handler: ast.ExceptHandler) -> bool:
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return handler.type is None or any(
+        isinstance(k, ast.Name) and k.id in ("Exception", "BaseException") for k in kinds
+    )
+
+
+def _unrouted_per_row_catches(root: Path = _ROOT):
+    found = set()
+    for folder in _SCANNED:
+        for path in sorted((root / folder).glob("*.py")):
+            tree = ast.parse(path.read_text())
+            for fn in ast.walk(tree):
+                if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for loop in (n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While))):
+                    for node in (n for n in ast.walk(loop) if isinstance(n, ast.Try)):
+                        names = {getattr(n, "id", getattr(n, "attr", None)) for n in ast.walk(node)}
+                        if any(_broad(h) for h in node.handlers) and not names & _ROUTES:
+                            found.add(f"{folder}/{path.name}:{fn.name}")
+    return found
+
+
+def test_every_per_row_catch_in_a_publishing_pass_routes_a_refused_token():
+    unrouted = _unrouted_per_row_catches()
+    assert unrouted - set(_NO_PLATFORM_CALL) == set(), (
+        "a per-row `except Exception` here can swallow a refused access token: route it "
+        "through queue.is_auth_blocked / queue.pause_for_auth (or youtube_auth_refused), "
+        "or add the function to _NO_PLATFORM_CALL with the reason it never calls a platform"
+    )
+    assert set(_NO_PLATFORM_CALL) - unrouted == set(), "stale _NO_PLATFORM_CALL entries"
+
+
+def test_the_guard_would_catch_a_swallowing_pass(tmp_path):
+    module = tmp_path / "publishing"
+    module.mkdir()
+    (module / "new_pass.py").write_text(
+        "def drain(conn, rows, client):\n"
+        "    for row in rows:\n"
+        "        try:\n"
+        "            client.post(row)\n"
+        "        except Exception:\n"
+        "            continue\n"
+    )
+    assert _unrouted_per_row_catches(tmp_path) == {"publishing/new_pass.py:drain"}
