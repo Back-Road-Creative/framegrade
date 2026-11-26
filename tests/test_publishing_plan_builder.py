@@ -10,7 +10,9 @@ import pytest
 from gomoveshift.pipeline.title_decision import decide_title
 from gomoveshift.publishing.models import MediaFingerprint
 from gomoveshift.publishing.plan import compute_plan_hash
-from gomoveshift.publishing.plan_builder import build_publish_plan
+from gomoveshift.publishing.plan_builder import LONG_VERSION_POINTER, build_publish_plan
+
+P = f" {LONG_VERSION_POINTER}"
 
 
 def _media(short_index: int = 1, sha: str = "a" * 64) -> MediaFingerprint:
@@ -72,8 +74,8 @@ def test_payloads_match_mapping_doc_for_representative_short():
     assert record.payloads.tiktok.title == "tt 1"
     assert record.payloads.tiktok.privacy_level == "SELF_ONLY"
     expected_caption = "Rolling through County Kerry today. Filmed April 2026."
-    assert record.payloads.instagram.caption == expected_caption
-    assert record.payloads.facebook.description == expected_caption
+    assert record.payloads.instagram.caption == expected_caption + P
+    assert record.payloads.facebook.description == expected_caption + P
     # Parent link lands only in the YouTube description, per the mapping doc.
     assert "https://youtu.be/vidparent" in record.payloads.youtube.description
     assert "youtu.be" not in record.payloads.instagram.caption
@@ -162,7 +164,7 @@ def test_tiktok_carries_the_same_caption_facebook_and_instagram_get():
     record = _build().shorts[0]
     expected_caption = "Rolling through County Kerry today. Filmed April 2026."
     assert record.payloads.tiktok.caption == expected_caption
-    assert record.payloads.tiktok.caption == record.payloads.facebook.description
+    assert record.payloads.tiktok.caption + P == record.payloads.facebook.description
 
 
 def test_tiktok_title_survives_beside_the_caption():
@@ -188,10 +190,10 @@ def test_filmed_date_closes_the_sentence_and_the_hashtags_close_the_caption():
     }
     record = _build(posts=[_post(captions=captions)]).shorts[0]
     assert record.payloads.facebook.description == (
-        "Worth the detour? Filmed April 2026.\n\n#POVDriving #PA"
+        "Worth the detour? Filmed April 2026." + P + "\n\n#POVDriving #PA"
     )
     assert record.payloads.instagram.caption == (
-        "From behind the wheel 🚗 Filmed April 2026.\n\n#PA #POVDriving #RoadTrip"
+        "From behind the wheel 🚗 Filmed April 2026." + P + "\n\n#PA #POVDriving #RoadTrip"
     )
     assert record.payloads.tiktok.caption == (
         "Just driving through Example Town. Filmed April 2026.\n\n#POVDriving #PA"
@@ -200,7 +202,29 @@ def test_filmed_date_closes_the_sentence_and_the_hashtags_close_the_caption():
 
 def test_a_number_sign_that_is_not_a_hashtag_stays_in_the_sentence():
     record = _build(posts=[_post(caption="Stop #2")]).shorts[0]
-    assert record.payloads.facebook.description == "Stop #2. Filmed April 2026."
+    assert record.payloads.facebook.description == "Stop #2. Filmed April 2026." + P
+
+
+def test_long_version_line_waits_for_a_public_parent():
+    """Facebook and Instagram name where the long version is only once the
+    parent long-form is public by the Short's slot; TikTok never does."""
+    from datetime import datetime, timezone
+
+    from gomoveshift.publishing.plan_builder import build_short_payloads
+
+    early = build_short_payloads(
+        _post(),
+        recording_date="2026-04-01",
+        parent_id="vidparent",
+        tiktok_privacy_level="SELF_ONLY",
+        short_at=datetime(2026, 4, 1, tzinfo=timezone.utc),
+        parent_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+    assert LONG_VERSION_POINTER not in early.facebook.description
+    assert LONG_VERSION_POINTER not in early.instagram.caption
+    public = _build().shorts[0]
+    assert LONG_VERSION_POINTER not in public.payloads.tiktok.caption
+    assert "youtu.be" not in public.payloads.instagram.caption
 
 
 # -- a sentence that never ended ------------------------------------------
@@ -216,10 +240,10 @@ def test_a_sentence_ending_on_a_word_gets_its_full_stop_before_the_date():
     }
     record = _build(posts=[_post(captions=captions)]).shorts[0]
     assert record.payloads.facebook.description == (
-        "Example Town — roads. Filmed April 2026.\n\n#POVDriving #RoadTrip"
+        "Example Town — roads. Filmed April 2026." + P + "\n\n#POVDriving #RoadTrip"
     )
     assert record.payloads.instagram.caption == (
-        "Just driving through Example Town. Filmed April 2026."
+        "Just driving through Example Town. Filmed April 2026." + P
     )
     assert record.payloads.tiktok.caption == "Mile marker (17). Filmed April 2026."
 
@@ -231,8 +255,8 @@ def test_a_sentence_that_already_ended_gets_no_second_stop():
         "tiktok": "Which way!",
     }
     record = _build(posts=[_post(captions=captions)]).shorts[0]
-    assert record.payloads.facebook.description == "Made it. Filmed April 2026."
-    assert record.payloads.instagram.caption == "Wait for it… Filmed April 2026."
+    assert record.payloads.facebook.description == "Made it. Filmed April 2026." + P
+    assert record.payloads.instagram.caption == "Wait for it… Filmed April 2026." + P
     assert record.payloads.tiktok.caption == "Which way! Filmed April 2026."
 
 
