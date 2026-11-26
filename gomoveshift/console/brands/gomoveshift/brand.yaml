@@ -38,6 +38,8 @@ seo:
 # at generation and tagged in the publish-plan sidecar; `metrics collect`
 # prints one `EXPERIMENT fb_hashtags ...` line per arm.
 policy:
+  # One Short per drive, its best clip (planner only; doc 136).
+  shorts_per_drive: 1
   experiments:
     - name: fb_hashtags
       platforms: [facebook]

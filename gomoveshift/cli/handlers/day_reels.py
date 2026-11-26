@@ -58,7 +58,9 @@ def _authorize(args) -> int:
     if not _FOLDER_ID.fullmatch(folder_id):
         print("Error: --folder-id must be the Drive folder id of the day-reels request folder.")
         return 2
-    scope = base64.b64encode(json.dumps({"scope": "drive.readonly"}).encode()).decode()
+    # rclone decodes the blob as URL-safe, unpadded base64 (padding is "illegal").
+    blob = json.dumps({"scope": "drive.readonly"}).encode()
+    scope = base64.urlsafe_b64encode(blob).decode().rstrip("=")
     print("Open the link rclone prints below, choose the Google account, and tap Allow.")
     result = subprocess.run(
         ["rclone", "authorize", "drive", scope, "--auth-no-open-browser"],

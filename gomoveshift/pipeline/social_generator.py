@@ -47,6 +47,7 @@ from ._series_utils import _strip_series_suffix, parse_lf_label
 from .content_validator import ContentValidationError, ContentValidator
 from .final_text_record import reviewable_short_tags
 from .geo_constants import US_STATE_ABBREVS
+from .owner_lines import load_owner_lines, owner_lines_path, with_owner_sentence
 from .title_decision import decide_title, shipped_title_snapshot, short_place_facts
 from .weather import WeatherCondition, WeatherResult
 
@@ -1053,6 +1054,10 @@ class SocialGenerator:
         self.titles_file = titles_file
         self.moment_kinds = moment_kinds
         self._hand_titles = load_hand_titles(titles_file) if titles_file else {}
+        # One line in the owner's own voice per Short, beside titles.yaml (owner_lines.py).
+        self._owner_lines = (
+            load_owner_lines(owner_lines_path(titles_file)).shorts if titles_file else {}
+        )
         self._pool_fallback_logged = False
         self.resolved_location = resolved_location
         # Set only on a per-short variant: the short's OWN clip-GPS regions.
@@ -1690,8 +1695,14 @@ class SocialGenerator:
         hand_caption: Optional[str] = None,
         experiment_arms: Optional["dict[str, str]"] = None,
         picked: Optional["dict[str, str]"] = None,
+        owner_line: Optional[str] = None,
     ) -> "dict[str, str]":
         """Compose one distinct caption per platform.
+
+        ``owner_line`` (``owner_lines.yaml``), when given, opens the Facebook
+        and Instagram captions as its own sentence, ahead of the composed or
+        hand text; YouTube and TikTok (150 characters, no room) keep theirs. An interactive
+        Short's owner line must not name the place, like its hand caption.
 
         ``picked``, when given, receives each composed caption's opener id
         (:func:`caption_template_id`); a hand caption composes none.
@@ -1725,6 +1736,13 @@ class SocialGenerator:
                     f"short_index {short_index}: interactive short's hand "
                     f"caption leaks the place {leak!r}: {hand_caption!r}"
                 )
+        if interactive and owner_line:
+            leak = self._leaks_place(owner_line)
+            if leak:
+                raise ValueError(
+                    f"short_index {short_index}: interactive short's owner "
+                    f"line leaks the place {leak!r}: {owner_line!r}"
+                )
         weather_emoji = weather.emoji if weather else "🚗"
         location_text = LOCATION_WITHHELD if interactive else self.social_location
         fmap = defaultdict(
@@ -1751,6 +1769,7 @@ class SocialGenerator:
         fb_base = first_sentence or self._compose_caption(
             "facebook", short_index, fmap, interactive, picked
         )
+        fb_base = with_owner_sentence(fb_base, owner_line)
         mandatory = [] if interactive else self._mandatory_location_tags()
         fb_mode = hashtag_mode_for(self.experiments, experiment_arms or {}, "facebook")
         captions["facebook"] = self._append_hashtags(
@@ -1766,6 +1785,7 @@ class SocialGenerator:
         ig_base = first_sentence or self._compose_caption(
             "instagram", short_index, fmap, interactive, picked
         )
+        ig_base = with_owner_sentence(ig_base, owner_line)
         if self.recording_date:
             ig_base += f"\n\n📹 {self.recording_date}"
         # Enforce Twitter's 280 char limit for Metricool compatibility: drop
@@ -2497,6 +2517,7 @@ class SocialGenerator:
                 hand_caption=(hand.caption if hand is not None else None),
                 experiment_arms=arms,
                 picked=caption_templates,
+                owner_line=self._owner_lines.get(hand_idx),
             )
             tags = self._build_tags(weather, short_index, interactive=interactive)
             first_comment = self._build_first_comment(weather, short_index, interactive=interactive)

@@ -99,9 +99,13 @@ never fails the run.
   Filmed March 2030."`, never the run-on `"...Unicoi Filmed March 2030."`). A number sign
   is not a hashtag (`"Stop #2"` stays in the sentence). **Without** the CSV's
   280-char Twitter truncation (retired
-  X/Twitter column only). No parent link here.
-- **TikTok**: `caption` = the SAME text Instagram and Facebook get
-  (`SocialPost.caption` + the filmed-date sentence, same placement); `title` =
+  X/Twitter column only). No parent link here. Once the parent long-form is public by
+  the Short's slot, one more sentence follows the filmed date,
+  `plan_builder.LONG_VERSION_POINTER` ("The long version is on our YouTube channel."),
+  so the Short reads as a trailer for its drive; "long version", not "full drive",
+  because a heavy-trim parent is a highlights cut. The CSV path has no such sentence.
+- **TikTok**: `caption` = the text Instagram and Facebook get minus that last
+  sentence (`SocialPost.caption` + the filmed-date sentence, same placement); `title` =
   `SocialPost.tiktok_title`, a short label for the console list and
   `ost_validator`. TikTok has one text field, so `caption` is what publishes
   — `post_info.title` on Direct Post, and the text a human pastes on the

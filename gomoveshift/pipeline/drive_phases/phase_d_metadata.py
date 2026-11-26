@@ -19,6 +19,7 @@ from ..chapters.generator import YOUTUBE_MIN_CHAPTERS
 from ..drive_text_adapter import attach_drive_text, reattach_with_chapters
 from ..final_text_record import build_final_text_review
 from ..location_evidence import refuse_unsupported_title
+from ..owner_lines import OWNER_LINES_FILE, load_owner_lines, with_owner_paragraph
 from ..region_resolver import derive_region, is_us_region
 from ..route_profile import RouteProfile, build_lf_profile
 from ..title_builder import ensure_unique_titles
@@ -356,6 +357,7 @@ def _build_metadata_per_lf(
 
     lf_inserts = _lf_inserts(state)
     metadata_per_lf: dict[int, dict] = {}
+    owner_lines = load_owner_lines(output_base / "social" / OWNER_LINES_FILE).longform
     for lf, _lf_path in zip(drive_plan.regular_lfs, regular_lf_paths):
         project_name = f"{project_base}_lf{lf.index:02d}"
         # A populated per-LF map
@@ -562,6 +564,11 @@ def _build_metadata_per_lf(
             lf_index=lf.index,
             bracket=getattr(state, "bracket_route", None),
         )
+        # The owner's own line (social/owner_lines.yaml) opens the description,
+        # before Waypost reviews the final text, so the review covers it too.
+        _owner = owner_lines.get(lf.index)
+        if _owner and metadata.get("description"):
+            metadata["description"] = with_owner_paragraph(metadata["description"], _owner)
         # Waypost's review of the final text against the retained route;
         # ``None`` for a GPS-less LF. Upload re-verifies it before insert.
         attach_drive_text(
