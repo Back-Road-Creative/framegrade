@@ -57,14 +57,28 @@ def _clip_hashtag_names(regions: Iterable[str]) -> set:
     return names
 
 
+def _allowed_tags(regions: Iterable[str]) -> set:
+    allowed = {t.casefold().lstrip("#") for t in (*GENERIC_HASHTAGS,)}
+    for tags in TERRAIN_HASHTAGS.values():
+        allowed.update(t.casefold().lstrip("#") for t in tags)
+    return allowed | _clip_hashtag_names(regions)
+
+
+def title_hashtag_backed(tag: str, regions: Iterable[str]) -> bool:
+    """``tag`` is a word a Short's title review backs for a clip voting ``regions``: the
+    policy's own filler (``#Shorts``), a generator tag list, or a region-vote component.
+    The plan builder appends only such tags to a title, so it never builds one the review
+    refuses (Old Head Short #7's ``#Ireland`` for a "County Cork" vote, 2026-11-25)."""
+    name = tag.lstrip("#").casefold()
+    filler = {w.casefold() for w in GMS_TEXT_POLICY.filler_words}
+    return name in filler or name in _allowed_tags(regions)
+
+
 def short_title_filler(title: str, recording_date: str, regions: Iterable[str]) -> tuple:
     """Words of ``title`` that the record backs and so are not names to cite."""
     body, hashtags = split_trailing_hashtags(title or "")
     backed: set = set()
-    allowed_tags = {t.casefold().lstrip("#") for t in (*GENERIC_HASHTAGS,)}
-    for tags in TERRAIN_HASHTAGS.values():
-        allowed_tags.update(t.casefold().lstrip("#") for t in tags)
-    allowed_tags |= _clip_hashtag_names(regions)
+    allowed_tags = _allowed_tags(regions)
     for tag in hashtags.split():
         name = tag.lstrip("#").casefold()
         if name in allowed_tags:
