@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from seo_manager.analytics.final_text_surfaces import compose_description
 
 from ..pipeline.drive_phases import youtube_uploader as youtube_uploader_module
-from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader
+from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader, youtube_auth_refused
 from ..pipeline.exceptions import YouTubeQuotaError
 from ..pipeline.final_text_record import (
     GMS_TEXT_POLICY,
@@ -38,6 +38,7 @@ from .queue import (
     acquire_lease,
     find_delivery,
     mark_missing_remote,
+    pause_for_auth,
     record_live_publish,
     transition,
 )
@@ -411,7 +412,11 @@ def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
             resp = (
                 service.videos().list(part="status,snippet", id=row["platform_upload_id"]).execute()
             )
-        except Exception:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+        except Exception as exc:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+            if youtube_auth_refused(exc):
+                pause_for_auth(conn, "youtube", exc)  # every row's lookup would fail alike
+                logger.warning("live check: YouTube paused, access token refused")
+                break
             logger.exception("live check failed for video_id=%s", row["platform_upload_id"])
             continue
         items = resp.get("items") or []

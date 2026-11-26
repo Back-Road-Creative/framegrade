@@ -15,6 +15,7 @@ from typing import Any, Mapping, TypeGuard
 import requests
 from requests.adapters import HTTPAdapter
 
+from .facebook_adapter import _AUTH_ERROR_CODES, _AUTH_ERROR_SUBCODES
 from .meta_auth import DEFAULT_GRAPH_VERSION
 from .meta_graph import graph_base_url
 
@@ -73,6 +74,14 @@ class PhotoReadbackUnknownError(Exception):
         self.story_id = story_id
 
 
+class PhotoReadbackAuthBlockedError(PhotoReadbackUnknownError):
+    """The status read was refused for the Page token itself (HTTP 401, or Graph
+    code 190 and its subcodes): still unconfirmed, and no read works until
+    someone re-authorizes. Carries nothing from the response."""
+
+    queue_state = "auth_blocked"  # what ``queue.is_auth_blocked`` reads
+
+
 class PhotoCommentUnknownError(Exception):
     """The first comment is unconfirmed; nothing about the photo post changed.
 
@@ -98,6 +107,22 @@ _CURSOR = re.compile(r"[A-Za-z0-9_=-]{1,512}")
 
 class _UnconfirmedError(Exception):
     """Internal marker carrying no untrusted response details."""
+
+
+class _TokenRefusedError(_UnconfirmedError):
+    """Internal marker: Graph refused the token (no response details kept)."""
+
+
+def _token_refused(response: requests.Response) -> bool:
+    if response.status_code == 401:
+        return True
+    try:
+        error = response.json().get("error") or {}
+    except Exception:  # noqa: BLE001 -- an unreadable body names no refusal
+        return False
+    return error.get("code") in _AUTH_ERROR_CODES or (
+        error.get("error_subcode") in _AUTH_ERROR_SUBCODES
+    )
 
 
 class FacebookPagePhotoClient:
@@ -150,7 +175,7 @@ class FacebookPagePhotoClient:
             **kwargs,
         )
         if response.status_code != 200:
-            raise _UnconfirmedError
+            raise _TokenRefusedError if _token_refused(response) else _UnconfirmedError
         body = response.json()
         if not isinstance(body, dict) or "error" in body:
             raise _UnconfirmedError
@@ -237,6 +262,8 @@ class FacebookPagePhotoClient:
             ):
                 raise _UnconfirmedError
             return PhotoStatus(receipt.photo_id, story_id, self._page_id, published)
+        except _TokenRefusedError:
+            raise PhotoReadbackAuthBlockedError(self._page_id, receipt.photo_id, story_id) from None
         except Exception:  # noqa: BLE001 -- readback cannot authorize repeating a write
             pass
         raise PhotoReadbackUnknownError(self._page_id, receipt.photo_id, story_id)

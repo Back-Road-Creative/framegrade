@@ -569,6 +569,8 @@ class FacebookShortsAdapter:
             )
         try:
             status = self._reels.check_video_status(video_id)
+        except FacebookAuthBlockedError:
+            raise  # a dead token, not an unknown outcome: the handler pauses Facebook
         except Exception:
             raise FacebookFinishUnknownError(
                 "Facebook status unconfirmed; retain video ID and retry the read"

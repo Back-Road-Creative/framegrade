@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from .dispatch import (
     PermanentDeliveryError,
+    PlatformAuthPausedError,
     ThrottledDeliveryError,
     _detail,
     _release_own_lease,
@@ -52,6 +53,7 @@ from .queue import (
     STATUS_AWAITING_MANUAL_PUBLISH,
     acquire_lease,
     find_delivery,
+    is_auth_blocked,
     pause_for_auth,
     transition,
 )
@@ -67,7 +69,11 @@ from .tiktok_adapter import (
     upload_video_chunks,
 )
 from .tiktok_pack import pack_and_park
-from .youtube_adapter import AmbiguousUploadMatchError, YouTubeShortsAdapter
+from .youtube_adapter import (
+    AmbiguousUploadMatchError,
+    YouTubeShortsAdapter,
+    youtube_auth_refused,
+)
 
 RecordLoader = Callable[[str, int], ShortPublishRecord]
 Handler = Callable[[Dict[str, Any]], None]
@@ -100,13 +106,9 @@ _MAX_PENDING_INBOX_DRAFTS = 3
 _AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT
 
 
-class PlatformAuthPausedError(ThrottledDeliveryError):
-    """A throttle whose cause is a refused access token: the platform is now
-    paused. Its own class name (``queue.AUTH_PAUSED_ERROR_CLASS``) is what lets
-    ``queue.resume_platform`` drop the throttle delay from the row it hit."""
-
-
-def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliveryError:
+def _pause_for_auth(
+    conn, row: Dict[str, Any], exc: Exception, *, requeue: bool = True
+) -> ThrottledDeliveryError:
     """The error a handler raises when the platform refused its access token.
 
     A dead token blocks every post to that platform, not just this one, and
@@ -118,14 +120,18 @@ def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliv
     ids otherwise), and the returned ``ThrottledDeliveryError`` never counts
     against ``max_attempts``. Before this each row was failed in turn, so one
     expired login quietly failed every queued Facebook, Instagram and TikTok
-    post. Resuming the platform in the console lets them go again."""
+    post. Resuming the platform in the console lets them go again.
+
+    ``requeue=False`` keeps a ``submitting`` row as it is, for an adapter whose
+    next attempt must reconcile that row before it uploads again (YouTube)."""
     detail = pause_for_auth(conn, row["platform"], exc)
     live = conn.execute(
         "SELECT status, platform_upload_id, platform_post_id FROM deliveries WHERE id=?",
         (row["id"],),
     ).fetchone()
     if (
-        live is not None
+        requeue
+        and live is not None
         and live["status"] == "submitting"
         and not live["platform_upload_id"]
         and not live["platform_post_id"]
@@ -143,7 +149,8 @@ def make_youtube_handler(
     """``AmbiguousUploadMatchError`` is terminal — two or more channel
     uploads match a retrying short by title/recency, and adopting either
     risks stealing the wrong video; a human must resolve it, retrying never
-    will (see the adapter's own docstring). Everything else — including
+    will (see the adapter's own docstring). A refused OAuth token
+    (``youtube_auth_refused``) pauses YouTube. Everything else — including
     ``YouTubeQuotaError``, which the adapter already treats as retryable by
     transitioning its own row and re-raising — propagates unrecognised,
     handled by ``drain_queue``'s default retryable path."""
@@ -155,6 +162,12 @@ def make_youtube_handler(
             adapter.publish(record, conn=conn, delivery_id=row["id"], video_path=video_path)
         except AmbiguousUploadMatchError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
+        except Exception as exc:
+            if not youtube_auth_refused(exc):
+                raise
+            # The row stays ``submitting``: the next attempt reconciles it
+            # against the channel's uploads before it ever inserts again.
+            raise _pause_for_auth(conn, row, exc, requeue=False) from exc
 
     return handler
 
@@ -284,6 +297,11 @@ def make_photo_handler(
                 media_image_url_loader=media_image_url_loader,
             )
         except PhotoPermanentError as exc:
+            if is_auth_blocked(exc.__cause__):
+                # A carousel part-built when the token died stays failed (its
+                # orphaned items are a person's call), but Facebook or
+                # Instagram pauses so the next row is not tried with it.
+                pause_for_auth(conn, row["platform"], exc.__cause__)
             raise PermanentDeliveryError(str(exc)) from exc
         except PhotoAuthBlockedError as exc:
             raise _pause_for_auth(conn, row, exc) from exc

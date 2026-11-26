@@ -1267,9 +1267,14 @@ def pause_for_auth(conn: sqlite3.Connection, platform: str, exc: BaseException) 
     ``AUTH_BLOCKED_PAUSE_REASON`` and the refusal), so every pass leaves it
     alone and ``health check`` raises its one ``platform_auth_blocked``
     incident until someone re-authorizes and resumes it. Returns the bounded
-    refusal text it stored."""
+    refusal text. A platform already paused for its token keeps that pause, so
+    its ``paused_at`` stays the time the block began."""
     detail = (str(exc).strip() or exc.__class__.__name__)[:2000]
-    pause_platform(conn, platform, reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    held = conn.execute(
+        "SELECT reason FROM platform_pauses WHERE platform=?", (platform,)
+    ).fetchone()
+    if held is None or not (held[0] or "").startswith(AUTH_BLOCKED_PAUSE_REASON):
+        pause_platform(conn, platform, reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
     return detail
 
 

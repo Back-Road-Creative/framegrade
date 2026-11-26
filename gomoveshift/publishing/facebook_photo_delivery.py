@@ -38,6 +38,13 @@ class PhotoDeliveryPendingError(Exception):
     """Outcome is uncertain; retained attempts never authorize another POST."""
 
 
+class PhotoDeliveryAuthBlockedError(PhotoDeliveryPendingError):
+    """Still uncertain, and the read was refused for the Page token: the drain
+    pauses Facebook (``queue.is_auth_blocked``) until someone re-authorizes."""
+
+    queue_state = "auth_blocked"
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizedPhoto:
     """Result of the trusted port, not itself proof of a signed approval.
@@ -202,6 +209,7 @@ class FacebookPhotoDelivery:
 
     def reconcile(self, supplied_row: dict) -> None:
         """Read-only remote path: no authority callback, draft or file loading."""
+        refused = False
         row = self._row(supplied_row["id"])
         attempt = facebook_photo_attempt(self._conn, row["id"])
         if row["status"] == "published" and attempt and row["upload_kind"] == FACEBOOK_PHOTO_KIND:
@@ -229,6 +237,7 @@ class FacebookPhotoDelivery:
                 raise ValueError("Retained receipt identity mismatch")
             status = self._client.read_status(receipt)
         except PhotoReadbackUnknownError as exc:
+            refused = getattr(exc, "queue_state", None) == "auth_blocked"
             if (
                 exc.page_id == row["upload_account"]
                 and exc.photo_id == row["platform_upload_id"]
@@ -249,7 +258,7 @@ class FacebookPhotoDelivery:
                 )
             ):
                 return
-        raise PhotoDeliveryPendingError(
+        raise (PhotoDeliveryAuthBlockedError if refused else PhotoDeliveryPendingError)(
             "Photo publication unconfirmed; retain identity and read only"
         )
 

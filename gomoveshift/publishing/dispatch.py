@@ -553,6 +553,37 @@ def _detail(exc: BaseException) -> str:
     return text[:_ERROR_DETAIL_MAX]
 
 
+class PlatformAuthPausedError(ThrottledDeliveryError):
+    """A throttle whose cause is a refused access token: the platform is now
+    paused. Its own class name (``queue.AUTH_PAUSED_ERROR_CLASS``) is what lets
+    ``queue.resume_platform`` drop the throttle delay from the row it hit."""
+
+
+def _pause_on_auth(conn, handler: Optional[Callable[[Dict[str, Any]], None]]):
+    """``handler``, but a refused access token it lets escape
+    (``queue.is_auth_blocked``) pauses the platform and becomes a
+    ``PlatformAuthPausedError``. The handlers translate their own adapters'
+    refusals (``handlers._pause_for_auth``); this is the net under every
+    other callable the drain runs, the Facebook photo reconciler included.
+    The row keeps its status: only the handler knows whether it is safe to
+    put back to ``queued``."""
+    if handler is None:
+        return None
+
+    def wrapped(row: Dict[str, Any]) -> None:
+        try:
+            handler(row)
+        except Exception as exc:
+            if not is_auth_blocked(exc):
+                raise
+            detail = pause_for_auth(conn, row["platform"], exc)
+            raise PlatformAuthPausedError(
+                f"{row['platform']} paused, access token refused: {detail}"
+            ) from exc
+
+    return wrapped
+
+
 #: What an interrupted attempt records instead of an exception class. There is
 #: no exception to name: the worker was killed between ``acquire_lease`` and
 #: any ``transition``, so nothing in this process ever saw a failure.
@@ -1018,7 +1049,9 @@ def drain_queue(
         # A durable photo identity never falls back to current-record routing.
         # Only this explicit read-only port may bypass pre-publication checks.
         photo_read = platform == "facebook" and row["upload_kind"] == FACEBOOK_PHOTO_KIND
-        handler = facebook_photo_reconciler if photo_read else handlers.get(platform)
+        handler = _pause_on_auth(
+            conn, facebook_photo_reconciler if photo_read else handlers.get(platform)
+        )
         if handler is None:
             result.skipped_no_handler += 1
             result.skipped_no_handler_by_platform[platform] = (
