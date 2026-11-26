@@ -622,6 +622,20 @@ def test_a_queue_refusal_is_recorded_and_later_requests_still_run(tmp_path, monk
     assert [o.state for o in again] == ["done", "done"]
 
 
+def test_a_second_reel_of_the_same_footage_is_refused_not_queued(tmp_path):
+    # Two Drive files, one render (the fake renderer writes the same bytes):
+    # the same content under a second day-reel project name is refused.
+    other = _request(video_file_id="2-OtherClipIdForDay11xx", recording_date="2026-11-26")
+    drive = FakeDrive({"day10.json": _request(), "day11.json": other})
+    outcomes, _ = _run(tmp_path, drive)
+    assert [(o.name, o.state) for o in outcomes] == [
+        ("day10.json", "enqueued"),
+        ("day11.json", "refused"),
+    ]
+    assert "duplicate_content" in outcomes[1].reason
+    assert {row["project_name"] for row in _rows(tmp_path)} == {f"day-reel-{VIDEO_ID}"}
+
+
 EMPTY = "{}"
 OWN = ("own-client.apps.googleusercontent.com", "own-client-value")
 

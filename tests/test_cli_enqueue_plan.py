@@ -53,12 +53,23 @@ _REAL_MEDIA = MediaFingerprint(
 )
 
 
+def _media_for(short_index):
+    """A real file of its own per Short: two Shorts carrying the same media sha256
+    are the same content, which enqueue refuses (``queue.content_twin``)."""
+    path = _MEDIA_PATH.with_name(f"short-{short_index}.mp4")
+    path.write_bytes(_MEDIA_PATH.read_bytes() + f" #{short_index}".encode())
+    data = path.read_bytes()
+    return MediaFingerprint(
+        str(path), len(data), 2.0, 1080, 1920, "h264", hashlib.sha256(data).hexdigest()
+    )
+
+
 def _record(short_index=3, selected=("youtube",), media=None, payloads=None):
     return ShortPublishRecord(
         project_name="proj",
         lf_index=0,
         short_index=short_index,
-        media=media or _REAL_MEDIA,
+        media=media or _media_for(short_index),
         schedule=ScheduleWindow(SCHEDULED, "America/Chicago"),
         recording_date="2026-08-01",
         sampled_regions=("a",),
@@ -69,6 +80,12 @@ def _record(short_index=3, selected=("youtube",), media=None, payloads=None):
         reviewed_plan_hash="HASH1",
         routes=RouteSelection(selected=tuple(selected)),
     )
+
+
+def _titled(short_index):
+    """A YouTube payload with a title of its own: enqueue refuses a second Short
+    whose normalised title another live row already holds."""
+    return PlatformPayloads(youtube=YouTubePayload(f"t{short_index}", "d"))
 
 
 def _sidecar(out_dir, *records):
@@ -521,7 +538,7 @@ def test_apply_spools_payload_at_the_limit(tmp_path):
 def test_max_shorts_spools_only_the_lowest_indexes(tmp_path, capsys):
     out = tmp_path / "out"
     out.mkdir()
-    _sidecar(out, _record(short_index=1), _record(short_index=2), _record(short_index=3))
+    _sidecar(out, *(_record(short_index=i, payloads=_titled(i)) for i in (1, 2, 3)))
     state_path = out / "pipeline_state.json"
     state_path.write_text("{}", encoding="utf-8")
 
@@ -684,7 +701,7 @@ def test_rolling_ceiling_default_calibrated_to_three_drives_of_seven(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
     # This run IS the third drive of the week: one long-form's 7 shorts.
-    _sidecar(out, *(_record(short_index=i, selected=("youtube",)) for i in range(7)))
+    _sidecar(out, *(_record(short_index=i, payloads=_titled(i)) for i in range(7)))
     state_path = out / "pipeline_state.json"
     state_path.write_text("{}", encoding="utf-8")
 
