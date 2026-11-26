@@ -12,7 +12,7 @@ than re-implementing its upload/retry/token/quota handling.
   is a private upload with `status.publishAt`; one due sooner, which is every
   drained row (the drain waits for the slot), goes up `public` with no
   `publishAt` (`youtube_adapter.upload_schedule`), so no past `publishAt` is
-  ever sent. `video_id` persists
+  ever sent. A Short with no slot stays private with no `publishAt`. `video_id` persists
   to the queue (`status=uploaded`) BEFORE the playlist call — a lost id there
   would re-issue `videos.insert` for content already live. A playlist failure after upload leaves `uploaded`
   with the id intact; resume retries only the playlist step, via

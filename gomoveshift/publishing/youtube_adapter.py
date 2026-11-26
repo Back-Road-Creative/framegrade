@@ -411,11 +411,15 @@ def upload_schedule(
     The drain releases a row only once its slot has arrived
     (``dispatch._select_due``), so a drained Short's slot is now or past. A past
     ``publishAt`` is never sent: the API reference says one publishes at once,
-    but that is untested here. A slot (or none) less than ``_SCHEDULE_MIN_LEAD``
-    ahead goes up ``public`` with no ``publishAt``, the documented
-    ``videos.insert`` form; a later slot stays a private upload with ``publishAt``."""
+    but that is untested here. A slot less than ``_SCHEDULE_MIN_LEAD`` ahead
+    goes up ``public`` with no ``publishAt``, the documented ``videos.insert``
+    form; a later slot stays a private upload with ``publishAt``. A Short with
+    no slot stays private with no ``publishAt``, as it always has: nothing says
+    when it may go public."""
+    if slot is None:
+        return None, "private"
     now = now or datetime.now(timezone.utc)
-    if slot is None or slot - now < _SCHEDULE_MIN_LEAD:
+    if slot - now < _SCHEDULE_MIN_LEAD:
         return None, "public"
     return slot, "private"
 
@@ -603,7 +607,7 @@ class YouTubeShortsAdapter:
             transition(conn, delivery_id, current_status, STATUS_SUBMITTING)
             sent_at = datetime.now(timezone.utc)
             publish_at, privacy = upload_schedule(record.schedule.scheduled_at_utc, sent_at)
-            go_public_at = publish_at or sent_at
+            go_public_at = publish_at or (sent_at if privacy == "public" else None)
             try:
                 video_id = self._uploader.upload_video(
                     video_path,

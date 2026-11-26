@@ -185,6 +185,25 @@ def test_due_short_never_sends_a_publish_at_earlier_than_now(
     assert datetime.fromisoformat(row["platform_published_at"]) >= before
 
 
+def test_short_with_no_slot_stays_private_with_no_publish_at(mock_service, queue_conn, tmp_path):
+    """No slot says nothing about when the Short may go public, so it never
+    goes public by itself: private, no ``publishAt``, as before the due-slot fix."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=None)
+    )
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    status = mock_service.videos.return_value.insert.call_args.kwargs["body"]["status"]
+    assert status["privacyStatus"] == "private"
+    assert "publishAt" not in status
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
+    assert (row["published_at_source"], row["platform_published_at"]) == (
+        "platform_confirmed",
+        None,
+    )
+
+
 def test_short_upload_sends_the_records_measured_recording_date(mock_service, queue_conn, tmp_path):
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
     assert record.recording_date == "2026-08-20"
