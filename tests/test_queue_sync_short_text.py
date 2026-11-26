@@ -665,10 +665,31 @@ def test_a_rewritten_short_does_not_repeat_the_place_of_a_kept_successor(tmp_pat
     successor["payloads"]["youtube"]["description"] = "Harrow \u2014 POV drive. #Shorts"
     plan, conn = _world(tmp_path, [_short(1), successor])
     _where(conn, 2, "youtube", status="published")
-    before = plan.read_text()
     changes = sync_short_text(conn, apply=True, now=NOW)
-    assert [c.status for c in changes] == ["refused"] and "next Short" in changes[0].reason
-    assert plan.read_text() == before
+    # the kept successor never changes, so refusing the Short for its place would repeat
+    # every night: the generator is steered off that place and names the clip's other one
+    assert [c.status for c in changes] == ["changed"], changes[0].reason
+    assert _youtube(plan, 1).payloads.youtube.title.split(" #", 1)[0] == "Ashby County"
+
+
+def test_a_kept_hand_titled_successor_never_refuses_a_short_with_no_other_place(
+    tmp_path, monkeypatch
+):
+    # The 20th/21st case: the 21st's hand title names the 20th's only measured place. The 20th
+    # cannot vary, so the repeat is sanctioned, not refused night after night.
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("county", "Ashby County")]
+    )
+    successor = _short(2)
+    successor["payloads"]["youtube"]["title"] = "Ashby County back roads #Shorts"
+    plan, conn = _world(tmp_path, [_short(1), successor])
+    (tmp_path / "social").mkdir()
+    (tmp_path / "social" / "titles.yaml").write_text('2:\n  title: "Ashby County back roads"\n')
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [(c.status, c.reason) for c in changes] == [("changed", ""), ("unchanged", "hand_title")]
+    assert "Ashby County" in _youtube(plan, 1).payloads.youtube.title
 
 
 @pytest.mark.parametrize("gate", ["assert_plan_text_grammar", "assert_shorts_metadata_in_region"])
@@ -828,8 +849,10 @@ def test_two_rewritten_neighbours_cannot_name_the_same_place(tmp_path, monkeypat
     second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
     plan, conn = _world(tmp_path, [_short(1), second])
     changes = sync_short_text(conn, apply=False, now=NOW)
-    assert [c.status for c in changes] == ["changed", "refused"]
-    assert "place repeats" in changes[1].reason
+    # asked alone, the second still sees the title the first just took, so it names its other
+    # place instead of being refused for the repeat
+    assert [c.status for c in changes] == ["changed", "changed"]
+    assert changes[0].new_title.split(" #")[0] != changes[1].new_title.split(" #")[0]
 
 
 def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
@@ -849,6 +872,12 @@ def test_a_short_asked_alone_in_the_fallback_gets_no_no_alternative_exemption(
         return made
 
     monkeypatch.setattr(qst, "_generate_lf", only_alone)
+    from gomoveshift.pipeline import social_generator
+
+    # one measured place, so the second cannot steer off the title the first just took
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("county", "Ashby County")]
+    )
     second = _short(2)
     second["payloads"]["youtube"]["description"] = "A quiet road. #Shorts"  # names no place
     plan, conn = _world(tmp_path, [_short(1), second])
@@ -896,3 +925,31 @@ def test_a_short_asked_alone_keeps_the_exemption_where_its_predecessor_keeps_its
     plan, conn = _world(tmp_path, [first, second])
     changes = sync_short_text(conn, apply=False, now=NOW)
     assert [c.status for c in changes] == ["changed", "changed"], [c.reason for c in changes]
+
+
+def test_a_placeholder_media_length_is_refused_not_titled_one_second(tmp_path):
+    # A 0.0 duration is a placeholder, not a measurement: the Short is refused, never given
+    # a stand-in length (plan_bracket_sync used to round it up to "1 seconds").
+    short = _short(1)
+    short["media"]["duration_seconds"] = 0.0
+    plan, conn = _world(tmp_path, [short])
+    before = plan.read_bytes()
+    [change] = sync_short_text(conn, apply=True, now=NOW)
+    assert change.status == "refused" and "measured secs" in change.reason
+    assert plan.read_bytes() == before
+
+
+def test_two_long_forms_of_one_plan_cannot_both_take_the_same_title(tmp_path, monkeypatch):
+    # One title ledger across the plan's LFs, as Phase D keeps one per drive: each LF's Short
+    # measured only Ashby County, and only one of them may be titled with it.
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("county", "Ashby County")]
+    )
+    second = _short(2, hours_ahead=96, lf_index=2)
+    (tmp_path / f"{PROJECT}_lf02_youtube.json").write_text(json.dumps({"location": REGION}))
+    plan, conn = _world(tmp_path, [_short(1), second])
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    titles = [_youtube(plan, n).payloads.youtube.title.split(" #", 1)[0] for n in (1, 2)]
+    assert len(set(titles)) == 2, (titles, [c.reason for c in changes])

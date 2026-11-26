@@ -207,6 +207,10 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: such a Short has no ``route_record``. ``None`` for every other Short. Excluded from
     #: equality and hashing, like ``route_record``.
     bracket_route: Optional[dict] = field(default=None, compare=False, hash=False)
+    #: ``SocialPost.place_variety``: the place the title / description names and why
+    #: (``no_alternative`` = a repeat with no other measured place). The neighbour-place
+    #: rule (``anti_spam_gate``) reads it. ``{}`` = a hand or legacy title, or an older plan.
+    place_variety: dict = field(default_factory=dict, compare=False, hash=False)
     #: Explicit publishable format -- one of KNOWN_FORMATS, or ``None`` for
     #: "not stated". ``None`` must never be READ as FORMAT_SHORT by any
     #: consumer -- that silent default is the defect this field exists to

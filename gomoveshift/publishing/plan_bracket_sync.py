@@ -216,11 +216,14 @@ def _generate_lf(
         own = [label] if record else [str(r) for r in s.get("sampled_regions") or []]
         if discard:
             own = []
+        # the media's measured length: a Short whose length is missing (a 0.0 placeholder) is
+        # refused by TitleFacts, never titled "1 seconds"; a discarded stand-in's text is not kept
+        secs = int(round(float(s["media"].get("duration_seconds") or 0)))
         facts.append(
             TitleFacts(
                 date=s["recording_date"],
                 ordinal=n,
-                secs=max(1, int(round(float(s["media"]["duration_seconds"])))),
+                secs=max(1, secs) if discard else secs,
                 # a discarded Short names no place, so it takes no measured place
                 place_ok=not discard,
             )

@@ -8,10 +8,16 @@ the rolling-ceiling gate and before anything is written to the queue: a
 violating batch is refused whole, nothing spooled, the same "nothing was
 written to the queue" shape the media/privacy/ceiling gates already use.
 
-Two scopes: every rule but one is within-batch. ``cross-batch-repeat`` compares
+Two scopes: every rule but two is within-batch. ``cross-batch-repeat`` compares
 each record's platform text against ``recent_texts`` -- the captions/titles
 already spooled in the last 60 days, loaded by :func:`recent_platform_texts`
 -- and refuses a text that opens with the same 6 words as one of them.
+``neighbour-place`` lines the batch's YouTube Shorts up with ``queued_youtube`` (the
+queue's other active YouTube rows, :func:`queued_youtube_records`) by scheduled slot and
+refuses a Short whose title names the same place as the YouTube Short just before or
+after it, whatever long-form or project either came from (the generator only sees the
+Short before it in one long-form). ``repeated-title``, in the same pass, refuses the very
+same title twice in a row or one title body (stamp aside) over three Shorts in a row.
 """
 
 from __future__ import annotations
@@ -325,16 +331,185 @@ def recent_platform_texts(
     return dict(out)
 
 
+def _utc(at: datetime) -> datetime:
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def queued_youtube_records(
+    conn: sqlite3.Connection,
+    *,
+    exclude_shorts: AbstractSet[Tuple[str, int]] = frozenset(),
+) -> List[Tuple[datetime, PublishRecord]]:
+    """``(slot, record)`` for every active (not terminal, not shadow) YouTube delivery
+    with a slot, read back from the sidecar its row names (gone or unreadable sidecars
+    and the ``exclude_shorts`` pairs are skipped): the queue's side of ``neighbour-place``."""
+    from .plan_io import load_publish_plan
+    from .queue import TERMINAL_STATUSES
+
+    terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
+    rows = conn.execute(
+        "SELECT project_name, short_index, sidecar_path, scheduled_at FROM deliveries "  # noqa: S608
+        f"WHERE platform = 'youtube' AND shadow = 0 AND status NOT IN ({terminal}) "
+        "AND sidecar_path IS NOT NULL AND scheduled_at IS NOT NULL",
+        TERMINAL_STATUSES,
+    ).fetchall()
+    plans: Dict[str, Optional[Mapping[Tuple[str, int], PublishRecord]]] = {}
+    out: List[Tuple[datetime, PublishRecord]] = []
+    for row in rows:
+        key = (row["project_name"], int(row["short_index"]))
+        if key in exclude_shorts:
+            continue
+        path = row["sidecar_path"]
+        if path not in plans:
+            try:
+                plans[path] = {
+                    (r.project_name, r.short_index): r for r in load_publish_plan(path).shorts
+                }
+            except Exception as exc:  # missing/malformed sidecar: nothing to compare
+                logger.warning("anti-spam: skipping unreadable sidecar %s: %s", path, exc)
+                plans[path] = None
+        record = (plans[path] or {}).get(key)
+        try:
+            at = _utc(datetime.fromisoformat(str(row["scheduled_at"]).replace("Z", "+00:00")))
+        except ValueError:
+            continue
+        if record is not None:
+            out.append((at, record))
+    return out
+
+
+def _youtube_slot(record: PublishRecord) -> Optional[datetime]:
+    if record.payloads.youtube is None or "youtube" not in record.routes.selected:
+        return None
+    sched = record.schedule
+    return _utc(sched.scheduled_at_utc_by_platform.get("youtube") or sched.scheduled_at_utc)
+
+
+def _place_candidates(record: PublishRecord) -> List[str]:
+    """The places a record's title may name: its recorded title place, its measured
+    towns and counties (``measured_places``), its regions and the bracket label."""
+    from ..pipeline.social_generator import measured_places
+
+    title = ((record.place_variety or {}).get("title") or {}).get("body") or ""
+    measured = measured_places(record.sampled_regions, record.sampled_roads, record.route_record)
+    regions = [r for region in record.sampled_regions for r in (region, region.split(",")[0])]
+    label = str((record.bracket_route or {}).get("label") or "")
+    return [title, *(b for k, b in measured if k != "road"), *regions, label]
+
+
+def title_place(record: PublishRecord) -> str:
+    """The place a YouTube Short's title names (lowercased, spaces folded), ``""`` when
+    its title names none of the record's own places."""
+    youtube = record.payloads.youtube
+    text = " ".join(_normalize_words(_bare_title(youtube.title))) if youtube else ""
+    for place in _place_candidates(record):
+        words = " ".join(_normalize_words(place))
+        if words and f" {words} " in f" {text} ":
+            return words
+    return ""
+
+
+def _no_alternative(record: PublishRecord, taken: AbstractSet[str]) -> bool:
+    """The generator could not have varied this Short's title place: it says so
+    (``place_variety`` reason ``no_alternative``), or every measured title place of the
+    clip is one of ``taken`` (its neighbours' places)."""
+    from ..pipeline.social_generator import REASON_NO_ALTERNATIVE, measured_places
+
+    if ((record.place_variety or {}).get("title") or {}).get("reason") == REASON_NO_ALTERNATIVE:
+        return True
+    measured = measured_places(record.sampled_regions, record.sampled_roads, record.route_record)
+    return all(" ".join(_normalize_words(b)) in taken for k, b in measured if k != "road")
+
+
+#: The ``"Sep 14, 3rd stretch: "`` stamp a stamped title opens with (``title_stamp``).
+_STAMP_RE = re.compile(r"^[a-z]{3} \d{1,2} \d+(?:st|nd|rd|th) stretch ")
+
+
+def title_body(record: PublishRecord) -> str:
+    """A YouTube Short's bare title without its stamp (lowercased words, hashtags off)."""
+    youtube = record.payloads.youtube
+    words = " ".join(_normalize_words(_bare_title(youtube.title))) if youtube else ""
+    return _STAMP_RE.sub("", words + " ").strip()
+
+
+def _neighbour_place_violations(
+    records: Sequence[PublishRecord],
+    queued_youtube: Sequence[Tuple[datetime, PublishRecord]],
+    now: Optional[datetime],
+) -> List[Violation]:
+    """``neighbour-place``: the batch's YouTube Shorts slotted after ``now`` and the queue's
+    other active YouTube rows, in slot order; a batch Short whose title place equals the
+    Short's just before or after it is refused, unless the generator could not vary it
+    (:func:`_no_alternative`). Only a Short whose generator recorded its title place
+    (``place_variety["title"]``) is judged: a hand title, or a plan written before the
+    record, is the operator's or unknown, but still counts as a neighbour."""
+    batch_keys = {(r.project_name, r.short_index) for r in records}
+    line = []  # (slot, project, short_index, record, batch index or None)
+    for index, record in enumerate(records):
+        at = _youtube_slot(record)
+        if at is not None and (now is None or at > _utc(now)):
+            line.append((at, record.project_name, record.short_index, record, index))
+    for at, record in queued_youtube:
+        if (record.project_name, record.short_index) not in batch_keys:
+            line.append((_utc(at), record.project_name, record.short_index, record, None))
+    line.sort(key=lambda e: e[:3])
+    places = [title_place(e[3]) for e in line]
+    bodies = [title_body(e[3]) for e in line]
+    titles = [" ".join(_normalize_words(_bare_title(e[3].payloads.youtube.title))) for e in line]
+    out: List[Violation] = []
+    for n, (_at, _p, _i, record, index) in enumerate(line):
+        if index is None or not (record.place_variety or {}).get("title"):
+            continue
+        near = [m for m in (n - 1, n + 1) if 0 <= m < len(line)]
+        # a run of one title body over three Shorts in a row, or the very same title twice: a
+        # stamped body rotates and a fact title is unique, so the generator can always vary it
+        same = [m for m in near if titles[m] == titles[n]]
+        if titles[n] and (same or (len(near) == 2 and all(bodies[m] == bodies[n] for m in near))):
+            m = same[0] if same else near[0]
+            out.append(
+                Violation(
+                    index,
+                    "youtube",
+                    "repeated-title",
+                    f"title {bodies[n]!r} repeats the YouTube Short(s) beside it by slot "
+                    f"({line[m][1]} #{line[m][2]} at {line[m][0].isoformat()})",
+                )
+            )
+        if not places[n]:
+            continue
+        sides = [
+            (m, word) for m, word in ((n - 1, "previous"), (n + 1, "next")) if 0 <= m < len(line)
+        ]
+        clash = [(m, word) for m, word in sides if places[m] == places[n]]
+        if not clash or _no_alternative(record, {places[m] for m, _ in sides}):
+            continue
+        m, word = clash[0]
+        out.append(
+            Violation(
+                index,
+                "youtube",
+                "neighbour-place",
+                f"title place {places[n]!r} repeats the {word} YouTube Short by slot "
+                f"({line[m][1]} #{line[m][2]} at {line[m][0].isoformat()})",
+            )
+        )
+    return out
+
+
 def check_batch(
     records: Sequence[PublishRecord],
     *,
     per_location_cap: Optional[int],
     recent_texts: Optional[Mapping[str, Sequence[str]]] = None,
+    queued_youtube: Optional[Sequence[Tuple[datetime, PublishRecord]]] = None,
+    now: Optional[datetime] = None,
 ) -> List[Violation]:
     """Every anti-spam violation across the whole batch, all at once -- the
     same refuse-whole shape as ``_rolling_ceiling_violations``: a batch that
     fails any rule spools nothing, and every offending index is reported in
-    one pass rather than fixed one at a time."""
+    one pass rather than fixed one at a time. ``neighbour-place`` runs only when
+    the caller passes ``queued_youtube`` (``[]`` = an empty queue); batch Shorts
+    slotted at or before ``now`` (already out) are left out of it."""
     violations: List[Violation] = []
 
     for index, record in enumerate(records):
@@ -423,5 +598,8 @@ def check_batch(
                         f"batch, cap is {per_location_cap}",
                     )
                 )
+
+    if queued_youtube is not None:
+        violations.extend(_neighbour_place_violations(records, queued_youtube, now))
 
     return violations

@@ -11,7 +11,8 @@ listed.
 
 ## Rules
 
-`check_batch(records, *, per_location_cap)` returns a list of `Violation(index,
+`check_batch(records, *, per_location_cap, recent_texts=None, queued_youtube=None,
+now=None)` returns a list of `Violation(index,
 platform, rule, detail)`, `index` being the record's position in the batch
 (after the existing `select_capped_shorts` selection — a capped-out short is
 never checked, matching the other pre-spool gates):
@@ -37,11 +38,26 @@ never checked, matching the other pre-spool gates):
    beyond the cap for that location is reported. A `None` cap (the default —
    most brands ship no `policy.per_location_cap`) disables the rule
    entirely.
+5. **`neighbour-place`** — runs when the caller passes `queued_youtube` (the
+   queue's other active YouTube rows as `(slot, record)`, `queued_youtube_records`)
+   and `now`. The batch's YouTube Shorts slotted after `now` and those rows are put
+   in slot order, whatever long-form, sidecar or project each came from; a batch
+   Short whose title place (`title_place`: its recorded title place or a measured
+   place its title names) equals the Short's just before or after it is refused.
+   It is not refused when its generator recorded `no_alternative` for the title, or
+   when every town and county its clip measured is a neighbour's place. Only a
+   Short whose generator recorded `place_variety["title"]` (now carried on the
+   record and in the sidecar) is judged; a hand title or an older plan still counts
+   as a neighbour.
+6. **`repeated-title`** — in the same slot order and for the same judged Shorts:
+   the very same title as the Short beside it, or one title body (the
+   `"Mar 5, 3rd stretch: "` stamp aside) on three Shorts in a row.
 
 ## Wiring
 
 `cmd_enqueue_plan` calls `check_batch(_planned_records(sidecars, max_shorts),
-per_location_cap=policy.per_location_cap)`, reusing the same
+per_location_cap=policy.per_location_cap, recent_texts=..., queued_youtube=..., now=...)`
+(the queued Shorts outside the batch), reusing the same
 `load_brand_policy(current_brand())` call the weekly-ceiling check (`weekly_ceiling`) already
 makes — one policy load, two consumers. On any violation it prints `Error:
 batch anti-spam gate refused the following short(s); nothing was written to
@@ -57,3 +73,8 @@ and rolling-ceiling gates already use.
 the pool has one home; `tests/test_publishing_anti_spam_gate.py::
 test_fixture_pool_is_the_gate_pool_not_a_copy` pins the fixture to the gate's
 tuple.
+
+The nightly queue text sync (`183-queue-sync-short-text.md`) runs the same
+`check_batch`, with the queue's active YouTube Shorts read once per run. The
+day-reel route (`publishing/day_reels.py`) enqueues its sidecar directly and does
+not run `check_batch` at all.
