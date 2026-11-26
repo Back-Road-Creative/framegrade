@@ -58,6 +58,12 @@ _DRIVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{9,127}")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _PASTE_START = "Paste the following into your remote machine --->"
 _PASTE_END = "<---End paste"
+#: Listing and reading a request are tiny calls: give up inside a minute instead of letting
+#: rclone's pacer back off for the cron's whole budget when Google throttles or a TLS
+#: handshake stalls. The next hourly run retries.
+READ_TIMEOUT_S = 60.0
+READ_FLAGS = ("--low-level-retries", "2", "--contimeout", "15s")
+_THROTTLED = re.compile(r"rateLimitExceeded|RATE_LIMIT_EXCEEDED|Quota exceeded|Rate limited", re.I)
 
 
 class DriveReadError(RuntimeError):
@@ -304,19 +310,25 @@ class RcloneDrive:
 
     The token travels only in the child's environment, never in argv or on
     disk, and the remote's scope is ``drive.readonly``: this reader cannot
-    change or delete anything in Drive."""
+    change or delete anything in Drive. ``client_id``/``client_secret`` are the
+    Google client the token was issued to (the pipeline's own, so Google's
+    per-project quota is ours alone); a sign-in saved without one keeps rclone's
+    built-in client, which every rclone user shares."""
 
     def __init__(
         self,
         *,
         folder_id: str,
         token: str,
+        client_id: str = "",
+        client_secret: str = "",
         rclone: str = "rclone",
         runner: Callable = subprocess.run,
         download_timeout_s: float = 1800.0,
     ) -> None:
         self._folder_id = folder_id
         self._token = token
+        self._client = (client_id, client_secret)
         self._rclone = rclone
         self._runner = runner
         self._download_timeout_s = download_timeout_s
@@ -328,9 +340,11 @@ class RcloneDrive:
             env[prefix + key] = value
         env[prefix + "TOKEN"] = self._token
         env[prefix + "ROOT_FOLDER_ID"] = self._folder_id
+        if self._client[0]:
+            env[prefix + "CLIENT_ID"], env[prefix + "CLIENT_SECRET"] = self._client
         return env
 
-    def _run(self, *args: str, timeout: float = 120.0) -> str:
+    def _run(self, *args: str, timeout: float = READ_TIMEOUT_S) -> str:
         try:
             result = self._runner(
                 [self._rclone, *args],
@@ -341,8 +355,12 @@ class RcloneDrive:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
+            if _THROTTLED.search(_text(getattr(exc, "stderr", None))):
+                raise DriveReadError(_throttled_message(args[0])) from None
             raise DriveReadError(f"rclone {args[0]} could not run: {exc}") from None
         if result.returncode != 0:
+            if _THROTTLED.search(result.stderr or ""):
+                raise DriveReadError(_throttled_message(args[0]))
             tail = (result.stderr or "").strip().splitlines()[-1:] or ["no detail"]
             raise DriveReadError(f"rclone {args[0]} failed (exit {result.returncode}): {tail[0]}")
         return result.stdout
@@ -350,7 +368,7 @@ class RcloneDrive:
     def list_requests(self) -> list:
         try:
             entries = json.loads(
-                self._run("lsjson", f"{REMOTE}:", "--files-only", "--max-depth", "1")
+                self._run("lsjson", f"{REMOTE}:", "--files-only", "--max-depth", "1", *READ_FLAGS)
             )
         except ValueError:
             raise DriveReadError("rclone lsjson returned no JSON") from None
@@ -363,7 +381,7 @@ class RcloneDrive:
     def read_request(self, name: str) -> str:
         if "/" in name:
             raise DriveReadError(f"request name {name!r} is not a top-level file")
-        return self._run("cat", f"{REMOTE}:{name}")
+        return self._run("cat", f"{REMOTE}:{name}", *READ_FLAGS)
 
     def download(self, file_id: str, dest_dir: Path) -> Path:
         dest_dir = Path(dest_dir)
@@ -374,6 +392,20 @@ class RcloneDrive:
         if len(files) != 1:
             raise DriveReadError(f"download of {file_id} left {len(files)} files, expected 1")
         return files[0]
+
+
+def _text(raw) -> str:
+    """``TimeoutExpired.stderr`` is bytes even under ``text=True``; None when nothing was read."""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw or ""
+
+
+def _throttled_message(command: str) -> str:
+    return (
+        f"Google is throttling Drive reads (rclone {command} hit the API rate limit); "
+        "the next hourly run retries"
+    )
 
 
 @contextmanager

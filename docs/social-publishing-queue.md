@@ -972,10 +972,21 @@ stops the requests after it. It has no clip GPS votes, so no final-text
 review applies; the drain's one-Short-per-hour rule may move it to the next free hour.
 
 **Drive access is a one-time read-only sign-in**: `day-reels authorize --folder-id <id>` runs
-`rclone authorize` with the `drive.readonly` scope and SOPS-encrypts the token and folder id to
-`day_reels_drive.json.enc` beside the pipeline's Drive token (`GMS_DAY_REELS_DRIVE_ENC`
-overrides). The token is never printed or put in argv. With no sign-in the step prints
+`rclone authorize` with the `drive.readonly` scope through the pipeline's **own** Google OAuth
+client (the `client_id`/`client_secret` inside its Drive token, `GMS_DRIVE_TOKEN_ENC`), not
+rclone's built-in client: that one is shared by every rclone user, and its project-wide
+"Queries per minute" quota returns `403 rateLimitExceeded` often enough to stall a listing past
+the cron's budget. With the token unreadable or missing its client, `authorize` refuses and
+saves nothing. It SOPS-encrypts the token, folder id and that client (a token only refreshes
+through the client that issued it) to `day_reels_drive.json.enc` beside the pipeline's Drive
+token (`GMS_DAY_REELS_DRIVE_ENC` overrides). Token and client secret travel only in rclone's
+environment, never printed or put in argv. A sign-in saved before the client was stored keeps
+rclone's built-in client until `authorize` is run again. With no sign-in the step prints
 `DAY_REELS skipped`. Anyone who can write to the request folder is trusted as the owner.
+
+Listing and reading a request give up fast (`READ_TIMEOUT_S` 60 s, `--low-level-retries 2`,
+`--contimeout 15s`); a throttled call prints `DAY_REELS failed: Google is throttling Drive reads
+…`, and the next hourly run retries. The clip download keeps its own long timeout.
 
 ## Real go-public time, held rows and one Short per hour
 

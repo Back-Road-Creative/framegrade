@@ -542,3 +542,89 @@ def test_a_queue_refusal_is_recorded_and_later_requests_still_run(tmp_path, monk
     # Recorded, so the next hourly run does not retry it.
     again, _ = _run(tmp_path, drive)
     assert [o.state for o in again] == ["done", "done"]
+
+
+EMPTY = "{}"
+OWN = ("own-client.apps.googleusercontent.com", "own-client-value")
+
+
+def _rclone(stdout="[]", rc=0, stderr="", seen=None):
+    def runner(argv, **kwargs):
+        if seen is not None:
+            seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+    return runner
+
+
+def test_rclone_drive_uses_the_pipelines_own_google_client_outside_argv():
+    seen = []
+    drive = day_reels.RcloneDrive(
+        folder_id="FOLDER123",
+        token=EMPTY,
+        client_id=OWN[0],
+        client_secret=OWN[1],
+        runner=_rclone(seen=seen),
+    )
+    drive.list_requests()
+    argv, kwargs = seen[0]
+    assert kwargs["env"]["RCLONE_CONFIG_GMSDAYREELS_CLIENT_ID"] == OWN[0]
+    assert kwargs["env"]["RCLONE_CONFIG_GMSDAYREELS_CLIENT_SECRET"] == OWN[1]
+    assert all(OWN[1] not in part for part in argv)
+
+
+def test_an_old_sign_in_without_a_client_keeps_rclones_default(monkeypatch):
+    monkeypatch.delenv("RCLONE_CONFIG_GMSDAYREELS_CLIENT_ID", raising=False)
+    seen = []
+    day_reels.RcloneDrive(
+        folder_id="FOLDER123", token=EMPTY, runner=_rclone(seen=seen)
+    ).list_requests()
+    assert "RCLONE_CONFIG_GMSDAYREELS_CLIENT_ID" not in seen[0][1]["env"]
+
+
+def test_listing_and_reading_give_up_fast():
+    seen = []
+    drive = day_reels.RcloneDrive(folder_id="FOLDER123", token=EMPTY, runner=_rclone(seen=seen))
+    drive.list_requests()
+    drive.read_request("day10.json")
+    for argv, kwargs in seen:
+        assert kwargs["timeout"] <= 60
+        flags = dict(zip(argv[2::], argv[3::]))
+        assert flags["--low-level-retries"] == "2"
+        assert flags["--contimeout"] == "15s"
+
+
+THROTTLED = (
+    "googleapi: Error 403: Quota exceeded for quota metric 'Queries' and limit "
+    "'Previous quota: Requests per minute' of service 'drive.googleapis.com', rateLimitExceeded"
+)
+
+
+def test_a_throttled_listing_says_google_is_throttling():
+    drive = day_reels.RcloneDrive(
+        folder_id="FOLDER123",
+        token=EMPTY,
+        runner=_rclone(rc=1, stderr=f"Failed to lsjson: {THROTTLED}"),
+    )
+    with pytest.raises(day_reels.DriveReadError, match="Google is throttling Drive reads"):
+        drive.list_requests()
+
+
+def test_a_timeout_while_throttled_says_google_is_throttling():
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            argv, kwargs["timeout"], stderr=f"DEBUG : pacer: {THROTTLED}".encode()
+        )
+
+    drive = day_reels.RcloneDrive(folder_id="FOLDER123", token=EMPTY, runner=runner)
+    with pytest.raises(day_reels.DriveReadError, match="Google is throttling Drive reads"):
+        drive.list_requests()
+
+
+def test_a_plain_timeout_still_says_it_timed_out():
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    drive = day_reels.RcloneDrive(folder_id="FOLDER123", token=EMPTY, runner=runner)
+    with pytest.raises(day_reels.DriveReadError, match="timed out"):
+        drive.list_requests()
