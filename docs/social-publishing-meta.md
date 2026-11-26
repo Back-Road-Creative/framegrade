@@ -67,9 +67,17 @@ publish. `PUBLISHED` → adopt the media id, never publish again. `ERROR` →
 a resumed container (read as `EXPIRED` up front, or turning `EXPIRED` while
 we wait) → a fresh container (nothing was published from it); `EXPIRED`
 right after a create → `InstagramPermanentError`. Still
-processing at the bound → `InstagramRetryableError`; the container stays on
-the row and the next pass resumes it. A container can turn `FINISHED` ~15 minutes
-after a delivery was refused as permanent, so the bound must not be read as final.
+processing at the bound → `InstagramContainerPendingError` (the handler raises
+`dispatch.ReconcilePendingError`); the container stays on the row and the next
+pass resumes it, outside `max_attempts`, until it finishes, reads `EXPIRED`
+(then a fresh container, attempts reset), or `dispatch.UNCOUNTED_RETRY_BOUND`
+parks the row at `needs_operator`. It is never answered with a fresh container
+while `IN_PROGRESS`: a resumed one may sit behind a lost `media_publish`
+answer, and `queue recover-terminal` refuses such a container as live. A
+container can turn `FINISHED` ~15 minutes after a delivery was refused as
+permanent, so the bound must not be read as final. Before, delivery #391's
+container was still processing on all 8 ordinary tries and the row failed for
+good.
 
 **Every GET sends the token as an `Authorization: OAuth` header**, never
 `access_token` in `params` (`requests` puts params into the URL, and a

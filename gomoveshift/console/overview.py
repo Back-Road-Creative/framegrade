@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..publishing.handlers import STATUS_AWAITING_MANUAL_PUBLISH
-from ..publishing.queue import STATUS_MISSING_REMOTE
+from ..publishing.queue import STATUS_MISSING_REMOTE, STATUS_NEEDS_OPERATOR
 from . import jobs, pubqueue
 
 #: Job statuses worth surfacing on "Needs attention".
@@ -41,6 +41,7 @@ _ATTENTION_DELIVERY_STATUSES = (
     "failed_permanent",
     STATUS_AWAITING_MANUAL_PUBLISH,
     STATUS_MISSING_REMOTE,
+    STATUS_NEEDS_OPERATOR,
 )
 
 #: Delivery statuses worth surfacing on "Coming up" -- still on their way
