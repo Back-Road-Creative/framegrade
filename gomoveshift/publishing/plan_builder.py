@@ -63,7 +63,7 @@ def _with_filmed(text: str, filmed: str) -> str:
     return f"{sentence}\n\n{hashtags}" if hashtags else sentence
 
 
-def _title_with_hashtags(title: str, description: str) -> str:
+def _title_with_hashtags(title: str, description: str, regions: Sequence[str] = ()) -> str:
     """The YouTube title plus the description's own hashtags, most specific
     first (the generator writes them generic-to-specific: ``#Shorts``,
     ``#POVDriving``, terrain, place), at most ``_TITLE_HASHTAG_MAX`` in all,
@@ -71,15 +71,21 @@ def _title_with_hashtags(title: str, description: str) -> str:
     shows the title and folds the description away, so hashtags left only in
     the description are hashtags no viewer sees. Taking them from the
     description keeps one hashtag choice per short -- an interactive short's
-    description withholds the place tag, so its title does too."""
+    description withholds the place tag, so its title does too.
+
+    With region votes (a GPS-bearing Short) a tag the title review cannot back is
+    skipped (``title_hashtag_backed``): a description may name the country, a title
+    whose clip votes only the county may not."""
     if not title:
         return title
+    from .short_title_review import title_hashtag_backed
+
     max_len = PAYLOAD_LIMITS["youtube"].title_max_len
     have = {tag.lower() for tag in hashtags_in(title)}
     for tag in reversed(hashtags_in(description)):
         if len(have) >= _TITLE_HASHTAG_MAX:
             break
-        if tag.lower() in have:
+        if tag.lower() in have or (regions and not title_hashtag_backed(tag, regions)):
             continue
         if len(title) + 1 + len(tag) > max_len:
             break
@@ -213,7 +219,11 @@ def build_short_payloads(
     yt_desc = "\n\n".join(part for part in (yt_description, parent_link) if part)
     return PlatformPayloads(
         youtube=YouTubePayload(
-            title=_title_with_hashtags(getattr(post, "youtube_title", "") or "", yt_description),
+            title=_title_with_hashtags(
+                getattr(post, "youtube_title", "") or "",
+                yt_description,
+                tuple(getattr(post, "sampled_regions", None) or ()),
+            ),
             description=yt_desc,
             tags=tags,
             category=getattr(post, "youtube_category", "") or "",

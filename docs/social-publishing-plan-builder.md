@@ -90,6 +90,12 @@ never fails the run.
   a legacy pool title cannot pass by wearing them. The generator pins the place
   and region tags as the LAST two description hashtags (region, then place), so
   the title always ends `... #Unicoi #Tennessee #POVDriving`.
+  A Short with region votes (`sampled_regions`) skips each description hashtag its
+  title review cannot back (`short_title_review.title_hashtag_backed`: the policy's
+  filler, a generator tag list, or a region-vote component) and takes the next. Before,
+  Old Head Short #7 (2025-09-19, votes `County Cork`) took `#Ireland` from its
+  description and was refused `name_unbacked:short_title:ireland` (2026-11-25). A
+  GPS-less Short has no review, so it keeps every tag as before.
 - **Instagram**/**Facebook**: caption = `SocialPost.caption` with the
   `"Filmed <Month YYYY>."` sentence placed after the caption's sentence and
   **before** its closing hashtags, joined with a space (the CSV path joins it

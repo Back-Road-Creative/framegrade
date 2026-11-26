@@ -141,3 +141,32 @@ def test_the_recovery_check_agrees_for_the_real_title_and_names_what_it_refuses(
     assert short_review_refusal(_short(base[1])) is None
     refusal = short_review_refusal(_short(base[1], "Feb 24, 2nd stretch: Polk County epic"))
     assert refusal and "name_unbacked:short_title:epic" in refusal
+
+
+@pytest.mark.parametrize(
+    ("tag", "regions", "backed"),
+    [
+        ("#Shorts", ("County Cork",), True),  # the policy's own filler
+        ("#OpenRoad", ("County Cork",), True),  # a generator tag list
+        ("#CountyCork", ("County Cork",), True),  # the clip's region vote
+        ("#Ireland", ("County Cork",), False),  # Old Head Short #7, 2026-11-25
+        ("#Ireland", ("County Cork, Ireland",), True),
+    ],
+)
+def test_title_hashtag_backed_is_the_rule_the_review_applies(tag, regions, backed):
+    from gomoveshift.publishing.short_title_review import title_hashtag_backed
+
+    assert title_hashtag_backed(tag, regions) is backed
+
+
+def test_old_head_short_7_with_its_built_title_is_reviewed_agree(base):
+    title = "Sep 19, 7th stretch: County Cork, on a Friday #CountyCork #OpenRoad #RoadTrip"
+    review = build_short_final_text_review(
+        _short(base[1], title, date="2025-09-19", regions=("County Cork",))
+    )
+    assert review["verdict"] == "agree", review["reasons"]
+    refused = "Sep 19, 7th stretch: County Cork, on a Friday #CountyCork #Ireland #OpenRoad"
+    review = build_short_final_text_review(
+        _short(base[1], refused, date="2025-09-19", regions=("County Cork",))
+    )
+    assert "name_unbacked:short_title:ireland" in review["reasons"]

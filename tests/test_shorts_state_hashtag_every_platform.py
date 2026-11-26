@@ -141,7 +141,15 @@ def test_single_component_location_is_not_gated():
 def test_plan_builder_youtube_title_carries_place_and_region():
     desc = _gen("Unicoi, Tennessee").generate_post(short_index=1).youtube_description
     record = _build(
-        posts=[_post(youtube_title="Mar 4, 1st stretch: Unicoi", youtube_description=desc)]
+        posts=[
+            _post(
+                youtube_title="Mar 4, 1st stretch: Unicoi",
+                youtube_description=desc,
+                # the generator's own vote (``sampled_regions=[location]``): the title takes
+                # only the hashtags its review backs, and the shared fixture votes County Kerry
+                sampled_regions=["Unicoi, Tennessee"],
+            )
+        ]
     ).shorts[0]
     title = record.payloads.youtube.title
     assert title.startswith("Mar 4, 1st stretch: Unicoi #Unicoi #Tennessee"), title

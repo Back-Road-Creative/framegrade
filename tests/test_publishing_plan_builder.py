@@ -314,3 +314,41 @@ def test_every_short_carries_the_review_hash_of_what_it_sends():
 
 def test_a_review_hash_the_caller_passes_is_kept():
     assert _build(reviewed_plan_hash="f" * 64).shorts[0].reviewed_plan_hash == "f" * 64
+
+
+# 2026-11-25: Old Head Short #7 (ireland-2025-09-19-old-head-courtmacsherry) took #Ireland from
+# its description into its title; its clip's only region vote is "County Cork", so the review
+# refused it (name_unbacked:short_title:ireland). A title takes only the hashtags its review backs.
+CORK = {"caption": "Rolling through County Cork today", "youtube_tags": "County Cork,road trip"}
+OLD_HEAD_7 = (
+    "POV Pt.7: driving through County Cork #Shorts #RoadTrip #OpenRoad #Ireland #CountyCork"
+)
+
+
+def test_a_title_skips_a_description_hashtag_its_clip_does_not_back():
+    post = _post(
+        youtube_title="Sep 19, 7th stretch: County Cork, on a Friday",
+        youtube_description=OLD_HEAD_7,
+        **CORK,
+        sampled_regions=["County Cork"],
+    )
+    title = _build(posts=[post]).shorts[0].payloads.youtube.title
+    assert title == "Sep 19, 7th stretch: County Cork, on a Friday #CountyCork #OpenRoad #RoadTrip"
+
+
+def test_a_country_the_clip_votes_for_still_reaches_the_title():
+    post = _post(
+        youtube_title="Sep 19, 7th stretch: County Cork, on a Friday",
+        youtube_description=OLD_HEAD_7,
+        **CORK,
+        sampled_regions=["County Cork, Ireland"],
+    )
+    title = _build(posts=[post]).shorts[0].payloads.youtube.title
+    assert title == "Sep 19, 7th stretch: County Cork, on a Friday #CountyCork #Ireland #OpenRoad"
+
+
+def test_a_gps_less_short_keeps_every_description_hashtag_as_before():
+    # no region votes = no review to satisfy (the rule ``_repair_short_tags`` follows)
+    post = _post(youtube_title="Back roads", youtube_description=OLD_HEAD_7, sampled_regions=[])
+    title = _build(posts=[post]).shorts[0].payloads.youtube.title
+    assert title == "Back roads #CountyCork #Ireland #OpenRoad"
