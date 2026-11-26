@@ -1042,6 +1042,25 @@ def transition(
     return changed
 
 
+def restart_delivery(
+    conn: sqlite3.Connection, delivery_id: int, expected_status: str, **fields: Any
+) -> bool:
+    """Start a delivery over: back to ``queued`` with its upload id cleared and
+    ``attempt_count`` 0. Every adapter path that abandons an upload it has
+    PROVEN can never publish (an expired Instagram container, a Facebook reel
+    whose finish never ran) goes through here.
+
+    The count resets because the tries it holds were spent on the abandoned
+    upload, often uncounted reads that still bumped it: kept, the fresh upload
+    failed permanently on its first ordinary error. Never use this for a try that
+    simply failed; that try is counted like any other. Compare-and-set like
+    ``transition``; ``fields`` are extra columns to write (an error note)."""
+    return transition(
+        conn, delivery_id, expected_status, "queued", platform_upload_id=None, attempt_count=0,
+        **fields,
+    )  # fmt: skip
+
+
 def acquire_lease(
     conn: sqlite3.Connection,
     delivery_id: int,

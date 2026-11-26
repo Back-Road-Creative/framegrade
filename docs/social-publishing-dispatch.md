@@ -79,6 +79,12 @@ recoverable, never duplicated.
   later pass. Treating an unrecognised exception as permanent instead
   silently discards a publishable short — the failure mode this module
   exists to prevent.
+- **Starting over resets the attempt count.** An adapter that abandons an
+  upload it has proven can never publish (an `EXPIRED` Instagram container, a
+  Facebook reel whose finish never ran) goes through `queue.restart_delivery`:
+  back to `queued`, upload id cleared, `attempt_count` 0. Kept, the count its
+  uncounted reads had run up failed the fresh upload on its first ordinary
+  error.
 - The retry loop is bounded: once `attempt_count` reaches `max_attempts`
   (a `drain_queue` param), the delivery transitions to `failed_permanent`
   with `error_class` prefixed `MaxAttemptsExceeded(...)` — visibly dead,

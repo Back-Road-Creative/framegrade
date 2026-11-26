@@ -46,7 +46,8 @@ the worker never fills old provenance from current credentials. Missing retained
 IDs cannot be reconciled by guessing or creating a replacement.
 
 One case proves no finish ran, and only then is the ID dropped (row back to
-`queued`, `platform_upload_id` cleared) so a fresh upload starts. In the same
+`queued`, `platform_upload_id` cleared, `attempt_count` reset through
+`queue.restart_delivery`) so a fresh upload starts. In the same
 pass, a byte upload that raises (write timeout, reset, refused host) drops it,
 since finish is sent only after the bytes land; the failure then counts toward
 `max_attempts` like any ordinary one. On a retained ID, a status read whose
