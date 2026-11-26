@@ -1143,6 +1143,16 @@ def record_live_publish(
     return True
 
 
+def parse_slot(value: Any) -> datetime:
+    """``value`` read as an ISO-8601 time (a trailing ``Z`` is UTC), or
+    ``ValueError`` naming it. A time with no zone comes back without one:
+    ``normalise_slot`` refuses it, and the drain reads it as UTC."""
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"scheduled_at must be an ISO-8601 timestamp; got {value!r}") from exc
+
+
 def normalise_slot(value: Any) -> str:
     """``value`` as a UTC ISO-8601 string, the one form ``scheduled_at`` holds.
 
@@ -1151,10 +1161,7 @@ def normalise_slot(value: Any) -> str:
     wrong against it even where they parse. A time with no zone is refused, not
     guessed: it could be Eastern or UTC, and the drain's arithmetic on it raised
     ``TypeError``."""
-    try:
-        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"scheduled_at must be an ISO-8601 timestamp; got {value!r}") from exc
+    parsed = parse_slot(value)
     if parsed.tzinfo is None:
         raise ValueError(
             f"scheduled_at must name its time zone (for example +00:00 or -05:00); "
