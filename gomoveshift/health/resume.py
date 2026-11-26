@@ -109,3 +109,17 @@ def mark_phase(stages_dir: Path, phase: str) -> None:
         return
     except (OSError, ValueError) as exc:
         logger.warning("could not update resume recipe %s: %s", path, exc)
+
+
+def rewrite_argv(path: Path, argv: List[str]) -> None:
+    """Replace the recipe's argv in place (atomically), every other field kept: how a replay
+    records an input it re-resolved (``heal.refresh_recipe``). Never raises."""
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["argv"] = list(argv)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("could not rewrite resume recipe %s: %s", path, exc)

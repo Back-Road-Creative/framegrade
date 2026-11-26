@@ -888,6 +888,52 @@ def test_a_row_resolved_without_a_reason_is_still_refiled_while_its_job_is_faile
     assert not row.get("resolved_at")
 
 
+# 2026-11-26: a released fix stayed pinned but uninstalled for days and nothing alerted.
+def _check_at(tmp_path, notify, when, versions):
+    cfg = SimpleNamespace(seo=SimpleNamespace(storage_path="relative/seo"))
+    return run_check(
+        cfg, incidents_dir=tmp_path / "inc", jobs_dir=tmp_path / "jobs", code_root=tmp_path,
+        staging_sha="abc123", now=when, notify_fn=notify, versions_fn=lambda: versions,
+    )  # fmt: skip
+
+
+def _deferred(out):
+    return [r for r in out["incidents"] if r["kind"] == "install_deferred"]
+
+
+def test_a_pin_the_venv_lacks_for_6_hours_raises_install_deferred_once(tmp_path):
+    sent = []
+
+    def notify(event, payload, text):
+        sent.append((event, text))
+        return True
+
+    pending = ("0.3.163", "0.3.167")
+    assert not _deferred(_check_at(tmp_path, notify, NOW, pending))
+    assert not _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=5, minutes=59), pending))
+    (row,) = _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=6), pending))
+    assert row["installed_version"] == "0.3.163" and row["pinned_version"] == "0.3.167"
+    assert row["pending_since"] == "2026-01-10T12:00:00+00:00"
+    assert [e for e, _ in sent] == ["health_install_deferred"]
+    assert "0.3.167" in sent[0][1] and "0.3.163" in sent[0][1]
+    assert _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=7), pending))
+    assert len(sent) == 1  # pushed once
+    # an unreadable version proves nothing: the incident stays open
+    assert _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=8), (None, "0.3.167")))
+    out = _check_at(tmp_path, notify, NOW + timedelta(hours=9), ("0.3.167", "0.3.167"))
+    assert not _deferred(out) and "install_deferred" in out["resolved"]
+    # the clock restarts: a later pending install waits its own 6 hours
+    later = NOW + timedelta(hours=10)
+    assert not _deferred(_check_at(tmp_path, notify, later, ("0.3.167", "0.3.168")))
+    assert len(sent) == 1
+
+
+def test_matching_or_unknown_versions_raise_no_install_deferred(tmp_path):
+    for versions in (("0.3.167", "0.3.167"), (None, "0.3.167"), ("0.3.163", None)):
+        out = _check_at(tmp_path, lambda *a: True, NOW + timedelta(days=3), versions)
+        assert not _deferred(out)
+
+
 # 2026-11-26: the queue was thin Dec 15 - Jan 15 and no rule looked further than a week ahead,
 # so a hole 3+ weeks out raised nothing until days before it.
 def _slotted(tmp_path, days, *, platform="youtube", status="queued", shadow=0):

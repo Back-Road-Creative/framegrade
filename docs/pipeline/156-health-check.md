@@ -189,6 +189,15 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10, 13 and 15 (it would
    unreadable tracking record is a note and keeps the open metrics row live; a missing
    decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
+14. **Pinned version not installed** (`install_deferred`). The code root's `pyproject.toml` pins one
+   `gomoveshift-video` version and its service venv has held another for over
+   `INSTALL_DEFERRED_AFTER_H` = 6 h. Every launch path refuses meanwhile (`heal.install_pending`,
+   below), so past that something still holds the staging sync's deferred install back. The
+   clock is one file beside the incidents dir (`<incidents dir>.install_pending.json`, `since`),
+   started the first tick the versions differ and removed when they match. One row (key and file
+   `install_deferred`; `installed_version`, `pinned_version`, `pending_since`), pushed once as
+   `health_install_deferred`, resolved once the versions match. Either version unreadable is a
+   note: an open row stays open.
 15. **Social queue runs dry** (`social_queue_gap`, `cadence.queue_gaps`). Rules 2 and 2b see 48 h
    and a week ahead, too late to render and enqueue Shorts for a hole. For each posting platform
    (one with a non-shadow delivery slotted no earlier than `QUEUE_ACTIVE_LOOKBACK_DAYS` = 28 days
@@ -216,7 +225,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `social_queue_gap` | `platform_auth_blocked`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `install_deferred` | `social_queue_gap` | `platform_auth_blocked`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -224,7 +233,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed). `social_queue_gap`: `platform`, `date`.
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed). `install_deferred`: `installed_version`, `pinned_version`, `pending_since`. `social_queue_gap`: `platform`, `date`.
 
 ## Resume recipe and `health heal`
 
@@ -259,7 +268,10 @@ lookup unavailable, network timeouts), `publish_only` (YouTube quota, Drive uplo
 `deterministic` 0 until the fingerprint changes, then one; `transient` 3, spaced by the backoff; `unknown` 1; `publish_only`
 never (heal has no publish path: it records `refused`, naming class, a 12-char fingerprint hash and `use health publish`).
 A refusal is one `refused` attempt (deduped per fingerprint and reason) and one log line. While the checkout's `pyproject.toml`
-pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`:
+pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`
+(`heal.install_pending`; `health backlog`'s new drive and confirmed resume and `health publish` refuse
+with the same reason, so every render boundary is a gap the deferred install lands in; unknown either way launches).
+Otherwise heal launches
 the recipe argv + `--skip-upload --no-youtube-upload`
 (each added only when the recipe lacks it), via
 the job runner (`--name gms-heal-<drive>-<sha7> --heavy --detach --stall 86400`). A failed heal job becomes an
