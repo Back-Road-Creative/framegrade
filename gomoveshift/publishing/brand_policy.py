@@ -6,7 +6,7 @@ file, missing block, or missing key falls back to today's behaviour, so
 every brand other than the one that opts in is unaffected. An unknown key
 under ``policy:`` raises -- a typo must not silently do nothing.
 
-Keys: ``per_location_cap``, ``weekly_ceiling``, ``daily_ladder``,
+Keys: ``per_location_cap``, ``shorts_per_drive``, ``weekly_ceiling``, ``daily_ladder``,
 ``stagger_hours``, ``region_weight``, ``blackout`` (read by
 ``dispatch._select_due``) and ``quiet_after_alert_hours`` (read by
 ``dispatch._exclude_quiet_window``), and ``experiments`` (caption A/B arms,
@@ -54,6 +54,7 @@ def brand_dir(slug: str, shipped: Optional[Path] = None) -> Path:
 _KNOWN_POLICY_KEYS = frozenset(
     {
         "per_location_cap",
+        "shorts_per_drive",
         "weekly_ceiling",
         "daily_ladder",
         "stagger_hours",
@@ -72,6 +73,10 @@ class BrandPolicy:
 
     #: Max shorts per location/LF. ``None`` means no cap (today's default).
     per_location_cap: Optional[int] = None
+    #: Max shorts planned per drive (long-form). Planner only: unlike
+    #: ``per_location_cap`` it never feeds the enqueue batch gate, so several
+    #: drives in one region still enqueue together. ``None`` means no cap.
+    shorts_per_drive: Optional[int] = None
     #: Max shorts per platform per rolling week. ``None`` means no cap.
     weekly_ceiling: Optional[int] = None
     #: Daily shorts ladder (e.g. ``(1, 2, 3)``), strictly increasing.
@@ -198,6 +203,7 @@ def load_brand_policy(slug: str) -> BrandPolicy:
         raise ValueError(f"policy.{bad_key} is not a recognized policy key")
 
     cap = _validate_int_at_least(block, "per_location_cap", minimum=1)
+    shorts_per_drive = _validate_int_at_least(block, "shorts_per_drive", minimum=1)
     weekly_ceiling = _validate_int_at_least(block, "weekly_ceiling", minimum=1)
     stagger_hours = _validate_int_at_least(block, "stagger_hours", minimum=0)
     daily_ladder = _validate_daily_ladder(block)
@@ -207,6 +213,7 @@ def load_brand_policy(slug: str) -> BrandPolicy:
 
     return BrandPolicy(
         per_location_cap=cap,
+        shorts_per_drive=shorts_per_drive,
         weekly_ceiling=weekly_ceiling,
         daily_ladder=daily_ladder,
         stagger_hours=stagger_hours,

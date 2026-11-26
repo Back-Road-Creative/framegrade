@@ -18,10 +18,14 @@ def _media_profile():
 
 
 def _per_location_cap():
+    """The per-drive shorts cap the planner trims to: the smaller of the brand's
+    ``per_location_cap`` and ``shorts_per_drive`` (``None`` when neither is set)."""
     from ..console.settings import current_brand
     from .brand_policy import load_brand_policy
 
-    return load_brand_policy(current_brand()).per_location_cap
+    policy = load_brand_policy(current_brand())
+    caps = [c for c in (policy.per_location_cap, policy.shorts_per_drive) if c is not None]
+    return min(caps) if caps else None
 
 
 def _superlong_title(location, part_index, part_count):
