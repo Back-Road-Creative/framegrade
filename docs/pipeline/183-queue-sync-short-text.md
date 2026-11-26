@@ -108,8 +108,9 @@ written earlier is checked against ITS stored text as well: a clash is named in 
 makes it actionable (otherwise it is transient).
 
 A sidecar that cannot be planned (a bad `titles.yaml`, a trial plan the gates reject, a missing
-`lf_index`) is refused but stays queued as stored, and its STORED text reaches the gates of the
-sidecars before and after it. Caveat: when a later sidecar's stored text was itself changed
+`lf_index`) is refused but stays queued as stored, and the STORED text of the Shorts it queues
+(never the file's other Shorts, which a second `sidecar_path` spelling may queue) reaches the
+gates of the sidecars before and after it. Caveat: when a later sidecar's stored text was itself changed
 by an earlier run, settling may take two runs.
 
 Schedule: run `gomoveshift health sync-short-text --data-root <workspaces>` from the service

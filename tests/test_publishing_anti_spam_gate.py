@@ -43,6 +43,7 @@ _REAL_MEDIA = MediaFingerprint(
 def _record(
     short_index=0,
     *,
+    project_name="proj",
     youtube=None,
     instagram=None,
     facebook=None,
@@ -50,7 +51,7 @@ def _record(
     sampled_regions=("kerry",),
 ):
     return ShortPublishRecord(
-        project_name="proj",
+        project_name=project_name,
         lf_index=0,
         short_index=short_index,
         media=_REAL_MEDIA,
@@ -168,6 +169,38 @@ def test_short_titles_under_three_words_are_never_prefix_flagged():
     violations = check_batch([a, b], per_location_cap=None)
 
     assert not any(v.rule == "shared-prefix" for v in violations)
+
+
+def test_a_short_beside_its_own_stored_copy_is_not_a_shared_prefix():
+    # A Short re-checked against a queue that holds its own row: same (project, short_index).
+    stored = _record(3, youtube=_yt("Driving the coast road toward Exampleton"))
+    rewritten = _record(3, youtube=_yt("Driving the coast highway near Tralee"))
+
+    violations = check_batch([stored, rewritten], per_location_cap=None)
+
+    assert not any(v.rule == "shared-prefix" for v in violations)
+
+
+def test_a_different_short_with_the_same_opening_still_clashes_and_is_named():
+    stored = _record(3, youtube=_yt("Driving the coast road toward Exampleton"))
+    rewritten = _record(3, youtube=_yt("Driving the coast highway near Tralee"))
+    other = _record(4, youtube=_yt("Driving the coast lane by Dingle"))
+
+    violations = check_batch([stored, rewritten, other], per_location_cap=None)
+
+    prefix = {v.index: v.detail for v in violations if v.rule == "shared-prefix"}
+    assert set(prefix) == {0, 1, 2}
+    assert "[2] (proj #4)" in prefix[1]  # never its own stored copy at index 0
+    assert "[0, 1] (proj #3, proj #3)" in prefix[2]
+
+
+def test_the_same_short_index_in_two_projects_is_two_shorts():
+    a = _record(1, project_name="proj-a", youtube=_yt("Driving the coast road toward Exampleton"))
+    b = _record(1, project_name="proj-b", youtube=_yt("Driving the coast highway near Tralee"))
+
+    violations = check_batch([a, b], per_location_cap=None)
+
+    assert {v.index for v in violations if v.rule == "shared-prefix"} == {0, 1}
 
 
 # -- rule 3: caption-collision -------------------------------------------------

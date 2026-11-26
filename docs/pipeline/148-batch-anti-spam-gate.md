@@ -25,7 +25,10 @@ never checked, matching the other pre-spool gates):
 2. **`shared-prefix`** — two YouTube titles share the same first three words
    after normalising to lowercase alphanumeric tokens (punctuation
    stripped). Titles under three words are never compared. Both/every
-   sharing index is reported.
+   sharing index is reported, with the other Shorts named `project #index`.
+   A Short is `(project_name, short_index)`, not its position: two copies of
+   one Short (its stored text beside its new text) never clash with each
+   other, while the same `short_index` in two projects is two Shorts.
 3. **`caption-collision`** — within one record, two platforms' comparable
    text are identical after `.strip()`: YouTube's `description`,
    Instagram's `caption`, Facebook's `description`, TikTok's `caption`.
