@@ -659,3 +659,12 @@ directory (the parent of `seo.credentials_dir`; a brand with its own
 refresh token is written back; once the refresh token itself has expired the record
 must be re-created from a fresh authorization. No setup helper ships in this tree,
 so build the record by hand with those fields and encrypt it in place.
+
+An expired refresh token (`TikTokRefreshExpiredError`) pauses TikTok when
+`dispatch-queue --apply` builds its handlers: `tiktok: paused, access token
+refused: ...`, reason `auth:blocked`, so its rows stay queued and `health check`
+rule 16 names it. Any other refresh failure skips TikTok for that pass only
+(`tiktok: skipped for this pass (...)`, counted under `skipped_no_handler`). In
+both cases YouTube, Instagram and Facebook still drain; before, the error escaped
+and stopped the whole pass. After re-creating the record, resume TikTok in the
+console.
