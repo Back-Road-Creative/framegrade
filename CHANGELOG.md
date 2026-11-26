@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.163] - 2026-11-26
+
+### Fixed
+
+- Phase D no longer fails `shorts_per_lf SPLIT-BRAIN` on a `short_NN.mp4` that the day's render record does not list (a leftover from an earlier shorts plan that an audit-only resume never re-renders away). It is logged and ignored; a recorded short left unattributed still fails.
+
 ## [0.3.162] - 2026-11-26
 
 ### Fixed
@@ -1859,7 +1865,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...HEAD
+[0.3.163]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...v0.3.163
 [0.3.162]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...v0.3.162
 [0.3.161]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...v0.3.161
 [0.3.160]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...v0.3.160
