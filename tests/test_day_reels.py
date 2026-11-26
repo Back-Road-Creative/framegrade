@@ -92,7 +92,8 @@ def _run(
     renderer=None,
     apply=True,
     location_free=True,
-    journal_link=lambda recording_date: None,
+    journal_link=lambda recording_date: DAY_10,
+    now_utc="2026-11-25T23:00:00+00:00",
 ):
     calls = []
     outcomes = day_reels.process_requests(
@@ -100,7 +101,7 @@ def _run(
         state_dir=tmp_path / "state",
         storage_path=tmp_path / "queue",
         apply=apply,
-        now_utc="2026-11-25T23:00:00+00:00",
+        now_utc=now_utc,
         privacy_reporter=privacy or _verified(),
         renderer=renderer or _renderer(calls),
         location_check=lambda path: location_free,
@@ -261,6 +262,7 @@ def test_busy_gpu_leaves_the_request_pending(tmp_path):
         renderer=_renderer([]),
         location_check=lambda path: True,
         gpu_lock=busy,
+        journal_link=lambda recording_date: DAY_10,
     )
     assert [o.state for o in outcomes] == ["held"]
     assert "GPU" in outcomes[0].reason
@@ -392,8 +394,14 @@ def test_youtube_title_is_the_first_line_without_hashtags():
 
 
 def test_youtube_description_keeps_an_existing_shorts_tag_once():
-    text = day_reels.youtube_description("Rain on the Gap #Shorts", None)
-    assert text == "Rain on the Gap #Shorts"
+    text = day_reels.youtube_description("Rain on the Gap #Shorts", DAY_10)
+    assert text == f"Rain on the Gap #Shorts\n\nRead the full day: {DAY_10}"
+
+
+@pytest.mark.parametrize("link", [None, "", "  "])
+def test_youtube_description_refuses_a_missing_journal_link(link):
+    with pytest.raises(ValueError, match="journal day link"):
+        day_reels.youtube_description(CAPTION, link)
 
 
 def test_the_queued_short_passes_the_youtube_upload_gates(tmp_path):
@@ -478,7 +486,26 @@ def test_unreachable_trip_list_gives_no_link(monkeypatch):
 
     monkeypatch.setattr(day_reels.urllib.request, "build_opener", lambda *h: Refusing())
     assert day_reels.fetch_journal_trips() is None
-    assert day_reels.lookup_journal_link("2026-11-25") is None
+    with pytest.raises(day_reels.JournalLinkMissingError, match="fetching .* failed .*no route"):
+        day_reels.lookup_journal_link("2026-11-25")
+
+
+@pytest.mark.parametrize(
+    "trips, needle",
+    [
+        ("not json", "malformed"),
+        (json.dumps({"trips": "x"}), "malformed"),
+        (TRIPS.replace("2026-11-16", "2027-01-01"), "no trip in the site's trip list covers"),
+        (
+            json.dumps({"trips": json.loads(TRIPS)["trips"] * 2}),
+            "2 trips in the site's trip list overlap",
+        ),
+    ],
+)
+def test_a_missing_link_says_why(monkeypatch, trips, needle):
+    monkeypatch.setattr(day_reels, "_fetch_trips", lambda: (trips, ""))
+    with pytest.raises(day_reels.JournalLinkMissingError, match=needle):
+        day_reels.lookup_journal_link("2026-11-25")
 
 
 def test_a_short_without_a_journal_url_links_its_journal_day(tmp_path):
@@ -508,10 +535,61 @@ def test_the_request_journal_url_wins_over_the_lookup(tmp_path):
     assert f"Read the full day: {own}" in _record(tmp_path)["payloads"]["youtube"]["description"]
 
 
-def test_no_journal_day_means_no_link_line(tmp_path):
-    _run(tmp_path, FakeDrive({"day10.json": _request()}))
-    description = _record(tmp_path)["payloads"]["youtube"]["description"]
-    assert "Read the full day" not in description and description.endswith("#Shorts")
+def _incidents():
+    from gomoveshift.health.store import default_data_root, default_incidents_dir, load_all
+
+    rows, _bad = load_all(default_incidents_dir(default_data_root()))
+    return [r for r in rows if r["kind"] == day_reels.LINK_HOLD_KIND]
+
+
+def test_a_reel_without_a_journal_day_is_held_not_queued(tmp_path):
+    """The journal day goes up first, then the post links to it: no link, no post."""
+    drive = FakeDrive({"day10.json": _request()})
+    outcomes, calls = _run(tmp_path, drive, journal_link=lambda recording_date: None)
+
+    assert [o.state for o in outcomes] == ["held"]
+    assert "no journal day link for 2026-11-25" in outcomes[0].reason
+    assert _rows(tmp_path) == []
+    assert drive.downloads == [] and calls == [], "held before the download and render"
+    assert not (tmp_path / "state" / "requests").exists(), "no ledger: the next run retries"
+    assert _incidents() == []
+
+
+def test_a_held_reel_is_queued_once_its_journal_day_is_live(tmp_path):
+    drive = FakeDrive({"day10.json": _request()})
+    _run(tmp_path, drive, journal_link=lambda recording_date: None)
+    outcomes, calls = _run(tmp_path, drive, now_utc="2026-11-26T02:00:00+00:00")
+
+    assert [o.state for o in outcomes] == ["enqueued"] and len(calls) == 1
+    assert f"Read the full day: {DAY_10}" in _record(tmp_path)["payloads"]["youtube"]["description"]
+    assert not list((tmp_path / "state" / "held_for_link").glob("*.json"))
+
+
+def test_a_reel_held_over_a_day_raises_one_incident(tmp_path):
+    def no_link_fn(recording_date):
+        raise day_reels.JournalLinkMissingError("fetching the site's trip list failed (HTTP 503)")
+
+    drive = FakeDrive({"day10.json": _request()})
+    no_link = dict(journal_link=no_link_fn)
+    _run(tmp_path, drive, now_utc="2026-11-25T23:00:00+00:00", **no_link)
+    _run(tmp_path, drive, now_utc="2026-11-26T22:00:00+00:00", **no_link)
+    assert _incidents() == [], "under 24 h: no incident yet"
+
+    outcomes, _ = _run(tmp_path, drive, now_utc="2026-11-26T23:00:00+00:00", **no_link)
+    _run(tmp_path, drive, now_utc="2026-11-27T00:00:00+00:00", **no_link)
+    assert [o.state for o in outcomes] == ["held"]
+    assert "health incident raised" in outcomes[0].reason
+    (row,) = _incidents()
+    assert row["request"] == "day10.json" and row["recording_date"] == "2026-11-25"
+    assert row["detected_at"] == "2026-11-25T23:00:00+00:00" and not row["resolved_at"]
+    assert "day10.json" in row["detail"] and "2026-11-25" in row["detail"]
+    # A site problem reads apart from a missing trip.
+    assert "HTTP 503" in row["detail"] and "HTTP 503" in outcomes[0].reason
+
+    # Once the journal day is live the reel is queued and the incident closes.
+    again, _ = _run(tmp_path, drive, now_utc="2026-11-27T01:00:00+00:00")
+    assert [o.state for o in again] == ["enqueued"]
+    assert _incidents()[0]["resolved_at"]
 
 
 def test_a_queue_refusal_is_recorded_and_later_requests_still_run(tmp_path, monkeypatch):
@@ -667,7 +745,7 @@ def test_a_tracking_failure_never_undoes_a_queued_reel(tmp_path):
         renderer=_renderer([]),
         location_check=lambda path: True,
         gpu_lock=day_reels.no_gpu_lock,
-        journal_link=lambda recording_date: None,
+        journal_link=lambda recording_date: DAY_10,
         register_tracking=broken,
     )
     assert [o.state for o in outcomes] == ["enqueued"]
