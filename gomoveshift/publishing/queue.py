@@ -241,7 +241,16 @@ AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = "9999-01-01T00:00:00+00:00"
 STATUS_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
 #: Its wait reason: only the account scan may end it, never retry-now.
 NEXT_ATTEMPT_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
+#: A delivery whose retries never counted against ``max_attempts`` (unknown
+#: Facebook outcome, a container still processing, unreadable media, a
+#: platform throttle) and that kept retrying past ``dispatch.UNCOUNTED_RETRY_BOUND``.
+#: Not terminal -- its platform ids stay, so nothing re-uploads it -- and never
+#: selected by the drain: a person decides it (``dispatch`` raises an incident).
+STATUS_NEEDS_OPERATOR = "needs_operator"
+#: Its wait reason: only a person ends it, never retry-now.
+NEXT_ATTEMPT_NEEDS_OPERATOR = "needs_operator"
 _NEXT_ATTEMPT_REASONS = (
+    NEXT_ATTEMPT_NEEDS_OPERATOR,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
     NEXT_ATTEMPT_RETRY_BACKOFF,
     NEXT_ATTEMPT_PLATFORM_THROTTLE,
@@ -576,6 +585,12 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "uncounted_since" not in cols:
+            # When the row's current run of retries that never count against
+            # ``max_attempts`` began; NULL when it is not in one. Bounds that run
+            # (``dispatch.UNCOUNTED_RETRY_BOUND``). NULL for older rows: their run
+            # starts at the next such retry, never at a guessed earlier time.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN uncounted_since TEXT")
         pause_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(platform_pauses)").fetchall()
         }
@@ -917,6 +932,7 @@ def transition(
         "permalink",
         "error_class",
         "error_detail",
+        "uncounted_since",
         # Lease fields: a retryable transition releases the lease it held so
         # next_attempt_at alone governs when the row is retried.
         "lease_owner",
@@ -1040,6 +1056,28 @@ def transition(
     if changed and new_status == "published":
         _register_platform_id_best_effort(conn, delivery_id)
     return changed
+
+
+def restart_delivery(
+    conn: sqlite3.Connection, delivery_id: int, expected_status: str, **fields: Any
+) -> bool:
+    """Start a delivery over: back to ``queued`` with its upload id cleared and
+    ``attempt_count`` 0. Every adapter path that abandons an upload it has
+    PROVEN can never publish (an expired Instagram container, a Facebook reel
+    whose finish never ran) goes through here.
+
+    The count resets because the tries it holds were spent on the abandoned
+    upload, often uncounted reads that still bumped it: kept, the fresh upload
+    failed permanently on its first ordinary error. ``uncounted_since`` is kept:
+    a fresh upload that is again left undecided is the same stuck episode, so
+    the bound (``dispatch.UNCOUNTED_RETRY_BOUND``) still parks it rather than a
+    restart every 24 h looping for good. Never use this for a try that simply
+    failed; that try is counted like any other. Compare-and-set like
+    ``transition``; ``fields`` are extra columns to write (an error note)."""
+    return transition(
+        conn, delivery_id, expected_status, "queued", platform_upload_id=None, attempt_count=0,
+        **fields,
+    )  # fmt: skip
 
 
 def acquire_lease(
@@ -1332,6 +1370,7 @@ _NEXT_ATTEMPT_REASONS_RETRY_REFUSES = frozenset(
         NEXT_ATTEMPT_PLATFORM_THROTTLE,
         NEXT_ATTEMPT_AWAITING_MANUAL,
         NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
+        NEXT_ATTEMPT_NEEDS_OPERATOR,
     }
 )
 
