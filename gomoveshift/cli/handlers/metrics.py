@@ -888,6 +888,21 @@ def _cmd_metrics_feed_share(args, config) -> int:
     return 0
 
 
+def _music_grouper(config):
+    """The licensed-music test's grouper for the growth review, or ``None``
+    when no test is declared or the policy cannot be read."""
+    from ...publishing.shorts_music import read_receipts
+
+    try:
+        test = load_brand_policy(current_brand()).shorts_music
+    except (ValueError, OSError):
+        return None
+    storage = getattr(getattr(config, "seo", None), "storage_path", None)
+    if test is None or not storage:
+        return None
+    return growth_review.music_grouper(test, read_receipts(Path(storage)))
+
+
 def _cmd_metrics_growth_review(args, config) -> int:
     """``metrics growth-review``: the weekly suggest-only review (docs/pipeline/186).
 
@@ -908,7 +923,9 @@ def _cmd_metrics_growth_review(args, config) -> int:
         for line in partner_progress.report_lines(counts, today):
             print(line)
 
-    scores = growth_review.format_scorecard(growth_review.samples_from_records(records, today))
+    scores = growth_review.format_scorecard(
+        growth_review.samples_from_records(records, today, _music_grouper(config))
+    )
     for score in scores:
         print(score.line())
 
