@@ -12,7 +12,8 @@ against it. Nothing here writes wording of its own: the text is the generator's.
 A Short is touched only when ALL hold: no ``route_record``; its parent LF sidecar
 (``<project>_lf{NN}_youtube.json`` beside the plan) holds a valid
 ``drive_text_inputs.bracket_route``; its ``sampled_regions`` is exactly ``[label]``; its
-old title is one the plan's generator wrote (the ``"<date>, Nth stretch"`` stamp, or a measured place). Anything else is
+old title is one the plan's generator wrote (``generated_title``: the recorded
+``generator_title``, or for an older plan the stamp or a measured place). Anything else is
 refused and left as it was. A rewritten Short must then pass ``short_review_refusal``, or
 it is refused too. YouTube title, description and tags are regenerated; another
 platform's text is replaced only when it names the collapsed destination and not the
@@ -139,12 +140,21 @@ def ordinal_basis(shorts: List[dict]) -> List[int]:
 
 
 def generated_title(short: dict, extra_places: Tuple[str, ...] = ()) -> bool:
-    """Whether the old YouTube title is one this plan's generator wrote: carrying its
-    ``"<date>, Nth stretch"`` stamp, or exactly one of the Short's measured places (or the
-    LF location / bracket label in ``extra_places``) before its hashtags."""
+    """Whether the old YouTube title is one this plan's generator wrote.
+
+    A Short that records ``generator_title`` (the plan builder and every sync rewrite store
+    it) answers by provenance alone: the stored title must be exactly that text, so a hand
+    edit (a kept stamp with new words, or a title set to a measured place) is never taken
+    for the generator's. A plan written before the field has no record of what the
+    generator wrote, so it is judged by its looks: the ``"<date>, Nth stretch"`` stamp, or
+    exactly one of the Short's measured places (or the LF location / bracket label in
+    ``extra_places``) before its hashtags. Refusing those outright would freeze every Short
+    already queued; the first rewrite records the field and ends the guess for it."""
     from gomoveshift.pipeline.social_generator import _norm, measured_places
     from gomoveshift.pipeline.text_format import split_trailing_hashtags
 
+    if short.get("generator_title"):
+        return short["payloads"]["youtube"]["title"] == short["generator_title"]
     if _stamp_ordinal(short) is not None:
         return True
     body = _norm(split_trailing_hashtags(short["payloads"]["youtube"]["title"])[0])
@@ -275,6 +285,8 @@ def _rewrite(short: dict, post, record: dict) -> Tuple[dict, Tuple[str, ...]]:
         if payloads["youtube"].get(name) != value:
             payloads["youtube"][name] = value
             fields.append(f"youtube.{name}")
+    if fields:  # the YouTube text is now the generator's: record its title
+        new["generator_title"] = built.youtube.title
     changed_platforms = set()
     for platform, field in _OTHER_TEXT:
         old_text = (payloads.get(platform) or {}).get(field)

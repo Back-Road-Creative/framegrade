@@ -33,6 +33,7 @@ from .queue import (
     FACEBOOK_PHOTO_KIND,
     STATUS_AWAITING_IG_RECONCILE,
     STATUS_MISSING_REMOTE,
+    STATUS_NEEDS_OPERATOR,
     STATUS_PHOTO_AWAITING_ID,
     STATUS_PHOTO_RECONCILE,
     TERMINAL_STATUSES,
@@ -46,6 +47,8 @@ from .queue import (
     set_platform_daily_cap,
     transition,
 )
+from .queue import AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT as PARKED_UNTIL
+from .queue import NEXT_ATTEMPT_NEEDS_OPERATOR as NEEDS_OPERATOR
 from .queue import NEXT_ATTEMPT_PLATFORM_THROTTLE as PLATFORM_THROTTLE
 from .queue import NEXT_ATTEMPT_RETRY_BACKOFF as RETRY_BACKOFF
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as CONFIRMED
@@ -93,6 +96,17 @@ MEDIA_STALL_ATTEMPTS = next(
 )
 MEDIA_STALL_KIND = "delivery_media_stalled"
 
+#: How long a delivery may keep retrying without those retries counting against
+#: ``max_attempts``: from the first such retry (``deliveries.uncounted_since``)
+#: to the one that parks it at ``needs_operator`` and raises a
+#: ``delivery_needs_operator`` incident. 24 h is an Instagram container's whole
+#: life and a full day of hourly drains: an unknown outcome, a drive, or a
+#: throttle that has not cleared by then is not going to clear by itself. Before
+#: this, an unknown Facebook outcome re-read its status every hour for good,
+#: with no alert. Every uncounted branch goes through ``_uncounted_retry``.
+UNCOUNTED_RETRY_BOUND = timedelta(hours=24)
+NEEDS_OPERATOR_KIND = "delivery_needs_operator"
+
 #: A throttled delivery waits this long regardless of `attempt_count`.
 #: Six hours is well inside the daily publishing cadence (slots are
 #: 12:00Z and 16:00Z) while being long enough that a throttled queue
@@ -124,6 +138,7 @@ _PARKED_STATUSES = (
     _STATUS_AWAITING_MANUAL_PUBLISH,
     STATUS_AWAITING_IG_RECONCILE,
     STATUS_PHOTO_AWAITING_ID,
+    STATUS_NEEDS_OPERATOR,
 )
 
 
@@ -244,6 +259,14 @@ class ThrottledDeliveryError(Exception):
     for a state only a person can change."""
 
 
+class ReconcilePendingError(Exception):
+    """Raise when the platform holds this delivery's upload and has not decided
+    it yet (an Instagram container still processing). Polled again on the
+    ordinary backoff and EXEMPT from ``max_attempts``: the upload is fine and
+    starting over could post twice. Bounded like every exemption, by
+    ``UNCOUNTED_RETRY_BOUND``."""
+
+
 class TransientMediaError(Exception):
     """Raise when a handler can't confirm its media still matches disk
     (missing file, moved run directory, unmounted drive — see
@@ -254,9 +277,9 @@ class TransientMediaError(Exception):
     property of the local filesystem, not of the content or the platform,
     so applying the same cap sized for API flakiness would burn the last
     surviving copy of a short's delivery record for a problem retrying
-    can't make worse. This branch always retries — never transitions
-    ``failed_permanent`` — so `attempt_count` here is for visibility only,
-    not a shutoff."""
+    can't make worse. This branch never transitions ``failed_permanent``, so
+    `attempt_count` here is for visibility only; ``UNCOUNTED_RETRY_BOUND``
+    parks the row at ``needs_operator`` instead."""
 
 
 @dataclass
@@ -304,6 +327,9 @@ class DrainResult:
     #: attempted by THIS pass, and a non-zero value here is a report about a
     #: previous worker, not about this one.
     reconciled_interrupted: int = 0
+    #: Rows this pass parked at ``needs_operator``: their uncounted retries ran
+    #: past ``UNCOUNTED_RETRY_BOUND``. Not in ``retried``; each has an incident.
+    needs_operator: int = 0
     errors: List[str] = field(default_factory=list)
 
     @property
@@ -625,7 +651,8 @@ def reconcile_interrupted_attempts(
 
     This does NOT decide whether the interrupted attempt reached the platform.
     Retained Facebook upload IDs have an ambiguous outcome and only retry status
-    reads, with backoff, beyond the usual attempt limit. Other crash loops stop
+    reads, with backoff, beyond the usual attempt limit, for up to
+    ``UNCOUNTED_RETRY_BOUND`` (then ``needs_operator``). Other crash loops stop
     at that limit.
 
     A PAUSED platform's row is selected here (unlike ``_select_due``) because
@@ -686,7 +713,24 @@ def reconcile_interrupted_attempts(
             f"{row['lease_expires_at']} and never reported an outcome; counted "
             "as an attempt; an ambiguous Facebook upload remains read-only"
         )
-        if attempt_count >= max_attempts and not _facebook_unknown(row):
+        if _facebook_unknown(row):
+            _uncounted_retry(
+                conn,
+                row,
+                status,
+                now,
+                next_attempt_at=compute_next_attempt_at(
+                    now,
+                    attempt_count,
+                    base_seconds=backoff_base_seconds,
+                    cap_seconds=backoff_cap_seconds,
+                ),
+                next_attempt_reason=RETRY_BACKOFF,
+                attempt_count=attempt_count,
+                error_class=_INTERRUPTED_ERROR_CLASS,
+                error_detail=detail,
+            )
+        elif attempt_count >= max_attempts:
             transition(
                 conn,
                 delivery_id,
@@ -764,6 +808,59 @@ def _checkpoint_facebook_upload(conn, row):
         transition(conn, row["id"], row["status"], _STATUS_AWAITING_FACEBOOK_RECONCILE)
         return _live_row(conn, row["id"])
     return row
+
+
+def _uncounted_retry(
+    conn, row, status: str, now: str, *, next_attempt_at: str, next_attempt_reason: str, **fields
+) -> Optional[str]:
+    """Record a retry that does not count against ``max_attempts``, bounded.
+
+    The ONLY way any branch skips ``max_attempts``
+    (``tests/test_delivery_uncounted_bounds.py`` checks each one). The row's run
+    of such retries starts at its first (``uncounted_since``); once it has
+    lasted ``UNCOUNTED_RETRY_BOUND`` the row parks at ``needs_operator`` with
+    its platform ids kept, so it is never re-uploaded and never selected again,
+    and ``sync_media_stall_incidents`` raises one incident for it. A Page-photo
+    attempt cannot change status (``transition`` refuses), so it keeps its
+    read-only retries and gets the incident all the same. Returns ``"parked"``,
+    ``"retried"`` or ``None`` when nothing was written. ``fields`` carry
+    ``attempt_count`` and the error."""
+    since = row["uncounted_since"] or now
+    try:
+        elapsed = datetime.fromisoformat(now) - datetime.fromisoformat(since)
+    except (TypeError, ValueError):  # unreadable or mixed-naive: the run starts now
+        since, elapsed = now, timedelta(0)
+    common = dict(fields, uncounted_since=since, lease_owner=None, lease_expires_at=None)
+    if elapsed >= UNCOUNTED_RETRY_BOUND:
+        hours = elapsed.total_seconds() / 3600
+        detail = (
+            f"parked from {status} after {hours:.0f} h of retries that do not count against "
+            f"max_attempts (since {since}); platform ids kept, never re-uploaded; a person "
+            f"decides it: {common.get('error_detail') or ''}"
+        )
+        parked = dict(common, error_detail=detail[:_ERROR_DETAIL_MAX])
+        if transition(
+            conn,
+            row["id"],
+            status,
+            STATUS_NEEDS_OPERATOR,
+            next_attempt_at=PARKED_UNTIL,
+            next_attempt_reason=NEEDS_OPERATOR,
+            **parked,
+        ):
+            logger.warning("dispatch: delivery %s parked at needs_operator", row["id"])
+            return "parked"
+    if transition(
+        conn,
+        row["id"],
+        status,
+        status,
+        next_attempt_at=next_attempt_at,
+        next_attempt_reason=next_attempt_reason,
+        **common,
+    ):
+        return "retried"
+    return None
 
 
 def _release_own_lease(conn, delivery_id: int, owner: str) -> None:
@@ -878,10 +975,17 @@ def _write_delivery_incident(
 
 
 def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = None) -> None:
-    """Open (or leave open) one ``delivery_media_stalled`` incident per queued row whose last
-    failure was ``TransientMediaError`` and whose attempts reached :data:`MEDIA_STALL_ATTEMPTS`;
-    resolve the incident of any row no longer in that state (it uploaded, or its media came
-    back). Never changes a row and never fatal: the row keeps retrying."""
+    """Keep one open incident per stuck row and resolve the rest. Two kinds:
+
+    - ``delivery_media_stalled``: a non-terminal row whose last failure was
+      ``TransientMediaError`` and whose attempts reached :data:`MEDIA_STALL_ATTEMPTS`
+      (it keeps retrying);
+    - ``delivery_needs_operator``: a row parked at ``needs_operator``, or one whose
+      uncounted retries have run past ``UNCOUNTED_RETRY_BOUND`` without parking
+      (a Page-photo attempt, which cannot change status).
+
+    An incident whose row is no longer in its state (it uploaded, its media came
+    back, a person closed it) is resolved. Never changes a row and never fatal."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -893,32 +997,55 @@ def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = N
 
     terminal = ", ".join("?" for _ in TERMINAL_STATUSES)
     try:
-        stalled = conn.execute(
-            "SELECT id, platform, project_name, short_index, attempt_count, error_detail "  # noqa: S608
-            f"FROM deliveries WHERE error_class = 'TransientMediaError' AND attempt_count >= ? "
+        cutoff = (datetime.fromisoformat(now) - UNCOUNTED_RETRY_BOUND).isoformat()
+        stuck = conn.execute(
+            "SELECT id, platform, project_name, short_index, attempt_count, error_detail, "  # noqa: S608
+            "CASE WHEN status = ? OR uncounted_since <= ? THEN ? ELSE ? END AS kind "
+            "FROM deliveries WHERE (status = ? OR uncounted_since <= ? OR "
+            "(error_class = 'TransientMediaError' AND attempt_count >= ?)) "
             f"AND status NOT IN ({terminal})",
-            (MEDIA_STALL_ATTEMPTS, *TERMINAL_STATUSES),
+            (
+                STATUS_NEEDS_OPERATOR,
+                cutoff,
+                NEEDS_OPERATOR_KIND,
+                MEDIA_STALL_KIND,
+                STATUS_NEEDS_OPERATOR,
+                cutoff,
+                MEDIA_STALL_ATTEMPTS,
+                *TERMINAL_STATUSES,
+            ),
         ).fetchall()
         directory = incidents_dir or default_incidents_dir(default_data_root())
-        live = {r["id"] for r in stalled}
+        live = {(r["id"], r["kind"]) for r in stuck}
         rows, _ = load_all(directory)
-        open_ids = set()
+        open_keys = set()
         for row in rows:
-            if row.get("kind") != MEDIA_STALL_KIND or row.get("resolved_at"):
+            kind = row.get("kind")
+            if kind not in (MEDIA_STALL_KIND, NEEDS_OPERATOR_KIND) or row.get("resolved_at"):
                 continue
-            if row.get("delivery_id") in live:
-                open_ids.add(row.get("delivery_id"))
+            if (row.get("delivery_id"), kind) in live:
+                open_keys.add((row.get("delivery_id"), kind))
             else:
                 row["resolved_at"] = now
                 write_row(directory, row)
-        for r in stalled:
-            if r["id"] in open_ids:
+        for r in stuck:
+            if (r["id"], r["kind"]) in open_keys:
                 continue
-            key = f"{MEDIA_STALL_KIND}:{r['id']}"
+            if r["kind"] == MEDIA_STALL_KIND:
+                what = (
+                    f"media unreadable for {r['attempt_count']} attempts "
+                    "(backoff at its ceiling); still retrying"
+                )
+            else:
+                what = (
+                    f"retried {UNCOUNTED_RETRY_BOUND} without an outcome, outside "
+                    "max_attempts; parked for a person, platform ids kept"
+                )
+            key = f"{r['kind']}:{r['id']}"
             write_row(
                 directory,
                 new_incident(
-                    MEDIA_STALL_KIND,
+                    r["kind"],
                     key,
                     f"{safe_name(key)}.json",
                     now,
@@ -927,8 +1054,7 @@ def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = N
                     project=r["project_name"],
                     detail=(
                         f"{r['platform']}#{r['id']} {r['project_name']} short {r['short_index']}: "
-                        f"media unreadable for {r['attempt_count']} attempts "
-                        f"(backoff at its ceiling); still retrying: {r['error_detail']}"
+                        f"{what}: {r['error_detail']}"
                     )[:500],
                 ),
             )
@@ -1170,6 +1296,7 @@ def drain_queue(
                 else None
             )
             new_attempt_count = (live["attempt_count"] if live is not None else 0) + 1
+            outcome = None
             if isinstance(exc, PermanentDeliveryError) and not _facebook_unknown(live):
                 recorded = live_status is not None and transition(
                     conn,
@@ -1186,35 +1313,35 @@ def drain_queue(
                 # Retry mechanics of the ordinary retryable branch, but NEVER
                 # checked against max_attempts and on a fixed long delay -- see
                 # the class docstring.
-                recorded = live_status is not None and transition(
+                outcome = live_status and _uncounted_retry(
                     conn,
-                    delivery_id,
+                    live,
                     live_status,
-                    live_status,
-                    attempt_count=new_attempt_count,
+                    now,
                     next_attempt_at=(
                         datetime.fromisoformat(now) + timedelta(seconds=_THROTTLE_BACKOFF_SECONDS)
                     ).isoformat(),
                     next_attempt_reason=PLATFORM_THROTTLE,
+                    attempt_count=new_attempt_count,
                     error_class=type(exc).__name__,
                     error_detail=_detail(exc),
-                    lease_owner=None,
-                    lease_expires_at=None,
                 )
-                if recorded:
+                recorded = bool(outcome)
+                if outcome == "retried":
                     result.retried += 1
                     result.throttled += 1
                     result.errors.append(f"{platform}#{delivery_id}: throttled: {exc}")
-            elif isinstance(exc, TransientMediaError) or _facebook_unknown(live):
+            elif isinstance(exc, (TransientMediaError, ReconcilePendingError)) or _facebook_unknown(
+                live
+            ):
                 # Same retry mechanics as the ordinary retryable branch below
                 # (backoff, lease release) but NEVER checked against
-                # max_attempts — see the class docstring.
-                recorded = live_status is not None and transition(
+                # max_attempts — see the class docstrings. Bounded in time.
+                outcome = live_status and _uncounted_retry(
                     conn,
-                    delivery_id,
+                    live,
                     live_status,
-                    live_status,
-                    attempt_count=new_attempt_count,
+                    now,
                     next_attempt_at=compute_next_attempt_at(
                         now,
                         new_attempt_count,
@@ -1222,15 +1349,17 @@ def drain_queue(
                         cap_seconds=backoff_cap_seconds,
                     ),
                     next_attempt_reason=RETRY_BACKOFF,
+                    attempt_count=new_attempt_count,
                     error_class=type(exc).__name__,
                     error_detail=_detail(exc),
-                    lease_owner=None,
-                    lease_expires_at=None,
                 )
-                if recorded:
+                recorded = bool(outcome)
+                if outcome == "retried":
                     result.retried += 1
                     reason = (
-                        "reconciliation pending" if _facebook_unknown(live) else "transient media"
+                        "transient media"
+                        if isinstance(exc, TransientMediaError)
+                        else "reconciliation pending"
                     )
                     result.errors.append(f"{platform}#{delivery_id}: {reason}: {exc}")
             elif new_attempt_count >= max_attempts:
@@ -1264,6 +1393,7 @@ def drain_queue(
                     next_attempt_reason=RETRY_BACKOFF,
                     error_class=type(exc).__name__,
                     error_detail=_detail(exc),
+                    uncounted_since=None,  # an ordinary failure ends an uncounted run
                     # Release the lease we just held. next_attempt_at is the
                     # only thing that should govern when this row is retried;
                     # a lingering 300s lease would swallow every backoff
@@ -1276,6 +1406,13 @@ def drain_queue(
                 if recorded:
                     result.retried += 1
                     result.errors.append(f"{platform}#{delivery_id}: retryable: {exc}")
+            if outcome == "parked":
+                result.needs_operator += 1
+                result.errors.append(
+                    f"{platform}#{delivery_id}: needs_operator: its retries never counted "
+                    f"against max_attempts and it has retried {UNCOUNTED_RETRY_BOUND} without an "
+                    f"outcome; parked with its platform ids for a person: {exc}"
+                )
             if not recorded:
                 _unrecorded_failure(conn, result, platform, delivery_id, owner, exc)
         else:

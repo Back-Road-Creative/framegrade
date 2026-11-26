@@ -61,3 +61,13 @@ def test_a_title_the_plan_generated_is_a_stamp_or_one_of_its_measured_places():
     assert not generated_title(foreign)
     label = _short("x.mp4", "Virginia to Pennsylvania #Shorts")
     assert generated_title(label, ("Virginia to Pennsylvania",))
+
+
+def test_a_recorded_generator_title_decides_by_provenance_not_looks():
+    stamped = _short("x.mp4", "Mar 5, 1st stretch: my own words #Shorts")
+    place = _short("x.mp4", "Ashby County #Shorts")
+    for short in (stamped, place):  # each LOOKS generated, but is not the recorded text
+        short["generator_title"] = "Mar 5, 1st stretch: 38 seconds, Ashby County #Shorts"
+        assert not generated_title(short, ("Ashby County",))
+    place["generator_title"] = "Ashby County #Shorts"
+    assert generated_title(place)

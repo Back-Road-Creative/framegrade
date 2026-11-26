@@ -261,9 +261,11 @@ Short's day ordinal from the plan itself: the day sidecar beside its media
 (`shorts_ost_audit_<DATE>.json`, start-time order, the same one Phase D reads), else the
 old title's verified stamp (a plan written before fact titles), else its position among the
 plan's Shorts of that recording date. It never parses "Nth stretch" out of a fact title.
-`generated_title` is the safety check that the old title is one this plan wrote: its stamp,
-or exactly one of the Short's measured places (or the LF location / bracket label); any
-other title is refused and left as it was. A discarded sibling (a stored Short the sync was
+`generated_title` is the safety check that the old title is one this plan wrote: it equals
+the `generator_title` the plan recorded (the plan builder stores it, every sync rewrite
+updates it), or, for a plan written before that field, its stamp or exactly one of the
+Short's measured places (or the LF location / bracket label); any other title is left as it
+was. A discarded sibling (a stored Short the sync was
 not asked to rewrite) names no place, so it takes no measured place, and its stored title
 is seeded into `used_titles` so a rewritten Short cannot repeat it. Running sync over a plan
 the generator just wrote changes nothing.
