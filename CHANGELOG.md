@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.162] - 2026-11-26
+
+### Fixed
+
+- `gomoveshift day-reels authorize` signs in through the pipeline's own Google OAuth client (from its Drive token) instead of rclone's built-in client, whose shared quota returned `403 rateLimitExceeded` and stalled the hourly listing. The client is stored with the token and passed to rclone only through its environment.
+- Day-reels listing and reading give up within a minute (`--low-level-retries 2`, `--contimeout 15s`) and report `Google is throttling Drive reads` instead of a bare timeout.
+
 ## [0.3.161] - 2026-11-25
 
 ### Fixed
@@ -1852,7 +1859,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...HEAD
+[0.3.162]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...v0.3.162
 [0.3.161]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...v0.3.161
 [0.3.160]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.159...v0.3.160
 [0.3.159]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.158...v0.3.159
