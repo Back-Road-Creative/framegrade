@@ -58,8 +58,8 @@ recoverable, never duplicated.
   **exempt from `max_attempts`**: an unmounted drive is operator-fixable
   and unrelated to the content or the platform, so the cap sized for API
   flakiness must never burn the delivery record for it. A row stuck on
-  `TransientMediaError` retries indefinitely rather than requiring a
-  manual re-enqueue once the drive is back.
+  `TransientMediaError` keeps retrying for up to `UNCOUNTED_RETRY_BOUND`
+  (24 h, below), then parks at `needs_operator`.
 
   Both media loaders raise it: `_read_media` and `_media_path` run
   `verify_media` before handing anything to an adapter, so a missing,
@@ -79,6 +79,35 @@ recoverable, never duplicated.
   later pass. Treating an unrecognised exception as permanent instead
   silently discards a publishable short — the failure mode this module
   exists to prevent.
+- **Every retry that skips `max_attempts` is bounded in time.** These never
+  count against it: `TransientMediaError`, `ThrottledDeliveryError`,
+  `ReconcilePendingError` (an Instagram container still processing), and a
+  Facebook row whose outcome is unknown (a retained upload id, or a Page-photo
+  attempt; in `drain_queue` and in the interrupted-lease reconcile). Each goes
+  through `_uncounted_retry`; a structural test
+  (`tests/test_delivery_uncounted_bounds.py`) fails if a branch does not. The
+  row's run of such retries starts at its first one
+  (`deliveries.uncounted_since`); an ordinary, counted failure ends it. Once
+  the run has lasted `UNCOUNTED_RETRY_BOUND` (24 h: an Instagram container's
+  life and a full day of hourly drains), the row moves to `needs_operator`:
+  not terminal, its platform ids kept, never re-uploaded, never selected by
+  `_select_due`, and `queue retry` refuses it. One `delivery_needs_operator`
+  incident opens for it (`sync_media_stall_incidents`), the console push
+  watches the status, `publishing-status --validate` names it (without
+  holding the rest of its project), and the summary line gains
+  `needs_operator=<n>`. A person checks the platform. The console's cancel
+  works on it (not on a Page-photo attempt); no command yet closes one as
+  published (the console's mark-published takes TikTok manual rows only). A
+  Page-photo attempt cannot change status, so it keeps its read-only retries
+  and gets the same incident. Before, an unknown Facebook
+  outcome re-read its status every hour for good, with no alert.
+- **Starting over resets the attempt count.** An adapter that abandons an
+  upload it has proven can never publish (an `EXPIRED` Instagram container, a
+  Facebook reel whose finish never ran) goes through `queue.restart_delivery`:
+  back to `queued`, upload id cleared, `attempt_count` 0. Kept, the count its
+  uncounted reads had run up failed the fresh upload on its first ordinary
+  error. `uncounted_since` is kept, so a fresh upload that is again left
+  undecided still parks at the bound instead of restarting every 24 h.
 - The retry loop is bounded: once `attempt_count` reaches `max_attempts`
   (a `drain_queue` param), the delivery transitions to `failed_permanent`
   with `error_class` prefixed `MaxAttemptsExceeded(...)` — visibly dead,
@@ -331,4 +360,4 @@ refuses to spool a delivery whose media fails
 immediately before each upload: a handler that finds the media missing,
 swapped or truncated raises `TransientMediaError`, so the delivery is retried
 without counting against `max_attempts` (an unmounted drive is
-operator-fixable).
+operator-fixable), for up to `UNCOUNTED_RETRY_BOUND`.

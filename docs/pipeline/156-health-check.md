@@ -151,7 +151,7 @@ sets `resolved_at`; a refusal for another reason, or a tick that never reached t
 (lease held, running drive), leaves it open. `health check` never resolves it. A dry run writes
 nothing.
 
-A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
+A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10, 13 and 15 (it would resolve against the cwd). The cadence rules' note names rules 2 and 4; rule 10 adds its own note. Rules 10 and 11 run independently: one raising is noted by name and does not skip the other.
 
 12. **Nightly Short text sync** (`gomoveshift health sync-short-text`,
    `gomoveshift/health/short_text_sync.py`; not part of `health check`, which never runs it).
@@ -189,6 +189,16 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would res
    unreadable tracking record is a note and keeps the open metrics row live; a missing
    decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
+15. **Social queue runs dry** (`social_queue_gap`, `cadence.queue_gaps`). Rules 2 and 2b see 48 h
+   and a week ahead, too late to render and enqueue Shorts for a hole. For each posting platform
+   (one with a non-shadow delivery slotted no earlier than `QUEUE_ACTIVE_LOOKBACK_DAYS` = 28 days
+   ago) that is not paused, the first day from tomorrow through `QUEUE_RUNWAY_DAYS` = 42 days
+   ahead with no non-shadow delivery slotted on it. A day is the UTC date of `scheduled_at` (as
+   dispatch's blackout reads it); any status but `cancelled`, `failed_permanent` and
+   `missing_remote` fills it (a YouTube upload is `published` ahead of its slot), and the
+   brand's `policy.blackout` dates are never a gap. Key `social_queue_gap:<platform>:<date>`
+   (`platform`, `date`), pushed once as `health_social_queue_gap`; it resolves when that day is
+   filled or arrives, and the next empty day is a new incident. Read-only (queue opened `mode=ro`).
 
 16. **Platform paused: access token refused** (`platform_auth_blocked`). One incident per
    platform in `platform_pauses` whose `reason` is `auth:blocked` (the dispatch handlers pause a
@@ -206,7 +216,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `platform_auth_blocked`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `social_queue_gap` | `platform_auth_blocked`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -214,7 +224,7 @@ Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` 
 (`[]`, owned by `health heal`).
 `lf_slot_unbooked`: `region`, `slot`, `ready_drives`. `queue_stalled`: `due_deliveries`,
 `last_updated_at`, `quiet_hours`. `placeless_label_unverifiable`: `project`, `label`, `claims` (the words
-outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed).
+outside `PLACELESS_NO_CLAIM_WORDS`), `reason`. `failure_unattended`: `drive`, `last_attempt_at`, `detail`. `queued_short_refused`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `reason`. `delivery_failed_permanent`: `delivery_id`, `project`, `short_index`, `scheduled_at`, `error_class`. `short_bad_run`: `n`, `median_views`, `threshold_views`, `shorts` (`project`, `index`, `youtube_id`, `posted_at`, `views`, `causes`). `seo_feedback_stale`: `detail`, plus `decided_at` (decisions), or `count` and `shorts` (metrics: `project`, `short_index`, `missing`), or `ran_at` (sync; null when the record is missing or cannot be parsed). `social_queue_gap`: `platform`, `date`.
 
 ## Resume recipe and `health heal`
 

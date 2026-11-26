@@ -303,7 +303,8 @@ for manual scheduling in TikTok Studio. Nothing here calls TikTok.
   drive that is offline), or the drive answers with a dead-mount error (EIO, ENODEV, ENXIO,
   ESTALE, ENOTCONN, EACCES), the pack raises `TransientMediaError` and writes
   nothing. That error is exempt from `max_attempts`, so the row retries
-  without ever failing for it, but the drain still increments `attempt_count`
+  without failing for it (for up to `dispatch.UNCOUNTED_RETRY_BOUND`, then
+  `needs_operator`), but the drain still increments `attempt_count`
   on each retry (`dispatch.py`, the `TransientMediaError` branch). A full disk
   (ENOSPC) is an ordinary error and counts toward `max_attempts`.
 - **File name:** `<YYYY-MM-DD>-<HHMM>-<Place>-<delivery id>.mp4`. The date and
@@ -608,7 +609,8 @@ Two guards, deliberately in that order:
   a draft dismissed in the app leaves the row parked but the reservation gone.
 
 `drain_queue` treats `ThrottledDeliveryError` like `TransientMediaError`:
-retried, lease released, **exempt from `max_attempts`**, but on a fixed
+retried, lease released, **exempt from `max_attempts`** (bounded by
+`UNCOUNTED_RETRY_BOUND`, then `needs_operator`), but on a fixed
 `_THROTTLE_BACKOFF_SECONDS` (6h) instead of the backoff curve. The curve caps
 at an hour, which is right for API flakiness and far too eager for a state
 only a person can change; and the 8-attempt bound would declare

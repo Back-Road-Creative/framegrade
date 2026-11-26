@@ -39,7 +39,8 @@ planned before it, never a later one's, so a rerun sees the same inputs and is a
 A Short is also checked, across sidecars, against those earlier records inside the same
 refusal loop as the neighbour-place check, so a refusal always re-checks the final text.
 A sidecar that cannot be planned (a bad ``titles.yaml``, a trial plan the gates reject) still
-contributes its STORED text, as it stays queued unchanged, to the sidecars around it.
+contributes the STORED text of the Shorts it queues, as it stays queued unchanged, to the
+sidecars around it (never its file's other Shorts: a Short is never gated against itself).
 The title ledger and the nightly title snapshot are read once per run. The brand's per-location
 cap (``per_location_cap``) is counted within ONE sidecar's own untrimmed plan, never across
 sidecars (the cross-sidecar passes run without it): an approximation of enqueue, which counts
@@ -864,12 +865,16 @@ def _new_text_clashes(new_records: Sequence, later: Sequence) -> Dict[Tuple[str,
     return {k: f"anti-spam gate: {why} (against a later sidecar's text)" for k, why in out.items()}
 
 
-def _stored_records(path: str) -> list:
-    """The records of the sidecar as stored ([] when it cannot be loaded)."""
+def _stored_records(path: str, rows: Sequence[sqlite3.Row]) -> list:
+    """The stored records of the Shorts ``rows`` queue from the sidecar ([] when it cannot be
+    loaded): never the sidecar's other Shorts, which another row's text may already stand for
+    (the same file under a second ``sidecar_path`` spelling), so a Short never meets itself."""
+    queued = {(r["project_name"], int(r["short_index"])) for r in rows}
     try:
-        return list(load_publish_plan(Path(path)).shorts)
+        shorts = load_publish_plan(Path(path)).shorts
     except (OSError, ValueError, LookupError):
         return []
+    return [r for r in shorts if (r.project_name, r.short_index) in queued]
 
 
 def _clash_note(clash: Mapping[Tuple[str, int], str]) -> str:
@@ -958,7 +963,7 @@ def sync_short_text(
                     unusable[path] = f"sidecar unusable: {exc}"
                     # It stays queued as stored, so its STORED text still reaches every other
                     # sidecar's gates (as an earlier or a later one); unloadable = nothing to see.
-                    finals[path] = _stored_records(path)
+                    finals[path] = _stored_records(path, by_sidecar[path])
                     earlier.extend(finals[path])
                     continue
                 finals[path] = planned[path][3]
@@ -993,7 +998,7 @@ def sync_short_text(
             # Skipped, so it stays as STORED: what was written before the failure is checked
             # against that, as for the sidecar whose own write failed (below).
             why = "an earlier sidecar's write failed; retried next run"
-            clash = _new_text_clashes(written_new, _stored_records(path))
+            clash = _new_text_clashes(written_new, _stored_records(path, group))
             if clash:
                 why += _clash_note(clash)
             refuse_all(group, why, transient=not clash)
@@ -1010,7 +1015,7 @@ def sync_short_text(
                 why = f"sidecar unusable: write failed: {exc if known else f'{type(exc).__name__}: {exc}'}"
                 # The sidecars written before this one were checked against its PLANNED text;
                 # it stays as STORED, so check what they wrote against that.
-                clash = _new_text_clashes(written_new, _stored_records(path))
+                clash = _new_text_clashes(written_new, _stored_records(path, group))
                 if clash:
                     why += _clash_note(clash)
                 # Transient only when the write lost a race or met a busy database AND nothing

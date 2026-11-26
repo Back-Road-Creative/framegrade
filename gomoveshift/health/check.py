@@ -28,6 +28,7 @@ _EVENTS = {
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
     "seo_feedback_stale": "health_seo_feedback_stale",
+    "social_queue_gap": "health_social_queue_gap",
     "short_text_sync_refused": "health_short_text_sync_refused",
     "short_text_sync_crash": "health_short_text_sync_crash",
 }
@@ -142,6 +143,11 @@ def _line(row: Dict[str, Any]) -> str:
         return (
             f"{row['n']} settled Shorts in a row are under {row['threshold_views']:g} day-7 views "
             f"(channel median {row['median_views']:g}): {runs}; causes are in the incident row."
+        )
+    if row["kind"] == "social_queue_gap":
+        return (
+            f"The {row['platform']} social queue has nothing scheduled on {row['date']}, the first "
+            f"empty day in the next {cadence.QUEUE_RUNWAY_DAYS}: queue Shorts for it before it arrives."
         )
     if row.get("detail"):
         return str(row["detail"])
@@ -518,10 +524,22 @@ def _accounting_rows(
     return found, held
 
 
+def _blackout(notes: List[str]) -> Tuple[Any, ...]:
+    """The current brand's ``policy.blackout`` dates (no Shorts by design), or none (noted)."""
+    try:
+        from ..console.settings import current_brand  # noqa: PLC0415
+        from ..publishing.brand_policy import load_brand_policy  # noqa: PLC0415
+
+        return tuple(load_brand_policy(current_brand()).blackout)
+    except Exception as exc:  # noqa: BLE001 -- an unreadable policy skips no day
+        notes.append(f"rule 15: blackout dates not read ({type(exc).__name__}: {exc})")
+        return ()
+
+
 def _cadence_rows(
     config: Any, ledger_path: Optional[Path], now: datetime, now_iso: str, notes: List[str]
 ):
-    """Rules 2 and 4. ``found`` maps kind -> rows, only for a rule that actually ran."""
+    """Rules 2, 4, 7, 8 and 15. ``found`` maps kind -> rows, only for a rule that actually ran."""
     found: Dict[str, List[Dict[str, Any]]] = {}
     storage = Path(config.seo.storage_path)
     if not storage.is_absolute():
@@ -565,6 +583,10 @@ def _cadence_rows(
             found["delivery_failed_permanent"] = failed_permanent_incidents(db, now, now_iso, notes)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"rule 8 not evaluated: {type(exc).__name__}: {exc}")
+        try:
+            found["social_queue_gap"] = cadence.queue_gaps(db, now, now_iso, _blackout(notes))
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"rule 15 not evaluated: {type(exc).__name__}: {exc}")
         try:
             found["platform_auth_blocked"] = auth_blocked_incidents(db, now_iso)
         except Exception as exc:  # noqa: BLE001

@@ -27,7 +27,12 @@ from gomoveshift.publishing.meta_auth import graph_error_tag
 from gomoveshift.publishing.meta_graph import GRAPH_TIMEOUT, graph_base_url, graph_post
 from gomoveshift.publishing.models import InstagramPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
-from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
+from gomoveshift.publishing.queue import (
+    acquire_lease,
+    find_delivery,
+    restart_delivery,
+    transition,
+)
 
 #: Exact-host allowlist for any upload URL, checked before any bytes are sent.
 ALLOWED_UPLOAD_HOSTS = frozenset({"rupload.facebook.com", "graph.facebook.com"})
@@ -73,6 +78,14 @@ class InstagramPublishingLimitError(InstagramRetryableError):
     is retryable, never permanent. Raised both when the account is at/over
     quota and when the quota reading itself is malformed/missing (fail
     closed rather than assume quota is fine)."""
+
+
+class InstagramContainerPendingError(InstagramRetryableError):
+    """The container is still processing at the end of the poll. Kept on the
+    row and polled again next pass, outside ``max_attempts`` (the handler maps
+    it to ``dispatch.ReconcilePendingError``): it can still turn ``FINISHED``,
+    and it expires on its own at 24 h, when the row starts over. Never answered
+    with a fresh container while it is ``IN_PROGRESS``: see ``_publish``."""
 
 
 class InstagramPermanentError(InstagramPublishError):  # message names the recovery action
@@ -497,7 +510,8 @@ class InstagramShortsAdapter:
         last status read (``FINISHED``, ``PUBLISHED`` or ``EXPIRED``).
         ``ERROR`` raises permanent, naming Meta's status text. Still
         processing when ``CONTAINER_READY_TIMEOUT_S`` runs out raises
-        retryable: the container is kept and the next pass resumes it."""
+        ``InstagramContainerPendingError``: the container is kept and the next
+        pass resumes it, without spending one of the row's ordinary tries."""
         deadline = self._monotonic() + CONTAINER_READY_TIMEOUT_S
         while True:
             status = self._reels.check_container_status(container_id)
@@ -510,7 +524,7 @@ class InstagramShortsAdapter:
                     f"{status.get('status') or 'no status text'} — re-encode and resubmit"
                 )
             if self._monotonic() >= deadline:
-                raise InstagramRetryableError(
+                raise InstagramContainerPendingError(
                     f"media container {container_id} still {code or 'without a status'} after "
                     f"{CONTAINER_READY_TIMEOUT_S}s; the next pass resumes it"
                 )
@@ -581,14 +595,10 @@ class InstagramShortsAdapter:
         existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
         current_status = existing["status"] if existing else STATUS_QUEUED
         container_id, media_id, permalink = (
-            self._reconcile(existing)
-            if existing
-            else (
-                None,
-                None,
-                None,
-            )
+            self._reconcile(existing, conn, delivery_id) if existing else (None, None, None)
         )
+        if existing and container_id is None and existing.get("platform_upload_id"):
+            current_status = STATUS_QUEUED  # ``_reconcile`` started it over
 
         try:
             return self._publish(
@@ -622,8 +632,9 @@ class InstagramShortsAdapter:
                 # A resumed container that expired while we waited can never
                 # be published and nothing was published from it: start over,
                 # as ``_reconcile`` does for one it reads as EXPIRED.
+                self._start_over(conn, delivery_id, current_status, container_id)
                 container_id = self._create_and_upload(
-                    conn, delivery_id, current_status, payload, video_bytes
+                    conn, delivery_id, STATUS_QUEUED, payload, video_bytes
                 )
                 current_status, created_here = STATUS_UPLOADED, True
                 ready = self._await_ready(container_id)
@@ -659,7 +670,23 @@ class InstagramShortsAdapter:
         )
         return InstagramPublishResult(media_id=media_id, permalink=permalink)
 
-    def _reconcile(self, existing: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    @staticmethod
+    def _start_over(conn, delivery_id: int, status: str, container_id: str) -> None:
+        """Drop an EXPIRED container through ``queue.restart_delivery`` (row back
+        to queued, attempts reset). Only EXPIRED proves nothing can publish from
+        it. A container still ``IN_PROGRESS`` is never dropped: it can still
+        turn ``FINISHED`` (seen ~15 min after a row was failed), a
+        ``media_publish`` whose answer was lost may be behind a resumed one,
+        and ``queue recover-terminal`` refuses such a container as live."""
+        if not restart_delivery(conn, delivery_id, status):
+            raise InstagramRetryableError(
+                f"delivery {delivery_id} changed while container {container_id} was "
+                "dropped as expired; the next pass reconciles it"
+            )
+
+    def _reconcile(
+        self, existing: dict, conn, delivery_id: int
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Mirrors ``youtube_adapter.YouTubeShortsAdapter._reconcile``: a
         ``media_publish`` timeout is an unknown outcome, never a failure.
         Checks the persisted container's live status before ever creating a
@@ -677,8 +704,8 @@ class InstagramShortsAdapter:
             return container_id, status.get("media_id"), status.get("permalink")
         if status.get("status_code") == "EXPIRED":
             # An expired container can never be published; nothing was ever
-            # published from it, so a fresh one cannot duplicate. The caller
-            # moves the row back to submitting (queue.transition is a plain
-            # compare-and-set on the current status) and creates it.
+            # published from it, so a fresh one cannot duplicate. The row
+            # starts over (queued, attempts reset) and the caller creates it.
+            self._start_over(conn, delivery_id, existing["status"], container_id)
             return None, None, None
         return container_id, None, None
