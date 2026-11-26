@@ -6,6 +6,13 @@ an audio stream. That rule is unchanged. The owner asked (2026-11-26) to test mu
 on Facebook and Instagram Shorts, so `publishing/shorts_music.py` adds a licensed
 track at upload time, to those two platforms only, for half the Shorts.
 
+**Not enabled for GoMoveShift.** The block was switched off on 2026-11-26: the owner
+picks music from the platform's own library inside the Facebook and Instagram apps,
+and Meta's publishing APIs offer no parameter to attach a library song to a Reel
+(IG `media` has only `audio_name`, which renames original audio; the Page Reels
+publishing guide has no audio parameter). The code stays for a brand that holds
+licensed track files.
+
 **Declared in `brand.yaml`.** `policy.shorts_music` takes `start`, `stop_after_days`
 and `platforms` (a subset of `facebook` and `instagram`; nothing else is accepted).
 With no block, the Meta readers in `dispatch-queue` are the plain muted readers.

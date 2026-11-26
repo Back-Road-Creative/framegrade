@@ -50,11 +50,3 @@ policy:
         A: {hashtag_mode: none}
         B: {hashtag_mode: location}
         C: {hashtag_mode: june}
-  # Licensed music on half the Facebook and Instagram Shorts (JP 2026-11-26:
-  # "You can test music on Facebook and Instagram Shorts"). Shorts stay muted;
-  # a ledger-licensed track is added at upload only (doc 188). Inert until a
-  # track and its ledger entry are in the private music folder.
-  shorts_music:
-    start: 2026-11-27
-    stop_after_days: 45
-    platforms: [facebook, instagram]
