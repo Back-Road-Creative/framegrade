@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.156] - 2026-11-25
+
+### Added
+
+- `gomoveshift day-reels`: an owner's phone reel named by a request file in a private Drive
+  folder is privacy-blurred with the night export's detectors and queued for Facebook and
+  Instagram with its exact caption; nothing is queued unless every privacy class verified and
+  the render passed. `day-reels authorize` is the one-time read-only Drive sign-in.
+- `asset_plan.build_asset_sidecar(caption=...)`: one caption used verbatim as the whole
+  Instagram caption and Facebook description.
+
 ## [0.3.155] - 2026-11-25
 
 ### Fixed
@@ -1794,7 +1805,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.155...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.156...HEAD
+[0.3.156]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.155...v0.3.156
 [0.3.155]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.154...v0.3.155
 [0.3.154]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.153...v0.3.154
 [0.3.153]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.152...v0.3.153
