@@ -23,7 +23,7 @@ from ...publishing.day_reels import (
     process_requests,
 )
 
-__all__ = ["Outcome", "cmd_day_reels", "credentials_path"]
+__all__ = ["ClientUnavailableError", "Outcome", "cmd_day_reels", "credentials_path"]
 
 _FOLDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{9,127}")
 
@@ -53,6 +53,28 @@ def _encrypt(data: dict, path: Path) -> None:
     uploader.sops_encrypt_json(data, path, age_recipients=recipients)
 
 
+class ClientUnavailableError(RuntimeError):
+    """The pipeline's own Google OAuth client could not be read."""
+
+
+def _pipeline_client() -> tuple:
+    """``(client_id, client_secret)`` of the pipeline's own Google client, read from its Drive
+    token (``GMS_DRIVE_TOKEN_ENC``). Signing in through it keeps day reels off rclone's
+    built-in client, whose quota every rclone user shares."""
+    from ...pipeline import uploader
+
+    try:
+        data = _decrypt(Path(uploader.DEFAULT_TOKEN_ENC))
+    except Exception as exc:  # unreadable for any reason: refuse, never fall back
+        raise ClientUnavailableError(
+            f"pipeline Drive token unreadable ({type(exc).__name__})"
+        ) from None
+    client = (str(data.get("client_id") or ""), str(data.get("client_secret") or ""))
+    if not all(client):
+        raise ClientUnavailableError("pipeline Drive token has no client_id/client_secret")
+    return client
+
+
 def _authorize(args) -> int:
     folder_id = args.folder_id or ""
     if not _FOLDER_ID.fullmatch(folder_id):
@@ -61,12 +83,24 @@ def _authorize(args) -> int:
     # rclone decodes the blob as URL-safe, unpadded base64 (padding is "illegal").
     blob = json.dumps({"scope": "drive.readonly"}).encode()
     scope = base64.urlsafe_b64encode(blob).decode().rstrip("=")
+    try:
+        client_id, client_secret = _pipeline_client()
+    except ClientUnavailableError as exc:
+        print(
+            f"Error: cannot sign in through the pipeline's own Google client: {exc}; nothing was saved."
+        )
+        return 1
+    # The client travels in the child's environment, never argv (rclone reads RCLONE_DRIVE_*).
+    env = dict(
+        os.environ, RCLONE_DRIVE_CLIENT_ID=client_id, RCLONE_DRIVE_CLIENT_SECRET=client_secret
+    )
     print("Open the link rclone prints below, choose the Google account, and tap Allow.")
     result = subprocess.run(
         ["rclone", "authorize", "drive", scope, "--auth-no-open-browser"],
         stdout=subprocess.PIPE,
         text=True,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         print(f"Error: rclone authorize exited {result.returncode}; nothing was saved.")
@@ -77,7 +111,16 @@ def _authorize(args) -> int:
         print(f"Error: {exc}; nothing was saved.")
         return 1
     path = credentials_path()
-    _encrypt({"rclone_token": token, "folder_id": folder_id}, path)
+    # The token only refreshes through the client that issued it, so the pair is stored together.
+    _encrypt(
+        {
+            "rclone_token": token,
+            "folder_id": folder_id,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        path,
+    )
     print(f"Saved the read-only Drive sign-in (encrypted) to {path}")
     return 0
 
@@ -93,7 +136,12 @@ def cmd_day_reels(args, config) -> int:
         )
         return 0
     creds = _decrypt(path)
-    drive = RcloneDrive(folder_id=creds["folder_id"], token=creds["rclone_token"])
+    drive = RcloneDrive(
+        folder_id=creds["folder_id"],
+        token=creds["rclone_token"],
+        client_id=creds.get("client_id", ""),
+        client_secret=creds.get("client_secret", ""),
+    )
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     try:
         outcomes = process_requests(
