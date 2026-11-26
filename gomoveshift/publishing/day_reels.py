@@ -636,6 +636,10 @@ def _process_one(
         return _refuse(ledger, request, f"queue refused the reel: {exc}")
     finally:
         conn.close()
+    if result.refused and not (result.enqueued or result.already_present):
+        # Refused at enqueue (the final-text review, or the same content already
+        # queued under another name): recorded, never reported as enqueued.
+        return _refuse(ledger, request, f"queue refused the reel: {result.refused[0][2]}")
     delivery_ids = tuple(int(entry[3]) for entry in result.enqueued)
     present = result.already_present_count
     tracking_note = _register_tracking_safely(
