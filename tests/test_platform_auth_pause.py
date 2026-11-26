@@ -5,7 +5,7 @@ failed row 1, then row 2, and so on, with no pause and no alert.
 
 The guard: an auth error on row 1 leaves rows 2..n queued and untouched,
 pauses the platform with ``AUTH_BLOCKED_PAUSE_REASON``, and ``health check``
-rule 14 raises exactly one incident naming the platform."""
+rule 16 raises exactly one incident naming the platform."""
 
 from __future__ import annotations
 

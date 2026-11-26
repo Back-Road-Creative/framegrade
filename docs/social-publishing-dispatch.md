@@ -108,7 +108,7 @@ recoverable, never duplicated.
     puts the row back to `queued` when nothing of it reached the platform, and
     raises `ThrottledDeliveryError` (never counted). The drain re-checks the
     pause before each row, so the platform's other rows stay queued and
-    untouched in the same pass; `health check` rule 14 raises one
+    untouched in the same pass; `health check` rule 16 raises one
     `platform_auth_blocked` incident naming the platform. Resuming the
     platform lets them go again.
   - **TikTok**: no dedicated permanent exception subclass exists —

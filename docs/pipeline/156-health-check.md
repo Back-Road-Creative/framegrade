@@ -190,7 +190,7 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10 and 13 (it would res
    decisions file is condition (a)'s finding only and holds nothing else. Detail:
    `docs/seo-feedback-stale.md`.
 
-14. **Platform paused: access token refused** (`platform_auth_blocked`). One incident per
+16. **Platform paused: access token refused** (`platform_auth_blocked`). One incident per
    platform in `platform_pauses` whose `reason` is `auth:blocked` (the dispatch handlers pause a
    platform when Facebook, Instagram or TikTok refuses its access token, and leave its queued posts
    queued). Key `platform_auth_blocked:<platform>`, fields `platform`, `paused_at`, `reason` (the

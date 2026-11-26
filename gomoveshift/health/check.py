@@ -357,7 +357,7 @@ def failed_permanent_incidents(
 
 
 def auth_blocked_incidents(db_path: Path, now_iso: str) -> List[Dict[str, Any]]:
-    """Rule 14: one ``platform_auth_blocked`` incident per platform that dispatch paused because
+    """Rule 16: one ``platform_auth_blocked`` incident per platform that dispatch paused because
     it refused the access token (``queue.AUTH_BLOCKED_PAUSE_REASON``). Every platform, like
     rule 8 is for YouTube failures: the pause holds every queued post, so it must be seen.
     Resolved once the pause is lifted. Read-only (queue opened ``mode=ro``)."""
@@ -568,7 +568,7 @@ def _cadence_rows(
         try:
             found["platform_auth_blocked"] = auth_blocked_incidents(db, now_iso)
         except Exception as exc:  # noqa: BLE001
-            notes.append(f"rule 14 not evaluated: {type(exc).__name__}: {exc}")
+            notes.append(f"rule 16 not evaluated: {type(exc).__name__}: {exc}")
     else:
         notes.append("social_queue.sqlite3 absent: rule 4 not evaluated")
     return found
