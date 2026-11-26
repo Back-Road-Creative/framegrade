@@ -5,6 +5,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.167] - 2026-11-26
+
+### Fixed
+
+- Tracking: a day reel that was queued before day reels got a tracking record is no longer
+  dropped from metrics. Its publish, or `metrics backfill-ids`, now writes the missing record
+  instead of skipping the platform id, so it is measured and counted by the growth review.
+
 ## [0.3.166] - 2026-11-26
 
 ### Fixed
@@ -1905,7 +1913,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...HEAD
+[0.3.167]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...v0.3.167
 [0.3.166]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.165...v0.3.166
 [0.3.165]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...v0.3.165
 [0.3.164]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...v0.3.164
