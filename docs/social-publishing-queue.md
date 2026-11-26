@@ -701,8 +701,9 @@ changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
 ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
 `delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
-(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
-error, i.e. after it uploads.
+(the error is exempt from `max_attempts`) for up to `dispatch.UNCOUNTED_RETRY_BOUND` (24 h), then
+parks at `needs_operator` and the incident becomes a `delivery_needs_operator` one; the incident
+closes when the row no longer carries the error, i.e. after it uploads.
 
 ## A replaced long-form upload (`relink_replaced_lf`)
 
@@ -973,8 +974,13 @@ other platforms, unless it is landscape or longer than 180 s (the outcome line s
 `Read the full day: <link>`, then `#Shorts`. The link is the request's optional `"journal_url"`
 (an `https://gomoveshift.com/` page); without one it is the live journal day the reel was filmed
 on, read from the site's public `/journal-trips.json` (day *n* is the trip's `start` + *n* - 1,
-as on the journal page: `/journeys/<trip>/#day-<n>`). A date in no trip, two trips on one date or
-an unreachable site simply leaves the line out. A queue refusal (for example an active YouTube
+as on the journal page: `/journeys/<trip>/#day-<n>`). **The journal day goes up first, then the
+post links to it**: a reel with no link (a date in no trip, two trips on one date, a malformed list
+or an unreachable site) is `held`, before any download or render and with no ledger record, so the
+next hourly run looks again; the outcome line names which of the four it was. Its first held time
+is kept under `<gms_data_home>/day_reels/held_for_link/`; held over 24 h it raises one
+`day_reel_held_for_link` health incident naming the request, the recording date and the cause,
+closed once the reel is queued. `youtube_description` refuses a missing link. A queue refusal (for example an active YouTube
 row for the same clip with a different plan) is recorded as `refused` for that request and never
 stops the requests after it. It has no clip GPS votes, so no final-text
 review applies; the drain's one-Short-per-hour rule may move it to the next free hour.
