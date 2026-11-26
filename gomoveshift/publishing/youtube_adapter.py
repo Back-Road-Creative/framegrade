@@ -424,6 +424,18 @@ def upload_schedule(
     return slot, "private"
 
 
+def _quota_error(exc: BaseException) -> Optional[YouTubeQuotaError]:
+    """``exc`` as a ``YouTubeQuotaError`` when it is a read's quota-class refusal
+    (the reasons the uploader's insert path recognises, ``QUOTA_REASONS``), else
+    ``None``. Lets a spent quota on a ``videos.list`` wait as throttled, as an
+    insert's does, instead of spending the row's attempts."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status not in (400, 403):
+        return None
+    reason = youtube_uploader_module._extract_quota_reason(exc)
+    return YouTubeQuotaError(reason=reason, status_code=status, http_error=exc) if reason else None
+
+
 def _not_public_incident(row, privacy: str, now: str, incidents_dir: Optional[Path]) -> None:
     """Open (once) or, with ``privacy`` ``None``, resolve the row's
     ``youtube_not_public_after_slot`` incident. Never fatal."""
@@ -563,11 +575,17 @@ class YouTubeShortsAdapter:
 
         existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
         current_status = existing["status"] if existing else STATUS_QUEUED
-        video_id = (
-            self._reconcile(existing, conn=conn, delivery_id=delivery_id, payload=payload)
-            if existing
-            else None
-        )
+        try:
+            video_id = (
+                self._reconcile(existing, conn=conn, delivery_id=delivery_id, payload=payload)
+                if existing
+                else None
+            )
+        except Exception as exc:
+            quota = _quota_error(exc)
+            if quota is None:
+                raise
+            raise quota from exc
         # An adopted or reconciled upload was sent by an earlier attempt: its slot.
         go_public_at = record.schedule.scheduled_at_utc
 
@@ -746,7 +764,9 @@ class YouTubeShortsAdapter:
     def _channel_lacks(self, video_id: str) -> bool:
         """``True`` only when ``videos.list`` twice returns no item for
         ``video_id``. A lookup that raises proves nothing, so it is logged and
-        the row publishes; the nightly catalog pass checks it again."""
+        the row publishes; the nightly catalog pass checks it again. A quota
+        refusal is raised as ``YouTubeQuotaError`` instead: the row stays
+        ``uploaded`` with its id and is verified once the quota resets."""
         try:
             service = self._uploader._build_service()
             for attempt in range(2):
@@ -755,7 +775,10 @@ class YouTubeShortsAdapter:
                 resp = service.videos().list(part="status", id=video_id).execute()
                 if resp.get("items"):
                     return False
-        except Exception:  # noqa: BLE001 -- unknown is not missing
+        except Exception as exc:  # noqa: BLE001 -- unknown is not missing
+            quota = _quota_error(exc)
+            if quota is not None:
+                raise quota from exc
             logger.exception("post-upload videos.list failed for video_id=%s", video_id)
             return False
         return True

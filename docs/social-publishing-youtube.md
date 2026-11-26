@@ -68,7 +68,9 @@ than re-implementing its upload/retry/token/quota handling.
   plan hash. The drain counts it as `failed_permanent`, never published. A
   lookup that *errors* proves nothing, so the row publishes, and the nightly
   catalog pass (`queue mark-missing-remote`, see
-  `docs/social-publishing-queue.md`) checks it again.
+  `docs/social-publishing-queue.md`) checks it again. A quota refusal on this
+  lookup, or on the reconcile lookups below, is raised as `YouTubeQuotaError`
+  and waits as throttled (see Queue states); the row keeps its id.
 - **Queue states:** `queued` → `submitting` (worker lease held, insert in
   flight) → `uploaded` (id persisted) → `published` (playlist assigned), or
   `uploaded` → `missing_remote` (terminal; the channel returns no such video).

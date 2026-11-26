@@ -628,3 +628,56 @@ def test_short_without_sampled_regions_is_not_filed_in_unsorted(mock_service, qu
     mock_service.playlistItems.return_value.insert.assert_not_called()
     row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
     assert row["status"] == "published"
+
+
+# ── quota on the read calls ─────────────────────────────────────────────
+
+
+def _quota_403_on_videos_list(mock_service):
+    import json
+
+    from googleapiclient.errors import HttpError
+
+    error = {"code": 403, "message": "quota", "errors": [{"reason": "quotaExceeded"}]}
+    body = json.dumps({"error": error}).encode("utf-8")
+    mock_service.videos.return_value.list.return_value.execute.side_effect = HttpError(
+        MagicMock(status=403, reason="Forbidden"), body, uri="fake://"
+    )
+
+
+def _handle(adapter, record, video_path, queue_conn, delivery_id):
+    """Run the real YouTube handler on the row; returns the row afterwards."""
+    from gomoveshift.publishing.dispatch import ThrottledDeliveryError
+    from gomoveshift.publishing.handlers import make_youtube_handler
+
+    handler = make_youtube_handler(adapter, queue_conn, lambda p, i: record, lambda r: video_path)
+    sql = "SELECT * FROM deliveries WHERE id=?"
+    with patch.object(yu, "MediaFileUpload", return_value=MagicMock()):
+        with pytest.raises(ThrottledDeliveryError):
+            handler(dict(queue_conn.execute(sql, (delivery_id,)).fetchone()))
+    return dict(queue_conn.execute(sql, (delivery_id,)).fetchone())
+
+
+def test_quota_on_the_reconcile_lookup_is_throttled_not_an_attempt(
+    mock_service, queue_conn, tmp_path
+):
+    """Spent quota on the ``videos.list`` that reconciles a persisted id waits
+    as throttled, as an insert's does; it never spends the row's attempts."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    transition(queue_conn, delivery_id, "queued", "uploaded", platform_upload_id="HAVEID")
+    _quota_403_on_videos_list(mock_service)
+
+    row = _handle(adapter, record, video_path, queue_conn, delivery_id)
+    mock_service.videos.return_value.insert.assert_not_called()
+    assert (row["status"], row["platform_upload_id"]) == ("uploaded", "HAVEID")
+
+
+def test_quota_on_the_post_upload_verify_is_throttled_and_keeps_the_id(
+    mock_service, queue_conn, tmp_path
+):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    _quota_403_on_videos_list(mock_service)
+
+    row = _handle(adapter, record, video_path, queue_conn, delivery_id)
+    assert (row["status"], row["platform_upload_id"]) == ("uploaded", "SHORTVID123")
+    assert mock_service.videos.return_value.insert.call_count == 1
