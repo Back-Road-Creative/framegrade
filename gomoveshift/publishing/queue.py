@@ -1253,6 +1253,26 @@ def pause_platform(
     return True
 
 
+def is_auth_blocked(exc: BaseException) -> bool:
+    """Whether ``exc`` is a platform refusing its access token. Each adapter's
+    refused-token error (``FacebookAuthBlockedError``, ``InstagramAuthBlockedError``,
+    ``PhotoAuthBlockedError``, ``TikTokAuthBlockedError``) carries
+    ``queue_state = "auth_blocked"``, so callers with no import edge onto the
+    adapters (``dispatch``'s reconcilers, the first-comment drain) can tell."""
+    return getattr(exc, "queue_state", None) == "auth_blocked"
+
+
+def pause_for_auth(conn: sqlite3.Connection, platform: str, exc: BaseException) -> str:
+    """Pause ``platform`` because it refused its access token (reason
+    ``AUTH_BLOCKED_PAUSE_REASON`` and the refusal), so every pass leaves it
+    alone and ``health check`` raises its one ``platform_auth_blocked``
+    incident until someone re-authorizes and resumes it. Returns the bounded
+    refusal text it stored."""
+    detail = (str(exc).strip() or exc.__class__.__name__)[:2000]
+    pause_platform(conn, platform, reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    return detail
+
+
 def resume_platform(conn: sqlite3.Connection, platform: str) -> bool:
     """Undo ``pause_platform``: selection resumes with no other side
     effect -- no backfill, no catch-up burst throttle. Rows that piled up

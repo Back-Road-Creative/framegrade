@@ -30,8 +30,10 @@ from gomoveshift.publishing.queue import (
     FIRST_COMMENT_DELAY_S,
     FIRST_COMMENT_MAX_ATTEMPTS,
     enqueue,
+    is_platform_paused,
     open_queue_db,
     pause_platform,
+    resume_platform,
     select_due_first_comments,
     transition,
 )
@@ -517,10 +519,9 @@ def test_a_meta_permission_error_never_counts_toward_the_cap(conn):
     "exc",
     [
         FacebookRetryableError("transient Graph API error: Please retry your request later."),
-        FacebookAuthBlockedError("Meta access token expired or revoked; reauthorize"),
         requests.exceptions.ConnectionError("Max retries exceeded with url: /FB1/comments"),
     ],
-    ids=["rate-limit-or-5xx", "lapsed-token", "network-down"],
+    ids=["rate-limit-or-5xx", "network-down"],
 )
 def test_a_meta_outage_never_counts_toward_the_cap(conn, exc):
     # An overnight outage says nothing about the post: it must not use up a
@@ -532,6 +533,30 @@ def test_a_meta_outage_never_counts_toward_the_cap(conn, exc):
     assert len(adapter.calls) == FIRST_COMMENT_MAX_ATTEMPTS + 2
     assert _row(conn, delivery_id)["first_comment_attempts"] == 0
     assert [r["id"] for r in select_due_first_comments(conn, now=_NOW)] == [delivery_id]
+
+
+def test_a_refused_meta_token_pauses_the_platform_and_spends_no_tries(conn):
+    # A lapsed token blocks every comment, and every post, on the platform:
+    # pause it once (as the publish drain does) rather than trying each row.
+    first = _published(conn, 1, "facebook", platform_post_id="FB1")
+    second = _published(conn, 2, "facebook", platform_post_id="FB2")
+    adapter = _FakeAdapter(FacebookAuthBlockedError("Meta access token expired or revoked"))
+
+    result = drain_meta_first_comments(
+        conn, adapter_factories={"facebook": lambda: adapter}, now=_NOW
+    )
+
+    assert len(adapter.calls) == 1
+    assert is_platform_paused(conn, "facebook")
+    assert result.errors == [
+        "facebook: paused, access token refused: Meta access token expired or revoked"
+    ]
+    for delivery_id in (first, second):
+        assert _row(conn, delivery_id)["first_comment_attempts"] == 0
+    # Paused, so nothing is due; resuming makes both due again.
+    assert select_due_first_comments(conn, now=_NOW) == []
+    resume_platform(conn, "facebook")
+    assert {r["id"] for r in select_due_first_comments(conn, now=_NOW)} == {first, second}
 
 
 def test_an_old_post_that_gave_up_is_never_due(conn):

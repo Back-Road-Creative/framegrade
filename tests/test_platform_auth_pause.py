@@ -15,7 +15,11 @@ import pytest
 from test_publishing_models import _record
 
 from gomoveshift.health.check import auth_blocked_incidents
-from gomoveshift.publishing.dispatch import drain_queue
+from gomoveshift.publishing.dispatch import (
+    drain_queue,
+    reconcile_awaiting_ig,
+    reconcile_awaiting_manual,
+)
 from gomoveshift.publishing.facebook_adapter import FacebookAuthBlockedError
 from gomoveshift.publishing.handlers import (
     PlatformAuthPausedError,
@@ -26,7 +30,10 @@ from gomoveshift.publishing.instagram_adapter import InstagramAuthBlockedError
 from gomoveshift.publishing.queue import (
     AUTH_BLOCKED_PAUSE_REASON,
     AUTH_PAUSED_ERROR_CLASS,
+    STATUS_AWAITING_IG_RECONCILE,
+    STATUS_AWAITING_MANUAL_PUBLISH,
     enqueue,
+    is_platform_paused,
     open_queue_db,
     resume_platform,
     transition,
@@ -172,3 +179,80 @@ def test_tiktok_names_a_refused_token_by_its_own_error_codes():
         detail = f"HTTP 401 code={code!r} message='x' log_id='y'"
         assert _throttle_type(detail, RuntimeError) is TikTokAuthBlockedError
     assert _throttle_type("HTTP 401 code='unauthorized'", RuntimeError) is RuntimeError
+
+
+# --- the passes outside the drain ------------------------------------------
+
+
+def _parked(conn, platform, status, ids=ROWS):
+    out = []
+    for i in range(ids):
+        delivery_id = enqueue(conn, "example-2026-08", i, platform, "hash-a")
+        conn.execute(
+            "UPDATE deliveries SET status=?, next_attempt_at='9999-01-01T00:00:00+00:00', "
+            "platform_upload_id=? WHERE id=?",
+            (status, f"upload-{i}", delivery_id),
+        )
+        out.append(delivery_id)
+    conn.commit()
+    return out
+
+
+def _statuses(conn, ids):
+    return [
+        conn.execute("SELECT status FROM deliveries WHERE id=?", (i,)).fetchone()[0] for i in ids
+    ]
+
+
+def _pause_reason(conn, platform):
+    row = conn.execute(
+        "SELECT reason FROM platform_pauses WHERE platform=?", (platform,)
+    ).fetchone()
+    return row["reason"] if row else None
+
+
+def test_the_tiktok_reconcile_pauses_tiktok_on_a_refused_token(conn):
+    ids = _parked(conn, "tiktok", STATUS_AWAITING_MANUAL_PUBLISH)
+    polls = []
+
+    def poll(publish_id):
+        polls.append(publish_id)
+        raise TikTokAuthBlockedError("status/fetch failed: HTTP 401 code='access_token_invalid'")
+
+    result = reconcile_awaiting_manual(conn, poll=poll, permalink_for=str)
+
+    assert len(polls) == 1  # one refusal is enough: the rest are not asked
+    assert _pause_reason(conn, "tiktok").startswith(AUTH_BLOCKED_PAUSE_REASON + " ")
+    assert _statuses(conn, ids) == [STATUS_AWAITING_MANUAL_PUBLISH] * ROWS
+    assert result.errors == [
+        "tiktok: paused, access token refused: "
+        "status/fetch failed: HTTP 401 code='access_token_invalid'"
+    ]
+
+
+def test_the_instagram_reconcile_pauses_instagram_on_a_refused_token(conn):
+    ids = _parked(conn, "instagram", STATUS_AWAITING_IG_RECONCILE)
+    scans = []
+
+    def recent_media(limit):
+        scans.append(limit)
+        raise InstagramAuthBlockedError("[graph http=400 code=190] Meta access token expired")
+
+    result = reconcile_awaiting_ig(conn, recent_media=recent_media, record_loader=_loader, now=NOW)
+
+    assert len(scans) == 1
+    assert _pause_reason(conn, "instagram").startswith(AUTH_BLOCKED_PAUSE_REASON + " ")
+    assert _statuses(conn, ids) == [STATUS_AWAITING_IG_RECONCILE] * ROWS
+    assert [e.split(":")[0] for e in result.errors] == ["instagram"]
+
+
+def test_an_ordinary_reconcile_error_pauses_nothing(conn):
+    _parked(conn, "tiktok", STATUS_AWAITING_MANUAL_PUBLISH)
+
+    def poll(publish_id):
+        raise RuntimeError("status/fetch failed: HTTP 503")
+
+    result = reconcile_awaiting_manual(conn, poll=poll, permalink_for=str)
+
+    assert not is_platform_paused(conn, "tiktok")
+    assert len(result.errors) == ROWS

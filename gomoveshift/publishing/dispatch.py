@@ -38,8 +38,10 @@ from .queue import (
     TERMINAL_STATUSES,
     acquire_lease,
     get_platform_daily_cap,
+    is_auth_blocked,
     is_platform_paused,
     log_response,
+    pause_for_auth,
     pause_platform,
     reschedule_delivery,
     set_platform_daily_cap,
@@ -1342,6 +1344,12 @@ def reconcile_awaiting_manual(
             # Any other status (SEND_TO_USER_INBOX, PROCESSING_*) is a draft
             # still waiting on a human. Leave it exactly where it is.
         except Exception as exc:  # noqa: BLE001 — one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # The token is dead for every row, not this one: pause the
+                # platform like the drain does and stop asking.
+                detail = pause_for_auth(conn, platform, exc)
+                result.errors.append(f"{platform}: paused, access token refused: {detail}")
+                break
             result.errors.append(f"{platform}#{delivery_id}: reconcile: {_detail(exc)}")
             logger.warning("reconcile: delivery %s could not be reconciled", delivery_id)
 
@@ -1546,6 +1554,11 @@ def reconcile_awaiting_ig(
             result.errors.append(f"instagram#{delivery_id}: still parked: {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 -- one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # A refused token fails every row's scan: pause Instagram, stop.
+                detail = pause_for_auth(conn, "instagram", exc)
+                result.errors.append(f"instagram: paused, access token refused: {detail}")
+                break
             result.errors.append(f"instagram#{delivery_id}: ig reconcile: {_detail(exc)}")
             continue
 

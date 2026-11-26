@@ -95,6 +95,8 @@ class TikTokAuthBlockedError(TikTokAdapterError):
     waits on a re-authorization, so the handler pauses TikTok instead of
     failing or retrying this one delivery."""
 
+    queue_state = "auth_blocked"  # what ``queue.is_auth_blocked`` reads
+
 
 def _throttle_type(detail: str, default: type) -> type:
     """`TikTokThrottledError` when `detail` names a throttle code,

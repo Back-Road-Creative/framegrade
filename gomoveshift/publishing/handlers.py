@@ -45,7 +45,6 @@ from .instagram_adapter import (
 from .models import FORMAT_CAROUSEL, FORMAT_PHOTO, MediaFingerprint, ShortPublishRecord
 from .photo_adapter import PhotoAuthBlockedError, PhotoCarouselAdapter, PhotoPermanentError
 from .queue import (
-    AUTH_BLOCKED_PAUSE_REASON,
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
     FACEBOOK_PHOTO_KIND,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
@@ -53,7 +52,7 @@ from .queue import (
     STATUS_AWAITING_MANUAL_PUBLISH,
     acquire_lease,
     find_delivery,
-    pause_platform,
+    pause_for_auth,
     transition,
 )
 from .queue import NEXT_ATTEMPT_AWAITING_MANUAL as AWAITING_MANUAL
@@ -112,7 +111,7 @@ def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliv
 
     A dead token blocks every post to that platform, not just this one, and
     only a person re-authorizing clears it. So the platform is paused
-    (``queue.pause_platform``, reason ``AUTH_BLOCKED_PAUSE_REASON``): the drain
+    (``queue.pause_for_auth``, reason ``AUTH_BLOCKED_PAUSE_REASON``): the drain
     leaves its other rows queued and untouched, and ``health check`` raises one
     ``platform_auth_blocked`` incident naming it. This row goes back to
     ``queued`` when nothing of it reached the platform (it keeps its status and
@@ -120,8 +119,7 @@ def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliv
     against ``max_attempts``. Before this each row was failed in turn, so one
     expired login quietly failed every queued Facebook, Instagram and TikTok
     post. Resuming the platform in the console lets them go again."""
-    detail = _detail(exc)
-    pause_platform(conn, row["platform"], reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    detail = pause_for_auth(conn, row["platform"], exc)
     live = conn.execute(
         "SELECT status, platform_upload_id, platform_post_id FROM deliveries WHERE id=?",
         (row["id"],),
