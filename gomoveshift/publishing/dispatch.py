@@ -283,6 +283,10 @@ class DrainResult:
     #: YouTube Shorts moved to the next free slot because another Short already
     #: held that clock hour (this pass or the queue).
     moved_same_hour: int = 0
+    #: Due deliveries left queued because their platform already had its one
+    #: post this pass. NOT a failure or a hold: no lease, no transition, no
+    #: attempt charged; the next pass takes the next one.
+    spaced_one_per_pass: int = 0
     #: Subset of `retried`, counted separately: a throttled pass is a
     #: standing instruction to a human, not queue noise.
     throttled: int = 0
@@ -979,6 +983,14 @@ def drain_queue(
     Two YouTube Shorts are never released in one clock hour: the second due row
     moves to the next free slot (row and sidecar ``publishAt``).
 
+    At most one delivery per platform is sent in one pass, on every platform.
+    After an outage every overdue row is due at once, and Facebook, Instagram
+    and TikTok post the moment they are called, so a single pass used to post
+    a whole backlog together, which the platforms read as spam. The rest stay
+    queued, untouched, for the next pass (``spaced_one_per_pass``). Enforced
+    here, at the lease, rather than in ``_select_due``: a held row must not use
+    up its platform's turn, and the TikTok pack sweep shares that selection.
+
     ``facebook_photo_reconciler`` is an explicitly trusted read-only port for
     persisted Page-photo kinds. It runs without current-draft validation or
     privacy loaders. If absent, those rows stay held instead of falling into
@@ -1001,6 +1013,7 @@ def drain_queue(
         max_attempts=max_attempts,
     )
     released_hours: set = set()
+    sent_platforms: set = set()
     for row in _select_due(conn, now):
         delivery_id, platform, status = row["id"], row["platform"], row["status"]
 
@@ -1056,6 +1069,14 @@ def drain_queue(
             if _defer_same_hour(conn, row, now, released_hours):
                 result.moved_same_hour += 1
                 continue
+
+        # One post per platform per pass. The read-only photo reconciler posts
+        # nothing, so it never takes or waits for a turn.
+        if not photo_read:
+            if platform in sent_platforms:
+                result.spaced_one_per_pass += 1
+                continue
+            sent_platforms.add(platform)
 
         if not acquire_lease(conn, delivery_id, owner, expires_at, now=now):
             result.skipped_leased += 1  # another worker holds a live lease
