@@ -278,6 +278,12 @@ refused (it logs a `PERFORMANCE:` WARNING instead of INFO); only dangling or unr
 files are, with or without the flag.
 A recipe whose argv is not `<python> -m gomoveshift …`, or a code root with no service
 interpreter, is `refused` with the reason.
+A `--day-gpx` or `--bracket-gpx` file the recipe names that no longer exists is replaced by the
+drive's `drive_backlog.yaml` row's own, when every file the row names exists; the attempt records
+`gpx_refreshed` (flag -> new paths). A recipe GPX that still exists is kept: the checkpoint was built
+from it. Before, gomoveshiftsite#334's rename of the Ireland GPX files left Galley Head's resume
+naming `ireland-2025-09-enhanced-day14.gpx`, and the drive CLI refused it, exit 2 (2026-11-26).
+Tests: `tests/test_health_heal.py`.
 
 **One drive.** `health heal --recipe <stages dir>/resume.json` heals that drive only: it registers
 the recipe as a `drive_failed` row keyed `drive_failed:<drive>:recipe` (reusing an existing row, so

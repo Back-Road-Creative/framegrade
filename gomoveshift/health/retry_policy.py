@@ -127,25 +127,33 @@ def default_sibling_versions(python: str) -> Dict[str, Optional[str]]:
     return {k: got.get(k) if isinstance(got, dict) else None for k in ("seo_manager", "redactcam")}
 
 
-def default_manifest_sha(row: Dict[str, Any]) -> Optional[str]:
-    """sha256 of the ``drive_backlog.yaml`` row the backlog launcher resolves for this drive
-    (project = the innermost job name, minus ``gms-backlog-``), else ``None`` (not a backlog
-    drive, or the manifest is unreadable)."""
+def default_manifest_row(row: Dict[str, Any]) -> Optional[Any]:
+    """The ``drive_backlog.yaml`` row the backlog launcher resolves for this drive (project = the
+    innermost job name, minus ``gms-backlog-``), else ``None`` (not a backlog drive, or the
+    manifest is unreadable)."""
     from . import drives  # noqa: PLC0415 -- drives imports store; keep the import graph acyclic
 
     name = str(row.get("drive") or "")
     name = min(drives.heal_origins(name) or {name}, key=len)
     project = name.removeprefix("gms-backlog-")
     try:
-        import dataclasses  # noqa: PLC0415
-
         from seo_manager.scheduling import backlog  # noqa: PLC0415
 
         from ..paths import drive_backlog_path  # noqa: PLC0415
 
-        found = next((r for r in backlog.load(drive_backlog_path()) if r.project == project), None)
-        return sha256_json(dataclasses.asdict(found)) if found else None
+        return next((r for r in backlog.load(drive_backlog_path()) if r.project == project), None)
     except Exception:  # noqa: BLE001 -- an unreadable manifest is "unknown", never a retry
+        return None
+
+
+def default_manifest_sha(row: Dict[str, Any]) -> Optional[str]:
+    """sha256 of the drive's ``drive_backlog.yaml`` row (``default_manifest_row``), else ``None``."""
+    import dataclasses  # noqa: PLC0415
+
+    found = default_manifest_row(row)
+    try:
+        return sha256_json(dataclasses.asdict(found)) if found else None
+    except Exception:  # noqa: BLE001 -- an unreadable row is "unknown", never a retry
         return None
 
 

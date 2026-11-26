@@ -12,6 +12,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,6 +48,7 @@ class Rig:
         self.pinned = None  # the checkout's pinned version; None = unknown
         self.siblings: dict = {}  # seo_manager / redactcam versions; {} = unknown
         self.manifest = None  # sha of the drive's manifest row; None = unknown
+        self.manifest_row = None  # the drive's ``drive_backlog.yaml`` row; None = not found
         stages = tmp_path / "stages"
         resume.write_recipe(
             stages,
@@ -91,6 +93,7 @@ class Rig:
             pinned_version_fn=lambda code_root: self.pinned,
             sibling_versions_fn=lambda python: self.siblings,
             manifest_sha_fn=lambda row: self.manifest,
+            manifest_row_fn=lambda row: self.manifest_row,
             config_sha_fn=lambda config: "cfg",
             proc_alive=lambda ident: self.alive,
         )  # fmt: skip
@@ -1291,3 +1294,72 @@ def test_past_the_interrupted_cap_an_interrupted_attempt_counts_like_a_failure()
     ]
     assert retry_policy.launched_count(attempts, "f") == 0
     assert retry_policy.launched_count(attempts + attempts[:1], "f") == 1
+
+
+# 2026-11-26: gomoveshiftsite#334 renamed the Ireland GPX files (enhanced-day14 -> day15) and
+# Galley Head's heal resumed its recipe as written: job 75fb04ce exited 2 at 12:45 UTC,
+# "--day-gpx: day GPX not found: .../ireland-2025-09-enhanced-day14.gpx". A recipe GPX that no
+# longer exists is taken from the drive's backlog row when that row names a file that does.
+
+
+def _gpx_rig(tmp_path, recipe_gpx, flag="--day-gpx"):
+    args = ["drive", "/in/demo-drive-a", "--publish", "fri", flag, *recipe_gpx]
+    return Rig(tmp_path, drive_args=args)
+
+
+def _tail(rig):
+    argv, _cwd = rig.launches[0]
+    return argv[argv.index("--") + 1 :]
+
+
+def test_a_recipe_day_gpx_that_is_gone_is_taken_from_the_backlog_row(tmp_path):
+    new = tmp_path / "gpx" / "day15.gpx"
+    new.parent.mkdir()
+    new.write_text("<gpx/>")
+    rig = _gpx_rig(tmp_path, [str(tmp_path / "gpx" / "enhanced-day14.gpx")])
+    rig.manifest_row = SimpleNamespace(day_gpx=str(new), bracket_gpx=())
+    rig.run()
+    tail = _tail(rig)
+    assert tail[tail.index("--day-gpx") + 1] == str(new)
+    att = rig.row()["resume_attempts"][0]
+    assert att["action"] == "launched"
+    assert att["gpx_refreshed"] == {"--day-gpx": [str(new)]}
+
+
+def test_a_recipe_bracket_gpx_pair_that_is_gone_is_taken_from_the_backlog_row(tmp_path):
+    pair = [tmp_path / "before.gpx", tmp_path / "after.gpx"]
+    for f in pair:
+        f.write_text("<gpx/>")
+    rig = _gpx_rig(tmp_path, ["/gone/a.gpx", "/gone/b.gpx"], flag="--bracket-gpx")
+    rig.manifest_row = SimpleNamespace(day_gpx="", bracket_gpx=tuple(str(f) for f in pair))
+    rig.run()
+    tail = _tail(rig)
+    i = tail.index("--bracket-gpx")
+    assert tail[i + 1 : i + 3] == [str(f) for f in pair]
+
+
+@pytest.mark.parametrize("case", ["recipe file exists", "row file missing too", "no row"])
+def test_a_recipe_gpx_is_kept_unless_it_is_gone_and_the_row_has_one(tmp_path, case):
+    old = tmp_path / "old.gpx"
+    if case == "recipe file exists":
+        old.write_text("<gpx/>")
+    other = tmp_path / "other.gpx"
+    if case != "row file missing too":
+        other.write_text("<gpx/>")
+    rig = _gpx_rig(tmp_path, [str(old)])
+    if case != "no row":
+        rig.manifest_row = SimpleNamespace(day_gpx=str(other), bracket_gpx=())
+    rig.run()
+    tail = _tail(rig)
+    assert tail[tail.index("--day-gpx") + 1] == str(old)
+    assert "gpx_refreshed" not in rig.row()["resume_attempts"][0]
+
+
+def test_default_manifest_row_reads_the_backlog_row_of_the_heals_origin(monkeypatch, tmp_path):
+    from seo_manager.scheduling import backlog
+
+    rows = [SimpleNamespace(project="demo-drive-a", day_gpx="/g/day15.gpx")]
+    monkeypatch.setattr(backlog, "load", lambda path: rows)
+    row = {"drive": "gms-heal-gms-backlog-demo-drive-a-abc1234"}
+    assert retry_policy.default_manifest_row(row) is rows[0]
+    assert retry_policy.default_manifest_row({"drive": "elsewhere"}) is None

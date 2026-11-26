@@ -157,6 +157,28 @@ def bind_to_code_root(code_root: Path, recipe_argv: List[str]) -> Tuple[Optional
     return [str(python), "-m", "gomoveshift", *args], str(svc)
 
 
+def refresh_gpx(argv: List[str], manifest_row: Any) -> Tuple[List[str], Dict[str, List[str]]]:
+    """``(argv, refreshed)``: each ``--day-gpx`` / ``--bracket-gpx`` value in a recipe's argv that
+    no longer exists is replaced by the drive's backlog row's own, when every file the row names
+    exists (a GPX rename, gomoveshiftsite#334, left Galley Head's recipe naming a gone file). A
+    recipe file that still exists is kept: the checkpoint was built from it. ``refreshed`` maps
+    each replaced flag to its new value(s)."""
+    out, refreshed = list(argv), {}
+    if manifest_row is None:
+        return out, refreshed
+    for flag, n, attr in (("--day-gpx", 1, "day_gpx"), ("--bracket-gpx", 2, "bracket_gpx")):
+        raw = getattr(manifest_row, attr, None) or ()
+        new = [str(raw)] if isinstance(raw, (str, Path)) else [str(p) for p in raw]
+        if flag not in out or len(new) != n or not all(Path(p).is_file() for p in new):
+            continue
+        i = out.index(flag) + 1
+        old = out[i : i + n]
+        if len(old) == n and not all(Path(p).is_file() for p in old):
+            out[i : i + n] = new
+            refreshed[flag] = new
+    return out, refreshed
+
+
 def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> Optional[str]:
     """Register one drive's ``resume.json`` as a ``drive_failed`` row so ``run_heal`` can target
     it (``only_key``) -- for a drive no ``health check`` saw fail, e.g. an evidence run launched
@@ -456,6 +478,7 @@ def run_heal(
     pinned_version_fn: Optional[Callable[[Path], Optional[str]]] = None,
     sibling_versions_fn: Optional[Callable[[str], Dict[str, Optional[str]]]] = None,
     manifest_sha_fn: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+    manifest_row_fn: Optional[Callable[[Dict[str, Any]], Optional[Any]]] = None,
     config_sha_fn: Optional[Callable[[Any], Optional[str]]] = None,
     proc_alive: Callable[[Any], bool] = _proc_alive,
 ) -> Dict[str, Any]:
@@ -473,6 +496,7 @@ def run_heal(
     pinned_version_fn = pinned_version_fn or default_pinned_version
     sibling_versions_fn = sibling_versions_fn or default_sibling_versions
     manifest_sha_fn = manifest_sha_fn or default_manifest_sha
+    manifest_row_fn = manifest_row_fn or retry_policy.default_manifest_row
     config_sha_fn = config_sha_fn or default_config_sha
     rows, _bad = load_all(incidents_dir)
     rows = [
@@ -629,6 +653,10 @@ def run_heal(
             bound, cwd = bind_to_code_root(code_root, recipe["argv"])
             if bound is None:
                 att.update(action="refused", reason=cwd)
+            else:
+                bound, refreshed = refresh_gpx(bound, manifest_row_fn(row))
+                if refreshed:
+                    att["gpx_refreshed"] = refreshed
         if bound is not None:
             name = job_name(row["drive"], sha)
             # Always this launcher's own value: the recipe records only RECIPE_ENV_KEYS, never an
