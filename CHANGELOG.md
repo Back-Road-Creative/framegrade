@@ -5,6 +5,20 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.164] - 2026-11-26
+
+### Fixed
+
+- `health backlog`: a refused publish retry of a failed drive no longer ends the tick. It is listed
+  under `publish_refusals` and the tick goes on to the region's passed audits, still exiting 2.
+  Kerry-to-Cork's blur-mask frame-gate refusal had kept Old Head to Courtmacsherry from publishing.
+- `health heal`: a resume whose recipe names a `--day-gpx` or `--bracket-gpx` file that no longer
+  exists takes the drive's backlog row's file instead, when that file exists. A GPX rename left
+  Galley Head's resume pointing at a gone file, and the drive refused it with exit 2.
+- A Short's YouTube title takes only the description hashtags its final-text review can back.
+  Old Head Short #7 took `#Ireland` when its clip only voted `County Cork`, and the review
+  refused it with `name_unbacked:short_title:ireland`.
+
 ## [0.3.163] - 2026-11-26
 
 ### Fixed
@@ -1865,7 +1879,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...HEAD
+[0.3.164]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...v0.3.164
 [0.3.163]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...v0.3.163
 [0.3.162]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...v0.3.162
 [0.3.161]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.160...v0.3.161
