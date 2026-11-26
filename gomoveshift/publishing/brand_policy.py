@@ -11,7 +11,9 @@ Keys: ``per_location_cap``, ``shorts_per_drive``, ``weekly_ceiling``, ``daily_la
 ``dispatch._select_due``) and ``quiet_after_alert_hours`` (read by
 ``dispatch._exclude_quiet_window``), and ``experiments`` (caption A/B arms,
 ``publishing/experiments.py``, read by ``SocialGenerator``) and ``arm_thresholds``
-(the Shorts arm decision thresholds, ``experiments.ArmThresholds``).
+(the Shorts arm decision thresholds, ``experiments.ArmThresholds``), and
+``shorts_music`` (the licensed-music test on Facebook and Instagram Shorts,
+``publishing/shorts_music.py``, read at dispatch).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Mapping, Optional, Tuple
 import yaml
 
 from .experiments import ArmThresholds, Experiment, parse_arm_thresholds, parse_experiments
+from .shorts_music import ShortsMusicTest, parse_shorts_music
 
 _CONSOLE_ROOT = Path(__file__).resolve().parent.parent / "console"
 _SHIPPED_BRANDS_DIR = _CONSOLE_ROOT / "brands"
@@ -62,6 +65,7 @@ _KNOWN_POLICY_KEYS = frozenset(
         "blackout",
         "quiet_after_alert_hours",
         "experiments",
+        "shorts_music",
         "arm_thresholds",
     }
 )
@@ -96,6 +100,9 @@ class BrandPolicy:
     quiet_after_alert_hours: Optional[int] = None
     #: Caption experiments (``publishing/experiments.py``). Empty = none run.
     experiments: Tuple[Experiment, ...] = ()
+    #: The licensed-music test on Facebook and Instagram Shorts
+    #: (``publishing/shorts_music.py``). ``None`` = no test, every Short muted.
+    shorts_music: Optional[ShortsMusicTest] = None
 
 
 def _load_raw_policy_block(slug: str) -> dict:
@@ -221,6 +228,7 @@ def load_brand_policy(slug: str) -> BrandPolicy:
         blackout=blackout,
         quiet_after_alert_hours=quiet_after_alert_hours,
         experiments=parse_experiments(block.get("experiments")),
+        shorts_music=parse_shorts_music(block.get("shorts_music")),
     )
 
 

@@ -240,6 +240,10 @@ def _read_tiktok_media(record: ShortPublishRecord) -> bytes:
 
 
 def _read_instagram_media(record: ShortPublishRecord) -> bytes:
+    return _instagram_media_path(record).read_bytes()
+
+
+def _instagram_media_path(record: ShortPublishRecord) -> Path:
     """Instagram caps Reels at 25 Mbps and stalls on over-cap masters — see
     ``publishing/tiktok_rendition.py``. Master verified FIRST, then a
     rendition is built only if the master is over the cap."""
@@ -250,7 +254,36 @@ def _read_instagram_media(record: ShortPublishRecord) -> bytes:
     bitrate = (
         int(media.size_bytes * 8 / media.duration_seconds) if media.duration_seconds > 0 else None
     )
-    return ensure_instagram_rendition(source, bitrate_bps=bitrate).read_bytes()
+    return ensure_instagram_rendition(source, bitrate_bps=bitrate)
+
+
+def _music_reader(config, platform: str, path_for):
+    """The Meta reader for ``platform``: the licensed-music copy for a Short in
+    the music half of ``policy.shorts_music``, the muted file otherwise
+    (``publishing/shorts_music.py``). With no test declared it is the plain
+    reader. Reading the policy can never stop a drain: a bad block posts every
+    Short muted and says why."""
+    from ...console.settings import current_brand
+    from ...publishing import shorts_music
+    from ...publishing.brand_policy import load_brand_policy
+
+    plain = _read_instagram_media if platform == "instagram" else _read_media
+    try:
+        slug = current_brand()
+        test = load_brand_policy(slug).shorts_music
+    except (ValueError, OSError) as exc:
+        logger.warning("shorts music: policy unreadable, every Short posts muted: %s", exc)
+        return plain
+    storage = getattr(getattr(config, "seo", None), "storage_path", None)
+    if test is None or not storage:
+        return plain
+    return shorts_music.with_music(
+        platform,
+        path_for,
+        test=test,
+        folder=shorts_music.music_dir(slug) if slug else None,
+        storage_dir=Path(storage),
+    )
 
 
 def _media_path(record: ShortPublishRecord) -> Path:
@@ -912,7 +945,7 @@ def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter")
             # layer over the raw Graph client); it does NOT take credentials.
             instagram = (
                 InstagramShortsAdapter(InstagramReelsAdapter(meta), worker_id=worker_id),
-                _read_instagram_media,
+                _music_reader(config, "instagram", _instagram_media_path),
             )
             # A routed platform gets a photo/carousel handler
             # too, so a format=photo/carousel row isn't left with
@@ -934,7 +967,7 @@ def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter")
 
             facebook = (
                 FacebookShortsAdapter(FacebookReelsAdapter(meta), worker_id=worker_id),
-                _read_media,
+                _music_reader(config, "facebook", _verified_path),
             )
             # MetaPhotoGraphClient targets ig_user_id and Instagram endpoints.
             # A Facebook label on PhotoCarouselAdapter cannot change that target.

@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .day7 import posted_date, settled_day7_views
 
@@ -92,9 +92,33 @@ class GroupScore:
         )
 
 
-def samples_from_records(records: Iterable[Any], today: date) -> List[Sample]:
+def music_grouper(test: Any, receipts: set) -> Callable[[str, int, str, date], Optional[str]]:
+    """The ``music:on`` / ``music:off`` group of a Short on a platform in the
+    licensed-music test (``publishing/shorts_music.py``), or ``None``.
+
+    A Short in the music half counts as ``music:on`` only when a receipt shows
+    it really went out with a track; one that posted muted after all (no track,
+    a refused copy) is left out of both groups, never counted as silent."""
+    from ..publishing.shorts_music import music_arm
+
+    def group(project: str, index: int, platform: str, posted: date) -> Optional[str]:
+        if test is None or platform not in test.platforms or not test.is_active(posted):
+            return None
+        if not music_arm(project, index):
+            return "music:off"
+        return "music:on" if (project, index, platform) in receipts else None
+
+    return group
+
+
+def samples_from_records(
+    records: Iterable[Any],
+    today: date,
+    music: Optional[Callable[[str, int, str, date], Optional[str]]] = None,
+) -> List[Sample]:
     """One sample per (short, platform) with a settled day-7 figure posted in
-    the window. A short with no settled figure is left out, never counted as 0."""
+    the window. A short with no settled figure is left out, never counted as 0.
+    ``music`` (see :func:`music_grouper`) adds the Short's music-test group."""
     since = today - timedelta(days=WINDOW_DAYS + 9)  # 7-day window + 2-day settle lag
     out: List[Sample] = []
     for record in records:
@@ -111,7 +135,8 @@ def samples_from_records(records: Iterable[Any], today: date) -> List[Sample]:
                 views = settled_day7_views(short.posted_at, getattr(metrics, "daily", []), today)
                 if views is None:
                     continue
-                out.append(Sample(platform, tuple(groups), views))
+                extra = music(record.project, short.index, platform, posted) if music else None
+                out.append(Sample(platform, tuple(groups) + ((extra,) if extra else ()), views))
     return out
 
 

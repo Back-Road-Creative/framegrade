@@ -12,6 +12,7 @@ Each key is validated on load; the table names its reader where one exists:
 |---|---|---|
 | `per_location_cap` | int >= 1, or omitted = no cap | `day_pipeline.py`'s shorts-budget block, and the batch check in `cli/handlers/enqueue_plan.py` |
 | `shorts_per_drive` | int >= 1, or omitted = no cap | `day_pipeline.py`'s shorts-budget block and the schedule report, via `publishing/title_kit.py` (the smaller of this and `per_location_cap`); never the enqueue batch gate, so several drives in one region still enqueue together |
+| `shorts_music` | mapping `{start, stop_after_days, platforms}` (platforms a subset of `facebook`, `instagram`), or omitted = no test | `dispatch-queue`'s Meta readers and `metrics growth-review`, via `publishing/shorts_music.py` (doc 188) |
 | `weekly_ceiling` | int >= 1, or omitted = no cap | `cmd_enqueue_plan` in `cli/handlers/enqueue_plan.py`, rolling-ceiling gate, `min(config ceiling, weekly_ceiling)` |
 | `daily_ladder` | non-empty sequence of ints >= 1, strictly increasing, stored as a tuple (e.g. `[1, 2, 3]`) | `cli/handlers/metrics.py`; shorts-per-day ramp |
 | `stagger_hours` | int >= 0 | cross-platform post delay |
