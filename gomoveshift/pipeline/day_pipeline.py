@@ -1551,6 +1551,15 @@ def _render_day_shorts(
         if _short_picture_changed
         else ""
     )
+    # Every planned short is re-rendered below, so a ``short_NN.mp4`` already on
+    # disk belongs to an earlier plan. Left in place, a rank this plan dropped
+    # (or one whose render fails) is counted as this day's short and fails
+    # phase_d ``shorts_per_lf SPLIT-BRAIN`` on every retry (Galley Head
+    # 2026-11-25: the 11-22 ``short_13`` outlived a plan that dropped rank 13).
+    for _old in sorted(shorts_dir.glob("short_[0-9][0-9].mp4")):
+        for _f in shorts_dir.glob(f"{_old.name}*"):
+            _f.unlink(missing_ok=True)
+        logger.info("Day %s: removed %s from an earlier shorts plan", date, _old.name)
     for short_range, short_duration, short_ost_text in _render_specs:
         rank = short_range.rank
         final_short = shorts_dir / f"short_{rank:02d}.mp4"
