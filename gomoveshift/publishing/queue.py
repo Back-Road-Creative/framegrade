@@ -1205,6 +1205,13 @@ def reschedule_delivery(
         return cur.rowcount == 1
 
 
+#: ``platform_pauses.reason`` of a pause taken because the platform refused its
+#: access token (``handlers._pause_for_auth``); the refusal follows after a
+#: space. ``health check`` raises one ``platform_auth_blocked`` incident for each
+#: platform paused this way and resolves it once the pause is lifted.
+AUTH_BLOCKED_PAUSE_REASON = "auth:blocked"
+
+
 def pause_platform(
     conn: sqlite3.Connection,
     platform: str,
@@ -1221,7 +1228,8 @@ def pause_platform(
     platform name rather than creating a pause row nothing will ever match.
 
     ``reason`` is optional and free-form (``None`` for a manual console
-    pause, ``"auto:suppressed"`` for the auto-pause path)."""
+    pause, ``"auto:suppressed"`` for the auto-pause path,
+    ``AUTH_BLOCKED_PAUSE_REASON`` for a refused access token)."""
     # Lazy import: queue.py is deliberately independent of publishing.models
     # (see module docstring) except for this one shared vocabulary check.
     from .models import KNOWN_PLATFORMS

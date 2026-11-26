@@ -84,12 +84,29 @@ class TikTokThrottledError(TikTokAdapterError):
     and retrying cannot change the answer. See ``THROTTLE_ERROR_CODES``."""
 
 
+#: TikTok's codes for an access token it will not accept: expired or revoked
+#: (``access_token_invalid``), or never granted the scope the call needs
+#: (``scope_not_authorized``). Only the owner re-authorizing clears either.
+AUTH_ERROR_CODES = frozenset({"access_token_invalid", "scope_not_authorized"})
+
+
+class TikTokAuthBlockedError(TikTokAdapterError):
+    """TikTok refused the access token (see ``AUTH_ERROR_CODES``). Every post
+    waits on a re-authorization, so the handler pauses TikTok instead of
+    failing or retrying this one delivery."""
+
+
 def _throttle_type(detail: str, default: type) -> type:
-    """`TikTokThrottledError` when `detail` names a throttle code, else
-    `default`. Substring match on the already-formatted detail string,
-    which carries `code=...` for both the HTTP and the error-body paths --
-    one place to key off rather than two."""
-    return TikTokThrottledError if any(c in detail for c in THROTTLE_ERROR_CODES) else default
+    """`TikTokThrottledError` when `detail` names a throttle code,
+    `TikTokAuthBlockedError` when it names an auth code, else `default`.
+    Substring match on the already-formatted detail string, which carries
+    `code=...` for both the HTTP and the error-body paths -- one place to
+    key off rather than two."""
+    if any(c in detail for c in THROTTLE_ERROR_CODES):
+        return TikTokThrottledError
+    if any(f"code={c!r}" in detail for c in AUTH_ERROR_CODES):
+        return TikTokAuthBlockedError
+    return default
 
 
 def _tiktok_error_detail(payload: Dict[str, Any]) -> Optional[str]:

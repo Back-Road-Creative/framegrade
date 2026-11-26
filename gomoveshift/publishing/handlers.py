@@ -13,7 +13,10 @@ exception (or, for TikTok, its own terminal *return value*) becomes
 retryable subclasses and any exception this module doesn't recognise —
 propagates unchanged, so ``drain_queue``'s default retryable path handles
 it. Never widen a ``except`` clause here to a base class "to be safe": that
-is exactly the mistake that would silently discard a publishable short."""
+is exactly the mistake that would silently discard a publishable short.
+
+An adapter's own auth-blocked exception (a refused access token) is the one
+case that is neither: it pauses the whole platform (``_pause_for_auth``)."""
 
 from __future__ import annotations
 
@@ -42,6 +45,7 @@ from .instagram_adapter import (
 from .models import FORMAT_CAROUSEL, FORMAT_PHOTO, MediaFingerprint, ShortPublishRecord
 from .photo_adapter import PhotoAuthBlockedError, PhotoCarouselAdapter, PhotoPermanentError
 from .queue import (
+    AUTH_BLOCKED_PAUSE_REASON,
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
     FACEBOOK_PHOTO_KIND,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
@@ -49,11 +53,13 @@ from .queue import (
     STATUS_AWAITING_MANUAL_PUBLISH,
     acquire_lease,
     find_delivery,
+    pause_platform,
     transition,
 )
 from .queue import NEXT_ATTEMPT_AWAITING_MANUAL as AWAITING_MANUAL
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM
 from .tiktok_adapter import (
+    TikTokAuthBlockedError,
     TikTokThrottledError,
     confirm_publish,
     init_direct_post,
@@ -92,6 +98,35 @@ _MAX_PENDING_INBOX_DRAFTS = 3
 # ``STATUS_AWAITING_MANUAL_PUBLISH`` and the 9999 park time live in
 # ``queue.py`` (shared with ``tiktok_pack``); the names stay importable here.
 _AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT
+
+
+def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliveryError:
+    """The error a handler raises when the platform refused its access token.
+
+    A dead token blocks every post to that platform, not just this one, and
+    only a person re-authorizing clears it. So the platform is paused
+    (``queue.pause_platform``, reason ``AUTH_BLOCKED_PAUSE_REASON``): the drain
+    leaves its other rows queued and untouched, and ``health check`` raises one
+    ``platform_auth_blocked`` incident naming it. This row goes back to
+    ``queued`` when nothing of it reached the platform (it keeps its status and
+    ids otherwise), and the returned ``ThrottledDeliveryError`` never counts
+    against ``max_attempts``. Before this each row was failed in turn, so one
+    expired login quietly failed every queued Facebook, Instagram and TikTok
+    post. Resuming the platform in the console lets them go again."""
+    detail = _detail(exc)
+    pause_platform(conn, row["platform"], reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    live = conn.execute(
+        "SELECT status, platform_upload_id, platform_post_id FROM deliveries WHERE id=?",
+        (row["id"],),
+    ).fetchone()
+    if (
+        live is not None
+        and live["status"] == "submitting"
+        and not live["platform_upload_id"]
+        and not live["platform_post_id"]
+    ):
+        transition(conn, row["id"], "submitting", "queued")
+    return ThrottledDeliveryError(f"{row['platform']} paused, access token refused: {detail}")
 
 
 def make_youtube_handler(
@@ -152,11 +187,8 @@ def make_instagram_handler(
     its subclasses) is terminal: the platform rejected the request outright
     or the response named an unsafe upload host.
 
-    ``InstagramAuthBlockedError`` is ALSO terminal here, deliberately: an
-    expired/revoked access token is recoverable by a human re-authorizing,
-    but NOT by this queue's retry loop — the token is still dead on attempt
-    8, so retrying only burns the attempt budget and delays a human
-    noticing. Marking it permanent surfaces the problem immediately instead.
+    ``InstagramAuthBlockedError`` (an expired/revoked access token) pauses
+    Instagram and leaves the row queued: see ``_pause_for_auth``.
 
     ``InstagramRetryableError`` / ``InstagramPublishingLimitError`` (the
     account-level quota refusal — the window self-heals) are NOT
@@ -178,7 +210,7 @@ def make_instagram_handler(
                 return
             raise PermanentDeliveryError(str(exc)) from exc
         except InstagramAuthBlockedError as exc:
-            raise PermanentDeliveryError(str(exc)) from exc
+            raise _pause_for_auth(conn, row, exc) from exc
 
     return handler
 
@@ -193,8 +225,8 @@ def make_facebook_handler(
 ) -> Handler:
     """Mirrors ``make_instagram_handler``'s classification and reasoning:
     ``FacebookPermanentError`` (incl. ``UnsafeUploadHostError`` and
-    ``ScheduleWindowError``, both subclasses) and ``FacebookAuthBlockedError``
-    are terminal for the same reasons as their Instagram counterparts.
+    ``ScheduleWindowError``, both subclasses) is terminal and
+    ``FacebookAuthBlockedError`` pauses Facebook, as on Instagram.
     ``FacebookRetryableError`` and any unrecognised exception propagate."""
 
     def handler(row: Dict[str, Any]) -> None:
@@ -208,8 +240,10 @@ def make_facebook_handler(
                 video_bytes=video_bytes,
                 video_state=video_state,
             )
-        except (FacebookPermanentError, FacebookAuthBlockedError) as exc:
+        except FacebookPermanentError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
+        except FacebookAuthBlockedError as exc:
+            raise _pause_for_auth(conn, row, exc) from exc
 
     return handler
 
@@ -230,8 +264,8 @@ def make_photo_handler(
     ``PhotoPermanentError`` (incl. ``UnsupportedPhotoFormatError`` and
     ``PartialCarouselError``, both subclasses -- a partial carousel is
     ALWAYS terminal, never auto-retried, see ``photo_adapter``'s module
-    docstring) and ``PhotoAuthBlockedError`` are terminal, mirroring the
-    video handlers' AuthBlocked reasoning. ``PhotoRetryableError`` and any
+    docstring) is terminal; ``PhotoAuthBlockedError`` pauses the platform,
+    as the video handlers do. ``PhotoRetryableError`` and any
     unrecognised exception propagate, handled by ``drain_queue``'s default
     retryable path."""
 
@@ -244,8 +278,10 @@ def make_photo_handler(
                 delivery_id=row["id"],
                 media_image_url_loader=media_image_url_loader,
             )
-        except (PhotoPermanentError, PhotoAuthBlockedError) as exc:
+        except PhotoPermanentError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
+        except PhotoAuthBlockedError as exc:
+            raise _pause_for_auth(conn, row, exc) from exc
 
     return handler
 
@@ -391,10 +427,12 @@ def make_tiktok_handler(
     retryable — TikTok exposes only ``TikTokAdapterError`` for both
     transient network failures and permanent misconfiguration, with no
     dedicated permanent subclass to key off; per the conservative default,
-    it stays retryable rather than being guessed at."""
+    it stays retryable rather than being guessed at. The one exception is
+    ``TikTokAuthBlockedError`` (TikTok refused the access token), which pauses
+    TikTok through ``_pause_for_auth`` like the Meta handlers."""
     resolved_mode = resolve_tiktok_mode(mode)
 
-    def handler(row: Dict[str, Any]) -> None:
+    def attempt(row: Dict[str, Any]) -> None:
         record = record_loader(row["project_name"], row["short_index"])
         payload = record.payloads.tiktok
         if payload is None:
@@ -539,6 +577,12 @@ def make_tiktok_handler(
             platform_post_id=publish_id,
             published_at_source=PLATFORM,
         )
+
+    def handler(row: Dict[str, Any]) -> None:
+        try:
+            attempt(row)
+        except TikTokAuthBlockedError as exc:
+            raise _pause_for_auth(conn, row, exc) from exc
 
     return handler
 
