@@ -588,11 +588,19 @@ next is the operator's per-row decision: dry-run `gomoveshift queue recover-term
 --authorized-by "<who, when>"` (gates above), then re-run it with `--apply` to re-queue. A row with a recovery row linked to it no longer
 counts as a validate problem; the new row is validated like any other.
 
-Two writers move a row there, both through `queue.mark_missing_remote` (YouTube rows with an
+Three writers move a row there, all through `queue.mark_missing_remote` (YouTube rows with an
 upload id, from `uploaded` or `published` only; one `response_log` row per mark):
 
 1. the adapter's post-upload verify (`docs/social-publishing-youtube.md`);
-2. the catalog pass:
+2. every non-dry-run `dispatch-queue` tick, beside the `CONFIRMED_LIVE` sweep:
+   `confirm_scheduled_live` for each scheduled row it asks about, and
+   `youtube_adapter.recheck_published_videos` for every `published` row on a slow rotation
+   (one `videos.list` of up to 50 ids per tick, least recently seen first, each row at most
+   once per 24 h, stamped in `remote_checked_at`; logs `PUBLISHED_RECHECK missing_remote=<n>`).
+   An id the channel does not return is looked up once more after `VERIFY_RECHECK_SEC`;
+   absent twice, its row is marked and one `youtube_video_missing` health incident is
+   written. A lookup that raises proves nothing and changes nothing;
+3. the catalog pass:
 
    ```bash
    gomoveshift catalog-fetch --out live_catalog.json --known-ids-from-queue
