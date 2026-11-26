@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.165] - 2026-11-26
+
+### Added
+
+- The weekly growth review scores `source:day-reel` against `source:drive`, so day reels
+  and Shorts cut from recorded drives can be compared on the same day-7 views.
+
+### Fixed
+
+- A day reel now gets a tracking record when it is queued, so its platform ids are stored
+  when it publishes and `metrics collect` can measure it. Before, the route enqueued
+  straight from its sidecar and the publish step's id registration failed for every reel.
+
 ## [0.3.164] - 2026-11-26
 
 ### Fixed
@@ -1879,7 +1892,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.165...HEAD
+[0.3.165]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...v0.3.165
 [0.3.164]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...v0.3.164
 [0.3.163]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...v0.3.163
 [0.3.162]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.161...v0.3.162
