@@ -108,6 +108,17 @@ def _unescape(value: str) -> str:
     return value[1:] if value.startswith("'") else value
 
 
+def _with_pointer(text, payload_text):
+    """``text`` with the long-version sentence after its filmed date, when the
+    payload carries it (the parent is public by the Short's slot)."""
+    from gomoveshift.publishing.plan_builder import LONG_VERSION_POINTER
+
+    if LONG_VERSION_POINTER not in payload_text:
+        return text
+    body, sep, tags = text.partition("\n\n")
+    return f"{body} {LONG_VERSION_POINTER}{sep}{tags}"
+
+
 def test_per_short_caption_and_title_parity(tmp_path):
     csv_rows, plan, _media_map, _links = _build_both(tmp_path)
     assert len(csv_rows) == len(plan.shorts) == 2
@@ -124,8 +135,16 @@ def test_per_short_caption_and_title_parity(tmp_path):
         # the plan's Instagram/Facebook payloads carry the identical string
         # (per docs/social-publishing-plan-builder.md's mapping doc) — no
         # parent-link funnel line lives on this surface on either side.
-        assert _unescape(row["Text"]) == record.payloads.instagram.caption
-        assert _unescape(row["Text"]) == record.payloads.facebook.description
+        # By design the plan's Facebook/Instagram captions end on one more
+        # sentence than the shared cell, naming where the long version is once
+        # the parent is public (plan_builder.LONG_VERSION_POINTER); TikTok
+        # still carries the shared cell's text.
+        text = _unescape(row["Text"])
+        pointed = _with_pointer(text, record.payloads.facebook.description)
+        assert pointed == record.payloads.facebook.description
+        assert _with_pointer(text, record.payloads.instagram.caption) == (
+            record.payloads.instagram.caption
+        )
 
         assert row["TikTok Title"] == record.payloads.tiktok.title
 

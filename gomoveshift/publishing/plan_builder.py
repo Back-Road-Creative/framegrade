@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 _TITLE_HASHTAG_MAX = 3
 
 
+#: The sentence a Short's Facebook and Instagram captions end on once its
+#: parent long-form is public. "Long version", not "full drive": a heavy-trim
+#: parent is a highlights cut (``csv_generator._first_comment_lead``).
+LONG_VERSION_POINTER = "The long version is on our YouTube channel."
+
+
 def _with_filmed(text: str, filmed: str) -> str:
     """The caption with ``filmed`` as the sentence after the caption's own and
     the hashtags closing the caption -- never the date glued onto the end of
@@ -188,13 +194,18 @@ def build_short_payloads(
     post_captions = getattr(post, "captions", None) or {}
     legacy_caption = (getattr(post, "caption", "") or "").rstrip()
 
-    def _platform_caption(platform: str) -> str:
-        text = (post_captions.get(platform) or legacy_caption or "").rstrip()
-        return _with_filmed(text, filmed)
-
     parent_link = (
         f"https://youtu.be/{parent_id}" if parent_is_public_at(short_at, parent_at) else ""
     )
+    # Facebook and Instagram carry no link (Instagram captions don't click and
+    # the first comment already holds it), so they name where the long version
+    # is -- only once the parent is public, so it never points at nothing.
+    pointer = f" {LONG_VERSION_POINTER}" if parent_link else ""
+
+    def _platform_caption(platform: str, points_to_parent: bool = False) -> str:
+        text = (post_captions.get(platform) or legacy_caption or "").rstrip()
+        return _with_filmed(text, filmed + (pointer if points_to_parent else ""))
+
     yt_description = (getattr(post, "youtube_description", "") or "").strip()
     tags = tuple(
         t.strip() for t in (getattr(post, "youtube_tags", "") or "").split(",") if t.strip()
@@ -207,8 +218,8 @@ def build_short_payloads(
             tags=tags,
             category=getattr(post, "youtube_category", "") or "",
         ),
-        instagram=InstagramPayload(caption=_platform_caption("instagram")),
-        facebook=FacebookPayload(description=_platform_caption("facebook")),
+        instagram=InstagramPayload(caption=_platform_caption("instagram", True)),
+        facebook=FacebookPayload(description=_platform_caption("facebook", True)),
         tiktok=TikTokPayload(
             title=getattr(post, "tiktok_title", "") or "",
             caption=_platform_caption("tiktok"),
