@@ -56,6 +56,16 @@ STATUS_RETRY_WAIT = "retry_wait"
 # another worker (or this one, on retry) to reclaim.
 LEASE_SEC = 900
 
+#: A slot nearer than one insert's lease ceiling could pass while the upload is
+#: still in flight, so such a Short goes up public instead of scheduled.
+_SCHEDULE_MIN_LEAD = timedelta(seconds=LEASE_SEC)
+
+#: How long after its go-public time a ``platform_scheduled`` Short may still
+#: read not-public before ``confirm_scheduled_live`` raises an incident: room for
+#: YouTube's processing of a fresh upload, short enough to be seen the same day.
+NOT_PUBLIC_GRACE = timedelta(hours=1)
+NOT_PUBLIC_KIND = "youtube_not_public_after_slot"
+
 # Bound on the channel-scan fallback (see ``_find_existing_upload``): only
 # uploads within this window of "now" are candidates, and at most this many
 # of the channel's most recent uploads are inspected.
@@ -391,18 +401,84 @@ def live_publish_time(item: Dict[str, Any]) -> Optional[str]:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
+def upload_schedule(
+    slot: Optional[datetime], now: Optional[datetime] = None
+) -> tuple[Optional[datetime], str]:
+    """``(publish_at, privacy)`` for the insert of a Short whose slot is ``slot``.
+
+    The drain releases a row only once its slot has arrived
+    (``dispatch._select_due``), so a drained Short's slot is now or past. A past
+    ``publishAt`` is never sent: the API reference says one publishes at once,
+    but that is untested here. A slot (or none) less than ``_SCHEDULE_MIN_LEAD``
+    ahead goes up ``public`` with no ``publishAt``, the documented
+    ``videos.insert`` form; a later slot stays a private upload with ``publishAt``."""
+    now = now or datetime.now(timezone.utc)
+    if slot is None or slot - now < _SCHEDULE_MIN_LEAD:
+        return None, "public"
+    return slot, "private"
+
+
+def _not_public_incident(row, privacy: str, now: str, incidents_dir: Optional[Path]) -> None:
+    """Open (once) or, with ``privacy`` ``None``, resolve the row's
+    ``youtube_not_public_after_slot`` incident. Never fatal."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    key = f"{NOT_PUBLIC_KIND}:{row['id']}"
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    path = directory / f"{safe_name(key)}.json"
+    try:
+        existing = json.loads(path.read_text()) if path.is_file() else None
+        is_open = existing is not None and existing.get("resolved_at") is None
+        if privacy is None:
+            if is_open:
+                existing["resolved_at"] = now
+                write_row(directory, existing)
+            return
+        if is_open:
+            return
+        write_row(
+            directory,
+            new_incident(
+                NOT_PUBLIC_KIND,
+                key,
+                path.name,
+                now,
+                delivery_id=row["id"],
+                platform=PLATFORM,
+                video_id=row["platform_upload_id"],
+                detail=(
+                    f"youtube#{row['id']} video {row['platform_upload_id']} is still "
+                    f"{privacy} after its {row['platform_published_at']} go-public time"
+                ),
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("could not write not-public incident for delivery %s", row["id"])
+
+
+def confirm_scheduled_live(
+    conn, service, now: Optional[str] = None, *, incidents_dir: Optional[Path] = None
+) -> int:
     """Replace the scheduled slot with the confirmed go-public time on every
     YouTube row still ``platform_scheduled`` whose slot has passed.
 
     One ``videos.list`` per row through the caller's ``service``; a lookup that
-    raises or a video not yet public leaves the row on its scheduled source.
+    raises or a video not yet public leaves the row on its scheduled source. A
+    video still not public ``NOT_PUBLIC_GRACE`` after its slot raises one
+    ``youtube_not_public_after_slot`` health incident (resolved once it is
+    confirmed live): a Short marked published must not sit private unseen.
     Returns how many rows were confirmed."""
     now = now or datetime.now(timezone.utc).isoformat()
     rows = conn.execute(
-        "SELECT id, platform_upload_id FROM deliveries WHERE platform='youtube' "
-        "AND status='published' AND published_at_source=? AND platform_upload_id IS NOT NULL "
-        "AND platform_published_at <= ? ORDER BY id",
+        "SELECT id, platform_upload_id, platform_published_at FROM deliveries "
+        "WHERE platform='youtube' AND status='published' AND published_at_source=? "
+        "AND platform_upload_id IS NOT NULL AND platform_published_at <= ? ORDER BY id",
         (PLATFORM_SCHEDULED, now),
     ).fetchall()
     confirmed = 0
@@ -418,6 +494,14 @@ def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
         live_at = live_publish_time(items[0]) if items else None
         if live_at and record_live_publish(conn, row["id"], live_at, now=now):
             confirmed += 1
+            _not_public_incident(row, None, now, incidents_dir)
+            continue
+        privacy = (items[0].get("status") or {}).get("privacyStatus") if items else None
+        if items and privacy != "public":
+            slot = datetime.fromisoformat(row["platform_published_at"])
+            slot = slot if slot.tzinfo else slot.replace(tzinfo=timezone.utc)
+            if datetime.fromisoformat(now) - slot > NOT_PUBLIC_GRACE:
+                _not_public_incident(row, privacy or "unknown", now, incidents_dir)
     return confirmed
 
 
@@ -469,6 +553,8 @@ class YouTubeShortsAdapter:
             if existing
             else None
         )
+        # An adopted or reconciled upload was sent by an earlier attempt: its slot.
+        go_public_at = record.schedule.scheduled_at_utc
 
         if not video_id:
             deferred = self._defer_if_over_budget(conn, delivery_id, record, current_status)
@@ -504,6 +590,9 @@ class YouTubeShortsAdapter:
                     "risk a duplicate videos.insert"
                 )
             transition(conn, delivery_id, current_status, STATUS_SUBMITTING)
+            sent_at = datetime.now(timezone.utc)
+            publish_at, privacy = upload_schedule(record.schedule.scheduled_at_utc, sent_at)
+            go_public_at = publish_at or sent_at
             try:
                 video_id = self._uploader.upload_video(
                     video_path,
@@ -511,8 +600,8 @@ class YouTubeShortsAdapter:
                     description=description,
                     tags=list(payload.tags),
                     category_id=payload.category or "2",
-                    publish_at=record.schedule.scheduled_at_utc,
-                    privacy="private",
+                    publish_at=publish_at,
+                    privacy=privacy,
                     # The measured filmed-on date (per_lf_recording_date via the
                     # plan builder), never a file time; blank sends nothing.
                     recording_date=(record.recording_date or "").strip() or None,
@@ -569,15 +658,14 @@ class YouTubeShortsAdapter:
                 record.sampled_regions,
             )
 
-        # The upload above set ``status.publishAt`` and ``privacy=private``,
-        # so the call returning success means YouTube ACCEPTED this video and
-        # will make it public at the scheduled instant -- usually hours from
-        # now. Calling that ``platform_confirmed`` ("within seconds of the
-        # real publish time") overstated the evidence by the whole length of
-        # the schedule. Record the instant YouTube was actually told, taken
-        # from the same value handed to ``upload_video`` rather than
-        # re-derived, so the two can never disagree.
-        scheduled_at = record.schedule.scheduled_at_utc
+        # The insert returning success means YouTube ACCEPTED this video, not
+        # that it is live: a scheduled one goes public at ``publishAt``, a
+        # public one once processed. Calling that ``platform_confirmed``
+        # ("within seconds of the real publish time") overstated the evidence.
+        # Record the instant YouTube was told -- the ``publishAt`` handed to
+        # ``upload_video``, or the moment a public upload was sent -- so
+        # ``confirm_scheduled_live`` checks every Short goes public after it.
+        scheduled_at = go_public_at
         fields = {
             "platform_upload_id": video_id,
             "platform_post_id": playlist_id,

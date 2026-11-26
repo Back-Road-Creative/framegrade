@@ -183,8 +183,9 @@ PUBLISHED_AT_OPERATOR_CONFIRMED = "operator_confirmed"  # human click, possibly 
 PUBLISHED_AT_PLATFORM_RECONCILED = "platform_reconciled"  # delayed poll noticed it -- unknown lag
 PUBLISHED_AT_PLATFORM_CONFIRMED = "platform_confirmed"  # publish call returned success -- seconds
 #: The platform ACCEPTED it and named a later time to make it public. The
-#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``,
-#: so its call returning success is not a publication -- calling that
+#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``
+#: (a Short already due goes up ``public``, its send time recorded here), so
+#: its call returning success is not a publication -- calling that
 #: ``platform_confirmed`` overstates the evidence by the whole length of the
 #: schedule. This source requires ``platform_published_at``: the claim it makes
 #: is that a specific later time is KNOWN, and without one it says less than

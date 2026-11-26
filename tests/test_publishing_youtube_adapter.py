@@ -133,6 +133,10 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
     mock_service, queue_conn, tmp_path
 ):
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    slot = (datetime.now(timezone.utc) + timedelta(days=2)).replace(microsecond=0)
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=slot)
+    )
     order = []
 
     def _fake_insert(*args, **kwargs):
@@ -145,7 +149,7 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
 
     body = mock_service.videos.return_value.insert.call_args.kwargs["body"]
     assert body["status"]["privacyStatus"] == "private"
-    assert body["status"]["publishAt"] == "2026-08-24T14:00:00Z"
+    assert body["status"]["publishAt"] == slot.isoformat().replace("+00:00", "Z")
     assert order == ["SHORTVID123"]  # video_id already persisted when playlist insert ran
     row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
     # The insert succeeded synchronously, but it set publishAt + private just
@@ -153,7 +157,32 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
     # "scheduled", not "confirmed within seconds" -- and the receipt records
     # the same instant the body carries, so the two can never disagree.
     assert row["published_at_source"] == "platform_scheduled"
-    assert row["platform_published_at"] == "2026-08-24T14:00:00+00:00"
+    assert row["platform_published_at"] == slot.isoformat()
+
+
+@pytest.mark.parametrize("lead", [timedelta(days=-3), timedelta(0), timedelta(minutes=5)])
+def test_due_short_never_sends_a_publish_at_earlier_than_now(
+    mock_service, queue_conn, tmp_path, lead
+):
+    """The drain releases a row only once its slot has arrived, so a drained
+    Short's slot is now or past. No insert may carry a ``publishAt`` before now
+    (what YouTube does with one is unverified): it goes up public instead, and
+    the receipt names the send time, never the past slot."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    slot = datetime.now(timezone.utc) + lead
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=slot)
+    )
+    before = datetime.now(timezone.utc)
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    status = mock_service.videos.return_value.insert.call_args.kwargs["body"]["status"]
+    sent = status.get("publishAt")
+    assert sent is None or datetime.fromisoformat(sent.replace("Z", "+00:00")) >= before
+    assert status["privacyStatus"] == "public"
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
+    assert row["published_at_source"] == "platform_scheduled"
+    assert datetime.fromisoformat(row["platform_published_at"]) >= before
 
 
 def test_short_upload_sends_the_records_measured_recording_date(mock_service, queue_conn, tmp_path):
