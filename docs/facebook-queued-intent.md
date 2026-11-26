@@ -28,9 +28,12 @@ separate from `destination_account`, which remains a published-receipt field.
 Reopening an existing queue adds the column without guessing accounts for old
 rows. The adapter persists `platform_upload_id` before uploading bytes and commits
 `awaiting_facebook_reconcile` before sending finish. Only a literal boolean
-`success: true` permits a confirmed finish receipt. A lost response, exception,
-missing success, false value, or malformed body raises `FacebookFinishUnknownError`
-and retains the ID without a published receipt. The checkpoint also survives a
+`success: true` followed by a read-back (`check_video_status`) permits a
+confirmed finish receipt: the reel must read published (a scheduled reel only
+has to be found and not failed). A lost response, exception, missing success,
+false value, malformed body, or a read-back that finds the reel missing, failed
+or not yet published raises `FacebookFinishUnknownError` and retains the ID
+without a published receipt; the reconcile reads then decide it. The checkpoint also survives a
 worker exit between sending finish and recording the answer.
 
 Every later attempt with a retained ID only reads that video's status. It never

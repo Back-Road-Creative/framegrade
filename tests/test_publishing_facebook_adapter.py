@@ -213,7 +213,7 @@ def test_wiring_persists_video_id_and_permalink(queue_conn):
                 _resp(200, {"success": True, "post_id": "p-1"}),
             ]
         ),
-        get=Mock(),
+        get=Mock(return_value=_resp(200, LIVE_STATUS_BODY)),
     )
     reels = FacebookReelsAdapter(CREDS, session=session)
     adapter = FacebookShortsAdapter(reels, worker_id="w1")
@@ -229,9 +229,9 @@ def test_wiring_persists_video_id_and_permalink(queue_conn):
     assert row["platform_upload_id"] == "v-1"
     assert row["platform_post_id"] == "v-1"  # bare video id, never packed JSON
     assert row["permalink"] == REEL_URL
-    # Derived, not fetched: a cosmetic readback must never be able to turn a
-    # completed publish into a failure.
-    session.get.assert_not_called()
+    # The permalink is derived, not fetched. The one read is the read-back
+    # that the reel went live; a miss there is an unknown, never a failure.
+    assert session.get.call_count == 1
 
 
 def test_finish_timeout_does_not_start_a_second_upload_session(queue_conn):
@@ -418,3 +418,69 @@ def test_low_level_refuses_time_on_non_scheduled_finish(state):
             datetime.now(timezone.utc) + timedelta(hours=2),
         )
     session.post.assert_not_called()
+
+
+# --- Read-back after finish ---------------------------------------------
+
+#: The reel was found but is still processing or failed: neither is live.
+PROCESSING_BODY = {"status": {"video_status": "processing", "processing_phase": {"status": "in_progress"}, "publishing_phase": {"status": "not_started"}}}  # fmt: skip
+FAILED_BODY = {"status": {"video_status": "error", "processing_phase": {"status": "error"}, "publishing_phase": {"status": "not_started"}}}  # fmt: skip
+
+
+def _finish_ok_session(*reads):
+    return Mock(
+        post=Mock(
+            side_effect=[
+                _resp(200, {"video_id": "v-1", "upload_url": "https://rupload.facebook.com/x"}),
+                _resp(200, {}),
+                _resp(200, {"success": True, "post_id": "p-1"}),
+            ]
+        ),
+        get=Mock(side_effect=list(reads)),
+    )
+
+
+@pytest.mark.parametrize(
+    "read_back",
+    [
+        _resp(200, PROCESSING_BODY),
+        _resp(200, FAILED_BODY),
+        # Graph's answer for an id it does not know (not found).
+        _resp(400, {"error": {"code": 100, "message": "Unsupported get request"}}),
+    ],
+)
+def test_finish_success_is_not_a_published_receipt_until_the_reel_reads_back_live(
+    queue_conn, read_back
+):
+    """Finish returning ``success`` is Facebook accepting the request. Before,
+    the row was marked published right there, so a reel that failed
+    processing or never appeared still read as posted. Now it stays the
+    unknown outcome, with its id kept, for the reconcile pass."""
+    session = _finish_ok_session(read_back)
+    adapter = FacebookShortsAdapter(FacebookReelsAdapter(CREDS, session=session))
+    record = _record()
+    delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+
+    with pytest.raises(FacebookFinishUnknownError, match="does not read back published"):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery_id, video_bytes=b"x")
+
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "facebook")
+    assert row["status"] == "awaiting_facebook_reconcile"
+    assert row["platform_upload_id"] == "v-1"
+    assert row["platform_post_id"] is None and row["published_at"] is None
+
+
+def test_a_reel_still_processing_is_published_by_the_next_read(queue_conn):
+    session = _finish_ok_session(_resp(200, PROCESSING_BODY), _resp(200, LIVE_STATUS_BODY))
+    adapter = FacebookShortsAdapter(FacebookReelsAdapter(CREDS, session=session))
+    record = _record()
+    delivery_id = enqueue(queue_conn, record.project_name, record.short_index, "facebook", "h1")
+    with pytest.raises(FacebookFinishUnknownError):
+        adapter.publish(record, conn=queue_conn, delivery_id=delivery_id, video_bytes=b"x")
+
+    adapter.publish(record, conn=queue_conn, delivery_id=delivery_id, video_bytes=b"x")
+
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "facebook")
+    assert row["status"] == "published" and row["platform_post_id"] == "v-1"
+    assert row["published_at_source"] == PLATFORM  # confirmed by the read, not the finish
+    assert session.post.call_count == 3  # never a second start or finish
