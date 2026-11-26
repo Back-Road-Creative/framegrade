@@ -111,6 +111,18 @@ def music_grouper(test: Any, receipts: set) -> Callable[[str, int, str, date], O
     return group
 
 
+#: Project-name prefix the day-reel route gives every reel it queues
+#: (``publishing.day_reels``: ``day-reel-<drive file id>``).
+DAY_REEL_PREFIX = "day-reel-"
+
+
+def source_group(project: str) -> str:
+    """``source:day-reel`` for a reel cut from the day's own phone clip,
+    ``source:drive`` for a Short cut from a recorded drive, so the review can
+    compare the two."""
+    return "source:day-reel" if project.startswith(DAY_REEL_PREFIX) else "source:drive"
+
+
 def samples_from_records(
     records: Iterable[Any],
     today: date,
@@ -123,12 +135,13 @@ def samples_from_records(
     out: List[Sample] = []
     for record in records:
         place = (getattr(record, "location", "") or "").strip()
+        source = source_group(getattr(record, "project", "") or "")
         for short in getattr(record, "shorts", []) or []:
             posted = posted_date(short.posted_at)
             if posted is None or posted < since:
                 continue
             band = length_band(getattr(short.content, "duration_sec", None))
-            groups = [f"length:{band}"]
+            groups = [f"length:{band}", source]
             if place:
                 groups.append(f"place:{place}")
             for platform, metrics in (short.metrics or {}).items():

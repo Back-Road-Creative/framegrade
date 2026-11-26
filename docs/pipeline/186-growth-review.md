@@ -28,8 +28,12 @@ skips the live part and prints `PARTNER_PROGRESS skipped=offline`.
 
 **Format scorecard (`tracking/growth_review.py`).** Every short posted in the last
 `WINDOW_DAYS` (28) plus the settle lag with a settled day-7 figure
-(`tracking/day7.py`) is one sample per platform, in two groups: its clip-length band
-(`under15s`, `15to30s`, `30to60s`, `over60s`) and its tracked place. Each group's median
+(`tracking/day7.py`) is one sample per platform, in up to three groups: its clip-length band
+(`under15s`, `15to30s`, `30to60s`, `over60s`), its source (`source:day-reel` for a
+project named `day-reel-…` by the day-reel route, `source:drive` otherwise) and its
+tracked place. The day-reel route registers each reel it queues in the tracking store
+(`publishing/day_reels.py`), the same as `enqueue-plan --apply` does for drive Shorts, so
+the publish step can store its platform ids and `metrics collect` can measure it. Each group's median
 is compared with its platform's median: `GROWTH_FORMAT` normally, `GROWTH_UNDERPERFORMER`
 when the group has at least `MIN_GROUP_POSTS` (5) and sits below `UNDERPERFORM_RATIO`
 (0.5) of the platform's median. A short with no settled figure is left out, never
