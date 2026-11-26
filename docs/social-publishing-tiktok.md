@@ -472,6 +472,15 @@ raises `PermanentDeliveryError` naming the interrupted upload: re-running
 where a person can see it and re-enqueue. A resume that finds `"uploaded"`
 behaves exactly as before -- no re-init, straight to the park or the confirm.
 
+**A chunk that fails in the handler's sight is retried, not failed.**
+`upload_video_chunks` raises `TikTokChunkUploadError`. When it proves the
+upload incomplete (a chunk before the last, or the last refused with an HTTP
+error), the handler drops the publish id and puts the row back to `queued`, so
+the drain's ordinary, counted retry starts over with a fresh init: TikTok never
+got the whole file, so there is no post to duplicate. Only the last chunk with
+no answer (or an unreadable 2xx) stays `"submitting"` with its id, the unknown
+case above. Before this, one dropped connection on any chunk failed the row.
+
 The console's Publishing tab renders the
 `awaiting_manual_publish` group with a "publish from the TikTok app inbox"
 hint and a mark-published button per row. `POST

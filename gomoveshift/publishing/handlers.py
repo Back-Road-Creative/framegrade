@@ -60,6 +60,7 @@ from .queue import NEXT_ATTEMPT_AWAITING_MANUAL as AWAITING_MANUAL
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM
 from .tiktok_adapter import (
     TikTokAuthBlockedError,
+    TikTokChunkUploadError,
     TikTokThrottledError,
     confirm_publish,
     init_direct_post,
@@ -526,19 +527,31 @@ def make_tiktok_handler(
             # would make those two indistinguishable to a resuming worker.
             transition(conn, delivery_id, "submitting", "submitting", platform_upload_id=publish_id)
             chunk_plan = init["chunk_plan"]
-            upload_video_chunks(
-                init["upload_url"], chunk_plan, _chunk_reader(video_bytes, chunk_plan)
-            )
+            try:
+                upload_video_chunks(
+                    init["upload_url"], chunk_plan, _chunk_reader(video_bytes, chunk_plan)
+                )
+            except TikTokChunkUploadError as exc:
+                # A chunk that provably never landed leaves an upload TikTok
+                # can never publish: drop its id and the drain's ordinary
+                # retry starts the short over with a fresh init. Kept, the
+                # next try found "submitting" with an id and failed the row
+                # for good, so one dropped connection lost the post.
+                if exc.upload_incomplete:
+                    transition(conn, delivery_id, "submitting", "queued", platform_upload_id=None)
+                raise
             # Only now is the video actually on TikTok.
             transition(conn, delivery_id, "submitting", "uploaded")
             current_status = "uploaded"
         elif existing["status"] == "submitting":
             # A publish id with the upload still unfinished: the worker died
-            # mid-chunk. Neither way forward is safe to take silently --
-            # re-running init would create a SECOND TikTok post, and skipping
-            # to the next step would treat an incomplete upload as a finished
-            # one. In inbox mode, parking the row as a draft "awaiting manual
-            # publish" would leave a draft that is not in anyone's app inbox:
+            # mid-chunk, or the last chunk's answer was lost (a chunk that
+            # provably failed went back to queued above). Neither way
+            # forward is safe to take silently -- re-running init would
+            # create a SECOND TikTok post, and skipping to the next step would
+            # treat an incomplete upload as a finished one. In inbox mode,
+            # parking the row as a draft "awaiting manual publish" would leave
+            # a draft that is not in anyone's app inbox:
             # nothing reprocesses that status automatically, and it would hold
             # one of the pending slots for good. In direct mode, polling would
             # wait on a publish that cannot complete until the attempt budget

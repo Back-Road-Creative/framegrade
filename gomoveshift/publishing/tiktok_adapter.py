@@ -421,6 +421,26 @@ def init_direct_post(
     return {"publish_id": publish_id, "upload_url": upload_url, "chunk_plan": chunk_plan}
 
 
+class TikTokChunkUploadError(TikTokAdapterError):
+    """A chunk PUT failed. ``upload_incomplete`` is True when that proves
+    TikTok never got the whole video: a chunk before the last one (the rest
+    were never sent), or the last one refused with an HTTP error. The handler
+    then starts the short over with a fresh init on its next try. False only
+    for the last chunk with no answer, or a 2xx it could not read: the bytes
+    may all be there, so the outcome is unknown."""
+
+    def __init__(self, message: str, *, upload_incomplete: bool):
+        super().__init__(message)
+        self.upload_incomplete = upload_incomplete
+
+
+def _http_status(resp: Any) -> int:
+    try:
+        return int(getattr(resp, "status_code", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def upload_video_chunks(
     upload_url: str, chunk_plan: ChunkPlan, chunk_reader: Callable[[int], bytes]
 ) -> None:
@@ -428,7 +448,9 @@ def upload_video_chunks(
     parallelized. ``chunk_reader(index)`` must return exactly that chunk's
     bytes (the last chunk may exceed ``chunk_size``, up to the 128 MB
     ceiling — the folded-in remainder from ``plan_chunks``). Re-validates
-    the host regardless of what the caller already checked."""
+    the host regardless of what the caller already checked. A failed PUT
+    raises ``TikTokChunkUploadError`` (a throttle or auth refusal keeps its
+    own type)."""
     validate_upload_host(upload_url)
     video_size = chunk_plan.video_size
     chunk_size = chunk_plan.chunk_size
@@ -440,8 +462,10 @@ def upload_video_chunks(
         data = chunk_reader(index)
         if len(data) != length:
             raise TikTokAdapterError("chunk reader returned the wrong byte count")
-        _tiktok_call(
-            lambda: requests.put(
+        answered: List[Any] = []
+
+        def put() -> "requests.Response":
+            resp = requests.put(
                 upload_url,
                 headers={
                     "Content-Range": f"bytes {start}-{end}/{video_size}",
@@ -450,10 +474,20 @@ def upload_video_chunks(
                 },
                 data=data,
                 timeout=120,
-            ),
-            "chunk upload",
-            None,
-        )
+            )
+            answered.append(resp)
+            return resp
+
+        try:
+            _tiktok_call(put, "chunk upload", None)
+        except (TikTokThrottledError, TikTokAuthBlockedError):
+            raise
+        except TikTokAdapterError as exc:
+            refused = bool(answered) and _http_status(answered[0]) >= 400
+            raise TikTokChunkUploadError(
+                f"{exc} (chunk {index + 1} of {total})",
+                upload_incomplete=index < total - 1 or refused,
+            ) from None
 
 
 # --- Publish-status poll loop ------------------------------------------------
