@@ -2269,3 +2269,94 @@ def test_a_dry_run_that_waypost_accepts_would_launch_and_writes_nothing(tmp_path
     assert res["action"] == "would_launch", res
     assert [c["dry_run"] for c in rig.replace_store.calls] == [True]
     _untouched(rig)
+
+
+# 2026-11-22: a replace whose LF is not finished must be retried by the machine. A failed publish of
+# such a drive is republished with the heal backoff (never hot), and a reopen that raises leaves an
+# incident naming the set-aside run, which a retry of --replace-scheduled plans from.
+
+
+class RaisingStore(ReopenStore):
+    def reopen_for_replace(self, project, **kw):
+        if kw.get("dry_run"):
+            return None
+        self.calls.append({"project": project, **kw})
+        raise RuntimeError("database is locked")
+
+
+def test_a_reopen_that_raises_is_retried_then_names_the_set_aside_run(tmp_path, monkeypatch):
+    pauses = []
+    monkeypatch.setattr(launch.time, "sleep", pauses.append)
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = RaisingStore(rig)
+    res = rig.run()
+    assert res["action"] == "refused" and "database is locked" in res["reason"], res
+    assert len(rig.launches) == 1 and len(rig.replace_store.calls) == 3  # retried, not abandoned
+    assert pauses == list(launch._REOPEN_RETRY_S)
+    (row,) = _replace_incidents()
+    assert f"{launch.SUPERSEDED_DIR}/<project>-<stamp>" in row["error"]
+    assert str(rig.out / launch.SUPERSEDED_DIR / f"day-a-{STAMP}") in row["error"]
+    assert not row["resolved_at"]
+
+
+def test_a_retry_after_a_failed_reopen_plans_from_the_set_aside_uploads(tmp_path, monkeypatch):
+    monkeypatch.setattr(launch.time, "sleep", lambda s: None)
+    rig = _replace_rig(tmp_path, _three_lfs())
+    rig.replace_store = RaisingStore(rig)
+    rig.run()
+    out = rig.out / "day-a"
+    assert not (out / "youtube_uploads.json").exists() and (out / "replace_plan.json").exists()
+    replace = {"now": NOW, "live": rig.live}
+    assert launch._uploads_refusal("day-a", out, replace) == ""
+    assert set(replace["plan"]["replace"]) == {"2", "3"} and set(replace["plan"]["kept"]) == {"1"}
+    # without a half-done plan the fresh dir is still just an empty output: no guessing
+    (out / "replace_plan.json").unlink()
+    assert launch._uploads_refusal("day-a", out, {"now": NOW, "live": rig.live}) == ""
+
+
+def test_a_launcher_that_raises_puts_the_drive_back(tmp_path):
+    rig = _replace_rig(tmp_path, _three_lfs())
+
+    def boom(argv, cwd, env):
+        raise OSError("no such runner")
+
+    rig.launcher = boom
+    res = rig.run()
+    assert res["action"] == "refused" and "no such runner" in res["reason"], res
+    assert (rig.stages / "day-a").is_dir() and not (rig.out / launch.SUPERSEDED_DIR).exists()
+
+
+def _unfinished_publish(rig, tmp_path, *, age_s):
+    out = tmp_path / "out-day-a"
+    out.mkdir()
+    (out / "youtube_uploads.json").write_text(json.dumps({"1": {"video_id": "V1"}}))
+    plan = {"schema": "replace-scheduled/1", "kept": {"1": {"video_id": "V1"}},
+            "replace": {"2": {"video_id": "old2"}}, "progress": {"2": {"state": "uploaded"}}}  # fmt: skip
+    (out / "replace_plan.json").write_text(json.dumps(plan))
+    rig.drives.append(drive("day-a", "failed", output_dir=str(out)))
+    job(rig, "ok", "day-a", "succeeded", 100.0, exit_code=0)
+    job(rig, "pub", "day-a", "failed", NOW.timestamp() - age_s, name="gms-publish-day-a")
+    rig.publish_result = {"action": "launched", "reason": "day-a for slot"}
+
+
+def test_an_unfinished_replace_is_republished_after_the_heal_backoff_not_before(tmp_path):
+    rig = Rig(tmp_path / "a")
+    _unfinished_publish(rig, tmp_path / "a", age_s=60)
+    res = rig.run()
+    assert rig.publishes == []  # one publish job a minute ago: the first retry waits an hour
+    assert res["publish_backoff"][0]["project"] == "day-a" and 0 < res["publish_backoff"][0]["wait_s"] <= heal._retry_wait_s(1)  # fmt: skip
+    rig2 = Rig(tmp_path / "b")
+    _unfinished_publish(rig2, tmp_path / "b", age_s=heal._retry_wait_s(1) + 60)
+    rig2.run()
+    assert rig2.publishes == [("day-a", False)]  # due: re-enters Phase D with no human step
+
+
+def test_an_unfinished_replace_never_counts_as_uploaded(tmp_path):
+    rig = Rig(tmp_path)
+    _unfinished_publish(rig, tmp_path, age_s=60)
+    out = rig.drives[0].output_dir
+    assert launch._uploaded(out) is False and launch.replace_unfinished(out) == {2: "uploaded"}
+    plan = json.loads((Path(out) / "replace_plan.json").read_text())
+    plan["progress"]["2"]["state"] = "done"
+    (Path(out) / "replace_plan.json").write_text(json.dumps(plan))
+    assert launch._uploaded(out) is True and launch.replace_unfinished(out) == {}

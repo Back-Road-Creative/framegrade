@@ -1080,4 +1080,8 @@ class YouTubeUploader:
             if decision:
                 record["title_decision"] = decision
             uploads[lf_idx] = record
+            # Same checkpoint as the playlist branch: a caller that files the playlist itself
+            # later (``--replace-scheduled`` passes no config) must not lose the new id either.
+            if persist is not None:
+                persist()
         return record

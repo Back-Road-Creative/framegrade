@@ -28,26 +28,39 @@ records: old video id, `publish_at`, title, playlist), and the same plan is writ
 output dir as `replace_plan.json`. Phase D reads it: a kept LF is put back as uploaded and never
 re-uploaded; a replaced LF has its old video re-checked live, and if still scheduled the new video
 is uploaded private under the NEW render's gated title (`require_title_decision` unchanged; the
-old and new titles are recorded in `replace_plan.json`) and later given the old `publish_at`, and only after the upload succeeds and is booked
-are the ledger entry re-pointed at the new id and the old id deleted (`videos.delete`). If the old
+old and new titles are recorded in `replace_plan.json`) and later given the old `publish_at`, and the order is fixed: upload private, recheck the old live, delete the old (`videos.delete`), schedule the
+new at the old `publish_at`, swap the ledger entry to the new id (title and slot too), then book the store. If the old
 video went public meanwhile it is kept, nothing is uploaded, and `replace_plan.json` records
 `kept_live`. A delete that fails is logged as `REPLACE-OLD-UNDELETED`; a 404 on it counts as deleted. The new
 id is written to the plan the moment `videos.insert` returns. The recheck before the delete decides
 three ways: the old is provably public or too close, so the new is deleted and the LF abandoned;
 the lookup errored (including a quota error), so nothing is deleted, an incident opens and the next
 entry retries; the old is already gone, so the replace continues. The new video is deleted only by a
-call that has just proven the old one exists. If the slot is within 6 h by the time the old is
-deleted, no past `publishAt` is sent: the new stays private in state `slot_passed` with an incident
-and needs a new slot. Thumbnails go only on a new video that is scheduled or done, once. A plan run
+call that has just proven the old one exists. After the old is deleted the slot counts as
+passed only when it is within `REPLACE_SLOT_PASSED_MARGIN_MIN` (5 min) of now; a slot an hour ahead is
+scheduled as planned. A truly passed slot is rebooked automatically at Waypost's next free slot
+(`seo_slots.next_free_slot` over the same ledger and `schedule.sqlite3`, no `publishAt` in the past,
+never two videos in a slot) with a `slot_rebooked` incident that resolves at `done`; if nothing is free
+the new stays private in `slot_passed` with an incident and every later entry retries it. Thumbnails go only on a new video that is scheduled or done, once. A plan run
 is exempt from the Drive-manifests rule (it queues no shorts), its quota projection counts only the
 plan LFs still to insert, and Phase D fails with `REPLACE-UNFINISHED` plus a `replace_scheduled_partial`
 incident while any plan LF is neither `done` nor `abandoned`. Every replace refusal or partial
 failure (`REPLACE-REOPEN-REFUSED`, `REPLACE-OLD-UNDELETED`, an abandoned LF, a failed schedule, a
 title-gate refusal, a restore that failed, a lookup error on the old video, and a publish claim
-that closed `complete` on the kept receipts while a replaced LF is not `done`) opens a
-`replace_scheduled_partial` incident, shown by `gomoveshift status --json`; none is auto-resolved. The new video's playlist
-comes from the normal metadata path, not the old record's, and shorts follow their normal per-LF
-Drive upload; neither is changed by the flag.
+closed on a replace with an unfinished LF, a deferred pre-upload check) opens a
+`replace_scheduled_partial` incident per LF, shown by `gomoveshift status --json`; each closes itself
+when its LF reaches `done` or `abandoned` (`abandoned` and `new_undeleted` stay open on an abandoned
+LF), and the drive-level ones when nothing is left. Nothing waits for a person: `health check` closes
+a claim whose plan has an unfinished LF `failed` (an abandoned LF is terminal, so that closes
+`complete`), and `health backlog` republishes a failed drive, which re-enters Phase D and resumes each LF
+from its state, spaced by the heal retry backoff (1 h doubling, capped at 24 h). The new video is filed in
+the old record's `playlist_id`, falling back to the metadata-resolved playlist when the old record has none.
+`upload_if_needed` flushes the checkpoint right after `videos.insert` on both of its branches, so the new
+id is in the plan even though a replace passes no `config`. Shorts follow their normal per-LF Drive
+upload, unchanged by the flag. If the real reopen of the store row raises (a locked database), it is
+retried; if it still fails the audit already running keeps its fresh dirs and an incident names the
+`_superseded/<project>-<stamp>` run holding the old uploads, from which a repeat of `--replace-scheduled`
+plans. The quality gate runs beside the replace check, so a quality failure is not hidden by it.
 Two checks keep the replace consistent. `health publish` refuses a drive whose output dir holds a
 `replace_plan.json` when the render's long-form count differs from the plan's total (kept plus
 replaced): a different split would upload other content under the old titles and slots, and the

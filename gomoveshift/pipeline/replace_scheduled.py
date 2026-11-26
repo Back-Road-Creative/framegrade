@@ -19,16 +19,16 @@ the plan under ``progress`` (written atomically BEFORE each external call and af
                 video, ``abandoned``. An ``error`` DEFERS (stays uploaded, incident, retried next
                 entry); ``gone`` (the old is already deleted) moves on to ``old_deleted``
     old_deleted delete the old (a 404 counts as deleted); set its publishAt (tz-aware) on the NEW
-                video unless that slot is now within REPLACE_MARGIN_H (then ``slot_passed``: the
-                new stays private, incident), file it in the old record's playlist, swap the
+                video unless that slot is within REPLACE_SLOT_PASSED_MARGIN_MIN of now (then it is rebooked at
+                the next free slot, else ``slot_passed``: the new stays private, incident), file it in the old record's playlist, swap the
                 ledger id, book the store
     scheduled   -> ``done`` once everything is recorded
 
 The one invariant: the NEW video is deleted only by a call that has just proved the OLD one exists.
 
 Every Phase D entry resumes each plan LF from its state before any upload
-(``resume_replacements``); a failed delete or swap is retried. A passed slot is never rescheduled
-under a plan (the old video is kept). Kept (public) LFs get no insert, booking, shorts, Metricool
+(``resume_replacements``); a failed delete or swap is retried, and ``slot_passed`` is retried too.
+A passed slot is rebooked through ``rebook`` (Waypost's allocator), never published at once. Kept (public) LFs get no insert, booking, shorts, Metricool
 or superlong emission, and replaced LFs get no new shorts/Metricool/superlong either.
 """
 
@@ -48,13 +48,20 @@ PENDING, UPLOADED, OLD_DELETED, SCHEDULED, DONE, ABANDONED, SLOT_PASSED = (
 logger = logging.getLogger(__name__)
 
 #: The ``health`` incident kind every replace refusal or partial failure opens (``gomoveshift
-#: status --json`` lists it under ``incidents.open``); nothing here resolves or deletes one.
+#: status --json`` lists it under ``incidents.open``); ``resolve_incidents`` closes a row when its LF
+#: finishes.
 INCIDENT_KIND = "replace_scheduled_partial"
 REPLACE_PLAN_FILENAME = "replace_plan.json"
 REPLACE_PLAN_SCHEMA = "replace-scheduled/1"
 #: A scheduled upload is replaced only while its ``publishAt`` is at least this far ahead: the
 #: re-render takes hours, and a video that goes public mid-render must never be deleted.
 REPLACE_MARGIN_H = 6
+#: After the old video is deleted the slot counts as passed only this close to now (minutes): a
+#: slot even an hour ahead is scheduled, never rebooked or left private.
+REPLACE_SLOT_PASSED_MARGIN_MIN = 5
+#: Codes that stop being a problem when the LF finishes; ``abandoned`` (the replace did not
+#: happen) and ``new_undeleted`` (a private leftover to delete) stay open on an abandoned LF.
+_KEEP_OPEN_ON_ABANDON = ("abandoned", "new_undeleted")
 #: ``{video_id: state}`` for the ids asked about; ``"scheduled"`` is a private video with a future
 #: ``publishAt`` (``playlist_reconciler.fetch_video_privacy``); an id absent is deleted.
 LiveStatus = Callable[[list], Mapping[str, str]]
@@ -87,6 +94,39 @@ def record_incident(drive: str, code: str, detail: str, *, lf: Optional[int] = N
         logger.exception("REPLACE-INCIDENT-NOT-WRITTEN %s %s: %s", drive, code, detail)
 
 
+def resolve_incidents(drive: str, *, lf: Optional[int] = None, keep: Tuple[str, ...] = (), drive_level: bool = False, incidents_dir: Optional[Path] = None) -> int:  # fmt: skip
+    """Resolve this drive's open ``INCIDENT_KIND`` rows for ``lf`` (all its codes but ``keep``), or
+    with ``drive_level`` the rows that carry no LF. Returns how many it closed; never raises."""
+    closed = 0
+    try:
+        from ..health.store import (  # fmt: skip
+            default_data_root,
+            default_incidents_dir,
+            safe_name,
+            utc_iso,
+            write_row,
+        )
+
+        inc = Path(incidents_dir) if incidents_dir else default_incidents_dir(default_data_root())
+        for path in sorted(inc.glob(f"{INCIDENT_KIND}_{safe_name(drive)}_*.json")):
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(row, dict) or row.get("resolved_at") or row.get("drive") != drive:
+                continue
+            if row.get("code") in keep or (row.get("lf") is None) != drive_level:
+                continue
+            if not drive_level and row.get("lf") != lf:
+                continue
+            row["resolved_at"] = utc_iso()
+            write_row(inc, row)
+            closed += 1
+    except Exception:  # noqa: BLE001
+        logger.exception("REPLACE-INCIDENT-NOT-RESOLVED %s lf=%s", drive, lf)
+    return closed
+
+
 def unfinished(plan: Mapping[str, Any]) -> Dict[int, str]:
     """``{lf: state}`` of every replaced LF whose replacement is not ``done`` (an abandoned LF
     kept its old video: the replace did not happen)."""
@@ -107,7 +147,9 @@ def _when(raw: Any) -> Optional[datetime]:
 def _is_not_found(exc: BaseException) -> bool:
     """A 404 from ``videos.delete``: the video is already gone, which is what was asked for."""
     status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)  # fmt: skip
-    return status == 404 or re.search(r"\b404\b|notFound", str(exc)) is not None
+    if status is not None:  # an explicit HTTP status is the answer: a 403 that mentions 404 is not
+        return status == 404
+    return re.search(r"\b404\b|notFound", str(exc)) is not None
 
 
 def unfinished_lfs(plan: Mapping[str, Any]) -> Dict[int, str]:
@@ -264,8 +306,9 @@ def check_old(yt: Any, old: Mapping[str, Any], now: datetime, margin_h: float = 
     return "ok", ""
 
 
-def swap_ledger_video_id(ledger_path: Path, old_id: str, new_id: str) -> bool:
-    """Point the content ledger's entry for ``old_id`` at ``new_id`` (same slot)."""
+def swap_ledger_video_id(ledger_path: Path, old_id: str, new_id: str, *, title: Optional[str] = None, slot: Optional[datetime] = None) -> bool:  # fmt: skip
+    """Point the content ledger's entry for ``old_id`` at ``new_id``: the old slot, or ``slot`` when
+    the LF was rebooked, and the new title when given (the entry now describes the new video)."""
     from .content_ledger import ContentLedger, _ledger_lock
 
     with _ledger_lock(ledger_path):
@@ -273,6 +316,13 @@ def swap_ledger_video_id(ledger_path: Path, old_id: str, new_id: str) -> bool:
         hits = [e for e in ledger.entries if e.video_id == old_id]
         for entry in hits:
             entry.video_id = new_id
+            if title:
+                entry.title = title
+            if slot is not None:
+                from .schedule_constants import EST
+
+                local = slot.astimezone(EST)
+                entry.date, entry.time = local.strftime("%Y-%m-%d"), local.strftime("%H:%M:%S")
         if hits:
             ledger.save(ledger_path)
     return bool(hits)
@@ -309,14 +359,19 @@ def abandon(yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: 
     save_state(state)
     note_kept_live(plan_dir, lf, why)
     set_progress(plan_dir, lf, state=ABANDONED, why=why, new_deleted=new_gone)
+    resolve_incidents(Path(plan_dir).name, lf=lf, keep=_KEEP_OPEN_ON_ABANDON)  # fmt: skip
 
 
 def advance(
     yt: Any, *, lf: int, old: Mapping[str, Any], plan_dir: Path, state: Any, save_state: Callable,
     now: datetime, ledger_path: Path, book: Callable[[dict], None], metadata: Optional[dict] = None,
-    config: Any = None,
+    config: Any = None, rebook: Optional[Callable[[datetime], Optional[datetime]]] = None,
 ) -> str:  # fmt: skip
     """Move one LF from its recorded state as far as it will go; returns the state reached.
+
+    ``rebook(now)`` returns the next free slot (Waypost's allocator) for an LF whose slot passed
+    after its old video was deleted; without one the new video stays private (``slot_passed``,
+    retried each entry), never published at once.
 
     Safe to call on every entry: each branch checks the durable state first, and a failed delete or
     swap stays where it is (logged loudly) to be retried."""
@@ -341,19 +396,32 @@ def advance(
                     return UPLOADED
         # "gone": an earlier run deleted it and died before writing the state; the slot is free
         set_progress(plan_dir, lf, state=OLD_DELETED)
-    if progress_map(load_plan(plan_dir)).get(lf, {}).get("state") == OLD_DELETED:
-        when = _when(old.get("publish_at"))
+    st = progress_map(load_plan(plan_dir)).get(lf, {})
+    if st.get("state") in (OLD_DELETED, SLOT_PASSED):
+        when = _when(st.get("slot") or old.get("publish_at"))
         pid = old.get("playlist_id")
         if when is None or (not pid and metadata is None):
             logger.error("REPLACE-UNSCHEDULED lf=%s: new %s needs a publish_at/playlist by hand", lf, new_id)  # fmt: skip
             record_incident(Path(plan_dir).name, "unscheduled", f"LF {lf}: old deleted, new {new_id} needs a publish_at/playlist by hand", lf=lf)  # fmt: skip
             return OLD_DELETED
-        if not st.get("publish_set") and when <= now + timedelta(hours=REPLACE_MARGIN_H):
-            # A past or near publishAt would go public at once (or be rejected): never send one.
-            logger.error("REPLACE-SLOT-PASSED lf=%s: slot %s is within %s h; new %s stays private", lf, when.isoformat(), REPLACE_MARGIN_H, new_id)  # fmt: skip
-            record_incident(Path(plan_dir).name, "slot_passed", f"LF {lf}: slot passed mid-replace ({when.isoformat()}), old deleted, new {new_id} stays private and needs a new slot", lf=lf)  # fmt: skip
-            set_progress(plan_dir, lf, state=SLOT_PASSED)
-            return SLOT_PASSED
+        if not st.get("publish_set") and when <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN):  # fmt: skip
+            # A past publishAt would go public at once (or be rejected): never send one. The old
+            # video is gone, so the LF takes the next free slot, booked as any other LF.
+            nxt = None
+            try:
+                nxt = rebook(now) if rebook is not None else None
+            except Exception:  # noqa: BLE001
+                logger.exception("REPLACE-REBOOK-FAILED lf=%s", lf)
+            if nxt is not None and nxt.tzinfo is None:
+                nxt = nxt.replace(tzinfo=timezone.utc)
+            if nxt is None or nxt <= now + timedelta(minutes=REPLACE_SLOT_PASSED_MARGIN_MIN):
+                logger.error("REPLACE-SLOT-PASSED lf=%s: slot %s passed, no free slot yet; new %s stays private, retried next entry", lf, when.isoformat(), new_id)  # fmt: skip
+                record_incident(Path(plan_dir).name, "slot_passed", f"LF {lf}: slot passed mid-replace ({when.isoformat()}), old deleted, new {new_id} stays private until the next free slot is found; retried next entry", lf=lf)  # fmt: skip
+                set_progress(plan_dir, lf, state=SLOT_PASSED)
+                return SLOT_PASSED
+            record_incident(Path(plan_dir).name, "slot_rebooked", f"LF {lf}: slot {when.isoformat()} passed mid-replace; new {new_id} rebooked at the next free slot {nxt.isoformat()}", lf=lf)  # fmt: skip
+            set_progress(plan_dir, lf, slot=nxt.isoformat(), rebooked_from=when.isoformat(), state=OLD_DELETED)  # fmt: skip
+            when, st = nxt, {**st, "slot": nxt.isoformat()}
         try:
             if not st.get("publish_set"):
                 yt.update_privacy(new_id, privacy="private", publish_at=when)
@@ -367,7 +435,7 @@ def advance(
                     yt.add_to_playlist(new_id, pid)  # lists first: a replay never files it twice
                 set_progress(plan_dir, lf, playlist_set=True, playlist_id=pid)
             if not st.get("ledger_swapped"):
-                swap_ledger_video_id(ledger_path, old["video_id"], new_id)
+                swap_ledger_video_id(ledger_path, old["video_id"], new_id, title=st.get("new_title"), slot=when if st.get("slot") else None)  # fmt: skip
                 set_progress(plan_dir, lf, ledger_swapped=True)
         except Exception:  # noqa: BLE001
             logger.error("REPLACE-SCHEDULE-FAILED lf=%s: new %s retried next entry", lf, new_id, exc_info=True)  # fmt: skip
@@ -378,11 +446,12 @@ def advance(
     if cur.get("state") == SCHEDULED:
         rec = dict(state.youtube_uploads.get(lf) or {})
         rec.update(video_id=new_id, url=f"https://youtu.be/{new_id}", title=rec.get("title") or old.get("title"),  # fmt: skip
-                   publish_at=_when(old.get("publish_at")).isoformat(),
+                   publish_at=_when(cur.get("slot") or old.get("publish_at")).isoformat(),
                    playlist_id=cur.get("playlist_id") or old.get("playlist_id"))  # fmt: skip
         state.youtube_uploads[lf] = rec
         save_state(state)
         book(rec)
         set_progress(plan_dir, lf, state=DONE)
+        resolve_incidents(Path(plan_dir).name, lf=lf)  # every code this LF opened is over
         return DONE
     return cur.get("state", PENDING)

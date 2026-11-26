@@ -88,7 +88,7 @@ def test_phase_d_does_not_succeed_while_a_plan_lf_is_unfinished(tmp_path, monkey
     with pytest.raises(RuntimeError, match="REPLACE-UNFINISHED"):
         _assert_replace_finished(Path(state["output_base"]))
     (inc,) = _incidents("unfinished")
-    assert f"LF 2 {lf_state}" in inc["error"]
+    assert f"LF 2 not done ({lf_state})" in inc["error"] and inc["lf"] == 2
 
 
 @pytest.mark.parametrize("lf_state", [rs.DONE, rs.ABANDONED])
@@ -104,6 +104,12 @@ def test_a_finished_or_abandoned_plan_is_a_clean_phase(tmp_path, lf_state):
 def test_phase_d_run_raises_and_opens_an_incident_for_a_stopped_lf(tmp_path, monkeypatch):
     state = _build_state(tmp_path, num_lfs=2)
     _plan(state, rs.SLOT_PASSED, "new2")
-    with pytest.raises(RuntimeError, match="REPLACE-UNFINISHED"):
+    # the entry's resume would now retry a SLOT_PASSED LF (see test_replace_durable_finish); hold it
+    # stopped here so this test keeps pinning the end-of-run check on its own
+    with (
+        patch("gomoveshift.pipeline.drive_phases.external_systems_coordinator.resume_replacements"),
+        pytest.raises(RuntimeError, match="REPLACE-UNFINISHED"),
+    ):
         _run(state, monkeypatch)
-    assert _incidents("unfinished")
+    (inc,) = _incidents("unfinished")
+    assert inc["lf"] == 2

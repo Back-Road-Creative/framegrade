@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -58,6 +59,9 @@ LEASE_NAME = "gms-backlog-launch"
 #: move is a rename on one device); ``staged_sources`` never reads under it.
 SUPERSEDED_DIR = "_superseded"
 SUPERSEDE_RECORD = "superseded.json"
+#: Pauses between the attempts at Waypost's reopen (a locked store is transient; the audit job is
+#: already running, so the call is retried here rather than given up on).
+_REOPEN_RETRY_S = (1.0, 2.0)
 #: The two ``no-auto-resume`` texts health backlog writes when it gives a drive up (``_hold_recipes``):
 #: that run is dead by record, so ``cleanup --abandoned`` reclaims it as it does a superseded one.
 RETIRED_HOLD_PREFIX = "retired by health backlog: "
@@ -477,11 +481,33 @@ def upload_receipts(output_dir: Optional[str]) -> Dict[int, Tuple[str, datetime]
     return found
 
 
+def replace_unfinished(output_dir: Optional[str]) -> Dict[int, str]:
+    """``{lf: state}`` of the replaced LFs under ``output_dir``'s plan that are neither done nor
+    abandoned (``{}`` when there is no plan)."""
+    if not output_dir:
+        return {}
+    return replace_scheduled_mod.unfinished_lfs(read_replace_plan(Path(output_dir)))
+
+
+def _publish_backoff_s(jobs_dir: Path, project: str, now: datetime) -> int:
+    """Seconds until a ``gms-publish-<project>`` job may be launched again: the heal retry backoff
+    (``heal._retry_wait_s``) after the newest of the project's publish jobs."""
+    from .heal import _retry_wait_s
+
+    name = PUBLISH_JOB_PREFIX + project
+    made = [float(r.get("created_at") or 0) for r in _job_records(Path(jobs_dir)) if r.get("name") == name]  # fmt: skip
+    if not made:
+        return 0
+    return max(0, int(max(made) + _retry_wait_s(len(made)) - now.timestamp()))
+
+
 def _uploaded(output_dir: Optional[str]) -> bool:
     """True when Phase D's receipt under ``output_dir`` (``youtube_uploads.json`` there or one
     level down) names a video id: the drive is published, so it neither holds nor covers a slot
-    whatever its store status says. Unreadable or empty counts as not uploaded."""
-    if not output_dir:
+    whatever its store status says. Unreadable or empty counts as not uploaded. A
+    ``--replace-scheduled`` drive whose plan still has an unfinished LF is NOT published: its kept
+    receipts must not close the claim ``complete`` or refuse the Phase D that finishes it."""
+    if not output_dir or replace_unfinished(output_dir):
         return False
     out = Path(output_dir)
     for receipt in [out / "youtube_uploads.json", *sorted(out.glob("*/youtube_uploads.json"))]:
@@ -522,6 +548,19 @@ def _subset(subset: Path, sources: Sequence[str], *, create: bool) -> Optional[s
     return None
 
 
+def _superseded_uploads(project, out: Path) -> Optional[Path]:
+    """The newest ``backlog-supersede/2`` run set aside for ``project`` that holds upload records."""
+    for dst in sorted((out.parent / SUPERSEDED_DIR).glob(f"{project}-*"), reverse=True):
+        try:
+            record = json.loads((dst / SUPERSEDE_RECORD).read_text())
+            held = json.loads((dst / "youtube_uploads.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("schema") == "backlog-supersede/2" and held:
+            return dst / "youtube_uploads.json"
+    return None
+
+
 def _uploads_refusal(project, out: Path, replace: Optional[Dict[str, Any]] = None) -> str:
     """Refusal text when ``out`` (``project``'s output dir) holds, or may hold, upload records.
 
@@ -529,6 +568,10 @@ def _uploads_refusal(project, out: Path, replace: Optional[Dict[str, Any]] = Non
     when each is public or live-confirmed scheduled; the replacement plan lands in
     ``replace["plan"]``."""
     uploads = out / "youtube_uploads.json"
+    if replace is not None and not uploads.exists() and replace_unfinished(str(out)):
+        # a replace attempt that died after the run was set aside (its fresh dir holds the plan
+        # and no records): the records are in the set-aside run, so a retry plans from them
+        uploads = _superseded_uploads(project, out) or uploads
     if uploads.exists():
         try:
             held = json.loads(uploads.read_text())
@@ -1146,8 +1189,13 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         return {**res, "reason": "a drive is running; one heavy drive at a time"}
     # a passed audit whose publish failed (``health check`` closed the claim ``failed``) is
     # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork)
-    for proj in sorted(d.project for d in mine if d.status == "failed" and d.project in listed):
+    for d in sorted((d for d in mine if d.status == "failed" and d.project in listed), key=lambda r: r.project):  # fmt: skip
+        proj = d.project
         if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
+            if replace_unfinished(d.output_dir) and (wait := _publish_backoff_s(jobs_dir, proj, now)):  # fmt: skip
+                # a replace that has not finished is retried with the heal backoff, never hot
+                res.setdefault("publish_backoff", []).append({"project": proj, "wait_s": wait})
+                continue
             return _publish_audited(res, proj, publish, dry_run)
     relaunch, auto = None, False
     for proj in auditing:
@@ -1359,18 +1407,36 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         )
     except PreflightBlockedError as exc:
         return refuse(str(exc))
-    ok, detail = launcher(argv, str(Path(code_root) / SERVICE_DIR), env)
+    except Exception as exc:  # noqa: BLE001 -- nothing launched: put the drive back, whatever raised
+        logger.exception("BACKLOG-PREFLIGHT-RAISED %s", row.project)
+        return refuse(f"preflight raised {type(exc).__name__}: {exc}")
+    try:
+        ok, detail = launcher(argv, str(Path(code_root) / SERVICE_DIR), env)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("BACKLOG-LAUNCHER-RAISED %s", row.project)
+        ok, detail = False, f"{type(exc).__name__}: {exc}"
     if not ok:
         return refuse(f"launch failed: {detail}")
     if reopen:  # register_ready raises on a complete row: Waypost's own reopen replaces it
         reopen_kw["now"] = datetime.now(timezone.utc)  # not the tick's start: the launch took time
-        why = store.reopen_for_replace(
-            row.project, plan_digest=plan_digest(replace["plan"], out_dir), dry_run=False, **reopen_kw
-        )  # fmt: skip
-        if why:  # the audit is already running on the fresh dirs: they stay, a human reopens it
+        why = ""
+        for pause in (*_REOPEN_RETRY_S, None):
+            try:
+                why = store.reopen_for_replace(
+                    row.project, plan_digest=plan_digest(replace["plan"], out_dir), dry_run=False, **reopen_kw
+                )  # fmt: skip
+                break
+            except Exception as exc:  # noqa: BLE001 -- a locked store, anything: never an uncaught crash
+                why = f"{type(exc).__name__}: {exc}"
+                logger.exception("REPLACE-REOPEN-RAISED %s", row.project)
+                if pause is not None:
+                    time.sleep(pause)
+        if why:  # the audit is already running on the fresh dirs: they stay (undoing the renames
+            # would pull them from under it), and the incident names where the old run went
             logger.error("REPLACE-REOPEN-REFUSED: %s: %s (stages already set aside, audit launched)", row.project, why)  # fmt: skip
-            msg = f"launched the audit but Waypost refused to reopen {row.project}: {why}"
-            replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"{msg}; the store row is still complete and the replace plan is in {out_dir}")  # fmt: skip
+            msg = f"launched the audit but Waypost could not reopen {row.project}: {why}"
+            aside = next((m["to"] for m in res["supersede"]["moves"] if m["from"] == str(out_dir)), "")  # fmt: skip
+            replace_scheduled_mod.record_incident(row.project, "reopen_refused", f"{msg}; the store row is still complete and the replace plan is in {out_dir}; the set-aside run holding the old uploads is {aside} ({SUPERSEDED_DIR}/<project>-<stamp>). Recovery: run `health backlog --supersede {row.project} --replace-scheduled` again, it plans from that run's uploads")  # fmt: skip
             return {**res, "action": "refused", "reason": msg}
     else:
         register(

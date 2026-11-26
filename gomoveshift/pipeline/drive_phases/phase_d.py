@@ -78,15 +78,21 @@ def _plan_manifests(*, state, **_kwargs):
     return dict(state.upload_manifests or {}), None
 
 
-def _assert_replace_finished(output_base: Path) -> None:
-    """A plan run is not a success while a plan LF is neither ``done`` nor ``abandoned``: open a
-    ``replace_scheduled_partial`` incident and raise, so the next entry resumes it."""
+def _assert_replace_finished(output_base: Path, quality: Optional[Exception] = None) -> None:
+    """A plan run is not a success while a plan LF is neither ``done`` nor ``abandoned``: open one
+    ``replace_scheduled_partial`` incident per LF and raise, so the next entry resumes it (the
+    publish retry re-enters Phase D). ``quality`` is a quality-gate failure that must not be hidden
+    behind this one. With nothing left the drive-level incidents close."""
+    name = Path(output_base).name
     left = replace_scheduled.unfinished_lfs(replace_scheduled.load_plan(output_base))
     if not left:
+        replace_scheduled.resolve_incidents(name, drive_level=True)
         return
     detail = ", ".join(f"LF {lf} {st}" for lf, st in sorted(left.items()))
-    replace_scheduled.record_incident(Path(output_base).name, "unfinished", f"Phase D ended with replaced LFs not done: {detail}")  # fmt: skip
-    raise RuntimeError(f"REPLACE-UNFINISHED: replaced LFs not done ({detail}); see the replace_scheduled_partial incident")  # fmt: skip
+    for lf, st in sorted(left.items()):
+        replace_scheduled.record_incident(name, "unfinished", f"Phase D ended with LF {lf} not done ({st}); all: {detail}", lf=lf)  # fmt: skip
+    also = f"; the quality gate also failed: {quality}" if quality is not None else ""
+    raise RuntimeError(f"REPLACE-UNFINISHED: replaced LFs not done ({detail}); see the replace_scheduled_partial incident{also}")  # fmt: skip
 
 
 def _claim_native_only() -> bool:
@@ -1762,11 +1768,19 @@ class PhaseD:
         # into ``assert_phase_d_title_quality``, not here.
         from ..quality_gates import assert_phase_d_quality
 
+        quality: Optional[Exception] = None
+        try:
+            assert_phase_d_quality(
+                state, drive_plan, consolidated_csv_path, replace_plan=bool(replace_plan)
+            )
+        except Exception as exc:  # noqa: BLE001 -- re-raised below, after the replace check
+            if not replace_plan:
+                raise
+            quality = exc
         if replace_plan:
-            _assert_replace_finished(output_base)
-        assert_phase_d_quality(
-            state, drive_plan, consolidated_csv_path, replace_plan=bool(replace_plan)
-        )
+            _assert_replace_finished(output_base, quality)
+        if quality is not None:
+            raise quality
 
 
 def _partition_shorts_slots(
