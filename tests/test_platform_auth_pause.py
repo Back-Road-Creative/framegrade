@@ -25,8 +25,10 @@ from gomoveshift.publishing.handlers import (
     PlatformAuthPausedError,
     TikTokCredentials,
     build_handlers,
+    make_photo_handler,
 )
 from gomoveshift.publishing.instagram_adapter import InstagramAuthBlockedError
+from gomoveshift.publishing.photo_adapter import PhotoAuthBlockedError
 from gomoveshift.publishing.queue import (
     AUTH_BLOCKED_PAUSE_REASON,
     AUTH_PAUSED_ERROR_CLASS,
@@ -124,6 +126,21 @@ def test_an_auth_error_pauses_the_platform_and_leaves_every_row_queued(
     # Resuming the platform (after re-authorizing) resolves the incident.
     resume_platform(conn, platform)
     assert auth_blocked_incidents(tmp_path / "seo" / "social_queue.sqlite3", NOW) == []
+
+
+@pytest.mark.parametrize("platform", ["facebook", "instagram"])
+def test_a_photo_post_with_a_refused_token_pauses_the_platform_too(conn, tmp_path, platform):
+    ids = [enqueue(conn, "example-2026-08", i, platform, "hash-a") for i in range(ROWS)]
+    adapter = _AuthFailsAdapter(PhotoAuthBlockedError)
+    handler = make_photo_handler(adapter, conn, _loader, lambda media: "https://img.invalid/x.jpg")
+
+    result = drain_queue(conn, {platform: handler}, now=NOW, incidents_dir=tmp_path / "incidents")
+
+    assert len(adapter.calls) == 1 and result.failed_permanent == 0
+    rows = [dict(conn.execute("SELECT * FROM deliveries WHERE id=?", (i,)).fetchone()) for i in ids]
+    assert [r["status"] for r in rows] == ["queued"] * ROWS
+    assert rows[0]["error_class"] == AUTH_PAUSED_ERROR_CLASS
+    assert _pause_reason(conn, platform).startswith(AUTH_BLOCKED_PAUSE_REASON + " ")
 
 
 def test_the_paused_error_class_name_is_the_one_resume_looks_for():
