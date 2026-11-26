@@ -46,7 +46,7 @@ from . import drives as drive_jobs
 from . import resume, retry_policy
 from . import stage_owners as owners_mod
 from .cadence import COVERAGE_HORIZON_H, _aware
-from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner
+from .heal import _STALL_S, SERVICE_DIR, _job_records, bind_to_code_root, job_runner, refresh_gpx
 from .heal import wrap_name as heal_job_name
 from .resume import HOLD_NAME, is_held
 from .store import load_all, new_incident, safe_name, utc_iso, write_row
@@ -929,10 +929,12 @@ def _publish_audited(res, project: str, publish, dry_run: bool) -> Dict[str, Any
 
 
 def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_dir, dry_run,
-                      launcher, installed_version, latest_version, why=None):  # fmt: skip
+                      launcher, installed_version, latest_version, why=None,
+                      manifest_row=None):  # fmt: skip
     """Resume a drive whose OST audit was confirmed (or, with ``why``, parked at the gate under
     another version), from its own recipe, under its backlog job name; the store row is already
-    ``auditing``, so nothing is registered."""
+    ``auditing``, so nothing is registered. A recipe GPX that no longer exists takes the backlog
+    row's (``heal.refresh_gpx``), as heal's own resume does."""
     lead = why or f"{project}: OST audit confirmed"
     recipes = sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json"))
     if any(is_held(r) for r in recipes):
@@ -943,6 +945,9 @@ def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_di
     bound, cwd = bind_to_code_root(code_root, recipe["argv"])
     if bound is None:
         return {**res, "action": "refused", "reason": f"{project}: {cwd}"}
+    bound, refreshed = refresh_gpx(bound, manifest_row)
+    if refreshed:
+        res["gpx_refreshed"] = refreshed
     bound += [f for f in ("--skip-upload", "--no-youtube-upload") if f not in bound]
     flag = "--output-dir"
     out_dir = Path(bound[bound.index(flag) + 1]) if flag in bound[:-1] else Path(output_root) / project  # fmt: skip
@@ -1169,10 +1174,11 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             res["project"] = proj
             if not gate[1]:
                 return {**res, "reason": gate[0]}
+            row = next((r for r in rows if r.project == proj), None)
             return _resume_confirmed(res, proj, stages_root, output_root, code_root,
                                      jobs_dir, dry_run, launcher, installed_version,
-                                     latest_version,
-                                     why=gate[2])  # fmt: skip
+                                     latest_version, why=gate[2],
+                                     manifest_row=row)  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
             return _publish_audited(res, proj, publish, dry_run)
         if (

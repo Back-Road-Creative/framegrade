@@ -4,6 +4,7 @@ write, clock) is injected; nothing here launches a real job."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1792,6 +1793,46 @@ def test_a_confirmed_ost_audit_resumes_the_waiting_drive_from_its_stages(tmp_pat
     )
     assert env["GMS_INTERMEDIATE_DIR"] == str(rig.stages / "day-a")
     assert not rig.registered  # the store row is already ``auditing``
+
+
+# 2026-11-26: a GPX rename (gomoveshiftsite#334) left Kerry-to-Cork, Old Head and Galley Head's
+# recipes naming gone files. Heal's resume already swaps in the backlog row's GPX (#614); the
+# confirmed-audit resume must do the same, or it relaunches a drive that refuses its own argv.
+def test_a_confirmed_resume_takes_the_rows_gpx_when_the_recipes_is_gone(tmp_path):
+    rig = Rig(tmp_path)
+    renamed = tmp_path / "gpx" / "day14.gpx"
+    renamed.parent.mkdir()
+    renamed.write_text("<gpx/>")
+    rig.rows[0] = dataclasses.replace(rig.rows[0], day_gpx=str(renamed))
+    stages, sidecar = _waiting(rig)
+    recipe = json.loads((stages / "resume.json").read_text())
+    recipe["argv"] += ["--day-gpx", str(tmp_path / "gpx" / "enhanced-day13.gpx")]
+    (stages / "resume.json").write_text(json.dumps(recipe))
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run()
+    assert res["action"] == "launched", res
+    ((argv, _cwd, _env),) = rig.launches
+    assert argv[argv.index("--day-gpx") + 1] == str(renamed)
+    assert res["gpx_refreshed"] == {"--day-gpx": [str(renamed)]}
+
+
+def test_a_confirmed_resume_keeps_a_recipe_gpx_that_still_exists(tmp_path):
+    rig = Rig(tmp_path)
+    kept = tmp_path / "gpx" / "day13.gpx"
+    kept.parent.mkdir()
+    kept.write_text("<gpx/>")
+    other = tmp_path / "gpx" / "day14.gpx"
+    other.write_text("<gpx/>")
+    rig.rows[0] = dataclasses.replace(rig.rows[0], day_gpx=str(other))
+    stages, sidecar = _waiting(rig)
+    recipe = json.loads((stages / "resume.json").read_text())
+    recipe["argv"] += ["--day-gpx", str(kept)]
+    (stages / "resume.json").write_text(json.dumps(recipe))
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run()
+    ((argv, _cwd, _env),) = rig.launches
+    assert argv[argv.index("--day-gpx") + 1] == str(kept)  # the checkpoint was built from it
+    assert "gpx_refreshed" not in res
 
 
 def test_a_confirmation_older_than_the_wait_never_resumes_it_again(tmp_path):
