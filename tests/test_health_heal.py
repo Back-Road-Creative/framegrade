@@ -1370,3 +1370,14 @@ def test_default_manifest_row_reads_the_backlog_row_of_the_heals_origin(monkeypa
     row = {"drive": "gms-heal-gms-backlog-demo-drive-a-abc1234"}
     assert retry_policy.default_manifest_row(row) is rows[0]
     assert retry_policy.default_manifest_row({"drive": "elsewhere"}) is None
+
+
+def test_heal_refuses_through_the_shared_install_pending_helper(tmp_path):
+    rig = Rig(tmp_path)
+    rig.pinned, rig.installed = "0.3.167", "0.3.163"
+    rig.run()
+    assert rig.launches == []
+    assert rig.row()["resume_attempts"][0]["reason"] == heal.install_pending("0.3.163", "0.3.167")
+    assert heal.install_pending("0.3.167", "0.3.167") is None
+    assert heal.install_pending(None, "0.3.167") is None
+    assert heal.install_pending("0.3.163", None) is None

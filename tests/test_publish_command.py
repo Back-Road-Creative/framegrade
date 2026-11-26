@@ -471,3 +471,32 @@ def test_a_replace_plan_with_a_matching_count_still_publishes(tmp_path):
     out.mkdir(parents=True, exist_ok=True)
     (out / "replace_plan.json").write_text(json.dumps(plan))
     assert rig.run()["action"] == "launched"
+
+
+# 2026-11-26: a pinned release the venv lacks must not publish on the old code either: Phase D
+# runs the service venv and keeps the staging sync's install deferred, like a render does.
+def _publish(rig, installed):
+    (rig.tmp / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0.3.167"\n')
+    return publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=False,
+        drive_running=lambda jobs: False, launcher=rig.launcher,
+        installed_version=lambda python: installed,
+    )  # fmt: skip
+
+
+def test_publish_waits_while_the_pinned_version_is_not_installed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit()
+    before = rig.snapshot()
+    res = _publish(rig, "0.3.163")
+    assert res["action"] == "refused", res
+    assert res["reason"] == "install pending: checkout pins 0.3.167, venv has 0.3.163"
+    assert not rig.launches and rig.snapshot() == before
+
+
+@pytest.mark.parametrize("installed", ["0.3.167", None])
+def test_publish_launches_on_an_equal_or_unknown_version(tmp_path, installed):
+    rig = Rig(tmp_path)
+    rig.audit()
+    assert _publish(rig, installed)["action"] == "launched"

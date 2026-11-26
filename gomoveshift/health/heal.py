@@ -311,6 +311,18 @@ def default_pinned_version(code_root: Path) -> Optional[str]:
     return version if isinstance(version, str) and version else None
 
 
+def install_pending(installed: Optional[str], pinned: Optional[str]) -> Optional[str]:
+    """Why no render may start now, else None: the code root pins one ``gomoveshift-video``
+    version and the venv that would render holds another. The staging sync defers the install
+    while any run of the service is live, so a launch here would run the old code and hold the
+    install back again; refusing leaves the gap the deferred install lands in. Every launch path
+    (heal's resume, ``health backlog``'s new drive and confirmed resume, ``health publish``) asks
+    this. Both versions must be known: an unknown one is not a reason to hold a render."""
+    if installed and pinned and installed != pinned:
+        return f"install pending: checkout pins {pinned}, venv has {installed}"
+    return None
+
+
 def _default_git_changed(
     code_root: Path,
 ) -> Callable[[str, str, Tuple[str, ...]], Optional[List[str]]]:
@@ -661,8 +673,8 @@ def run_heal(
                 f"pre-flight failed {HEAL_PREFLIGHT_RETRIES}x on this code; "
                 f"retry at {utc_iso(retry_at.timestamp())}"
             )
-        elif pinned and installed and pinned != installed:
-            att["reason"] = f"install pending: checkout pins {pinned}, venv has {installed}"
+        elif pending := install_pending(installed, pinned):
+            att["reason"] = pending
         elif drive_running(jobs_dir):
             att["reason"] = "a drive job is running"
         else:
