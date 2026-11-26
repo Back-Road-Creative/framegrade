@@ -35,6 +35,7 @@ from ...publishing.queue import (
     STATUS_AWAITING_IG_RECONCILE,
     STATUS_AWAITING_MANUAL_PUBLISH,
     STATUS_MISSING_REMOTE,
+    STATUS_NEEDS_OPERATOR,
     TERMINAL_STATUSES,
     log_response,
     open_queue_db,
@@ -196,6 +197,15 @@ def validate_restored_state(conn, credentials_dir, *, now: "Optional[str]" = Non
         overdue = _manual_publish_overdue(row, now)
         if overdue is not None:
             problems.append(overdue)
+        if row["status"] == STATUS_NEEDS_OPERATOR:
+            problems.append(
+                RestoreProblem(
+                    row["id"],
+                    row["platform"],
+                    "needs_operator",
+                    f"parked since {row['updated_at']}: {row['error_detail'] or 'no detail'}",
+                )
+            )
     return problems
 
 
@@ -205,7 +215,9 @@ def validate_restored_state(conn, credentials_dir, *, now: "Optional[str]" = Non
 #: ``manual_publish_overdue`` is a reminder for the human who taps Post, not a
 #: pipeline defect: holding every other short until the operator opens TikTok would turn
 #: one missed tap into a stalled queue.
-_NOT_GATING_KINDS = frozenset({"stale_lease", "manual_publish_overdue"})
+#: ``needs_operator`` names one parked row (it has its own incident); holding
+#: every other short of its project would spread one stuck upload to all.
+_NOT_GATING_KINDS = frozenset({"stale_lease", "manual_publish_overdue", "needs_operator"})
 
 #: Kinds ``publishing-status --validate`` prints without failing: the plan
 #: lags a retitle our own tool made, which the sync command closes. Real drift

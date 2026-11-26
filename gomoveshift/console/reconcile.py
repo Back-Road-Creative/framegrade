@@ -45,7 +45,7 @@ def _state(row: Dict[str, Any]) -> Optional[str]:
         return "uploaded"
     if status == "awaiting_manual_publish":
         return "awaiting_manual"
-    if status in ("awaiting_ig_reconcile", STATUS_MISSING_REMOTE):
+    if status in ("awaiting_ig_reconcile", STATUS_MISSING_REMOTE, "needs_operator"):
         return "unverified"
     if status == "published":
         return pubqueue.published_kind(row)

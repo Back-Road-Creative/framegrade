@@ -693,8 +693,9 @@ changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
 ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
 `delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
-(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
-error, i.e. after it uploads.
+(the error is exempt from `max_attempts`) for up to `dispatch.UNCOUNTED_RETRY_BOUND` (24 h), then
+parks at `needs_operator` and the incident becomes a `delivery_needs_operator` one; the incident
+closes when the row no longer carries the error, i.e. after it uploads.
 
 ## A replaced long-form upload (`relink_replaced_lf`)
 

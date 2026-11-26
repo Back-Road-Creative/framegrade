@@ -80,6 +80,14 @@ class InstagramPublishingLimitError(InstagramRetryableError):
     closed rather than assume quota is fine)."""
 
 
+class InstagramContainerPendingError(InstagramRetryableError):
+    """The container is still processing at the end of the poll. Kept on the
+    row and polled again next pass, outside ``max_attempts`` (the handler maps
+    it to ``dispatch.ReconcilePendingError``): it can still turn ``FINISHED``,
+    and it expires on its own at 24 h, when the row starts over. Never answered
+    with a fresh container while it is ``IN_PROGRESS``: see ``_publish``."""
+
+
 class InstagramPermanentError(InstagramPublishError):  # message names the recovery action
     queue_state = "failed_permanent"
 
@@ -502,7 +510,8 @@ class InstagramShortsAdapter:
         last status read (``FINISHED``, ``PUBLISHED`` or ``EXPIRED``).
         ``ERROR`` raises permanent, naming Meta's status text. Still
         processing when ``CONTAINER_READY_TIMEOUT_S`` runs out raises
-        retryable: the container is kept and the next pass resumes it."""
+        ``InstagramContainerPendingError``: the container is kept and the next
+        pass resumes it, without spending one of the row's ordinary tries."""
         deadline = self._monotonic() + CONTAINER_READY_TIMEOUT_S
         while True:
             status = self._reels.check_container_status(container_id)
@@ -515,7 +524,7 @@ class InstagramShortsAdapter:
                     f"{status.get('status') or 'no status text'} — re-encode and resubmit"
                 )
             if self._monotonic() >= deadline:
-                raise InstagramRetryableError(
+                raise InstagramContainerPendingError(
                     f"media container {container_id} still {code or 'without a status'} after "
                     f"{CONTAINER_READY_TIMEOUT_S}s; the next pass resumes it"
                 )

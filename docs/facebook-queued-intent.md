@@ -63,7 +63,9 @@ the never-finished video every hour for good. Tests:
 `test_a_broken_byte_upload_*`, `test_a_retained_id_*`).
 
 The dispatcher preserves this state beyond normal retry limits, including expired
-worker leases, and keeps the existing retry backoff and lease release. A retained
+worker leases, and keeps the existing retry backoff and lease release, for up to
+`dispatch.UNCOUNTED_RETRY_BOUND` (24 h); then the row parks at `needs_operator`
+with its ID kept and a `delivery_needs_operator` incident. A retained
 ID protects the unknown outcome even if the handler fails before reaching the
 adapter. Ordinary failures without an ID still exhaust their retry budget. Paused
 platforms, privacy checks, validation holds, and existing queue timing remain in
