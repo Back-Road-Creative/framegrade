@@ -31,12 +31,20 @@ from gomoveshift.cli.parser import _build_parser
 from gomoveshift.health.launch import SUPERSEDED_DIR
 
 PY = "/opt/venv/bin/python"
-SRC = "/mnt/d/_gms-sources/nctopa-2026-03-05-rec0063"
+SRC = "mnt/d/_gms-sources/nctopa-2026-03-05-rec0063"  # relative: made under tmp_path below
 OUT = "/mnt/d/GMSVidOutput/nctopa-2026-03-05-rec0063"
 DRIVE_ARGS = [
     "drive", SRC, "--region", "usa", "--ingest-mode", "gopro", "--lf-mode", "full_drive",
     "--output-dir", OUT, "--skip-upload", "--no-youtube-upload", "--no-review", "--no-tmux", "--force",
 ]  # fmt: skip
+
+
+@pytest.fixture(autouse=True)
+def _source_dir(tmp_path, monkeypatch):
+    """The recipes' source dir exists (relative to the cwd the relaunch runs in): a gone one is
+    refused (``heal.refresh_inputs``)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / SRC).mkdir(parents=True)
 
 
 def _recipe(stages: Path, *, env=None, argv=None) -> Path:
@@ -66,7 +74,10 @@ def _one(tmp_path: Path, run: str = "rec0063-signs-resume3") -> Path:
 
 
 def _expand(tmp_path: Path, argv, environ=None):
-    return expand(argv, environ={} if environ is None else environ, stages_root=_root(tmp_path))
+    return expand(
+        argv, environ={} if environ is None else environ, stages_root=_root(tmp_path),
+        manifest_row_fn=lambda row: None,
+    )  # fmt: skip
 
 
 def test_other_commands_and_a_plain_drive_pass_through_untouched(tmp_path):

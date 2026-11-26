@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import cadence, drives
-from .store import code_sha, load_all, utc_iso, write_row
+from .store import code_sha, load_all, new_incident, utc_iso, write_row
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ _EVENTS = {
     "backlog_unlisted_footage": "health_backlog_unlisted_footage",
     "backlog_exclusion_invalid": "health_backlog_exclusion_invalid",
     "seo_feedback_stale": "health_seo_feedback_stale",
+    "install_deferred": "health_install_deferred",
     "social_queue_gap": "health_social_queue_gap",
     "short_text_sync_refused": "health_short_text_sync_refused",
     "short_text_sync_crash": "health_short_text_sync_crash",
@@ -56,6 +58,12 @@ UNATTENDED_AFTER_H = 26
 #: fires on it because every relaunch refreshes it (Courtmacsherry, 2026-11-17..19: ~10 failed
 #: resumes across 9 SHAs with the alarm marked resolved).
 UNATTENDED_AFTER_FAILURES = 3
+
+#: Rule 14: the code root has pinned a ``gomoveshift-video`` version the render venv still lacks
+#: for this long. The staging sync defers the install while a run is live and every launch path
+#: refuses while it is pending (``heal.install_pending``), so the gap normally comes within hours;
+#: past this, something still holds the install back and a released fix is not rendering.
+INSTALL_DEFERRED_AFTER_H = 6
 
 _BACKFILL = ("resume_recipe", "log_path")
 #: Fields of an already-open grouped ``seo_feedback_stale`` row that follow the live finding.
@@ -136,6 +144,13 @@ def _line(row: Dict[str, Any]) -> str:
         return (
             f"{row['n']} settled Shorts in a row are under {row['threshold_views']:g} day-7 views "
             f"(channel median {row['median_views']:g}): {runs}; causes are in the incident row."
+        )
+    if row["kind"] == "install_deferred":
+        return (
+            f"The code root pins gomoveshift-video {row['pinned_version']} but the render venv "
+            f"still has {row['installed_version']} (since {row['pending_since']}): the staging "
+            "sync's deferred install has not landed, so no render or publish launches. Check the "
+            "PIN DEFERRED / VENV DEFERRED sync logs and what is keeping the service live."
         )
     if row["kind"] == "social_queue_gap":
         return (
@@ -551,6 +566,58 @@ def _cadence_rows(
     return found
 
 
+def install_state_path(incidents_dir: Path) -> Path:
+    """Rule 14's one piece of state, beside the incidents dir: when the pending install was
+    first seen (not an incident: never listed or pushed)."""
+    return incidents_dir.parent / f"{incidents_dir.name}.install_pending.json"
+
+
+def default_versions(code_root: Path) -> Tuple[Optional[str], Optional[str]]:
+    """``(installed, pinned)``: the version in the code root's service venv and the one its
+    ``pyproject.toml`` pins, each ``None`` when it cannot be read (heal's own probes)."""
+    from . import heal, retry_policy  # noqa: PLC0415
+
+    python = retry_policy.service_python(code_root)
+    return retry_policy.default_installed_version(python), heal.default_pinned_version(code_root)
+
+
+def install_deferred_rows(
+    versions: Tuple[Optional[str], Optional[str]],
+    state_path: Path,
+    now: datetime,
+    now_iso: str,
+    notes: List[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """Rule 14, or ``None`` (noted) when either version is unknown: that proves nothing, so an
+    open incident stays open. Equal versions clear the clock and close it."""
+    installed, pinned = versions
+    if not installed or not pinned:
+        notes.append(
+            "rule 14 (install_deferred) not evaluated: installed or pinned version unknown"
+        )
+        return None
+    if installed == pinned:
+        state_path.unlink(missing_ok=True)
+        return []
+    try:
+        since = _when(json.loads(state_path.read_text())["since"])
+    except (OSError, ValueError, KeyError, TypeError):
+        since = None
+    if since is None or since > now:
+        since = now
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"since": now_iso}) + "\n")
+    if now - since < timedelta(hours=INSTALL_DEFERRED_AFTER_H):
+        return []
+    return [
+        new_incident(
+            "install_deferred", "install_deferred", "install_deferred.json", now_iso,
+            installed_version=installed, pinned_version=pinned,
+            pending_since=utc_iso(since.timestamp()),
+        )
+    ]  # fmt: skip
+
+
 def _bad_run_rows(
     config: Any, tracking_root: Optional[Path], now: datetime, now_iso: str, notes: List[str]
 ) -> Optional[List[Dict[str, Any]]]:
@@ -659,6 +726,7 @@ def run_check(
     now: Optional[datetime] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
     stamp_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    versions_fn: Optional[Callable[[], Tuple[Optional[str], Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Returns ``{"incidents": open rows, "new": keys written, "pushed": keys pushed,
     "resolved": keys closed, "unreadable": int, "publish_reconciled": [claims closed], "notes": [str]}``. Never raises on bad input."""
@@ -679,6 +747,16 @@ def run_check(
         new_row["failure_fingerprint"] = (stamp_fn or _default_stamp(config, code_root))(new_row)
     reconciled = _reconcile_publishes(config, jobs_dir, notes)
     found = {"drive_failed": drive_rows, **_cadence_rows(config, ledger_path, now, now_iso, notes)}
+    try:
+        versions = (versions_fn or (lambda: default_versions(code_root)))()
+        deferred = install_deferred_rows(
+            versions, install_state_path(incidents_dir), now, now_iso, notes
+        )
+    except Exception as exc:  # noqa: BLE001 -- a broken rule is reported, never fatal
+        notes.append(f"rule 14 (install_deferred) not evaluated: {type(exc).__name__}: {exc}")
+        deferred = None
+    if deferred is not None:
+        found["install_deferred"] = deferred
     held_dirs: List[str] = []
     backlog_rows = _backlog_rows(notes)
     if backlog_rows is not None:

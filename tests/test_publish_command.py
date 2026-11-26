@@ -32,6 +32,7 @@ class Rig:
         self.launches: list = []
         self.launch_ok = True
         self.running = False
+        self.manifest_row = None  # the drive's drive_backlog.yaml row; None = not found
 
     def audit(self, project="day-a", status="auditing", recipe=True, lfs=1):
         out = self.out / project
@@ -42,12 +43,15 @@ class Rig:
         if recipe:
             stages = self.stages / project / project / "_stages"
             stages.mkdir(parents=True)
+            (self.out / "_sources" / project).mkdir(parents=True)  # the drive's source subset
+            (self.tmp / "gpx").mkdir(exist_ok=True)
+            (self.tmp / "gpx" / "a.gpx").write_text("<gpx/>")
             argv = [
                 "/old/py", "-m", "gomoveshift", "drive", str(self.out / "_sources" / project),
                 "--region", "usa", "--publish", "mon", "--lf-day", "mon", "--ingest-mode",
                 "gopro", "--lf-mode", "full_drive", "--output-dir", str(out), "--skip-upload",
                 "--no-youtube-upload", "--no-review", "--force", "--no-tmux",
-                "--day-gpx", "/gpx/a.gpx", "--camera-utc-offset-hours", "-4",
+                "--day-gpx", str(self.tmp / "gpx" / "a.gpx"), "--camera-utc-offset-hours", "-4",
             ]  # fmt: skip
             body = {"argv": argv, "cwd": "/old", "env": {"GMS_INTERMEDIATE_DIR": str(self.stages / project)}}  # fmt: skip
             (stages / "resume.json").write_text(json.dumps(body))
@@ -64,6 +68,7 @@ class Rig:
             project=project, region="usa", store=self.store, cadence=CAD, stages_root=self.stages,
             code_root=self.tmp, jobs_dir=self.jobs, now=NOW, dry_run=dry_run,
             drive_running=lambda jobs: self.running, launcher=self.launcher,
+            manifest_row_fn=lambda row: self.manifest_row,
         )  # fmt: skip
 
     def snapshot(self):
@@ -466,3 +471,32 @@ def test_a_replace_plan_with_a_matching_count_still_publishes(tmp_path):
     out.mkdir(parents=True, exist_ok=True)
     (out / "replace_plan.json").write_text(json.dumps(plan))
     assert rig.run()["action"] == "launched"
+
+
+# 2026-11-26: a pinned release the venv lacks must not publish on the old code either: Phase D
+# runs the service venv and keeps the staging sync's install deferred, like a render does.
+def _publish(rig, installed):
+    (rig.tmp / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0.3.167"\n')
+    return publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=False,
+        drive_running=lambda jobs: False, launcher=rig.launcher,
+        installed_version=lambda python: installed,
+    )  # fmt: skip
+
+
+def test_publish_waits_while_the_pinned_version_is_not_installed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.audit()
+    before = rig.snapshot()
+    res = _publish(rig, "0.3.163")
+    assert res["action"] == "refused", res
+    assert res["reason"] == "install pending: checkout pins 0.3.167, venv has 0.3.163"
+    assert not rig.launches and rig.snapshot() == before
+
+
+@pytest.mark.parametrize("installed", ["0.3.167", None])
+def test_publish_launches_on_an_equal_or_unknown_version(tmp_path, installed):
+    rig = Rig(tmp_path)
+    rig.audit()
+    assert _publish(rig, installed)["action"] == "launched"
