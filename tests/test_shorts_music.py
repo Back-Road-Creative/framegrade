@@ -272,8 +272,8 @@ def test_growth_review_groups_only_shorts_that_really_had_music():
     assert group("p", off, "facebook", date(2026, 11, 1)) is None
 
 
-def test_the_shipped_gomoveshift_brand_declares_the_test():
+def test_the_shipped_gomoveshift_brand_runs_no_music_test():
+    """Switched off 2026-11-26: the owner adds music in the Meta apps, not files."""
     from gomoveshift.publishing.brand_policy import load_brand_policy
 
-    test = load_brand_policy("gomoveshift").shorts_music
-    assert test is not None and set(test.platforms) == {"facebook", "instagram"}
+    assert load_brand_policy("gomoveshift").shorts_music is None
