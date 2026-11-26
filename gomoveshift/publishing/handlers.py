@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from ..pipeline.exceptions import YouTubeQuotaError
 from .dispatch import (
     PermanentDeliveryError,
+    ReconcilePendingError,
     ThrottledDeliveryError,
     _detail,
     _release_own_lease,
@@ -37,6 +38,7 @@ from .facebook_adapter import (
 )
 from .instagram_adapter import (
     InstagramAuthBlockedError,
+    InstagramContainerPendingError,
     InstagramPermanentError,
     InstagramShortsAdapter,
 )
@@ -167,7 +169,9 @@ def make_instagram_handler(
     ``InstagramRetryableError`` / ``InstagramPublishingLimitError`` (the
     account-level quota refusal — the window self-heals) are NOT
     translated, nor is any exception this module doesn't recognise: both
-    propagate as themselves.
+    propagate as themselves. ``InstagramContainerPendingError`` (a container
+    still processing) becomes ``ReconcilePendingError``: polled again outside
+    ``max_attempts``, bounded by ``dispatch.UNCOUNTED_RETRY_BOUND``.
 
     One permanent refusal is NOT terminal: "Media ID is not available" can
     mean the post went live, so the row parks at ``awaiting_ig_reconcile``
@@ -185,6 +189,8 @@ def make_instagram_handler(
             raise PermanentDeliveryError(str(exc)) from exc
         except InstagramAuthBlockedError as exc:
             raise PermanentDeliveryError(str(exc)) from exc
+        except InstagramContainerPendingError as exc:
+            raise ReconcilePendingError(str(exc)) from exc
 
     return handler
 

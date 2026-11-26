@@ -312,6 +312,20 @@ def test_every_short_carries_the_review_hash_of_what_it_sends():
     )
 
 
+def test_every_short_records_the_title_the_generator_wrote_and_the_sidecar_keeps_it(tmp_path):
+    # The queue sync rewrites a queued title only when it is still this text (provenance,
+    # not looks), so the builder must record it and the sidecar must carry it back.
+    from gomoveshift.pipeline.drive_phases.phase_d import _serialize_publish_plan
+    from gomoveshift.publishing.plan_io import load_publish_plan
+
+    plan = _build()
+    record = plan.shorts[0]
+    assert record.generator_title == record.payloads.youtube.title != ""
+    path = tmp_path / "p_publish_plan.json"
+    path.write_text(_serialize_publish_plan(plan))
+    assert load_publish_plan(path).shorts[0].generator_title == record.generator_title
+
+
 def test_a_review_hash_the_caller_passes_is_kept():
     assert _build(reviewed_plan_hash="f" * 64).shorts[0].reviewed_plan_hash == "f" * 64
 

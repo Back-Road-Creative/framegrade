@@ -228,6 +228,10 @@ class PublishRecord:  # one immutable publish record for a single publishable un
     #: learning joins reach and plays to. ``{}`` = hand caption or an older plan.
     #: Rides the sidecar only, like ``experiment_arms``.
     caption_templates: dict = field(default_factory=dict, compare=False, hash=False)
+    #: The exact YouTube title the generator wrote for this record (the plan builder, or a
+    #: queue-sync rewrite). A stored title that differs was set by hand, so the nightly
+    #: queue sync leaves it alone. ``""`` = a plan written before this field.
+    generator_title: str = field(default="", compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.format is not None and self.format not in KNOWN_FORMATS:
