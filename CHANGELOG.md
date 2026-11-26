@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.166] - 2026-11-26
+
+### Fixed
+
+- `health backlog`: resuming a drive whose OST audit was confirmed now takes the backlog row's
+  `--day-gpx` / `--bracket-gpx` file when the recipe's no longer exists, as `health heal` already
+  does. A GPX rename left three Ireland drives' recipes naming gone files.
+- Facebook and Instagram: a byte upload that breaks off (a write timeout) now starts over on a
+  fresh upload. Facebook kept the unfinished video's id and re-read its status every hour for good;
+  a retained id whose live status shows the upload never finished and publishing never began now
+  starts a fresh upload too. Instagram raised the timeout raw, skipped its fresh-container retry and
+  spent its attempts polling a container that never got its bytes. The Day 10 reel hit both.
+
 ## [0.3.165] - 2026-11-26
 
 ### Added
@@ -1892,7 +1905,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.165...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...HEAD
+[0.3.166]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.165...v0.3.166
 [0.3.165]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.164...v0.3.165
 [0.3.164]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.163...v0.3.164
 [0.3.163]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.162...v0.3.163
