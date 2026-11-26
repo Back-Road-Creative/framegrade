@@ -32,15 +32,16 @@ SCHEDULED = datetime(2026, 9, 1, 19, 0, tzinfo=timezone.utc)
 
 _MEDIA_PATH = Path(tempfile.mkdtemp(prefix="gms-enqueue-plan-anti-spam-test-")) / "short.mp4"
 _MEDIA_PATH.write_bytes(b"gms enqueue-plan anti-spam test media fixture bytes")
-_REAL_MEDIA = MediaFingerprint(
-    str(_MEDIA_PATH),
-    _MEDIA_PATH.stat().st_size,
-    2.0,
-    1080,
-    1920,
-    "h264",
-    hashlib.sha256(_MEDIA_PATH.read_bytes()).hexdigest(),
-)
+
+
+def _media_for(short_index):
+    """A real file of its own per Short: enqueue refuses two Shorts with one media sha256."""
+    path = _MEDIA_PATH.with_name(f"short-{short_index}.mp4")
+    path.write_bytes(_MEDIA_PATH.read_bytes() + f" #{short_index}".encode())
+    data = path.read_bytes()
+    return MediaFingerprint(
+        str(path), len(data), 2.0, 1080, 1920, "h264", hashlib.sha256(data).hexdigest()
+    )
 
 
 def _record(short_index, title, sampled_regions=("a",)):
@@ -48,7 +49,7 @@ def _record(short_index, title, sampled_regions=("a",)):
         project_name="proj",
         lf_index=0,
         short_index=short_index,
-        media=_REAL_MEDIA,
+        media=_media_for(short_index),
         schedule=ScheduleWindow(SCHEDULED, "America/Chicago"),
         recording_date="2026-08-01",
         sampled_regions=sampled_regions,

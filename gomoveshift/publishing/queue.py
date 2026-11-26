@@ -241,7 +241,16 @@ AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = "9999-01-01T00:00:00+00:00"
 STATUS_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
 #: Its wait reason: only the account scan may end it, never retry-now.
 NEXT_ATTEMPT_AWAITING_IG_RECONCILE = "awaiting_ig_reconcile"
+#: A delivery whose retries never counted against ``max_attempts`` (unknown
+#: Facebook outcome, a container still processing, unreadable media, a
+#: platform throttle) and that kept retrying past ``dispatch.UNCOUNTED_RETRY_BOUND``.
+#: Not terminal -- its platform ids stay, so nothing re-uploads it -- and never
+#: selected by the drain: a person decides it (``dispatch`` raises an incident).
+STATUS_NEEDS_OPERATOR = "needs_operator"
+#: Its wait reason: only a person ends it, never retry-now.
+NEXT_ATTEMPT_NEEDS_OPERATOR = "needs_operator"
 _NEXT_ATTEMPT_REASONS = (
+    NEXT_ATTEMPT_NEEDS_OPERATOR,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
     NEXT_ATTEMPT_RETRY_BACKOFF,
     NEXT_ATTEMPT_PLATFORM_THROTTLE,
@@ -567,6 +576,13 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
                 "ALTER TABLE deliveries ADD COLUMN first_comment_correction_attempts "
                 "INTEGER NOT NULL DEFAULT 0"
             )
+        for identity_col in ("content_sha256", "content_title_key"):
+            # What the row publishes, so ``content_twin`` can see the same
+            # footage queued under another project or index. NULL on every
+            # row queued before these columns existed, and never backfilled:
+            # such a row is simply not compared.
+            if identity_col not in cols:
+                conn.execute(f"ALTER TABLE deliveries ADD COLUMN {identity_col} TEXT")
         for recovery_col, recovery_type in (
             # ``recover_terminal_delivery``: NULL on every row that is not a
             # recovery row -- an honest "not a recovery", never backfilled.
@@ -576,6 +592,12 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "uncounted_since" not in cols:
+            # When the row's current run of retries that never count against
+            # ``max_attempts`` began; NULL when it is not in one. Bounds that run
+            # (``dispatch.UNCOUNTED_RETRY_BOUND``). NULL for older rows: their run
+            # starts at the next such retry, never at a guessed earlier time.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN uncounted_since TEXT")
         pause_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(platform_pauses)").fetchall()
         }
@@ -598,6 +620,8 @@ def enqueue(
     sidecar_path: Optional[str] = None,
     scheduled_at: Optional[str] = None,
     first_comment_text: Optional[str] = None,
+    content_sha256: Optional[str] = None,
+    content_title_key: Optional[str] = None,
 ) -> int:
     """Insert a delivery, or return the existing id for the same 4-tuple
     (idempotent). Raises ``sqlite3.IntegrityError`` if a different
@@ -640,7 +664,11 @@ def enqueue(
     Facebook short carries (``first_comment.full_drive_comment_text``),
     posted ``FIRST_COMMENT_DELAY_S`` after publish -- see
     ``select_due_first_comments``. The TEXT is generated elsewhere; this
-    module only stores and schedules it. ``NULL`` means no first comment is scheduled for this delivery."""
+    module only stores and schedules it. ``NULL`` means no first comment is scheduled for this delivery.
+
+    ``content_sha256`` / ``content_title_key`` are what the row publishes (the
+    plan's media sha256, and on YouTube its normalised title), stored for
+    ``content_twin``. Neither is checked here: the caller refuses a twin first."""
     now = _now_iso()
     with conn:
         existing = conn.execute(
@@ -661,8 +689,8 @@ def enqueue(
             "INSERT INTO deliveries "
             "(project_name, short_index, platform, plan_hash, status, "
             " attempt_count, shadow, sidecar_path, scheduled_at, first_comment_text, "
-            " created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)",
+            " content_sha256, content_title_key, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_name,
                 short_index,
@@ -672,11 +700,51 @@ def enqueue(
                 sidecar_path,
                 scheduled_at,
                 first_comment_text,
+                content_sha256,
+                content_title_key,
                 now,
                 now,
             ),
         )
         return int(cur.lastrowid)
+
+
+def content_twin(
+    conn: sqlite3.Connection,
+    project_name: str,
+    short_index: int,
+    platform: str,
+    *,
+    content_sha256: Optional[str],
+    content_title_key: Optional[str],
+) -> Optional[sqlite3.Row]:
+    """Another live row on ``platform`` that publishes the same content, or ``None``.
+
+    The queue's own uniqueness knows a row only by ``(project_name, short_index,
+    platform)``, so the same footage queued under another name -- a day reel
+    (``day-reel-<drive file id>``) and a drive Short of the same clip, or two reels
+    from two Drive files -- never collided and both published. A twin is a row with
+    a DIFFERENT ``(project_name, short_index)`` holding the same media sha256, or the
+    same normalised title, whose status is active, ``published`` or
+    ``missing_remote``: a ``cancelled`` or ``failed_permanent`` row never went out,
+    so it blocks nothing. A shadow row is a rehearsal and blocks nothing either.
+    Rows queued before the identity columns existed hold NULL and are not compared."""
+    clauses, params = [], []
+    if content_sha256:
+        clauses.append("content_sha256 = ?")
+        params.append(content_sha256)
+    if content_title_key:
+        clauses.append("content_title_key = ?")
+        params.append(content_title_key)
+    if not clauses:
+        return None
+    return conn.execute(
+        "SELECT * FROM deliveries WHERE platform = ? AND shadow = 0 "  # noqa: S608
+        "AND status NOT IN ('cancelled', 'failed_permanent') "
+        "AND NOT (project_name = ? AND short_index = ?) "
+        f"AND ({' OR '.join(clauses)}) ORDER BY id LIMIT 1",
+        (platform, project_name, short_index, *params),
+    ).fetchone()
 
 
 def registered_platform_id(
@@ -917,6 +985,7 @@ def transition(
         "permalink",
         "error_class",
         "error_detail",
+        "uncounted_since",
         # Lease fields: a retryable transition releases the lease it held so
         # next_attempt_at alone governs when the row is retried.
         "lease_owner",
@@ -1040,6 +1109,28 @@ def transition(
     if changed and new_status == "published":
         _register_platform_id_best_effort(conn, delivery_id)
     return changed
+
+
+def restart_delivery(
+    conn: sqlite3.Connection, delivery_id: int, expected_status: str, **fields: Any
+) -> bool:
+    """Start a delivery over: back to ``queued`` with its upload id cleared and
+    ``attempt_count`` 0. Every adapter path that abandons an upload it has
+    PROVEN can never publish (an expired Instagram container, a Facebook reel
+    whose finish never ran) goes through here.
+
+    The count resets because the tries it holds were spent on the abandoned
+    upload, often uncounted reads that still bumped it: kept, the fresh upload
+    failed permanently on its first ordinary error. ``uncounted_since`` is kept:
+    a fresh upload that is again left undecided is the same stuck episode, so
+    the bound (``dispatch.UNCOUNTED_RETRY_BOUND``) still parks it rather than a
+    restart every 24 h looping for good. Never use this for a try that simply
+    failed; that try is counted like any other. Compare-and-set like
+    ``transition``; ``fields`` are extra columns to write (an error note)."""
+    return transition(
+        conn, delivery_id, expected_status, "queued", platform_upload_id=None, attempt_count=0,
+        **fields,
+    )  # fmt: skip
 
 
 def acquire_lease(
@@ -1332,6 +1423,7 @@ _NEXT_ATTEMPT_REASONS_RETRY_REFUSES = frozenset(
         NEXT_ATTEMPT_PLATFORM_THROTTLE,
         NEXT_ATTEMPT_AWAITING_MANUAL,
         NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
+        NEXT_ATTEMPT_NEEDS_OPERATOR,
     }
 )
 

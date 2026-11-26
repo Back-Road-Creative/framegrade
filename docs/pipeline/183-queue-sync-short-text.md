@@ -8,16 +8,26 @@ unusable.
 It touches every `queued`, unleased YouTube row whose slot is more than 24 hours away
 (`SYNC_LEAD_TIME` in `gomoveshift/publishing/queue_short_text.py`), regenerating title,
 description and tags through the per-LF path Phase D uses (`plan_bracket_sync._generate_lf`,
-now also usable without a bracket record). The title stamp, recording date, schedule, media and
-`experiment_arms` stay as stored: the sync never picks, swaps or excludes an arm. The
-generator renders each Short's stored Shorts arms (`yt_title_body`, `yt_hashtag_set`) verbatim,
-and a Short whose known stored arm the new text no longer carries is refused whole, so the
-experiment is never mislabeled; an arm id outside `SHORTS_ARMS` is never rendered.
+now also usable without a bracket record). The title is the generator's new one, stamp included (a fact title, or the stamped
+fallback, see `135-shorts-titles-and-interactive-family.md`): a stored stamp is not kept. The
+recording date, schedule, media and `experiment_arms` stay as stored: the sync never picks,
+swaps or excludes an arm. The generator renders each Short's stored `yt_hashtag_set` arm
+verbatim, and a Short whose known stored arm the new text no longer carries is refused whole,
+so the experiment is never mislabeled; an arm id outside `SHORTS_ARMS` is never rendered. A
+Short carrying a known stored arm of a factor the generator no longer renders at all
+(`UNRENDERED_FACTORS`: `yt_title_body`, since a fact title has no body variant) is `unchanged`:
+it posts its stored text, and refusing it would only file the same incident every night.
 
 The whole Short is refused (nothing written) when any delivery row of it, on any platform, is
 neither `queued` nor terminal, holds a live lease, has no `scheduled_at`, or has a slot inside
 the lead time, or when a recovery row exists. A Short with a hand title in
 `<plan dir>/social/titles.yaml` (the file Phase D reads) is `unchanged` with reason `hand_title`.
+So is one whose stored title differs from the `generator_title` its plan recorded (the plan
+builder stores the exact title it wrote, and every sync rewrite updates it): that title was
+edited by hand in the sidecar, whatever it looks like (reason `hand_title (edited in the plan)`;
+the sidecar stays byte for byte). Only a plan written before `generator_title` is judged by its
+looks (a valid "Nth stretch" stamp or exactly a measured place, `generated_title`), because
+refusing those would freeze every Short already queued; its first rewrite records the field.
 
 The no-repeated-place chain is seeded from the stored title and description of the Short before
 each rewritten one, not from regenerated text, and the generator's date is the LF's
@@ -73,7 +83,7 @@ actionable and the check fails closed. Classified by reading `queue_short_text.p
   database (`sqlite3` BUSY, e.g. "database is locked"; LOCKED is a conflict inside one connection, so it repeats and stays actionable). A failed write whose reason
   carries the "clashes with this sidecar's stored text" note is never transient.
 - Actionable, needs a person: "generator: ...", an LF sidecar unreadable or without a location,
-  a stored arm the generator cannot render, "no such Short in the plan", "already holds the new
+  a stored `yt_hashtag_set` arm the generator cannot render, "no such Short in the plan", "already holds the new
   plan hash", a recovery row, a sibling slot already past on a row still queued and past its retry backoff ("is past but still queued"),
   a row in another state ("is <status>"), "has no usable
   scheduled_at", "no clip place to compose a title from", an old title with no verifiable
@@ -108,8 +118,9 @@ written earlier is checked against ITS stored text as well: a clash is named in 
 makes it actionable (otherwise it is transient).
 
 A sidecar that cannot be planned (a bad `titles.yaml`, a trial plan the gates reject, a missing
-`lf_index`) is refused but stays queued as stored, and its STORED text reaches the gates of the
-sidecars before and after it. Caveat: when a later sidecar's stored text was itself changed
+`lf_index`) is refused but stays queued as stored, and the STORED text of the Shorts it queues
+(never the file's other Shorts, which a second `sidecar_path` spelling may queue) reaches the
+gates of the sidecars before and after it. Caveat: when a later sidecar's stored text was itself changed
 by an earlier run, settling may take two runs.
 
 Schedule: run `gomoveshift health sync-short-text --data-root <workspaces>` from the service

@@ -587,13 +587,60 @@ def test_a_stored_arm_is_rendered_not_replaced_by_legacy_text(tmp_path):
     assert _youtube(plan, 1).experiment_arms == {"yt_hashtag_set": "road"}
 
 
-def test_a_stored_title_body_arm_is_refused_not_dropped(tmp_path):
-    # A fact title carries no title-body variant, so a plan holding one is left as it was.
+def test_a_stored_title_body_arm_is_kept_as_stored_not_refused(tmp_path):
+    # A fact title carries no title-body variant, so a plan holding one is left as it was: it
+    # posts its stored text, and a refusal would only file the same incident every night.
     plan, conn = _world(tmp_path, [_short(1, arms={"yt_title_body": "clip_led"})])
-    before = plan.read_text()
+    before = plan.read_bytes()
     [change] = sync_short_text(conn, apply=True, now=NOW)
-    assert change.status == "refused" and "can no longer be rendered" in change.reason
-    assert plan.read_text() == before
+    assert change.status == "unchanged" and "no longer renders" in change.reason
+    assert not qst.is_actionable_refusal(change)
+    assert plan.read_bytes() == before
+
+
+def test_the_unrendered_factors_are_the_ones_the_generator_never_carries():
+    from gomoveshift.pipeline.social_generator import SocialGenerator
+
+    gen = SocialGenerator(location=REGION, project_name=PROJECT)
+    carried = set(gen._shorts_arm_factors(1, None))
+    assert set(qst.UNRENDERED_FACTORS) == set(qst.SHORTS_ARMS) - carried
+
+
+def _recorded(n, title, generator_title):
+    """A Short the plan builder recorded ``generator_title`` for, now titled ``title``."""
+    short = _short(n)
+    short["payloads"]["youtube"]["title"] = title
+    short["generator_title"] = generator_title
+    return short
+
+
+def test_a_hand_edited_title_is_never_regenerated(tmp_path):
+    # Both titles LOOK generated (a valid stamp; exactly a measured place), but neither is the
+    # text the generator recorded: they were set by hand, so the sidecar stays byte for byte.
+    plan, conn = _world(
+        tmp_path,
+        [
+            _recorded(1, "Mar 5, 1st stretch: my own words #Shorts", "Mar 5, 1st stretch: x"),
+            _recorded(2, "Harrow #Shorts", "Mar 5, 2nd stretch: old words #Shorts"),
+        ],
+    )
+    before = plan.read_bytes()
+    changes = sync_short_text(conn, apply=True, now=NOW)
+    assert [(c.status, c.reason) for c in changes] == [
+        ("unchanged", "hand_title (edited in the plan)")
+    ] * 2
+    assert plan.read_bytes() == before
+    assert set(_hashes(conn).values()) == {OLD_HASH}
+
+
+def test_a_generator_written_title_still_syncs_and_records_the_new_one(tmp_path):
+    stored = "Mar 5, 1st stretch: old words #Shorts"
+    plan, conn = _world(tmp_path, [_recorded(1, stored, stored)])
+    [change] = sync_short_text(conn, apply=True, now=NOW)
+    assert change.status == "changed" and change.new_title != stored
+    rec = _youtube(plan, 1)
+    assert rec.generator_title == rec.payloads.youtube.title == change.new_title
+    assert [c.status for c in sync_short_text(conn, apply=True, now=NOW)] == ["unchanged"]
 
 
 def test_a_sidecar_edited_during_the_run_is_refused(tmp_path, monkeypatch):

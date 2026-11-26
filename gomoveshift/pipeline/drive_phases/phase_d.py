@@ -846,8 +846,8 @@ def _serialize_publish_plan(plan) -> str:
         record.pop("generated_at", None)
         # An untagged record omits the key, so a plan outside every experiment
         # keeps the bytes (and Gate C/D hash) it had before experiments existed.
-        # The same holds for a record with no recorded caption opener ids.
-        for key in ("experiment_arms", "caption_templates"):
+        # The same holds for a record with no recorded caption opener ids or generator title.
+        for key in ("experiment_arms", "caption_templates", "generator_title"):
             if not record.get(key):
                 record.pop(key, None)
         if not record.get("place_variety"):  # an older plan's bytes stay as they were
@@ -1014,7 +1014,7 @@ def _emit_publish_preview_sidecar(
         payload = asdict(plan)
         for record in payload.get("shorts", []):
             record.pop("generated_at", None)
-            for key in ("experiment_arms", "caption_templates"):
+            for key in ("experiment_arms", "caption_templates", "generator_title"):
                 if not record.get(key):
                     record.pop(key, None)
             if not record.get("place_variety"):

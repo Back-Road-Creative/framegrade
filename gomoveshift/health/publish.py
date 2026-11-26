@@ -4,7 +4,8 @@ Waypost, and the hourly reconcile that closes its claim.
 Order, each a stop that leaves the store as it was: the drive must be ``auditing`` in
 ``schedule.sqlite3`` (or ``failed`` -- a publish job that died before uploading -- which is
 reopened to ``auditing`` at the first write) with no upload receipt; no drive job running; its ``resume.json`` recipe must
-rebind to the code root's venv and its checkpoint hold no phase the current code re-runs (Phase D
+rebind to the code root's venv, which must hold the version the code root pins
+(``heal.install_pending``), and its checkpoint hold no phase the current code re-runs (Phase D
 refuses a missing prerequisite, after the slot is booked); and no older ``ready`` drive may sit ahead of it (Waypost claims the
 oldest ready drive of a region, never a named one), except one already uploaded outside a claim,
 which is retired from its receipts first (Waypost's ``retire_published``). The long-form count comes from the
@@ -30,9 +31,26 @@ from seo_manager.scheduling.store import SlotTaken, StaleDrive
 from .. import run_origin
 from ..pipeline.replace_scheduled import record_incident, unfinished
 from ..publishing.mask_frame_gate import mask_frame_refusal
-from . import resume
-from .heal import _STALL_S, _job_records, bind_to_code_root, job_runner, stale_phases
-from .launch import _uploaded, default_launcher, plan_total_lfs, read_replace_plan, upload_receipts
+from . import resume, retry_policy
+from .heal import (
+    _STALL_S,
+    SERVICE_DIR,
+    _job_records,
+    bind_to_code_root,
+    default_pinned_version,
+    install_pending,
+    job_runner,
+    refresh_recipe,
+    stale_phases,
+)
+from .launch import (
+    _uploaded,
+    default_installed_version,
+    default_launcher,
+    plan_total_lfs,
+    read_replace_plan,
+    upload_receipts,
+)
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -104,6 +122,9 @@ def run_publish(
     launcher: Callable[..., Any] = default_launcher,
     lead_hours: Optional[int] = None,
     expect_sha: Optional[str] = None,
+    installed_version: Callable[[Path], Optional[str]] = default_installed_version,
+    pinned_version: Callable[[Path], Optional[str]] = default_pinned_version,
+    manifest_row_fn: Callable[[Dict[str, Any]], Any] = retry_policy.default_manifest_row,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"project": project, "region": region, "action": "noop", "steps": []}
     d = store.drive(project)
@@ -122,9 +143,16 @@ def run_publish(
     recipe = resume.read_recipe(recipe_path) if recipe_path else None
     if recipe is None:
         return _refuse(res, f"no readable resume.json under {Path(stages_root) / project}")
-    bound, why = bind_to_code_root(code_root, recipe["argv"])
+    # Phase D slices the recipe's --day-gpx too: a gone one takes the backlog row's, else refuses.
+    fresh, refreshed, why = refresh_recipe(recipe_path, recipe, manifest_row_fn({"drive": project}),
+                                           cwd=Path(code_root) / SERVICE_DIR, dry_run=dry_run)  # fmt: skip
+    if refreshed:
+        res["gpx_refreshed"] = refreshed
+    bound, why = bind_to_code_root(code_root, fresh) if fresh else (None, f"{project}: {why}")
     if bound is None:
         return _refuse(res, why)
+    if pending := install_pending(installed_version(Path(bound[0])), pinned_version(Path(code_root))):  # fmt: skip
+        return _refuse(res, pending)  # before any store write: the drive stays as it was
     stale = stale_phases(recipe_path)
     if stale:
         return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "

@@ -417,3 +417,33 @@ def test_a_refused_hash_check_reseeds_the_neighbour_on_the_final_text(tmp_path):
     assert first.status == "refused" and "is unknown" in first.reason
     title = second.new_title.split(" #")[0]
     assert "Harrow" in title and "Ashby County" not in title  # Short 1 keeps its stored place
+
+
+def test_a_short_is_never_gated_against_its_own_stored_copy(tmp_path, monkeypatch):
+    # One file under two sidecar_path spellings, the first unusable this run: its stored text
+    # reaches the second's gates, which must never hold the second's own Short (unit C5b).
+    second = _short(2)
+    second["payloads"]["youtube"]["description"] = "Another view of Ashby County #Shorts"
+    plan, conn = _world(tmp_path, [_short(1), second])
+    raw = f"{plan.parent}/./{plan.name}"  # sorts first: planned first
+    conn.execute("UPDATE deliveries SET sidecar_path = ? WHERE short_index = 2", (raw,))
+    conn.commit()
+    real_text, real_changes = qst._youtube_text, qst._sidecar_changes
+
+    def keep_opening(short, post):  # the new text keeps the stored openings
+        out = real_text(short, post)
+        out["title"] = short["payloads"]["youtube"]["title"].split(":")[0] + ": " + out["title"]
+        out["description"] = "Front-seat view driving through Ashby County, " + out["description"]
+        return out
+
+    def unusable(conn, sidecar, rows, *a):
+        if rows[0]["short_index"] == 2:
+            raise OSError("unreadable this run")
+        return real_changes(conn, sidecar, rows, *a)
+
+    monkeypatch.setattr(qst, "_youtube_text", keep_opening)
+    monkeypatch.setattr(qst, "_sidecar_changes", unusable)
+    first, second = sync_short_text(conn, apply=False, now=NOW)
+    assert first.status == "changed", first.reason
+    assert first.new_title.startswith("Mar 5, 1st stretch: ")
+    assert second.status == "refused" and "unreadable this run" in second.reason

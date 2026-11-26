@@ -233,6 +233,19 @@ exactly the file that produced the row, never a directory guess.
   The plan builder (`plan_builder.build_publish_plan`) first drops a Short's unreviewable
   tags with `reviewable_short_tags`, the filter `queue sync-plan-tags` applies, and logs
   a warning for a Short that still fails.
+- **The same content never queues twice under two names**: the queue's own
+  uniqueness knows a row only by `(project, short_index, platform)`, and a day reel is
+  `day-reel-<drive file id>`, so it and the drive Short of the same footage both went
+  out. Every row now stores `content_sha256` (the record's media sha256) and, on
+  YouTube, `content_title_key` (the title before its closing hashtags, whitespace
+  collapsed, lowercased). A record whose sha or title another row on the same platform
+  already holds under a different `(project, short_index)` is refused on every platform
+  through the same path as a review refusal (`EnqueueResult.refused`, one
+  `duplicate_content_refused` incident); the other records still enqueue. Only a row that
+  is active, `published` or `missing_remote` counts (`queue.content_twin`); a `cancelled`
+  or `failed_permanent` row, or a shadow row, blocks nothing. Rows queued before these
+  columns existed hold `NULL` and are not compared. `day-reels` records such a reel as
+  refused.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises
@@ -693,8 +706,9 @@ changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
 ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
 `delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
-(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
-error, i.e. after it uploads.
+(the error is exempt from `max_attempts`) for up to `dispatch.UNCOUNTED_RETRY_BOUND` (24 h), then
+parks at `needs_operator` and the incident becomes a `delivery_needs_operator` one; the incident
+closes when the row no longer carries the error, i.e. after it uploads.
 
 ## A replaced long-form upload (`relink_replaced_lf`)
 
@@ -965,8 +979,13 @@ other platforms, unless it is landscape or longer than 180 s (the outcome line s
 `Read the full day: <link>`, then `#Shorts`. The link is the request's optional `"journal_url"`
 (an `https://gomoveshift.com/` page); without one it is the live journal day the reel was filmed
 on, read from the site's public `/journal-trips.json` (day *n* is the trip's `start` + *n* - 1,
-as on the journal page: `/journeys/<trip>/#day-<n>`). A date in no trip, two trips on one date or
-an unreachable site simply leaves the line out. A queue refusal (for example an active YouTube
+as on the journal page: `/journeys/<trip>/#day-<n>`). **The journal day goes up first, then the
+post links to it**: a reel with no link (a date in no trip, two trips on one date, a malformed list
+or an unreachable site) is `held`, before any download or render and with no ledger record, so the
+next hourly run looks again; the outcome line names which of the four it was. Its first held time
+is kept under `<gms_data_home>/day_reels/held_for_link/`; held over 24 h it raises one
+`day_reel_held_for_link` health incident naming the request, the recording date and the cause,
+closed once the reel is queued. `youtube_description` refuses a missing link. A queue refusal (for example an active YouTube
 row for the same clip with a different plan) is recorded as `refused` for that request and never
 stops the requests after it. It has no clip GPS votes, so no final-text
 review applies; the drain's one-Short-per-hour rule may move it to the next free hour.

@@ -325,6 +325,8 @@ def build_publish_plan(
                     place_variety=dict(getattr(post, "place_variety", None) or {}),
                     experiment_arms=dict(getattr(post, "experiment_arms", None) or {}),
                     caption_templates=dict(getattr(post, "caption_templates", None) or {}),
+                    # what the generator wrote: a later title that differs is a hand edit
+                    generator_title=payloads.youtube.title,
                     parent_lf_video_id=parent_id,
                     parent_lf_publish_at=parent_publish_at,
                     payloads=payloads,

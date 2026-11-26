@@ -32,7 +32,7 @@ from typing import Any, Callable, Optional, Union
 from .dynamic_schedule import staggered_by_platform
 from .first_comment import COMMENT_PLATFORMS, full_drive_comment_text, parent_is_public_at
 from .models import KNOWN_PLATFORMS
-from .queue import enqueue, find_delivery
+from .queue import content_twin, enqueue, find_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,8 @@ class EnqueueResult:
 
     enqueued: tuple[tuple[str, int, str, int], ...]  # (project, short_index, platform, id)
     already_present: tuple[tuple[str, int, str, int], ...]
-    #: ``(project, short_index, reason)`` of every Short the final-text review refused;
-    #: none of its platforms was enqueued.
+    #: ``(project, short_index, reason)`` of every Short the final-text review refused,
+    #: or whose content another live row already publishes; none of its platforms was enqueued.
     refused: tuple[tuple[str, int, str], ...] = field(default=())
 
     @property
@@ -173,9 +173,18 @@ def sidecar_review_refusals(
     return refusals
 
 
-def _raise_refusal_incident(project_name: str, short_index: int, reason: str, path: Path) -> None:
-    """One open ``short_review_refused`` health incident per Short, written through the
-    health store (``new_incident``). Deduped on its key: a repeated enqueue run finds the
+def _raise_refusal_incident(
+    project_name: str,
+    short_index: int,
+    reason: str,
+    path: Path,
+    *,
+    kind: str = "short_review_refused",
+    why: str = "the final-text review refuses it",
+) -> None:
+    """One open ``kind`` health incident per Short (``short_review_refused`` unless
+    named; ``why`` says what refused it), written through the health store
+    (``new_incident``). Deduped on its key: a repeated enqueue run finds the
     open row and leaves it as it was; a refusal with a new reason replaces it. The row's
     ``detail`` is the line ``health check`` pushes; a failed write never blocks the rest of the plan."""
     from ..health.store import (
@@ -188,7 +197,7 @@ def _raise_refusal_incident(project_name: str, short_index: int, reason: str, pa
         write_row,
     )
 
-    key = f"short_review_refused:{project_name}:{short_index}"
+    key = f"{kind}:{project_name}:{short_index}"
     try:
         incidents_dir = default_incidents_dir(default_data_root())
         rows, _bad = load_all(incidents_dir)
@@ -197,22 +206,59 @@ def _raise_refusal_incident(project_name: str, short_index: int, reason: str, pa
             return
         now = utc_iso()
         row = new_incident(
-            "short_review_refused",
+            kind,
             key,
-            f"short_review_refused_{safe_name(project_name)}_{short_index}.json",
+            f"{kind}_{safe_name(project_name)}_{short_index}.json",
             prior["detected_at"] if prior else now,
             project=project_name,
             short_index=short_index,
             reason=reason,
             sidecar=str(path),
-            detail=(
-                f"Short {short_index} of {project_name} was not enqueued: the final-text "
-                f"review refuses it ({reason})."
-            ),
+            detail=f"Short {short_index} of {project_name} was not enqueued: {why} ({reason}).",
         )
         write_row(incidents_dir, row)
     except OSError as exc:
         logger.warning("could not record the refusal incident %s: %s", key, exc)
+
+
+def content_title_key(title: object) -> Optional[str]:
+    """A YouTube title as content identity: the body before its closing hashtags,
+    whitespace collapsed, lowercased; ``None`` when nothing is left. Function-local
+    import: ``pipeline`` imports from ``publishing`` (see models.py)."""
+    if not isinstance(title, str):
+        return None
+    from ..pipeline.text_format import split_trailing_hashtags
+
+    return " ".join(split_trailing_hashtags(title)[0].split()).lower() or None
+
+
+def _content_identity(record: dict, platform: str) -> "tuple[Optional[str], Optional[str]]":
+    """``(media sha256, title key)`` the row for ``platform`` stores; the title only on YouTube."""
+    media = record.get("media")
+    sha = media.get("sha256") if isinstance(media, dict) else None
+    title = None
+    if platform == "youtube":
+        payloads = record.get("payloads")
+        youtube = payloads.get("youtube") if isinstance(payloads, dict) else None
+        title = content_title_key(youtube.get("title")) if isinstance(youtube, dict) else None
+    return (sha if isinstance(sha, str) and sha else None), title
+
+
+def _twin_refusal(conn, project_name: str, short_index: int, identities: dict) -> Optional[str]:
+    """Why the record must not enqueue: another live row already publishes its media
+    or (YouTube) its title on one of the platforms in ``identities`` (platform ->
+    ``_content_identity``) -- see ``queue.content_twin``."""
+    for platform, (sha, title) in identities.items():
+        twin = content_twin(
+            conn, project_name, short_index, platform, content_sha256=sha, content_title_key=title
+        )
+        if twin is not None:
+            what = "media sha256" if sha and twin["content_sha256"] == sha else "title"
+            return (
+                f"duplicate_content:{platform} {what} matches delivery {twin['id']} "
+                f"({twin['project_name']} #{twin['short_index']}, {twin['status']})"
+            )
+    return None
 
 
 def _platform_scheduled_at(
@@ -274,6 +320,14 @@ def enqueue_from_plan_sidecar(
     before it is spooled: a Short the review would refuse at dispatch is not enqueued on
     any platform, raises one health incident naming the reason and is listed in
     ``EnqueueResult.refused``; the other records still enqueue.
+
+    Every row stores its content identity (the record's media sha256, and on
+    YouTube its normalised title, ``content_title_key``). A record whose identity
+    another live row on the same platform already holds under a different
+    ``(project, short_index)`` is refused the same way, with a
+    ``duplicate_content_refused`` incident (``queue.content_twin`` says which rows
+    count). Rows queued before the identity columns existed hold NULL and are not
+    compared; nothing backfills them.
     """
     path = Path(sidecar_path)
     payload = _load_sidecar(path)
@@ -353,7 +407,25 @@ def enqueue_from_plan_sidecar(
                     f"publish-plan sidecar {path}: unknown platform {platform!r} ({context}); "
                     f"known platforms: {sorted(KNOWN_PLATFORMS)}"
                 )
+        # The same footage under another project or index (a day reel and the
+        # drive Short of the same clip) is refused on every platform, before
+        # any row is written, through the same path as a review refusal.
+        identities = {p: _content_identity(record, p) for p in routes["selected"]}
+        reason = _twin_refusal(conn, project_name, short_index, identities)
+        if reason:
+            _raise_refusal_incident(
+                project_name,
+                short_index,
+                reason,
+                path,
+                kind="duplicate_content_refused",
+                why="another queued or published delivery already carries the same content",
+            )
+            refused.append((project_name, short_index, reason))
+            continue
 
+        for platform in routes["selected"]:
+            sha, title_key = identities[platform]
             existing_row = conn.execute(
                 "SELECT id FROM deliveries WHERE project_name=? AND short_index=? "
                 "AND platform=? AND plan_hash=?",
@@ -372,6 +444,8 @@ def enqueue_from_plan_sidecar(
                     sidecar_path=str(path),
                     scheduled_at=platform_at,
                     first_comment_text=_first_comment_for(record, platform, platform_at, context),
+                    content_sha256=sha,
+                    content_title_key=title_key,
                 )
             except sqlite3.IntegrityError as exc:
                 active = find_delivery(conn, project_name, short_index, platform)

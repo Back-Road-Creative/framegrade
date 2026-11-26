@@ -172,6 +172,15 @@ def _caption_templates(raw: Dict[str, Any], path: Path, ctx: str) -> Dict[str, s
     return dict(value)
 
 
+def _generator_title(raw: Dict[str, Any], path: Path, ctx: str) -> str:
+    """``generator_title``, absent-tolerant: sidecars written before the generator's
+    title was recorded carry none."""
+    value = raw.get("generator_title") or ""
+    if not isinstance(value, str):
+        raise _fail(path, f"'generator_title' must be a string ({ctx})")
+    return value
+
+
 def _payloads(raw: Dict[str, Any], path: Path, ctx: str) -> PlatformPayloads:
     """Absent OR null means 'this platform has no payload' — ``asdict``
     writes ``None`` for an unset payload, so both shapes reach us."""
@@ -278,6 +287,7 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
             additional_media=_additional_media(raw, path, ctx),
             experiment_arms=_experiment_arms(raw, path, ctx),
             caption_templates=_caption_templates(raw, path, ctx),
+            generator_title=_generator_title(raw, path, ctx),
         )
     except KeyError as exc:
         raise _fail(path, f"missing required field {exc} ({ctx})") from exc

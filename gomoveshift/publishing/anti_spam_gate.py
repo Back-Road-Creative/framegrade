@@ -527,16 +527,22 @@ def check_batch(
     youtube_titles = [
         record.payloads.youtube.title if record.payloads.youtube else "" for record in records
     ]
+    # A Short is (project_name, short_index), never its position: a caller may pass one
+    # Short twice (its stored copy beside its new text), and a Short never clashes with itself.
+    shorts = [(record.project_name, record.short_index) for record in records]
     for prefix, indices in shared_prefix_groups(youtube_titles).items():
         for index in indices:
-            others = [i for i in indices if i != index]
+            others = [i for i in indices if shorts[i] != shorts[index]]
+            if not others:
+                continue
+            names = ", ".join(f"{shorts[i][0]} #{shorts[i][1]}" for i in others)
             violations.append(
                 Violation(
                     index,
                     "youtube",
                     "shared-prefix",
                     f"title shares first-3-word prefix {' '.join(prefix)!r} with "
-                    f"index(es) {others}",
+                    f"index(es) {others} ({names})",
                 )
             )
 

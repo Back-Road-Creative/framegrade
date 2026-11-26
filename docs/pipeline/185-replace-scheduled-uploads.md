@@ -1,6 +1,6 @@
 ## `health backlog --replace-scheduled`: replace a drive's still-scheduled uploads
 
-Part of `health backlog` ([156-health-check.md](156-health-check.md)); `--supersede` is described there.
+Part of `health backlog` ([190-health-backlog.md](190-health-backlog.md)); `--supersede` is described there.
 
 **Replace scheduled uploads.** `--supersede <project> --reason <text> --replace-scheduled` also
 accepts an output whose `youtube_uploads.json` holds records, when every record is either already
