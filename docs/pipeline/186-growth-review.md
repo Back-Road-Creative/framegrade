@@ -33,7 +33,10 @@ skips the live part and prints `PARTNER_PROGRESS skipped=offline`.
 project named `day-reel-…` by the day-reel route, `source:drive` otherwise) and its
 tracked place. The day-reel route registers each reel it queues in the tracking store
 (`publishing/day_reels.py`), the same as `enqueue-plan --apply` does for drive Shorts, so
-the publish step can store its platform ids and `metrics collect` can measure it. Each group's median
+the publish step can store its platform ids and `metrics collect` can measure it. A day reel
+queued before that registration existed has no record; `TrackingStore.update_platform_id` writes
+one when its publish (or `metrics backfill-ids`) records the id, instead of dropping it. Drive
+Shorts keep the `ValueError` contract. Each group's median
 is compared with its platform's median: `GROWTH_FORMAT` normally, `GROWTH_UNDERPERFORMER`
 when the group has at least `MIN_GROUP_POSTS` (5) and sits below `UNDERPERFORM_RATIO`
 (0.5) of the platform's median. A short with no settled figure is left out, never
