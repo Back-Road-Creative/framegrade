@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .day7 import posted_date, settled_day7_views
+from .store import DAY_REEL_PREFIX
 
 #: Days a review looks back over.
 WINDOW_DAYS = 28
@@ -109,11 +110,6 @@ def music_grouper(test: Any, receipts: set) -> Callable[[str, int, str, date], O
         return "music:on" if (project, index, platform) in receipts else None
 
     return group
-
-
-#: Project-name prefix the day-reel route gives every reel it queues
-#: (``publishing.day_reels``: ``day-reel-<drive file id>``).
-DAY_REEL_PREFIX = "day-reel-"
 
 
 def source_group(project: str) -> str:

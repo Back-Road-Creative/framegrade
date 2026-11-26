@@ -24,6 +24,10 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
+#: Project-name prefix of a day reel (``publishing.day_reels``:
+#: ``day-reel-<drive file id>``); the growth review groups on the same one.
+DAY_REEL_PREFIX = "day-reel-"
+
 
 def append_observation(
     record: TrackingRecord, short_index: int, observation: MetricObservation
@@ -332,8 +336,13 @@ class TrackingStore:
                 f"refusing to record a posting time for short #{short_index} in "
                 f"{project} with no provenance: pass posted_at_source, or neither"
             )
-        record = self.load(project)
-        for short in record.shorts:
+        try:
+            record = self.load(project)
+        except FileNotFoundError:
+            if not project.startswith(DAY_REEL_PREFIX):
+                raise
+            record = None
+        for short in record.shorts if record is not None else ():
             if short.index == short_index:
                 short.platform_ids[platform] = video_id
                 if posted_at:
@@ -348,6 +357,26 @@ class TrackingStore:
                     video_id,
                 )
                 return
+        if project.startswith(DAY_REEL_PREFIX):
+            # A day reel queued before its enqueue step wrote a tracking
+            # record (docs/pipeline/186) has no record to update. Its publish
+            # is the only receipt we will ever get, so the record is written
+            # here instead of dropping the id: the day reel is then counted
+            # by metrics collect and the growth review like any other Short.
+            self.register_short(
+                project,
+                short_index,
+                posted_at=posted_at,
+                posted_at_source=posted_at_source,
+                platform_ids={platform: video_id},
+            )
+            logger.info(
+                "Registered missing day-reel record for %s while recording its %s ID %s",
+                project,
+                platform,
+                video_id,
+            )
+            return
         raise ValueError(f"Short #{short_index} not found in project {project}")
 
     # ── Long-form Management ─────────────────────────────────────────────
