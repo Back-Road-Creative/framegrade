@@ -55,7 +55,7 @@ from .heal import (
     default_pinned_version,
     install_pending,
     job_runner,
-    refresh_gpx,
+    refresh_recipe,
 )
 from .heal import wrap_name as heal_job_name
 from .resume import HOLD_NAME, is_held
@@ -944,7 +944,8 @@ def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_di
     """Resume a drive whose OST audit was confirmed (or, with ``why``, parked at the gate under
     another version), from its own recipe, under its backlog job name; the store row is already
     ``auditing``, so nothing is registered. A recipe GPX that no longer exists takes the backlog
-    row's (``heal.refresh_gpx``), as heal's own resume does."""
+    row's, and a gone input with no replacement refuses (``heal.refresh_recipe``), as heal's own
+    resume does."""
     lead = why or f"{project}: OST audit confirmed"
     recipes = sorted(Path(stages_root).glob(f"{project}/**/_stages/resume.json"))
     if any(is_held(r) for r in recipes):
@@ -952,12 +953,13 @@ def _resume_confirmed(res, project, stages_root, output_root, code_root, jobs_di
     recipe = resume.read_recipe(recipes[0]) if recipes else None
     if recipe is None:
         return {**res, "action": "refused", "reason": f"{lead}, but no readable resume.json under {Path(stages_root) / project}"}  # fmt: skip
-    bound, cwd = bind_to_code_root(code_root, recipe["argv"])
-    if bound is None:
-        return {**res, "action": "refused", "reason": f"{project}: {cwd}"}
-    bound, refreshed = refresh_gpx(bound, manifest_row)
+    fresh, refreshed, gone = refresh_recipe(recipes[0], recipe, manifest_row,
+                                            cwd=Path(code_root) / SERVICE_DIR, dry_run=dry_run)  # fmt: skip
     if refreshed:
         res["gpx_refreshed"] = refreshed
+    bound, cwd = bind_to_code_root(code_root, fresh) if fresh else (None, gone)
+    if bound is None:
+        return {**res, "action": "refused", "reason": f"{project}: {cwd}"}
     bound += [f for f in ("--skip-upload", "--no-youtube-upload") if f not in bound]
     flag = "--output-dir"
     out_dir = Path(bound[bound.index(flag) + 1]) if flag in bound[:-1] else Path(output_root) / project  # fmt: skip

@@ -157,26 +157,70 @@ def bind_to_code_root(code_root: Path, recipe_argv: List[str]) -> Tuple[Optional
     return [str(python), "-m", "gomoveshift", *args], str(svc)
 
 
-def refresh_gpx(argv: List[str], manifest_row: Any) -> Tuple[List[str], Dict[str, List[str]]]:
-    """``(argv, refreshed)``: each ``--day-gpx`` / ``--bracket-gpx`` value in a recipe's argv that
-    no longer exists is replaced by the drive's backlog row's own, when every file the row names
-    exists (a GPX rename, gomoveshiftsite#334, left Galley Head's recipe naming a gone file). A
-    recipe file that still exists is kept: the checkpoint was built from it. ``refreshed`` maps
-    each replaced flag to its new value(s)."""
+#: Recipe flags whose values are files or directories the drive reads, with the values each takes.
+_INPUT_FLAGS = {"--day-gpx": 1, "--bracket-gpx": 2, "--map-inset-bundle": 1, "--trail-profile": 1}
+#: Of those, the ones a ``drive_backlog.yaml`` row owns (flag -> row attribute): only these have a
+#: current replacement.
+_ROW_INPUTS = {"--day-gpx": "day_gpx", "--bracket-gpx": "bracket_gpx"}
+
+
+def _row_value(manifest_row: Any, flag: str) -> List[str]:
+    raw = (getattr(manifest_row, _ROW_INPUTS[flag], None) or ()) if flag in _ROW_INPUTS else ()
+    return [str(raw)] if isinstance(raw, (str, Path)) else [str(p) for p in raw]
+
+
+def refresh_inputs(
+    argv: List[str], manifest_row: Any, cwd: Optional[Path] = None
+) -> Tuple[Optional[List[str]], Dict[str, List[str]], str]:
+    """``(argv, refreshed, "")``, or ``(None, {}, reason)`` when a file the saved argv names is
+    gone and nothing current replaces it: a replay that would only die in the drive's pre-flight
+    is refused instead, saying which file.
+
+    Inputs are the drive's source directory and each ``_INPUT_FLAGS`` value, judged from ``cwd``
+    (where the drive will run). A gone ``--day-gpx`` / ``--bracket-gpx`` takes the drive's backlog
+    row's value when every file the row names exists (a GPX rename, gomoveshiftsite#334, left
+    Galley Head's recipe naming a gone file). An input that still exists is kept even when the
+    row names another: the checkpoint was built from it. ``refreshed`` maps each replaced flag
+    to its new value(s)."""
+    base = Path(cwd) if cwd else Path.cwd()
     out, refreshed = list(argv), {}
-    if manifest_row is None:
-        return out, refreshed
-    for flag, n, attr in (("--day-gpx", 1, "day_gpx"), ("--bracket-gpx", 2, "bracket_gpx")):
-        raw = getattr(manifest_row, attr, None) or ()
-        new = [str(raw)] if isinstance(raw, (str, Path)) else [str(p) for p in raw]
-        if flag not in out or len(new) != n or not all(Path(p).is_file() for p in new):
+    if "drive" in out[3:]:
+        i = out.index("drive", 3) + 1
+        if i < len(out) and not out[i].startswith("-") and not (base / out[i]).is_dir():
+            return None, {}, f"the drive's source directory {out[i]} no longer exists"
+    for k, tok in enumerate(list(out)):
+        flag, eq, val = tok.partition("=")
+        n = _INPUT_FLAGS.get(flag)
+        if n is None or (eq and n != 1):
             continue
-        i = out.index(flag) + 1
-        old = out[i : i + n]
-        if len(old) == n and not all(Path(p).is_file() for p in old):
-            out[i : i + n] = new
-            refreshed[flag] = new
-    return out, refreshed
+        old = [val] if eq else out[k + 1 : k + 1 + n]
+        if all((base / p).exists() for p in old if p):
+            continue
+        new = _row_value(manifest_row, flag)
+        if len(new) != n or not all((base / p).is_file() for p in new):
+            where = "and its drive_backlog.yaml row names no existing replacement"
+            return None, {}, f"recipe {flag} {' '.join(old)} no longer exists {where}"
+        out[k : k + 1 + (0 if eq else n)] = [f"{flag}={new[0]}"] if eq else [flag, *new]
+        refreshed[flag] = new
+    return out, refreshed, ""
+
+
+def refresh_recipe(
+    recipe_path: Path, recipe: Dict[str, Any], manifest_row: Any, *, cwd: Path, dry_run: bool
+) -> Tuple[Optional[List[str]], Dict[str, List[str]], str]:
+    """``refresh_inputs`` on a recipe's own argv: the one step every replay of a ``resume.json``
+    takes (heal, a confirmed backlog resume, ``health publish``, ``drive --from-recipe``). A
+    replaced value is also written back into the recipe (``resume.rewrite_argv``; never in a dry
+    run), so the next replay names the current file without depending on the backlog row again.
+    That changes no checkpoint: only a file that no longer exists is replaced, which no resume
+    could have read, and the drive itself rewrites the recipe from its own argv on every full
+    start."""
+    argv, refreshed, why = refresh_inputs(recipe["argv"], manifest_row, cwd)
+    if argv is None:
+        logger.warning("replay of %s refused: %s", recipe_path, why)
+    elif refreshed and not dry_run:
+        resume.rewrite_argv(Path(recipe_path), argv)
+    return argv, refreshed, why
 
 
 def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> Optional[str]:
@@ -662,13 +706,15 @@ def run_heal(
                     )
         bound, cwd = (None, "")
         if att["action"] == "skipped" and not att["reason"]:
-            bound, cwd = bind_to_code_root(code_root, recipe["argv"])
+            fresh, refreshed, why = refresh_recipe(
+                Path(recipe_path), recipe, manifest_row_fn(row),
+                cwd=Path(code_root) / SERVICE_DIR, dry_run=dry_run,
+            )  # fmt: skip
+            if refreshed:
+                att["gpx_refreshed"] = refreshed
+            bound, cwd = bind_to_code_root(code_root, fresh) if fresh else (None, why)
             if bound is None:
                 att.update(action="refused", reason=cwd)
-            else:
-                bound, refreshed = refresh_gpx(bound, manifest_row_fn(row))
-                if refreshed:
-                    att["gpx_refreshed"] = refreshed
         if bound is not None:
             name = job_name(row["drive"], sha)
             # Always this launcher's own value: the recipe records only RECIPE_ENV_KEYS, never an

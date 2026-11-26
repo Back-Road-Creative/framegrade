@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from ..health import retry_policy
+from ..health.heal import refresh_recipe
 from ..health.launch import SUPERSEDED_DIR
 from ..health.resume import RECIPE_NAME, read_recipe, recipe_env
 
@@ -134,10 +136,15 @@ def _split_overrides(tokens: List[str]) -> Tuple[Optional[str], List[str]]:
 
 
 def expand(
-    argv: List[str], *, environ: Mapping[str, str], stages_root: Optional[Path] = None
+    argv: List[str],
+    *,
+    environ: Mapping[str, str],
+    stages_root: Optional[Path] = None,
+    manifest_row_fn: Callable[[Dict[str, Any]], Any] = retry_policy.default_manifest_row,
 ) -> Tuple[List[str], Dict[str, str], Optional[Path]]:
     """``(argv, env to apply, recipe path)``. Untouched ``(argv, {}, None)`` unless ``argv`` is
-    a ``drive`` with ``--from-recipe``. Raises :class:`FromRecipeError`."""
+    a ``drive`` with ``--from-recipe``. A recipe input that no longer exists takes the drive's
+    backlog row's, else refuses (``heal.refresh_recipe``). Raises :class:`FromRecipeError`."""
     if (
         not argv
         or argv[0] != "drive"
@@ -166,4 +173,10 @@ def expand(
             raise FromRecipeError(
                 f"{where}, environment says {key}={current}; unset it or drop {FLAG}"
             )
+    drive = recipe_path.resolve().parent.parent.name  # <stages>/<drive>/_stages/resume.json
+    recipe_argv, _refreshed, gone = refresh_recipe(
+        recipe_path, recipe, manifest_row_fn({"drive": drive}), cwd=Path.cwd(), dry_run=False
+    )
+    if recipe_argv is None:
+        raise FromRecipeError(f"cannot relaunch {recipe_path}: {gone}")
     return [*recipe_argv[3:], *overrides], env, recipe_path

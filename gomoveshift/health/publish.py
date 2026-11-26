@@ -31,14 +31,16 @@ from seo_manager.scheduling.store import SlotTaken, StaleDrive
 from .. import run_origin
 from ..pipeline.replace_scheduled import record_incident, unfinished
 from ..publishing.mask_frame_gate import mask_frame_refusal
-from . import resume
+from . import resume, retry_policy
 from .heal import (
     _STALL_S,
+    SERVICE_DIR,
     _job_records,
     bind_to_code_root,
     default_pinned_version,
     install_pending,
     job_runner,
+    refresh_recipe,
     stale_phases,
 )
 from .launch import (
@@ -122,6 +124,7 @@ def run_publish(
     expect_sha: Optional[str] = None,
     installed_version: Callable[[Path], Optional[str]] = default_installed_version,
     pinned_version: Callable[[Path], Optional[str]] = default_pinned_version,
+    manifest_row_fn: Callable[[Dict[str, Any]], Any] = retry_policy.default_manifest_row,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"project": project, "region": region, "action": "noop", "steps": []}
     d = store.drive(project)
@@ -140,7 +143,12 @@ def run_publish(
     recipe = resume.read_recipe(recipe_path) if recipe_path else None
     if recipe is None:
         return _refuse(res, f"no readable resume.json under {Path(stages_root) / project}")
-    bound, why = bind_to_code_root(code_root, recipe["argv"])
+    # Phase D slices the recipe's --day-gpx too: a gone one takes the backlog row's, else refuses.
+    fresh, refreshed, why = refresh_recipe(recipe_path, recipe, manifest_row_fn({"drive": project}),
+                                           cwd=Path(code_root) / SERVICE_DIR, dry_run=dry_run)  # fmt: skip
+    if refreshed:
+        res["gpx_refreshed"] = refreshed
+    bound, why = bind_to_code_root(code_root, fresh) if fresh else (None, f"{project}: {why}")
     if bound is None:
         return _refuse(res, why)
     if pending := install_pending(installed_version(Path(bound[0])), pinned_version(Path(code_root))):  # fmt: skip
