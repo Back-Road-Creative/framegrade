@@ -515,6 +515,11 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_account TEXT")
         if "upload_kind" not in cols:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_kind TEXT")
+        if "first_submitted_at" not in cols:
+            # When the row FIRST entered ``submitting`` (set by ``transition``,
+            # never moved). A YouTube retry looks for its own lost upload from
+            # here, not from "now". NULL for rows that predate it: never guessed.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_submitted_at TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -1020,7 +1025,12 @@ def transition(
         fields["published_at_source"] = published_at_source
     set_cols = ", ".join(f"{k}=?" for k in fields)
     set_clause = f"status=?, updated_at=?{', ' + set_cols if set_cols else ''}"
-    params = [new_status, _now_iso(), *fields.values(), delivery_id, expected_status]
+    params = [new_status, _now_iso(), *fields.values()]
+    if new_status == "submitting":
+        # The first submit only: every later attempt keeps it (COALESCE).
+        set_clause += ", first_submitted_at=COALESCE(first_submitted_at, ?)"
+        params.append(_now_iso())
+    params += [delivery_id, expected_status]
     account_guard = ""
     photo_guard = (
         " AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)"

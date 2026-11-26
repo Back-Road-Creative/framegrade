@@ -48,8 +48,11 @@ than re-implementing its upload/retry/token/quota handling.
   double-post. `_reconcile` now runs a channel-scan fallback in that one
   case — and ONLY that case, never on a first `queued` attempt: it walks
   `channels().list(mine=True)` → `relatedPlaylists.uploads` →
-  `playlistItems().list` → `videos().list`, matching on exact title within a
-  2-hour recency window (`youtube_adapter._ADOPT_RECENCY`). One match is
+  `playlistItems().list` → `videos().list`, matching on exact title among
+  uploads made since the row was first submitted (the queue's
+  `first_submitted_at`, less `_ADOPT_CLOCK_SKEW`; `created_at` for an older
+  row), so a retry hours later still finds it. A video another queue row
+  already holds as its `platform_upload_id` is never adopted. One match is
   adopted instead of inserting; two or more raise
   `AmbiguousUploadMatchError` rather than guess. `playlistItems.list` and
   `videos.list` cost units in the combined 10,000/day bucket, not the

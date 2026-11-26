@@ -67,9 +67,10 @@ NOT_PUBLIC_GRACE = timedelta(hours=1)
 NOT_PUBLIC_KIND = "youtube_not_public_after_slot"
 
 # Bound on the channel-scan fallback (see ``_find_existing_upload``): only
-# uploads within this window of "now" are candidates, and at most this many
+# uploads made since the row was FIRST submitted (less this allowance for the
+# gap between our clock and YouTube's) are candidates, and at most this many
 # of the channel's most recent uploads are inspected.
-_ADOPT_RECENCY = timedelta(hours=2)
+_ADOPT_CLOCK_SKEW = timedelta(minutes=5)
 _ADOPT_SCAN_LIMIT = 100  # explicit bound passed to the shared lister
 
 # U-R1: after a fresh insert, ``videos.list`` must return the new id before
@@ -721,7 +722,7 @@ class YouTubeShortsAdapter:
         if existing.get("status") != STATUS_SUBMITTING:
             return None
 
-        adopted = self._find_existing_upload(payload)
+        adopted = self._find_existing_upload(payload, existing, conn)
         if adopted:
             transition(
                 conn, delivery_id, STATUS_SUBMITTING, STATUS_UPLOADED, platform_upload_id=adopted
@@ -745,18 +746,36 @@ class YouTubeShortsAdapter:
             return False
         return True
 
-    def _find_existing_upload(self, payload: YouTubePayload) -> Optional[str]:
+    def _find_existing_upload(
+        self, payload: YouTubePayload, existing: Dict[str, Any], conn
+    ) -> Optional[str]:
         """Scan the channel's most recent uploads (pattern: see
         ``youtube_uploads_listing.list_uploads``) for a video matching
-        ``payload`` by exact title and upload recency. Read-only; costs
-        ``playlistItems.list``/``videos.list`` units (the combined
+        ``payload`` by exact title, uploaded since the row was first submitted
+        (``first_submitted_at``; ``created_at`` for a row that predates it), so
+        a retry hours later still finds its own lost upload. A video another
+        queue row already holds as its upload is never a candidate. Read-only;
+        costs ``playlistItems.list``/``videos.list`` units (the combined
         10,000/day bucket), never ``videos.insert`` quota. Never called
         outside the lost-response retry path (see ``_reconcile``)."""
         service = self._uploader._build_service()
-        cutoff = datetime.now(timezone.utc) - _ADOPT_RECENCY
+        since = existing.get("first_submitted_at") or existing["created_at"]
+        cutoff = datetime.fromisoformat(since) - _ADOPT_CLOCK_SKEW
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        owned = {
+            r[0]
+            for r in conn.execute(
+                "SELECT platform_upload_id FROM deliveries WHERE platform=? AND id<>? "
+                "AND platform_upload_id IS NOT NULL",
+                (PLATFORM, existing["id"]),
+            )
+        }
         candidates: List[str] = []
         for upload in list_uploads(service, limit=_ADOPT_SCAN_LIMIT):
             if upload.title != payload.title or not upload.published_at:
+                continue
+            if upload.video_id in owned:
                 continue
             try:
                 published_dt = datetime.fromisoformat(upload.published_at.replace("Z", "+00:00"))
@@ -767,8 +786,8 @@ class YouTubeShortsAdapter:
 
         if len(candidates) > 1:
             raise AmbiguousUploadMatchError(
-                f"{len(candidates)} recent uploads match title={payload.title!r} within "
-                f"{_ADOPT_RECENCY} — refusing to guess which is this short's video"
+                f"{len(candidates)} unowned uploads since {since} match "
+                f"title={payload.title!r} — refusing to guess which is this short's video"
             )
         return candidates[0] if candidates else None
 

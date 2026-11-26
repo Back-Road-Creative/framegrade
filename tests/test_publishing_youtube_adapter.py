@@ -60,7 +60,7 @@ def mock_service():
     return svc
 
 
-def _video_item(video_id: str, title: str, *, age: timedelta = timedelta(minutes=5)) -> dict:
+def _video_item(video_id: str, title: str, *, age: timedelta = timedelta(minutes=1)) -> dict:
     published = (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z")
     return {"id": video_id, "snippet": {"title": title, "publishedAt": published}}
 
@@ -457,6 +457,56 @@ def test_channel_scan_ignores_same_title_outside_recency_window(mock_service, qu
 
     assert result.video_id == "SHORTVID123"
     assert mock_service.videos.return_value.insert.call_count == 1
+
+
+def test_retry_hours_after_the_lost_upload_still_adopts_it(mock_service, queue_conn, tmp_path):
+    """The window runs from the row's FIRST submit, not from now: a retry five
+    hours after the lost-response upload adopts it instead of posting twice."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    transition(queue_conn, delivery_id, "queued", "submitting")
+    submitted = datetime.now(timezone.utc) - timedelta(hours=5)
+    queue_conn.execute(
+        "UPDATE deliveries SET first_submitted_at=? WHERE id=?",
+        (submitted.isoformat(), delivery_id),
+    )
+    queue_conn.commit()
+    _seed_channel_scan(mock_service, "BEFORE", "LOSTVID")
+    mock_service.videos.return_value.list.return_value.execute.return_value = {
+        "items": [
+            _video_item("BEFORE", SHORT_TITLE, age=timedelta(hours=6)),  # before the submit
+            _video_item("LOSTVID", SHORT_TITLE, age=timedelta(hours=4, minutes=55)),
+        ]
+    }
+
+    result = _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    assert result.video_id == "LOSTVID"
+    mock_service.videos.return_value.insert.assert_not_called()
+
+
+def test_channel_scan_never_adopts_a_video_another_row_owns(mock_service, queue_conn, tmp_path):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    other = enqueue(queue_conn, "other-proj", 7, "youtube", "hash-other")
+    transition(queue_conn, other, "queued", "uploaded", platform_upload_id="TAKEN")
+    transition(queue_conn, delivery_id, "queued", "submitting")
+    _seed_channel_scan(mock_service, "TAKEN", "MINE")
+    mock_service.videos.return_value.list.return_value.execute.return_value = {
+        "items": [_video_item("TAKEN", SHORT_TITLE), _video_item("MINE", SHORT_TITLE)]
+    }
+
+    result = _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    assert result.video_id == "MINE"
+    mock_service.videos.return_value.insert.assert_not_called()
+
+
+def test_first_submit_time_survives_later_attempts(queue_conn):
+    did = enqueue(queue_conn, "proj", 1, "youtube", "h")
+    transition(queue_conn, did, "queued", "submitting")
+    first = find_delivery(queue_conn, "proj", 1, "youtube")["first_submitted_at"]
+    transition(queue_conn, did, "submitting", "retry_wait")
+    transition(queue_conn, did, "retry_wait", "submitting")
+    assert first and find_delivery(queue_conn, "proj", 1, "youtube")["first_submitted_at"] == first
 
 
 # ── Shorts playlist routing ────────────────────────────────────
