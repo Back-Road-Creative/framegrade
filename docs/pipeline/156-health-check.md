@@ -385,3 +385,17 @@ container refuses too, as
 per tick; it is resolved once the counts agree. There is no override flag or variable: re-render
 the day on the fixed renderer, which rewrites the sidecar. A `--dry-run` refuses but records no
 incident. Queue-dispatched Shorts are not re-checked; they are enqueued by Phase D, behind it.
+
+**The backlog tick re-renders a mismatched day itself (#662).** Each `health backlog` tick, when
+no `--supersede` is given, looks for an open `mask_index_mismatch` row whose reason is
+`mask_frame_count_mismatch` on a listed, unpublished `failed` or `auditing` drive of its region.
+It supersedes that drive through the same path an operator's `--supersede` takes (only that row
+launches). It asks once per drive-day per renderer version: the launch appends
+`{renderer_version, at, reason}` to the row's `rerender_requested` list, and a row that already
+names the installed version is never asked again, so a renderer that still miscounts cannot loop.
+A new renderer version asks once more. `mask_frame_count_unknown` is never re-rendered (it stays
+fail closed), and nothing is asked while the renderer's version cannot be read. A dry pass decides
+first: a re-render the supersede would refuse (an upload record, a sibling run) leaves the tick
+exactly as it would have been, with the refusal under `mask_rerender.refused`. The incident still
+resolves only when the gate passes the re-rendered day. A `--dry-run` reports `mask_rerender`
+and writes nothing.
