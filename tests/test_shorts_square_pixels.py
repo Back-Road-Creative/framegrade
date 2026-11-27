@@ -28,7 +28,8 @@ def test_crop_filter_forces_square_pixels_after_scale(src):
 @pytest.mark.parametrize("builder", [_ffmpeg_argv, _instagram_argv])
 def test_h264_variants_force_square_pixels(builder):
     argv = builder(Path("in.mp4"), Path("out.mp4"))
-    assert argv[argv.index("-vf") + 1] == "setsar=1"
+    # the Instagram variant scales first (frame cap); square pixels are still the last step
+    assert argv[argv.index("-vf") + 1].split(",")[-1] == "setsar=1"
 
 
 def _data(sar):
