@@ -73,3 +73,13 @@ it under `publish_refusals` (exit 2). If none publishes, the first refusal is st
 `refused` result and the region is still held (no new row launches), with the later refusals
 listed. Before, Old Head to Courtmacsherry's mask-gate refusal held Galley Head's passed audit
 (2026-11-27).
+
+**A supersede re-renders a drive whose own passed audit cannot publish.** `--supersede <project>`
+naming a `failed` store row whose publish retry is refused sets that run aside and relaunches the
+row (the retry is still offered first; a retry that publishes wins). Naming an `auditing` drive
+whose audit passed asks `health publish` as a dry run: if it is refused, the run is set aside and
+the row relaunches; if it could publish, the supersede is refused with `its passed audit can
+publish`, and nothing is moved. Either relaunch re-registers the same store row `auditing` and
+reports the refusal under `relaunch`. Before, the mask gate asked for re-renders of Kerry-to-Cork
+(`failed`) and Old Head to Courtmacsherry (`auditing`) that `--supersede` refused as "in the
+schedule store (failed)" and "audit in progress" (2026-11-27).
