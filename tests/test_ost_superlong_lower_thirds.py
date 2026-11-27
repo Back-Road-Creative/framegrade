@@ -14,10 +14,11 @@ from gomoveshift.pipeline.ffmpeg_runner import VideoValidation
 
 from ost_subprocess_harness import patch_ost_run
 
-# Byte-identical regular_lf filtergraph pins, captured BEFORE the
-# lower-thirds feature existed (no lower_thirds kwarg passed at all).
-_MONTAGE_SHA = "b6b244a063feceaab85382c730ac0bd6d81e80ef792937719052a1967afd586c"  # pragma: allowlist secret (filtergraph digest, not a credential)
-_LEGACY_SHA = "1ec8b169829938ce872500efe5a4cafe3598e929cf7af61aac85dd04a334b8bf"  # pragma: allowlist secret (filtergraph digest, not a credential)
+# Byte-identical regular_lf filtergraph pins: no lower_thirds kwarg passed at
+# all. Re-pinned 2026-11-27 when the brand line became "gomoveshift.com"; the
+# old pins reproduce exactly with only that word swapped back.
+_MONTAGE_SHA = "1ec8e48a1b4487c3d11529667771ac7c423319a0b4299822e88af6ee03be6ede"  # pragma: allowlist secret (filtergraph digest, not a credential)
+_LEGACY_SHA = "b0b47f0f48ace8f67cffa3fd42422142628cc186ac380e58a45a7c2dc00ee690"  # pragma: allowlist secret (filtergraph digest, not a credential)
 _STUB_PROBE = {"width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 12000, "duration": 14400.0}
 
 
