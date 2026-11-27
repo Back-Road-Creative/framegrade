@@ -161,8 +161,8 @@ class PostText:
 
 def sent_texts(record) -> Tuple[str, str]:
     """``(title, description)`` the YouTube adapter sends for ``record``: a Short
-    with region votes sends its reviewed description, any other its plan text
-    (also when the review refuses it, as it is then never sent)."""
+    with region votes sends its reviewed description; any other, or one the review
+    does not agree with (it is never sent), is compared by its plan text."""
     payload = record.payloads.youtube
     description = payload.description or ""
     if record.sampled_regions:
@@ -171,7 +171,9 @@ def sent_texts(record) -> Tuple[str, str]:
 
             from .youtube_adapter import build_short_final_text_review
 
-            description = compose_description(build_short_final_text_review(record)["surfaces"])
+            review = build_short_final_text_review(record)
+            if review.get("verdict") == "agree":
+                description = compose_description(review["surfaces"])
         except Exception:  # noqa: BLE001 -- a refused review sends nothing; keep the plan text
             pass
     return payload.title, description
