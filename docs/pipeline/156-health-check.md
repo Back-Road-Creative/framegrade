@@ -367,9 +367,16 @@ its source container holds (Kerry-to-Cork: 306,385 vs 306,377), so the blur lags
 `health publish` (and the backlog republish, which runs `run_publish`) refuses before any store
 write, and Phase D raises `MaskFrameCountError` at the top of an upload run (an audit pass is not
 gated). Per `day_<date>` stage dir it compares `source_frame_count` in
-`day_<date>_blur_regions.json` with the container's ffprobe `nb_frames` (`day_<date>_raw.mp4`, else
-`day_<date>_master.mp4`). Unequal counts refuse, naming the day, both counts and the difference. A
-missing sidecar, a missing count, or no probeable container refuses too, as
+`day_<date>_blur_regions.json` with the frames of the container the detect pass read: ffprobe
+`nb_frames` of `day_<date>_raw.mp4`. The encode deletes the raw and cleanup's master-drop deletes the
+master once the finals exist, so a finished day is counted from the raw's inputs: the
+`_stages/episode_*_<date>.mp4` files, summed, but only when their size:mtime fingerprints are the
+`source_fingerprints` that `day_<date>_color_cache.json` recorded at encode (the concat is a stream
+copy). `day_<date>_master.mp4` counts last, and only when its frame rate is within 1% of the
+sidecar's `source_fps`: a master encoded at another rate (Old Head: 184,421 frames at 29.97 fps
+against a 368,837-frame 59.94 fps mask) is in a different frame space. Unequal counts refuse, naming the day, both counts and the difference. A
+missing sidecar, a missing count, episodes that are not the recorded ones, or no probeable
+container refuses too, as
 `mask_frame_count_unknown` (fail closed). Each refused day gets one `mask_index_mismatch` incident
 (`mask_index_mismatch_<drive>_<date>.json`, key `mask_index_mismatch:<drive>:<date>`), never one
 per tick; it is resolved once the counts agree. There is no override flag or variable: re-render
