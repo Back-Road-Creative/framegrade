@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.171] - 2026-11-26
+
+### Fixed
+
+- A released fix no longer sits pinned but uninstalled while renders run back to back: `health backlog` (a new drive or a confirmed OST resume) and `health publish` now refuse, as `health heal` already did, while the service venv lacks the version the code root pins, so the staging sync's deferred install lands between renders.
+- `health check` raises one `install_deferred` incident when that pinned version has still not been installed after 6 hours.
+- The same footage can no longer be queued twice under two names. A day reel and the drive Short of the same clip (or two reels of two Drive files) used to both publish, because the queue only compared project, Short number and platform. Each queued row now records its video's fingerprint and, on YouTube, its title, and enqueue refuses a Short whose video or title is already queued or published, with a health incident.
+- The nightly queue text sync no longer rewrites a Short title someone edited by hand in the plan. The plan now records the exact title the generator wrote, and only a title still equal to it is regenerated, whatever the edited title looks like.
+- A Short queued with a title-body experiment arm the generator no longer renders is now left as stored, instead of being refused, with an incident filed, every night.
+- A YouTube Short whose video later disappears from the channel no longer stays "published" unnoticed. Every dispatch run now checks a batch of published videos (each at most once a day) and moves one the channel no longer returns, after a second look, to missing with a health alert. A lost-upload recovery no longer adopts a video another queued Short already owns.
+
 ## [0.3.170] - 2026-11-26
 
 ### Fixed
@@ -1940,7 +1951,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...HEAD
+[0.3.171]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...v0.3.171
 [0.3.170]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...v0.3.170
 [0.3.169]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.168...v0.3.169
 [0.3.168]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...v0.3.168
