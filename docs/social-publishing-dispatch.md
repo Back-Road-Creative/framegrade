@@ -147,7 +147,10 @@ recoverable, never duplicated.
     adapter's reconcile. `dispatch._pause_on_auth` wraps every callable the
     drain runs (the Facebook photo reconciler too), and every other platform
     pass pauses the same way. `tests/test_auth_pause_passes.py` fails on a new
-    per-row `except Exception` there that routes no refusal.
+    per-row `except Exception` there that routes no refusal, and on any broad
+    `except` in a `publishing/*_adapter.py` that carries on without routing
+    one: a refusal after the upload (YouTube's post-upload check and playlist
+    assign, the Facebook reel read-back) pauses too, the row keeping its id.
   - **TikTok**: no dedicated permanent exception subclass exists —
     `TikTokAdapterError` covers both transient and permanent failures with
     no way to tell them apart by type, so per the conservative default
