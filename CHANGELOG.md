@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.182] - 2026-11-27
+
+### Fixed
+
+- An Irish county's boundary proof measures the route's reach against every other county on the Tailte map instead of the county's own edge, which ends at the shore, so a coastal drive such as Galley Head is no longer refused as a "possible boundary crossing" into the sea. Counties on the Northern Ireland border keep the full-boundary test, because the map has no Northern Ireland polygon. A refused proof's reason is now kept in the route record's `boundary_notes`. Waypost (`seo-manager`) is pinned to 7a6f21f (waypost#119) for proof version `tiger2026-tailte2026-bounded-v3`.
+
 ## [0.3.181] - 2026-11-27
 
 ### Fixed
@@ -2039,7 +2045,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.182...HEAD
+[0.3.182]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...v0.3.182
 [0.3.181]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...v0.3.181
 [0.3.180]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...v0.3.180
 [0.3.179]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...v0.3.179
