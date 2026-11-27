@@ -465,6 +465,86 @@ def test_any_other_publish_refusal_is_a_refusal_naming_it(tmp_path):
     assert launch.exit_code(res) == 2
 
 
+# 2026-11-26: an operator's ``--supersede`` of Kerry-to-Cork (to re-render it on the fixed blur
+# mask) was refused with Old Head to Courtmacsherry's own refusal: Old Head's audit had passed,
+# its publish is refused by the same mask gate, and the auditing loop returned that refusal
+# before the supersede was reached. An explicit supersede of another row is not held by a
+# passed audit's standing publish refusal: it is recorded and the supersede goes on.
+
+
+def test_a_refused_publish_of_a_passed_audit_does_not_block_a_supersede_of_another_row(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    rig.drives.append(drive("day-x", "auditing"))
+    job(rig, "ok-x", "day-x", "succeeded", 100.0, exit_code=0)
+    rig.publish_result = {"action": "refused", "reason": "day-x blur mask does not match its source"}  # fmt: skip
+    rig.supersede = ("day-a", "re-render on the fixed blur mask")
+    res = rig.run(dry_run=True)
+    assert rig.publishes == [("day-x", True)], res
+    assert (res["action"], res["project"]) == ("would_launch", "day-a"), res
+    assert res["publish_refusals"] == [
+        {"project": "day-x", "reason": "publish refused: day-x blur mask does not match its source"}
+    ]
+    assert launch.exit_code(res) == 2  # the standing refusal still shows in the exit
+
+
+def test_without_a_supersede_a_passed_audits_refused_publish_still_holds_the_region(tmp_path):
+    rig = Rig(tmp_path)
+    _audited(rig, action="refused", reason="day-a blur mask does not match its source")
+    res = rig.run()
+    assert res["action"] == "refused" and "publish refused: day-a blur mask" in res["reason"]
+    assert not rig.launches
+
+
+# 2026-11-27: Old Head to Courtmacsherry's passed audit is refused by the blur-mask frame gate
+# until its re-render, and the hourly tick returned that refusal before Galley Head's audit
+# (passed 2026-11-26) was ever offered for publish. A passed audit behind a refused one still
+# gets its publish; the region is still held (no new launch) while no audit publishes.
+
+
+def _two_audits(rig, replies):
+    for name, at in (("day-a", 100.0), ("day-b", 300.0)):
+        rig.drives.append(drive(name, "auditing"))
+        job(rig, f"ok-{name}", name, "succeeded", at, exit_code=0)
+    rig.publish_result = {"action": "unused"}
+    rig.publish = lambda project, dry_run: (
+        rig.publishes.append((project, dry_run)) or {"project": project, **replies[project]}
+    )
+
+
+def test_a_passed_audits_refused_publish_does_not_starve_the_next_passed_audit(tmp_path):
+    rig = Rig(tmp_path)
+    _two_audits(rig, {
+        "day-a": {"action": "refused", "reason": "day-a blur mask does not match its source"},
+        "day-b": {"action": "launched", "reason": "day-b for 2026-10-23T09:00:00-04:00"},
+    })  # fmt: skip
+    res = rig.run()
+    assert rig.publishes == [("day-a", False), ("day-b", False)], res
+    assert res["action"] == "launched" and res["project"] == "day-b", res
+    assert res["publish_refusals"] == [
+        {"project": "day-a", "reason": "publish refused: day-a blur mask does not match its source"}
+    ]
+    assert launch.exit_code(res) == 2  # Old Head's refusal still shows in the tick's exit
+    assert not rig.launches
+
+
+def test_when_every_passed_audits_publish_is_refused_the_first_still_holds_the_region(tmp_path):
+    rig = Rig(tmp_path)
+    _two_audits(rig, {
+        "day-a": {"action": "refused", "reason": "day-a blur mask does not match its source"},
+        "day-b": {"action": "refused", "reason": "day-b final text refused"},
+    })  # fmt: skip
+    res = rig.run()
+    assert rig.publishes == [("day-a", False), ("day-b", False)], res
+    assert (res["action"], res["project"]) == ("refused", "day-a"), res
+    assert "publish refused: day-a blur mask" in res["reason"]
+    assert res["publish_refusals"] == [
+        {"project": "day-b", "reason": "publish refused: day-b final text refused"}
+    ]
+    assert launch.exit_code(res) == 2
+    assert not rig.launches
+
+
 def test_a_dry_run_asks_the_publisher_for_its_dry_run(tmp_path):
     rig = Rig(tmp_path)
     _audited(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
