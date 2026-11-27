@@ -103,9 +103,10 @@ def _line(row: Dict[str, Any]) -> str:
             f"Queued YouTube Shorts {', '.join(map(str, row['delivery_ids']))} of {row['project']} "
             f"need a route re-measure, but {row['stages_dir']} no longer has "
             f"{', '.join(row['missing'])}: dispatch-queue refuses them every tick and cannot "
-            f"repair them. A supersede re-render of {row['project']} is needed, then "
-            "`gomoveshift queue remeasure-short-route --id <id> --stages-dir <new _stages> "
-            "--rendered-shorts <its shorts dir> --apply`."
+            f"repair them. Re-render {row['project']}'s footage audit-only, uploads off, into a "
+            "separate stage root with its own owner record (a supersede refuses once uploads "
+            "exist), then `gomoveshift queue remeasure-short-route --id <id> --stages-dir "
+            "<new _stages> --rendered-shorts <its shorts dir> --apply`."
         )
     if row["kind"] == "delivery_failed_permanent":
         return (

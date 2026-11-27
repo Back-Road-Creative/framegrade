@@ -226,8 +226,10 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10, 13 and 15 (it would
    an unreadable queue releases nothing. When those files are already gone from the project's
    `_stages` (as `dispatch-queue` resolves it), the repair can only refuse the row every tick, so one
    incident per project is filed: key `queued_short_stages_gone:<project>`, fields `project`,
-   `delivery_ids`, `stages_dir`, `missing`; pushed once (`health_queued_short_stages_gone`) saying a
-   supersede re-render is needed, then `queue remeasure-short-route --stages-dir --rendered-shorts`.
+   `delivery_ids`, `stages_dir`, `missing`; pushed once (`health_queued_short_stages_gone`) saying to
+   re-render the footage audit-only, uploads off, into a separate stage root with its own owner
+   record (`health backlog --supersede` refuses a drive that already has upload records), then
+   `queue remeasure-short-route --stages-dir --rendered-shorts`.
    Resolves once the rows are measured, leave `queued`, or the files are back. Read-only. Host
    releases outside this repo (workspaces `bin/gms-stage-release.sh`, `_ops/host-cleanup.sh`
    rule 7) do not consult it.

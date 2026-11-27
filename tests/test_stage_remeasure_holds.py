@@ -154,7 +154,8 @@ def test_health_raises_when_a_held_projects_stages_are_gone(env):  # noqa: F811
     assert rows[0]["delivery_ids"] == [a, b]
     assert rows[0]["missing"] == [f"gps_points_{DATE}.json", f"shorts_ost_audit_{DATE}.json"]
     line = check_mod._line(rows[0])
-    assert "proj" in line and "supersede re-render" in line and str(gone) in line
+    assert "proj" in line and "separate stage root" in line and str(gone) in line
+    assert "A supersede re-render" not in line  # supersede refuses once uploads exist
     assert check_mod.stages_gone_incidents(_db(env), lambda s, p: env.stages, "t") == []
 
 
