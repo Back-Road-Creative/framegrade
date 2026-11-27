@@ -64,3 +64,11 @@ that refusal is listed under `publish_refusals` the same way and the supersede g
 tick still exits 2 while the refusal stands. Before, the supersede re-rendering Kerry-to-Cork
 on the fixed blur mask was refused with Old Head to Courtmacsherry's own mask-gate refusal
 (2026-11-26). A failed audit still stops an explicit supersede of another row.
+
+**A passed audit behind a refused one still gets its publish.** Without `--supersede`, the first
+passed audit whose publish is refused no longer ends the auditing loop: every later passed audit
+is offered for publish. The first one that publishes is the tick's result, with the refusals ahead of
+it under `publish_refusals` (exit 2). If none publishes, the first refusal is still the tick's
+`refused` result and the region is still held (no new row launches), with the later refusals
+listed. Before, Old Head to Courtmacsherry's mask-gate refusal held Galley Head's passed audit
+(2026-11-27).

@@ -1179,7 +1179,20 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             refused = {"project": proj, "reason": done["reason"]}
             res.setdefault("publish_refusals", []).append(refused)
     relaunch, auto = None, False
+    held = None  # the first passed audit whose publish was refused (no --supersede)
     for proj in auditing:
+        if held is not None:
+            # a passed audit behind a refused one still gets its publish (2026-11-27, Old Head's
+            # mask refusal held Galley Head's passed audit); nothing else runs past the hold
+            if not _failed_audit(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
+                done = _publish_audited(dict(res), proj, publish, dry_run)
+                bad = {"project": held["project"], "reason": held["reason"]}
+                if done.get("action") != "refused":
+                    return {**done, "publish_refusals": [*res.get("publish_refusals", []), bad]}
+                res.setdefault("publish_refusals", []).append(
+                    {"project": proj, "reason": done["reason"]}
+                )
+            continue
         failed = _failed_audit(jobs_dir, proj)
         gate = (
             None if failed else _ost_gate(jobs_dir, stages_root, proj, code_root, installed_version)
@@ -1197,8 +1210,11 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                                      manifest_row=row, pinned_version=pinned_version)  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
             done = _publish_audited(dict(res), proj, publish, dry_run)
-            if not (supersede and done.get("action") == "refused"):
+            if done.get("action") != "refused":
                 return done
+            if not supersede:
+                held = {**done, "project": proj}
+                continue
             # an operator's supersede of another row is never held by this drive's standing
             # publish refusal (2026-11-26, Old Head held Kerry-to-Cork's re-render): recorded,
             # and the supersede goes on; the tick still exits 2 while the refusal stands
@@ -1231,6 +1247,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             "project": proj,
             "reason": _failed_audit(jobs_dir, proj, hint=False) + "; health heal keeps retrying it from its stages",
         })  # fmt: skip
+    if held is not None:  # no audit behind it published: the refusal still holds the region
+        later = res.get("publish_refusals")
+        return {**held, **({"publish_refusals": later} if later else {})}
     if relaunch is None and failed_relaunch is not None and not supersede:
         # a failed store row heal cannot resume (no readable resume.json) is set aside and
         # launched from source once ``FailedRelaunch`` says its failure fingerprint changed
