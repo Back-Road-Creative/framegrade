@@ -52,3 +52,12 @@ def kill_group(proc: subprocess.Popen) -> None:
     except (OSError, subprocess.SubprocessError):
         pass
     proc.kill()
+
+
+def signal_group_of(pid: int, sig: int) -> None:
+    """Signal the process group that ``pid`` leads, by pid alone: for a job this
+    process did not start (the host worker re-adopting one). Windows: the pid."""
+    if _is_windows():
+        os.kill(pid, sig)
+    else:
+        os.killpg(pid, sig)

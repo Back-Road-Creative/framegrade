@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from gomoveshift import run_origin
+from gomoveshift._process_group import popen_kwargs, signal_group_of
 from gomoveshift.console.jobs import ALLOWED_SUBCOMMANDS
 from gomoveshift.console.settings import load_registry
 from gomoveshift.pipeline.orchestrator_lock import gpu_lock_path
@@ -142,7 +143,7 @@ def _signal_group(pid: Optional[int], start: Optional[str], sig: int) -> None:
     if pid is None or start is None or proc_start(pid) != start:
         return
     try:
-        os.killpg(pid, sig)
+        signal_group_of(pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -348,7 +349,7 @@ class HostWorker:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                **popen_kwargs(),
             )
         except OSError as exc:
             self._write_status(job_id, "failed", error=f"could not start: {exc}")
