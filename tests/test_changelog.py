@@ -99,3 +99,25 @@ def test_no_changelog_fragment_name_is_held_by_the_merge_robot() -> None:
     """Fails the PR that adds such a name, before it can stop a release PR."""
     held = [p.name for p in release.fragment_paths(REPO_ROOT) if _held_by_merge_robot(p.name)]
     assert held == [], f"rename these changelog.d fragments: {held}"
+
+
+def _unreleased_body(text: str) -> str:
+    match = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## \[)", text, flags=re.MULTILINE | re.DOTALL)
+    assert match, "CHANGELOG.md has no [Unreleased] section before a released version"
+    return match.group(1)
+
+
+def test_unreleased_holds_no_entries() -> None:
+    """The release robot cuts only when ``changelog.d`` holds a fragment, so an
+    entry written under ``[Unreleased]`` instead never starts a release: #687
+    (day reel site URL) merged on 2026-11-27 and no release was cut for it."""
+    body = _unreleased_body(_text()).strip()
+    assert body == "", (
+        "move the [Unreleased] entries in CHANGELOG.md to a changelog.d/<name>.md fragment"
+    )
+
+
+def test_unreleased_entries_are_found() -> None:
+    text = "## [Unreleased]\n\n### Added\n\n- x\n\n## [0.0.1] - 2026-01-01\n"
+    assert _unreleased_body(text).strip() == "### Added\n\n- x"
+    assert _unreleased_body("## [Unreleased]\n\n## [0.0.1] - 2026-01-01\n").strip() == ""
