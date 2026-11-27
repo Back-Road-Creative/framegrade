@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.176] - 2026-11-27
+
+### Fixed
+
+- The final-text review sent a region claim's `contains` as its required places only, so a region whose places were all retained under the required floor went to Waypost empty and was refused as `region_claim_malformed` (Galley Head LF 2). A region claim now lists every route place inside it, required ones first. Gaps, coverage and outside samples are unchanged, so an unproven gap still refuses.
+
 ## [0.3.175] - 2026-11-27
 
 ### Fixed
@@ -1992,7 +1998,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...HEAD
+[0.3.176]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...v0.3.176
 [0.3.175]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...v0.3.175
 [0.3.174]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...v0.3.174
 [0.3.173]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...v0.3.173
