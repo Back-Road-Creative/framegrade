@@ -30,7 +30,7 @@ def wired(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         launch, "load_inputs",
-        lambda config, region, ledger_path, now: ("usa", [], [], [], set(), lambda **kw: None),
+        lambda config, region, ledger_path, now: ("usa", [], [], [], set(), lambda **kw: None, set()),
     )  # fmt: skip
     monkeypatch.setattr(launch, "lease_fns", lambda code_root: (lambda: True, lambda: None))
     monkeypatch.setattr(launch, "render_horizon_h", lambda config: 1680)

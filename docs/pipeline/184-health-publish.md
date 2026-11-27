@@ -83,3 +83,12 @@ publish`, and nothing is moved. Either relaunch re-registers the same store row 
 reports the refusal under `relaunch`. Before, the mask gate asked for re-renders of Kerry-to-Cork
 (`failed`) and Old Head to Courtmacsherry (`auditing`) that `--supersede` refused as "in the
 schedule store (failed)" and "audit in progress" (2026-11-27).
+
+**The relaunched row's own unpublished ledger entries do not refuse it.** With the relaunch
+allowed, the supersede was still refused `in the content ledger`: Kerry-to-Cork's failed publish
+had left 7 Shorts entries naming the project, none holding a video id. An operator's
+`--supersede` relaunch now skips that check for the row's own entries when none of them holds a
+video id (`launch.load_inputs` returns the ledger projects that do, `ledger_live_projects`); an
+entry with a video id is live and still refuses. Every other row in the ledger is still skipped,
+and the automatic failed-row relaunch (`190-health-backlog.md`) still never takes a ledger row
+(2026-11-27). Tests: `tests/test_health_backlog_launch.py`.
