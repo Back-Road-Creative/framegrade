@@ -1,3 +1,0 @@
-### Fixed
-
-- No two YouTube posts on one channel carry near-identical titles or descriptions. Enqueue refuses a Short whose title or sent description is near-identical to a queued or recently published row (a `near_duplicate_text_refused` incident), the YouTube adapter re-checks right before each insert, and each drain pass holds the later of two colliding queued rows at `needs_operator` with the reason. A stamped Short's reviewed description now carries its stamp, so the Shorts of one drive that name one place no longer all send "Drive through <place>", and a Short title is never one a published title says in other words.
