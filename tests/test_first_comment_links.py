@@ -956,3 +956,32 @@ def test_the_summary_stays_quiet_when_no_first_comment_was_due(tmp_path, capsys)
         tmp_path, capsys, meta_result=FirstCommentResult(), instagram="first_party"
     )
     assert "first_comment" not in lines[-1]
+
+
+# --- a record's own first comment (day reels: the journal day link) ----------
+
+_JOURNAL = "https://gomoveshift.com/journeys/trip/#day-3"
+
+
+def test_enqueue_uses_the_records_own_comment_for_the_platforms_it_names(conn, tmp_path):
+    # A day reel has no full drive: its route names the comment itself.
+    record = _record(selected=("youtube", "instagram", "facebook"))
+    record["first_comment_by_platform"] = {"youtube": _JOURNAL, "facebook": _JOURNAL}
+    enqueue_from_plan_sidecar(conn, _write_sidecar(tmp_path, [record]))
+    got = dict(conn.execute("SELECT platform, first_comment_text FROM deliveries").fetchall())
+    assert got == {"youtube": _JOURNAL, "instagram": None, "facebook": _JOURNAL}
+
+
+def test_backfill_fills_the_records_own_comment(conn, tmp_path):
+    record = _record(short_index=7, selected=("youtube", "instagram"))
+    record["first_comment_by_platform"] = {"youtube": _JOURNAL}
+    path = _write_sidecar(tmp_path, [record])
+    ids = {
+        platform: enqueue(
+            conn, "p", 7, platform, "hash-a", sidecar_path=str(path), first_comment_text=None
+        )
+        for platform in ("youtube", "instagram")
+    }
+    backfill_first_comment_text(conn)
+    assert _row(conn, ids["youtube"])["first_comment_text"] == _JOURNAL
+    assert _row(conn, ids["instagram"])["first_comment_text"] is None

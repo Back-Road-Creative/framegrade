@@ -158,3 +158,24 @@ def test_without_caption_instagram_keeps_title_and_description(video):
     assert record["payloads"]["instagram"] == {
         "caption": "Driving the Wicklow Way\n\nA scenic loop through the mountains."
     }
+
+
+def test_first_comment_is_carried_on_the_record_and_round_trips(tmp_path, video):
+    link = "https://gomoveshift.com/journeys/trip/#day-3"
+    doc = _build(video, platforms=["youtube", "facebook"], first_comment={"youtube": link})
+    assert doc["shorts"][0]["first_comment_by_platform"] == {"youtube": link}
+    path, _ = write_asset_bundle(tmp_path, doc, None)
+    load_publish_plan(path)
+
+
+def test_without_first_comment_the_record_names_none(video):
+    assert "first_comment_by_platform" not in _build(video)["shorts"][0]
+
+
+@pytest.mark.parametrize(
+    "comment, needle",
+    [({"tiktok": "https://gomoveshift.com/"}, "unrouted"), ({"youtube": "  "}, "blank")],
+)
+def test_first_comment_refuses_an_unrouted_platform_or_blank_text(video, comment, needle):
+    with pytest.raises(ValueError, match=needle):
+        _build(video, platforms=["youtube"], first_comment=comment)
