@@ -360,17 +360,28 @@ def test_itm_projection_matches_its_false_origin_and_scale():
     assert abs(itm(54.5, -8.0)[1] - y - 111_285) < 30
 
 
-def _tailte_geojson(name: str, half_m: float, centre=_CORK_FIX) -> bytes:
+def _tailte_geojson(
+    name: str, half_m: float, centre=_CORK_FIX, neighbour="KERRY", gap_m: float = 0.0
+) -> bytes:
+    """A square county around ``centre`` and, unless ``neighbour`` is None, a
+    same-sized county ``gap_m`` west of it (0: sharing its west edge). Any other
+    edge is shoreline."""
     import json
 
     cx, cy = itm(*centre)
-    ring = [
-        [cx - half_m, cy - half_m, -100000.0],
-        [cx + half_m, cy - half_m, -100000.0],
-        [cx + half_m, cy + half_m, -100000.0],
-        [cx - half_m, cy + half_m, -100000.0],
-        [cx - half_m, cy - half_m, -100000.0],
-    ]
+
+    def square(x):
+        return [
+            [x - half_m, cy - half_m, -100000.0],
+            [x + half_m, cy - half_m, -100000.0],
+            [x + half_m, cy + half_m, -100000.0],
+            [x - half_m, cy + half_m, -100000.0],
+            [x - half_m, cy - half_m, -100000.0],
+        ]
+
+    counties = [(name, square(cx))]
+    if neighbour:
+        counties.append((neighbour, square(cx - 2 * half_m - gap_m)))
     return json.dumps(
         {
             "type": "FeatureCollection",
@@ -378,9 +389,10 @@ def _tailte_geojson(name: str, half_m: float, centre=_CORK_FIX) -> bytes:
             "features": [
                 {
                     "type": "Feature",
-                    "properties": {"ENG_NAME_VALUE": name, "BDY_TYPE_VALUE": "County Statutory"},
+                    "properties": {"ENG_NAME_VALUE": n, "BDY_TYPE_VALUE": "County Statutory"},
                     "geometry": {"type": "Polygon", "coordinates": [ring]},
                 }
+                for n, ring in counties
             ],
         }
     ).encode()
@@ -406,7 +418,7 @@ def test_irish_county_is_proven_on_the_tailte_map_with_an_inward_margin(tmp_path
     prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000))
     proof = prover.prove([_ie_window(gap=17.0)], dict(_IE_CLAIM))
     assert proof["verified"] is True, proof
-    assert proof["basis"] == "pinned_tailte_polygon_bounded_speed_error_and_margin"
+    assert proof["basis"] == "pinned_tailte_other_counties_bounded_speed_error_and_margin"
     assert proof["source"] == f"TAILTE2026/COUNTIES/{_IE_SOURCE[0]}"
     assert proof["region"] == "County Cork" and proof["country"] == "IE"
     assert proof["margin_m"] == IE_MARGIN_M == 250.0
@@ -414,8 +426,8 @@ def test_irish_county_is_proven_on_the_tailte_map_with_an_inward_margin(tmp_path
 
 
 def test_irish_proof_refuses_a_fix_inside_the_vintage_margin(tmp_path):
-    # 300 m inside: enough for the TIGER rule at 1 s (100 + 70 = 170 m), not
-    # once the 250 m vintage margin is added (420 m).
+    # 300 m from Kerry: enough for the TIGER rule at 1 s (100 + 70 = 170 m),
+    # not once the 250 m vintage margin is added (420 m).
     prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300))
     proof = prover.prove([_ie_window()], dict(_IE_CLAIM))
     assert proof["verified"] is False and "boundary" in proof["reason"]
@@ -496,6 +508,111 @@ def test_gapped_irish_route_gets_a_proof_even_when_the_county_label_passes(tmp_p
     claim = measured[1].region_claim("county")
     assert claim["country"] == "Ireland"
     proof = claim["boundary_proof"]
-    assert proof["basis"] == "pinned_tailte_polygon_bounded_speed_error_and_margin"
+    assert proof["basis"] == "pinned_tailte_other_counties_bounded_speed_error_and_margin"
     assert proof["recording_date"] == "2025-09-15"
     assert proof["max_gap_s"] >= 12.0
+
+
+# -- Ireland's coast: the sea is not a county a car can be in (framegrade#654) --
+
+
+def _donegal_claim():
+    return {"level": "county", "name": "County Donegal", "state": None, "country": "Ireland"}
+
+
+def test_a_fix_near_the_shore_is_proven_when_no_other_county_is_in_reach(tmp_path):
+    # 300 m from the shoreline on three sides, Kerry 50 km west: the complement
+    # test called the sea a crossing (Galley Head: "possible boundary crossing").
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300, gap_m=50_000))
+    proof = prover.prove([_ie_window()], dict(_IE_CLAIM))
+    assert proof["verified"] is True, proof
+    assert proof["basis"] == "pinned_tailte_other_counties_bounded_speed_error_and_margin"
+    assert proof["margin_m"] == IE_MARGIN_M
+
+
+def test_another_county_in_reach_across_water_still_refuses(tmp_path):
+    # Kerry 100 m across a bay: within 100 + 250 + 70 = 420 m of the fix's reach.
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300, gap_m=100))
+    proof = prover.prove([_ie_window()], dict(_IE_CLAIM))
+    assert proof["verified"] is False and "boundary crossing" in proof["reason"]
+
+
+def test_a_fix_in_the_sea_is_still_outside_the_county(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300, gap_m=50_000))
+    lat, lon = _CORK_FIX
+    offshore = RouteWindow("lf1", 0.0, 2.0, [(0.0, lat, lon), (1.0, lat + 0.01, lon)])
+    proof = prover.prove([offshore], dict(_IE_CLAIM))
+    assert proof["verified"] is False and "outside boundary" in proof["reason"]
+
+
+def test_a_map_with_no_other_county_refuses(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000, neighbour=None))
+    proof = prover.prove([_ie_window()], dict(_IE_CLAIM))
+    assert proof == {"verified": False, "reason": "Tailte county map has no other county"}
+
+
+def test_a_border_county_keeps_the_full_boundary_test(tmp_path):
+    # The map has no Northern Ireland polygon, so Donegal's edge may be the border.
+    coast = _ie_prover(tmp_path, _tailte_geojson("DONEGAL", 300, gap_m=50_000))
+    assert coast.prove([_ie_window()], _donegal_claim())["verified"] is False
+    inland = tmp_path / "inland"
+    inland.mkdir()
+    proof = _ie_prover(inland, _tailte_geojson("DONEGAL", 5_000)).prove(
+        [_ie_window()], _donegal_claim()
+    )
+    assert proof["verified"] is True
+    assert proof["basis"] == "pinned_tailte_polygon_bounded_speed_error_and_margin"
+
+
+def test_every_county_on_the_northern_ireland_border_is_listed():
+    from gomoveshift.pipeline.boundary_proof import IE_BORDER_COUNTIES
+
+    assert IE_BORDER_COUNTIES == {"cavan", "donegal", "leitrim", "louth", "monaghan"}
+
+
+def test_a_pinned_neighbour_proof_is_refused_for_a_border_county(tmp_path):
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 5_000))
+    windows = [_ie_window()]
+    cork = {**_IE_CLAIM, "windows_key": retained_windows_key(windows)}
+    proof = prover.prove(windows, dict(cork))
+    proof.update(sha256=_IE_SOURCE[1], recording_date="2025-09-15")
+    assert pinned_boundary_proof(proof, cork)
+    full = {**proof, "basis": "pinned_tailte_polygon_bounded_speed_error_and_margin"}
+    assert pinned_boundary_proof(full, cork)
+    donegal = {**_donegal_claim(), "windows_key": cork["windows_key"]}
+    assert not pinned_boundary_proof({**proof, "region": "County Donegal"}, donegal)
+    assert pinned_boundary_proof({**full, "region": "County Donegal"}, donegal)
+    pair = {**cork, "level": "counties", "counties": ["County Cork", "County Leitrim"]}
+    assert not pinned_boundary_proof(proof, pair)
+
+
+def test_an_outside_geometry_needs_projected_coordinates():
+    square = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+    window = RouteWindow("lf1", 0.0, 2.0, [(0.0, 5.0, 5.0), (1.0, 5.0, 5.0)])
+    assert prove_windows_inside([window], square, outside=square)["verified"] is False
+
+
+def test_a_refused_proof_leaves_its_reason_in_the_route_record(tmp_path):
+    class Geo:
+        def reverse_geocode_detailed(self, lat, lon):
+            return {"town": "Ballyvourney", "county": "County Cork", "country": "Ireland"}
+
+    lat, lon = _CORK_FIX
+    window = RouteWindow(
+        "lf1", 0, 180, [(float(t), lat, lon) for t in range(180) if not 50 <= t < 62]
+    )
+    prover = _ie_prover(tmp_path, _tailte_geojson("CORK", 300))
+    text = {"2025-09-15": {1: "County Cork"}}
+    measured = enforce_route_claims(
+        text,
+        {1: [window]},
+        Geo(),
+        boundary_prover=prover,
+        require_review_support=True,
+        review_support_available=True,
+    )
+    notes = measured[1].record()["boundary_notes"]
+    assert any(
+        n.startswith("boundary proof of county 'County Cork' refused: lf1: possible boundary")
+        for n in notes
+    ), notes
