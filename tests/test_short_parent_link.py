@@ -23,7 +23,7 @@ from gomoveshift.pipeline.drive_phases import youtube_uploader as youtube_upload
 from gomoveshift.publishing.youtube_adapter import build_short_final_text_review
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN = "fe920eb23f1678648591892de27270d9df357e68"  # pragma: allowlist secret
+PIN = "cbb5f4db81049919acf19757b7bc93e1af042bfc"  # pragma: allowlist secret
 VID = "aB3_dE-fG1h"
 TITLE = "County Kerry drive"
 
