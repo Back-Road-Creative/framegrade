@@ -15,7 +15,14 @@ tmp + rename) beside the sidecar only after the final frame-pairing check passes
 and the stage path. It holds the three equal counts, the source fingerprint, the sidecar's sha256,
 the mask's size and mtime, the renderer identity and the redactcam commit (from `direct_url.json`,
 `null` when absent). The gate accepts it only while the sidecar's sha256 and the mask's size/mtime
-still equal what is on disk, and never when a raw or master exists (their live probe wins); a
+still equal what is on disk, and never when a raw or a master at the source's rate exists (their
+live probe wins). **A master at another rate defers to the proof.** The mask pairs with source
+frames and the CFR conversion runs after the composite, so with the raw gone a 29.97 fps master
+of a 59.94 fps day holds about half the mask's frames. When the master's ffprobe
+`avg_frame_rate` differs from the sidecar's `source_fps` by 0.01 or more, the proof is the
+count; with no valid proof the day is `mask_frame_count_unknown`, naming both rates, never a
+mismatch telling you to re-render (Galley Head, 2026-11-27: 491,848 vs 245,925). An unreadable
+rate keeps the master count. Tests: `tests/test_mask_gate_master_rate.py`. A
 missing, unreadable, malformed, stale or unequal file leaves the day `mask_frame_count_unknown`, and
 counts that disagree with the sidecar refuse as a mismatch. The file (schema `v2`) also records the
 `date` and `day_dir` it was written for and the gate accepts it only for that day, so a proof copied

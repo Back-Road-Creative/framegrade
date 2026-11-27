@@ -13,7 +13,11 @@ concat, else its master). A mismatch, a missing sidecar or count, or a container
 probed all refuse (fail closed). When the raw and the master are both purged, the count the
 pairing check persisted (``day_<date>_source_frames.json``) stands in for the container, but only
 while the sidecar's sha256 and the mask's size/mtime still match disk; otherwise the day stays
-unknown. There is no override: the refusal ends when the counts agree.
+unknown. The same proof stands in when the raw is gone and the master runs at another frame rate
+than the sidecar's ``source_fps``: the mask pairs with source frames and the CFR conversion runs
+after the composite, so a 29.97 fps master of a 59.94 fps day holds about half the mask's frames
+and its count measures nothing (Galley Head, 2026-11-27). With no valid proof such a day is
+unknown, naming both rates. There is no override: the refusal ends when the counts agree.
 A refused day gets one ``mask_index_mismatch`` incident (``health/store.py`` row) per drive-day,
 and the row is resolved once the day passes."""
 
@@ -23,6 +27,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -55,6 +60,10 @@ REASON_MISMATCH = "mask_frame_count_mismatch"
 #: The sidecar keeps ``source_frame_count`` in its header; no need to parse the whole file.
 _HEADER_BYTES = 4096
 _COUNT_RE = re.compile(r'"source_frame_count"\s*:\s*(\d+)')
+_FPS_RE = re.compile(r'"source_fps"\s*:\s*(\d+(?:\.\d+)?)')
+#: Rates closer than this are one cadence (``color_filters.source_output_fps`` uses the same).
+_RATE_TOLERANCE = 0.01
+_RATE_PROBE_TIMEOUT_S = 180
 #: Container candidates, in order: the raw concat the detect pass read, then the master.
 _CONTAINER_NAMES = ("day_{date}_raw.mp4", "day_{date}_master.mp4")
 
@@ -63,15 +72,39 @@ class MaskFrameCountError(RuntimeError):
     """Raised by ``assert_mask_frame_counts_agree``: the drive must not publish."""
 
 
-def sidecar_frame_count(sidecar: Path) -> Optional[int]:
-    """``source_frame_count`` from the sidecar header, or None (missing, unreadable, absent)."""
+def _sidecar_header(sidecar: Path) -> str:
     try:
         with open(sidecar, "rb") as fh:
-            head = fh.read(_HEADER_BYTES).decode("utf-8", errors="replace")
+            return fh.read(_HEADER_BYTES).decode("utf-8", errors="replace")
     except OSError:
-        return None
-    found = _COUNT_RE.search(head)
+        return ""
+
+
+def sidecar_frame_count(sidecar: Path) -> Optional[int]:
+    """``source_frame_count`` from the sidecar header, or None (missing, unreadable, absent)."""
+    found = _COUNT_RE.search(_sidecar_header(sidecar))
     return int(found.group(1)) if found else None
+
+
+def sidecar_source_fps(sidecar: Path) -> Optional[float]:
+    """``source_fps`` from the sidecar header (the rate the mask's frames run at), or None."""
+    found = _FPS_RE.search(_sidecar_header(sidecar))
+    return float(found.group(1)) if found else None
+
+
+def probe_rate(path: Path) -> Optional[float]:
+    """The video stream's ``avg_frame_rate`` via ffprobe, or None when unreadable or 0/0."""
+    try:
+        out = subprocess.run(  # noqa: S603,S607 -- fixed argv
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=avg_frame_rate", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=_RATE_PROBE_TIMEOUT_S, check=True,
+        ).stdout.strip()  # fmt: skip
+        num, _, den = out.partition("/")
+        rate = float(num) / float(den or 1)
+    except (OSError, subprocess.SubprocessError, ValueError, ZeroDivisionError):
+        return None
+    return rate if rate > 0 else None
 
 
 def container_frame_count(day_dir: Path, date: str) -> Optional[int]:
@@ -112,9 +145,20 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
             os.path.lexists(day_dir / name.format(date=date)) for name in _CONTAINER_NAMES
         ):
             container_n = persisted_source_count(day_dir, date)
+        rate_note = None
+        if container_n is not None and not os.path.lexists(day_dir / f"day_{date}_raw.mp4"):
+            # the count came from the master: it measures source frames only at the source rate
+            master_fps = probe_rate(day_dir / f"day_{date}_master.mp4")
+            src_fps = sidecar_source_fps(day_dir / f"day_{date}_blur_regions.json")
+            if master_fps and src_fps and abs(master_fps - src_fps) >= _RATE_TOLERANCE:
+                container_n = persisted_source_count(day_dir, date)
+                if container_n is None:
+                    rate_note = (f"master is {master_fps:.3f} fps, the mask's source {src_fps:.3f} "
+                                 f"fps, and no valid day_{date}_source_frames.json")  # fmt: skip
         if sidecar_n is None or container_n is None:
-            findings.append({"date": date, "reason": REASON_UNKNOWN,
-                             "sidecar_frames": sidecar_n, "container_frames": container_n})  # fmt: skip
+            row = {"date": date, "reason": REASON_UNKNOWN,
+                   "sidecar_frames": sidecar_n, "container_frames": container_n}  # fmt: skip
+            findings.append({**row, "rate_note": rate_note} if rate_note else row)
         elif sidecar_n != container_n:
             findings.append({"date": date, "reason": REASON_MISMATCH, "sidecar_frames": sidecar_n,
                              "container_frames": container_n, "difference": sidecar_n - container_n})  # fmt: skip
@@ -123,8 +167,9 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
 
 def _describe(drive: str, row: Dict[str, Any]) -> str:
     if row["reason"] == REASON_UNKNOWN:
+        note = f"; {row['rate_note']}" if row.get("rate_note") else ""
         return (f"{REASON_UNKNOWN}: {drive} day {row['date']} (blur sidecar frames "
-                f"{row['sidecar_frames']}, container frames {row['container_frames']})")  # fmt: skip
+                f"{row['sidecar_frames']}, container frames {row['container_frames']}{note})")  # fmt: skip
     return (f"{REASON_MISMATCH}: {drive} day {row['date']} blur mask has {row['sidecar_frames']} "
             f"frames, source has {row['container_frames']} (difference {row['difference']:+d}); "
             "re-render the day on the fixed renderer")  # fmt: skip
