@@ -29,6 +29,9 @@ from .instagram_adapter import InstagramPermanentError
 from .queue import (
     first_comment_prior_texts,
     first_comment_still_current,
+    is_auth_blocked,
+    is_platform_paused,
+    pause_for_auth,
     select_due_first_comments,
 )
 from .youtube_comments import (
@@ -102,6 +105,8 @@ def drain_meta_first_comments(
     due = select_due_first_comments(conn, now, platforms=tuple(adapter_factories))
     for row in due:
         platform = row["platform"]
+        if is_platform_paused(conn, platform):
+            continue  # paused mid-pass (a refused token below): leave its rows due
         # A relink may have rewritten the text after selection: post what the row says NOW.
         fresh = first_comment_still_current(conn, row["id"])
         if fresh is None:
@@ -134,7 +139,13 @@ def drain_meta_first_comments(
                     "first_comment_attempts=first_comment_attempts+? WHERE id=?",
                     (detail[:_ERROR_DETAIL_MAX], int(refused), row["id"]),
                 )
-            if isinstance(exc, CommentPermissionError):
+            if is_auth_blocked(exc):
+                # The token is dead for every post on this platform: pause it
+                # as the drain does, so a re-auth and a resume bring it back.
+                pause_for_auth(conn, platform, exc)
+                result.failed += 1
+                result.errors.append(f"{platform}: paused, access token refused: {detail}")
+            elif isinstance(exc, CommentPermissionError):
                 result.skipped_scope_error += 1
                 if platform not in warned:
                     logger.warning(

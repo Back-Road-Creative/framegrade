@@ -1544,3 +1544,66 @@ def test_facebook_only_route_never_constructs_instagram_photo_client():
     photo_client.assert_not_called()
     assert build.call_args.kwargs["facebook_photo"] is None
     assert build.call_args.kwargs["facebook"] is not None
+
+
+def _tiktok_and_facebook_config():
+    return SimpleNamespace(
+        seo=SimpleNamespace(credentials_dir="/creds/brand-a"),
+        photos=SimpleNamespace(site_root="/site-a", resolve_site_root=lambda: Path("/site-a")),
+    )
+
+
+def _build_with_tiktok_refresh_failing(tmp_path, monkeypatch, exc):
+    from gomoveshift.cli.handlers.dispatch_queue import _build_routed_handlers
+
+    monkeypatch.setenv("GMS_TIKTOK_MODE", "direct")
+    conn = open_queue_db(tmp_path / "seo")
+    with (
+        mock.patch(
+            "gomoveshift.publishing.meta_auth.load_meta_credentials",
+            return_value={"page_access_token": "tok", "page_id": "1", "ig_user_id": "2"},
+        ),
+        mock.patch(
+            "gomoveshift.publishing.tiktok_auth.get_valid_tiktok_credentials", side_effect=exc
+        ),
+        mock.patch("gomoveshift.cli.handlers.dispatch_queue.build_handlers") as build,
+    ):
+        _build_routed_handlers(conn, None, _tiktok_and_facebook_config(), ["facebook", "tiktok"])
+    return conn, build.call_args.kwargs
+
+
+def test_an_expired_tiktok_refresh_token_pauses_tiktok_and_the_rest_still_drain(
+    tmp_path, monkeypatch, capsys
+):
+    """Before, the refresh failure escaped ``_build_routed_handlers`` and
+    stopped the whole pass: no Facebook, Instagram or YouTube post went
+    either, and nothing paused TikTok or raised its health incident."""
+    from gomoveshift.publishing.queue import AUTH_BLOCKED_PAUSE_REASON
+    from gomoveshift.publishing.tiktok_auth import TikTokRefreshExpiredError
+
+    conn, kwargs = _build_with_tiktok_refresh_failing(
+        tmp_path, monkeypatch, TikTokRefreshExpiredError("TikTok refresh token has expired")
+    )
+
+    assert kwargs["facebook"] is not None
+    assert kwargs["tiktok"] is None
+    reason = conn.execute("SELECT reason FROM platform_pauses WHERE platform='tiktok'").fetchone()
+    assert reason["reason"] == f"{AUTH_BLOCKED_PAUSE_REASON} TikTok refresh token has expired"
+    assert "tiktok: paused, access token refused" in capsys.readouterr().out
+
+
+def test_another_tiktok_refresh_failure_skips_tiktok_without_pausing_it(
+    tmp_path, monkeypatch, capsys
+):
+    from gomoveshift.publishing.queue import is_platform_paused
+    from gomoveshift.publishing.tiktok_auth import TikTokAuthError
+
+    conn, kwargs = _build_with_tiktok_refresh_failing(
+        tmp_path, monkeypatch, TikTokAuthError("TikTok token refresh request failed")
+    )
+
+    assert kwargs["facebook"] is not None and kwargs["tiktok"] is None
+    assert not is_platform_paused(conn, "tiktok")
+    assert "tiktok: skipped for this pass (TikTok token refresh request failed)" in (
+        capsys.readouterr().out
+    )

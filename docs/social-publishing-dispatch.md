@@ -135,11 +135,19 @@ recoverable, never duplicated.
     to that platform, and only a person re-authorizing clears it.
     `handlers._pause_for_auth` pauses the platform (reason `auth:blocked`),
     puts the row back to `queued` when nothing of it reached the platform, and
-    raises `ThrottledDeliveryError` (never counted). The drain re-checks the
-    pause before each row, so the platform's other rows stay queued and
-    untouched in the same pass; `health check` rule 16 raises one
-    `platform_auth_blocked` incident naming the platform. Resuming the
-    platform lets them go again.
+    raises `PlatformAuthPausedError`, a `ThrottledDeliveryError` (never
+    counted). The drain re-checks the pause before each row, so the platform's
+    other rows stay queued and untouched in the same pass; `health check` rule
+    16 raises one `platform_auth_blocked` incident naming the platform.
+    Resuming the platform lets them go again on the next pass, the row that hit
+    the refusal included: `queue.resume_platform` drops the 6 h throttle delay
+    from rows whose `error_class` is `PlatformAuthPausedError`.
+    On YouTube, `youtube_auth_refused` (a non-retryable `RefreshError` or a
+    401; never a 403) pauses it and the row stays `submitting` for the
+    adapter's reconcile. `dispatch._pause_on_auth` wraps every callable the
+    drain runs (the Facebook photo reconciler too), and every other platform
+    pass pauses the same way. `tests/test_auth_pause_passes.py` fails on a new
+    per-row `except Exception` there that routes no refusal.
   - **TikTok**: no dedicated permanent exception subclass exists —
     `TikTokAdapterError` covers both transient and permanent failures with
     no way to tell them apart by type, so per the conservative default

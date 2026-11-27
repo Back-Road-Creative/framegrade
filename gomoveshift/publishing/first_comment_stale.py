@@ -19,7 +19,10 @@ from .queue import (
     first_comment_correction_ids,
     first_comment_corrections,
     first_comment_intended_texts,
+    is_auth_blocked,
+    is_platform_paused,
     mark_first_comment_removed,
+    pause_for_auth,
     pending_first_comment_corrections,
     registered_platform_id,
     removed_first_comment_ids,
@@ -294,6 +297,7 @@ def run_corrections(
     result: Any,
     incidents_dir: Optional[Path] = None,
     gone: Optional[Callable[[Exception], bool]] = None,
+    auth_refused: Callable[[Exception], bool] = is_auth_blocked,
 ) -> None:
     """Apply every pending correction through ``client_for(platform)`` (built lazily; has
     ``edit_comment(id, text, object_id=None)`` / ``delete_comment(id, object_id=None)``; ``object_id`` is the
@@ -303,11 +307,15 @@ def run_corrections(
     pass. ``gone(exc)`` is "comment not found": a delete is then done, an edit unposts the row
     (its deletes still run).
     A delete of the row's intended text is never run. A capped row is counted in
-    ``result.correction_capped`` and gets the capped incident every pass."""
+    ``result.correction_capped`` and gets the capped incident every pass.
+    ``auth_refused(exc)`` (default ``queue.is_auth_blocked``) is a refused access
+    token: the platform is paused (``queue.pause_for_auth``) and its other rows wait."""
     platforms = tuple(platforms)
     restore_removed(conn, platforms, incidents_dir)
     _resolve_all(conn, platforms, incidents_dir)
     for row in pending_first_comment_corrections(conn, platforms):
+        if is_platform_paused(conn, row["platform"]):
+            continue  # paused mid-pass by a refused token below
         keep = first_comment_intended_texts(row)
         unposted = False
         for item in first_comment_corrections(row):
@@ -370,6 +378,12 @@ def run_corrections(
                         continue
                     call(item["live_id"], object_id=_target(row))
             except Exception as exc:  # noqa: BLE001 -- graded per correction
+                if auth_refused(exc):
+                    detail = pause_for_auth(conn, row["platform"], exc)
+                    result.errors.append(
+                        f"{row['platform']}: paused, access token refused: {detail}"
+                    )
+                    break
                 if isinstance(exc, ReplacePostFailedError):
                     # The delete is confirmed; the row goes back to unposted with the new text
                     # and the normal posting path (attempts, alerts) owns the post.

@@ -39,9 +39,11 @@ from .queue import (
     TERMINAL_STATUSES,
     acquire_lease,
     get_platform_daily_cap,
+    is_auth_blocked,
     is_platform_paused,
     log_response,
     parse_slot,
+    pause_for_auth,
     pause_platform,
     reschedule_delivery,
     set_platform_daily_cap,
@@ -615,6 +617,37 @@ def _detail(exc: BaseException) -> str:
     """
     text = str(exc).strip() or exc.__class__.__name__
     return text[:_ERROR_DETAIL_MAX]
+
+
+class PlatformAuthPausedError(ThrottledDeliveryError):
+    """A throttle whose cause is a refused access token: the platform is now
+    paused. Its own class name (``queue.AUTH_PAUSED_ERROR_CLASS``) is what lets
+    ``queue.resume_platform`` drop the throttle delay from the row it hit."""
+
+
+def _pause_on_auth(conn, handler: Optional[Callable[[Dict[str, Any]], None]]):
+    """``handler``, but a refused access token it lets escape
+    (``queue.is_auth_blocked``) pauses the platform and becomes a
+    ``PlatformAuthPausedError``. The handlers translate their own adapters'
+    refusals (``handlers._pause_for_auth``); this is the net under every
+    other callable the drain runs, the Facebook photo reconciler included.
+    The row keeps its status: only the handler knows whether it is safe to
+    put back to ``queued``."""
+    if handler is None:
+        return None
+
+    def wrapped(row: Dict[str, Any]) -> None:
+        try:
+            handler(row)
+        except Exception as exc:
+            if not is_auth_blocked(exc):
+                raise
+            detail = pause_for_auth(conn, row["platform"], exc)
+            raise PlatformAuthPausedError(
+                f"{row['platform']} paused, access token refused: {detail}"
+            ) from exc
+
+    return wrapped
 
 
 #: What an interrupted attempt records instead of an exception class. There is
@@ -1218,7 +1251,9 @@ def drain_queue(
         # A durable photo identity never falls back to current-record routing.
         # Only this explicit read-only port may bypass pre-publication checks.
         photo_read = platform == "facebook" and row["upload_kind"] == FACEBOOK_PHOTO_KIND
-        handler = facebook_photo_reconciler if photo_read else handlers.get(platform)
+        handler = _pause_on_auth(
+            conn, facebook_photo_reconciler if photo_read else handlers.get(platform)
+        )
         if handler is None:
             result.skipped_no_handler += 1
             result.skipped_no_handler_by_platform[platform] = (
@@ -1563,6 +1598,12 @@ def reconcile_awaiting_manual(
             # Any other status (SEND_TO_USER_INBOX, PROCESSING_*) is a draft
             # still waiting on a human. Leave it exactly where it is.
         except Exception as exc:  # noqa: BLE001 — one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # The token is dead for every row, not this one: pause the
+                # platform like the drain does and stop asking.
+                detail = pause_for_auth(conn, platform, exc)
+                result.errors.append(f"{platform}: paused, access token refused: {detail}")
+                break
             result.errors.append(f"{platform}#{delivery_id}: reconcile: {_detail(exc)}")
             logger.warning("reconcile: delivery %s could not be reconciled", delivery_id)
 
@@ -1767,6 +1808,11 @@ def reconcile_awaiting_ig(
             result.errors.append(f"instagram#{delivery_id}: still parked: {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 -- one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # A refused token fails every row's scan: pause Instagram, stop.
+                detail = pause_for_auth(conn, "instagram", exc)
+                result.errors.append(f"instagram: paused, access token refused: {detail}")
+                break
             result.errors.append(f"instagram#{delivery_id}: ig reconcile: {_detail(exc)}")
             continue
 

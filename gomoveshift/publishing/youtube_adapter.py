@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from seo_manager.analytics.final_text_surfaces import compose_description
 
 from ..pipeline.drive_phases import youtube_uploader as youtube_uploader_module
-from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader
+from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader, youtube_auth_refused
 from ..pipeline.exceptions import YouTubeQuotaError
 from ..pipeline.final_text_record import (
     GMS_TEXT_POLICY,
@@ -40,6 +40,7 @@ from .queue import (
     find_delivery,
     mark_missing_remote,
     mark_remote_checked,
+    pause_for_auth,
     record_live_publish,
     transition,
 )
@@ -520,7 +521,11 @@ def confirm_scheduled_live(
                 if not _listed(service, [video_id]):
                     _mark_gone(conn, row["id"], video_id, "confirm_scheduled_live", now)
                     continue
-        except Exception:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+        except Exception as exc:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+            if youtube_auth_refused(exc):
+                pause_for_auth(conn, "youtube", exc)  # every row's lookup would fail alike
+                logger.warning("live check: YouTube paused, access token refused")
+                break
             logger.exception("live check failed for video_id=%s", video_id)
             continue
         mark_remote_checked(conn, [row["id"]], now)
@@ -569,7 +574,11 @@ def recheck_published_videos(conn, service, now: Optional[str] = None) -> int:
         if absent:
             _sleep(VERIFY_RECHECK_SEC)
             present |= {item.get("id") for item in _listed(service, absent)}
-    except Exception:  # noqa: BLE001 -- unknown is not missing; the next pass asks again
+    except Exception as exc:  # noqa: BLE001 -- unknown is not missing; the next pass asks again
+        if youtube_auth_refused(exc):
+            pause_for_auth(conn, "youtube", exc)
+            logger.warning("published-video recheck: YouTube paused, access token refused")
+            return 0
         logger.exception("published-video recheck failed for %d ids", len(by_video))
         return 0
     mark_remote_checked(conn, [i for vid in present if vid in by_video for i in by_video[vid]], now)

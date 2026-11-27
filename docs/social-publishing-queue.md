@@ -164,7 +164,9 @@ its rows never carry text.
   `*PermanentError` (a deleted reel is Graph code 100). Nothing else counts:
   a 5xx, a rate limit or spent quota, a lapsed token, a missing scope or a
   network failure says nothing about the post, so an overnight outage never
-  uses up a live short's tries.
+  uses up a live short's tries. A refused Meta token (`*AuthBlockedError`)
+  also pauses that platform (`queue.pause_for_auth`), as the publish drain
+  does, and the pass stops trying its other rows; resuming it makes them due.
 - **Output.** Each drain prints `first_comment: posted=N failed=N
   [needs_reauth=1]` above the summary. A scheduler may keep only a pass's
   last line, so the summary line adds the two drains up too:
@@ -458,7 +460,12 @@ because "stop touching this platform" means something different to each:
 - `reconcile_awaiting_manual` skips a paused platform's rows **entirely**, before it ever calls
   `poll`. Every action it takes — polling the platform's API, transitioning to `published` or
   `failed_permanent` — is itself a platform-facing decision, so unlike the lease case there is no
-  bookkeeping-only half to salvage.
+  bookkeeping-only half to salvage. `reconcile_awaiting_ig` does the same for Instagram.
+
+Both reconcilers also take a pause themselves: when the platform refuses its access token
+(`queue.is_auth_blocked`, the adapters' `queue_state = "auth_blocked"`), they pause it with
+`queue.pause_for_auth`, exactly as the publish drain's handlers do, record one error line and stop
+the pass for that platform rather than asking about every parked row.
 
 A row already leased or in flight when the pause takes effect is never touched by any of the
 three paths: the platform call it may be mid-flight on cannot be un-sent.
