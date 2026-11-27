@@ -368,11 +368,42 @@ def test_every_per_row_catch_in_a_publishing_pass_routes_a_refused_token():
     assert set(_NO_PLATFORM_CALL) - unrouted == set(), "stale _NO_PLATFORM_CALL entries"
 
 
-#: Broad ``except`` clauses in an adapter module that keep going (neither
+#: Broad ``except`` clauses in ``gomoveshift/publishing`` that carry on (neither
 #: re-raise nor route a refusal) and need no auth routing, and why. A catch
 #: around a platform call does not belong here: route the refusal.
-_ADAPTER_NO_TOKEN_CALL = {
+_NO_TOKEN_CATCH = {
+    "publishing/anti_spam_gate.py:queued_youtube_records": "local plan sidecars",
+    "publishing/anti_spam_gate.py:recent_text_entries": "local plan sidecars",
+    "publishing/day_reels.py:_fetch_trips": "the site's own public trip list; no platform token",
+    "publishing/day_reels.py:_process_one": "the local privacy render",
+    "publishing/day_reels.py:_register_tracking_safely": "local tracking files",
+    "publishing/dispatch.py:drain_queue": (
+        "a local privacy-attestation read, and every handler is wrapped in _pause_on_auth"
+    ),
+    "publishing/facebook_photo_client.py:_token_refused": "decodes a response already received",
+    "publishing/facebook_photo_delivery.py:_authorized": "the local approval callback",
+    "publishing/facebook_reel_delivery.py:_authorized": "the local approval callback",
+    "publishing/meta_comments.py:drain_meta_first_comments": (
+        "run_corrections routes each refusal itself; this keeps a broken pass from stopping posts"
+    ),
+    "publishing/photo_run_hooks.py:next_photo_voice_style": "the local theme rotator",
+    "publishing/photo_run_hooks.py:photo_upscale_policy": "the local brand media profile",
+    "publishing/photo_run_hooks.py:record_photo_theme_usage": "the local theme rotator",
+    "publishing/plan_bracket_sync.py:sync_bracket_short_text": "the local text generator",
+    "publishing/queue.py:_register_platform_id_best_effort": "local tracking files",
+    "publishing/queue_repair.py:repair_queued_shorts": "local plans and the geocoder",
+    "publishing/queue_short_text.py:_generate": "the local text generator",
+    "publishing/queue_short_text.py:sync_short_text": "local sidecar writes",
+    "publishing/queue_slot_refill.py:config_grid": "local plan sidecars",
+    "publishing/queue_slot_refill.py:grid_for": "local plan sidecars",
+    "publishing/queue_slot_refill.py:refill_slots": "local plan review",
+    "publishing/replace_relink.py:relink_replaced_lf": "local stores",
     "publishing/tiktok_adapter.py:_http_failure_detail": "decodes a response already received",
+    "publishing/tiktok_pack.py:reconcile_packed": (
+        "only local reads are caught; list_videos raises to the caller, and pack mode "
+        "needs no token to pack, so a refusal must not pause TikTok's packing"
+    ),
+    "publishing/tiktok_pack.py:sweep_queued": "local pack files",
 }
 
 
@@ -385,15 +416,14 @@ def _always_raises(body) -> bool:
     return False
 
 
-def _swallowing_adapter_catches(root: Path = _ROOT):
-    """Every function in a ``publishing/*_adapter.py`` with a broad ``except``
-    that carries on (it does not always raise) while nothing in its ``try``
-    routes a refused token: one of the routes above, or an earlier
-    ``except <...>AuthBlockedError`` clause. Unlike the per-row guard, a catch
-    outside any loop counts too: one call that logs a refused token and returns
-    lets that row go on unchecked (``_channel_lacks``, the playlist assign)."""
+def _swallowing_catches(root: Path = _ROOT):
+    """Every function in ``publishing/*.py`` with a broad ``except`` that carries
+    on (it does not always raise) while nothing in its ``try`` routes a refused
+    token: one of the routes above, or an ``except <...>AuthBlockedError`` clause.
+    Unlike the per-row guard, a catch outside any loop counts too: one call that
+    logs a refused token and returns lets that row go on unchecked."""
     found = set()
-    for path in sorted((root / "publishing").glob("*_adapter.py")):
+    for path in sorted((root / "publishing").glob("*.py")):
         tree = ast.parse(path.read_text())
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -410,21 +440,21 @@ def _swallowing_adapter_catches(root: Path = _ROOT):
     return found
 
 
-def test_no_adapter_catch_swallows_a_refused_token():
-    found = _swallowing_adapter_catches()
-    assert found - set(_ADAPTER_NO_TOKEN_CALL) == set(), (
-        "an adapter's broad `except` here carries on and can swallow a refused access "
-        "token: re-raise it (`except <Platform>AuthBlockedError: raise`, or "
-        "`if youtube_auth_refused(exc): raise`) so the handler pauses the platform, "
-        "or add the function to _ADAPTER_NO_TOKEN_CALL with the reason it calls no platform"
+def test_no_publishing_catch_swallows_a_refused_token():
+    found = _swallowing_catches()
+    assert found - set(_NO_TOKEN_CATCH) == set(), (
+        "a broad `except` in gomoveshift/publishing carries on and can swallow a refused "
+        "access token: route it (`except <Platform>AuthBlockedError`, queue.is_auth_blocked "
+        "/ queue.pause_for_auth, or youtube_auth_refused) so the platform pauses, or add the "
+        "function to _NO_TOKEN_CATCH with the reason it calls no platform"
     )
-    assert set(_ADAPTER_NO_TOKEN_CALL) - found == set(), "stale _ADAPTER_NO_TOKEN_CALL entries"
+    assert set(_NO_TOKEN_CATCH) - found == set(), "stale _NO_TOKEN_CATCH entries"
 
 
-def test_the_adapter_guard_would_catch_a_swallowing_check(tmp_path):
+def test_the_package_guard_would_catch_a_swallowing_check(tmp_path):
     module = tmp_path / "publishing"
     module.mkdir()
-    (module / "new_adapter.py").write_text(
+    (module / "new_pass.py").write_text(
         "class Adapter:\n"
         "    def _check(self, service):\n"
         "        try:\n"
@@ -446,7 +476,7 @@ def test_the_adapter_guard_would_catch_a_swallowing_check(tmp_path):
         "                raise\n"
         "            raise RuntimeError() from exc\n"
     )
-    assert _swallowing_adapter_catches(tmp_path) == {"publishing/new_adapter.py:_check"}
+    assert _swallowing_catches(tmp_path) == {"publishing/new_pass.py:_check"}
 
 
 def test_the_guard_would_catch_a_swallowing_pass(tmp_path):
