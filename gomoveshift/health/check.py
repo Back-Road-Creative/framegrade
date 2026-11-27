@@ -22,6 +22,7 @@ _EVENTS = {
     "failure_unattended": "health_failure_unattended",
     "queued_short_refused": "health_queued_short_refused",
     "delivery_failed_permanent": "health_delivery_failed_permanent",
+    "platform_auth_blocked": "health_platform_auth_blocked",
     "short_bad_run": "health_short_bad_run",
     "backlog_storage_refused": "health_backlog_storage_refused",
     "backlog_store_orphan": "health_backlog_store_orphan",
@@ -102,6 +103,12 @@ def _line(row: Dict[str, Any]) -> str:
             f"{row['scheduled_at']}) failed permanently ({row['error_class']}); its slot is not "
             "refilled and it is not retried. dispatch-queue requeues a review refusal once the "
             "review passes."
+        )
+    if row["kind"] == "platform_auth_blocked":
+        return (
+            f"{row['platform']} is paused: it refused the access token ({row['reason']}). "
+            "Nothing posts there until it is re-authorized and the platform resumed in the "
+            "console; its queued posts wait, none failed."
         )
     if row["kind"] == "backlog_storage_refused":
         return (
@@ -370,6 +377,40 @@ def failed_permanent_incidents(
     return out
 
 
+def auth_blocked_incidents(db_path: Path, now_iso: str) -> List[Dict[str, Any]]:
+    """Rule 16: one ``platform_auth_blocked`` incident per platform that dispatch paused because
+    it refused the access token (``queue.AUTH_BLOCKED_PAUSE_REASON``). Every platform, like
+    rule 8 is for YouTube failures: the pause holds every queued post, so it must be seen.
+    Resolved once the pause is lifted. Read-only (queue opened ``mode=ro``)."""
+    import sqlite3
+
+    from ..publishing.queue import AUTH_BLOCKED_PAUSE_REASON
+    from .store import new_incident
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT platform, paused_at, reason FROM platform_pauses "
+            "WHERE reason = ? OR reason LIKE ? ORDER BY platform",
+            (AUTH_BLOCKED_PAUSE_REASON, f"{AUTH_BLOCKED_PAUSE_REASON} %"),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        new_incident(
+            "platform_auth_blocked",
+            f"platform_auth_blocked:{row['platform']}",
+            f"platform_auth_blocked_{row['platform']}.json",
+            now_iso,
+            platform=row["platform"],
+            paused_at=row["paused_at"],
+            reason=row["reason"][len(AUTH_BLOCKED_PAUSE_REASON) :].strip() or "unknown",
+        )
+        for row in rows
+    ]
+
+
 def _next_drives(store: Any, regions: List[str], notes: List[str]) -> Dict[str, Optional[str]]:
     """Region -> the ``drive_backlog.yaml`` project to audit next (rule 2b names it)."""
     from seo_manager.scheduling import backlog
@@ -561,6 +602,10 @@ def _cadence_rows(
             found["social_queue_gap"] = cadence.queue_gaps(db, now, now_iso, _blackout(notes))
         except Exception as exc:  # noqa: BLE001
             notes.append(f"rule 15 not evaluated: {type(exc).__name__}: {exc}")
+        try:
+            found["platform_auth_blocked"] = auth_blocked_incidents(db, now_iso)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"rule 16 not evaluated: {type(exc).__name__}: {exc}")
     else:
         notes.append("social_queue.sqlite3 absent: rule 4 not evaluated")
     return found

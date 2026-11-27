@@ -39,6 +39,7 @@ from .queue import (
     acquire_lease,
     find_delivery,
     mark_missing_remote,
+    mark_remote_checked,
     record_live_publish,
     transition,
 )
@@ -80,6 +81,13 @@ _ADOPT_SCAN_LIMIT = 100  # explicit bound passed to the shared lister
 # loop; empty twice is ``missing_remote``. Module-level so tests skip it.
 VERIFY_RECHECK_SEC = 10
 _sleep = time.sleep
+
+#: ``recheck_published_videos``: each published row is looked up at most once per
+#: ``RECHECK_INTERVAL``, ``RECHECK_BATCH`` ids per ``videos.list`` call (the API's
+#: own cap for ``id=``), one call per pass, least recently checked first.
+RECHECK_INTERVAL = timedelta(hours=24)
+RECHECK_BATCH = 50
+MISSING_VIDEO_KIND = "youtube_video_missing"
 
 
 #: The one surface a Short's review covers: the title as published.
@@ -491,6 +499,9 @@ def confirm_scheduled_live(
     video still not public ``NOT_PUBLIC_GRACE`` after its slot raises one
     ``youtube_not_public_after_slot`` health incident (resolved once it is
     confirmed live): a Short marked published must not sit private unseen.
+    A video the channel does not return is looked up once more after
+    ``VERIFY_RECHECK_SEC``; absent twice, the row is ``missing_remote`` with a
+    health incident (``_mark_gone``) instead of staying ``published`` unseen.
     Returns how many rows were confirmed."""
     now = now or datetime.now(timezone.utc).isoformat()
     rows = conn.execute(
@@ -501,14 +512,18 @@ def confirm_scheduled_live(
     ).fetchall()
     confirmed = 0
     for row in rows:
+        video_id = row["platform_upload_id"]
         try:
-            resp = (
-                service.videos().list(part="status,snippet", id=row["platform_upload_id"]).execute()
-            )
+            items = _listed(service, [video_id], part="status,snippet")
+            if not items:
+                _sleep(VERIFY_RECHECK_SEC)
+                if not _listed(service, [video_id]):
+                    _mark_gone(conn, row["id"], video_id, "confirm_scheduled_live", now)
+                    continue
         except Exception:  # noqa: BLE001 -- unknown is not live; the next pass asks again
-            logger.exception("live check failed for video_id=%s", row["platform_upload_id"])
+            logger.exception("live check failed for video_id=%s", video_id)
             continue
-        items = resp.get("items") or []
+        mark_remote_checked(conn, [row["id"]], now)
         live_at = live_publish_time(items[0]) if items else None
         if live_at and record_live_publish(conn, row["id"], live_at, now=now):
             confirmed += 1
@@ -521,6 +536,101 @@ def confirm_scheduled_live(
             if datetime.fromisoformat(now) - slot > NOT_PUBLIC_GRACE:
                 _not_public_incident(row, privacy or "unknown", now, incidents_dir)
     return confirmed
+
+
+def recheck_published_videos(conn, service, now: Optional[str] = None) -> int:
+    """Look up, on a slow rotation, whether the channel still returns every
+    ``published`` YouTube row's video; return how many rows went ``missing_remote``.
+
+    Nothing else ever looked again once a row was ``published``: a video deleted or
+    removed afterwards stayed ``published`` until someone ran
+    ``queue mark-missing-remote`` by hand. One ``videos.list`` of up to
+    ``RECHECK_BATCH`` ids per pass, for rows not seen within ``RECHECK_INTERVAL``.
+    An id absent from it is looked up again after ``VERIFY_RECHECK_SEC``; absent
+    twice, its rows move to ``missing_remote`` with a health incident. A lookup that
+    raises proves nothing: the rows are left as they were and asked about next pass."""
+    now = now or datetime.now(timezone.utc).isoformat()
+    cutoff = (datetime.fromisoformat(now) - RECHECK_INTERVAL).isoformat()
+    rows = conn.execute(
+        "SELECT id, platform_upload_id FROM deliveries WHERE platform='youtube' "
+        "AND status='published' AND platform_upload_id IS NOT NULL "
+        "AND (remote_checked_at IS NULL OR remote_checked_at <= ?) "
+        "ORDER BY remote_checked_at IS NOT NULL, remote_checked_at, id LIMIT ?",
+        (cutoff, RECHECK_BATCH),
+    ).fetchall()
+    by_video: Dict[str, List[int]] = {}
+    for row in rows:
+        by_video.setdefault(row["platform_upload_id"], []).append(int(row["id"]))
+    if not by_video:
+        return 0
+    try:
+        present = {item.get("id") for item in _listed(service, list(by_video))}
+        absent = [vid for vid in by_video if vid not in present]
+        if absent:
+            _sleep(VERIFY_RECHECK_SEC)
+            present |= {item.get("id") for item in _listed(service, absent)}
+    except Exception:  # noqa: BLE001 -- unknown is not missing; the next pass asks again
+        logger.exception("published-video recheck failed for %d ids", len(by_video))
+        return 0
+    mark_remote_checked(conn, [i for vid in present if vid in by_video for i in by_video[vid]], now)
+    gone = 0
+    for vid in by_video:
+        if vid not in present:
+            for delivery_id in by_video[vid]:
+                gone += _mark_gone(conn, delivery_id, vid, "recheck_published_videos", now)
+    return gone
+
+
+def _listed(service, video_ids: List[str], part: str = "status") -> List[Dict[str, Any]]:
+    resp = service.videos().list(part=part, id=",".join(video_ids)).execute()
+    return list(resp.get("items") or [])
+
+
+def _mark_gone(conn, delivery_id: int, video_id: str, source: str, now: str) -> bool:
+    """``missing_remote`` (``queue.mark_missing_remote``) plus one open
+    ``youtube_video_missing`` health incident; a failed incident write never
+    undoes the mark."""
+    if not mark_missing_remote(
+        conn, delivery_id, evidence={"source": source, "lookups": 2}, now=now
+    ):
+        return False
+    logger.error(
+        "delivery %s: YouTube returns no video %s; now missing_remote", delivery_id, video_id
+    )
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    row = conn.execute(
+        "SELECT project_name, short_index FROM deliveries WHERE id=?", (delivery_id,)
+    ).fetchone()
+    key = f"{MISSING_VIDEO_KIND}:{delivery_id}"
+    try:
+        write_row(
+            default_incidents_dir(default_data_root()),
+            new_incident(
+                MISSING_VIDEO_KIND,
+                key,
+                f"{safe_name(key)}.json",
+                now,
+                delivery_id=delivery_id,
+                platform=PLATFORM,
+                project=row["project_name"],
+                video_id=video_id,
+                detail=(
+                    f"youtube#{delivery_id} {row['project_name']} short {row['short_index']}: "
+                    f"the channel no longer returns video {video_id}; the row is missing_remote. "
+                    "Nothing re-uploads it: see `gomoveshift queue recover-terminal`."
+                ),
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("could not write the %s incident", key)
+    return True
 
 
 #: YouTube's quota day starts at midnight Pacific time, not UTC.
@@ -784,7 +894,12 @@ class YouTubeShortsAdapter:
         return True
 
     def _find_existing_upload(
-        self, payload: YouTubePayload, existing: Dict[str, Any], conn
+        self,
+        payload: YouTubePayload,
+        existing: Optional[Dict[str, Any]] = None,
+        conn=None,
+        *,
+        delivery_id: Optional[int] = None,
     ) -> Optional[str]:
         """Scan the channel's most recent uploads (pattern: see
         ``youtube_uploads_listing.list_uploads``) for a video matching
@@ -794,7 +909,15 @@ class YouTubeShortsAdapter:
         queue row already holds as its upload is never a candidate. Read-only;
         costs ``playlistItems.list``/``videos.list`` units (the combined
         10,000/day bucket), never ``videos.insert`` quota. Never called
-        outside the lost-response retry path (see ``_reconcile``)."""
+        outside the lost-response retry path (see ``_reconcile``).
+
+        A video another queue row (any row but ``delivery_id``) already records
+        as its upload is that row's, never a candidate: adopting it would leave
+        two rows claiming one video and this Short never uploaded."""
+        if existing is None:
+            existing = dict(
+                conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+            )
         service = self._uploader._build_service()
         since = existing.get("first_submitted_at") or existing["created_at"]
         cutoff = datetime.fromisoformat(since) - _ADOPT_CLOCK_SKEW
@@ -813,6 +936,10 @@ class YouTubeShortsAdapter:
             if upload.title != payload.title or not upload.published_at:
                 continue
             if upload.video_id in owned:
+                logger.warning(
+                    "not adopting video_id=%s: another delivery already records it",
+                    upload.video_id,
+                )
                 continue
             try:
                 published_dt = datetime.fromisoformat(upload.published_at.replace("Z", "+00:00"))

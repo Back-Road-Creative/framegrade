@@ -850,6 +850,8 @@ def _serialize_publish_plan(plan) -> str:
         for key in ("experiment_arms", "caption_templates", "generator_title"):
             if not record.get(key):
                 record.pop(key, None)
+        if not record.get("place_variety"):  # an older plan's bytes stay as they were
+            record.pop("place_variety", None)
     return json.dumps(payload, sort_keys=True, indent=2, default=_json_datetime_default) + "\n"
 
 
@@ -1015,6 +1017,8 @@ def _emit_publish_preview_sidecar(
             for key in ("experiment_arms", "caption_templates", "generator_title"):
                 if not record.get(key):
                     record.pop(key, None)
+            if not record.get("place_variety"):
+                record.pop("place_variety", None)
             record["placeholders"] = placeholders.get(record["short_index"], [])
         payload = {"kind": "publish_preview", "not_for_publish": True, **payload}
         preview_path = output_base / f"{project_base}_publish_preview.json"

@@ -127,16 +127,23 @@ recoverable, never duplicated.
     terminal. `YouTubeQuotaError` and anything else propagate.
   - **Instagram** / **Facebook** (identical shape): `*PermanentError` (incl.
     `UnsafeUploadHostError`, and Facebook's `ScheduleWindowError`, both
-    subclasses) is terminal. `*AuthBlockedError` is ALSO terminal,
-    deliberately: an expired/revoked token is recoverable by a human
-    re-authorizing, never by retrying — the token is still dead on attempt
-    8, so retrying only burns the attempt budget and delays the human
-    noticing. `*RetryableError` / `*PublishingLimitError` (a
+    subclasses) is terminal. `*RetryableError` / `*PublishingLimitError` (a
     shared-quota refusal, which self-heals) propagate.
+  - **A refused access token** (`*AuthBlockedError` on Instagram, Facebook
+    and photos; `TikTokAuthBlockedError` for TikTok's `access_token_invalid`
+    and `scope_not_authorized`) is never a row failure: it blocks every post
+    to that platform, and only a person re-authorizing clears it.
+    `handlers._pause_for_auth` pauses the platform (reason `auth:blocked`),
+    puts the row back to `queued` when nothing of it reached the platform, and
+    raises `ThrottledDeliveryError` (never counted). The drain re-checks the
+    pause before each row, so the platform's other rows stay queued and
+    untouched in the same pass; `health check` rule 16 raises one
+    `platform_auth_blocked` incident naming the platform. Resuming the
+    platform lets them go again.
   - **TikTok**: no dedicated permanent exception subclass exists —
     `TikTokAdapterError` covers both transient and permanent failures with
     no way to tell them apart by type, so per the conservative default
-    nothing is translated from it; only `confirm_publish`'s own terminal
+    nothing else is translated from it (a refused token is above); only `confirm_publish`'s own terminal
     *return value* (`PublishOutcome.delivery_status ==
     "failed_permanent"`) becomes `PermanentDeliveryError`.
     `TikTokPollTimeoutError` is never translated — a poll timeout is an

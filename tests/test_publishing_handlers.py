@@ -45,6 +45,7 @@ from gomoveshift.publishing.queue import (
     acquire_lease,
     enqueue,
     find_delivery,
+    is_platform_paused,
     open_queue_db,
     transition,
 )
@@ -171,14 +172,14 @@ def test_instagram_unsafe_upload_host_is_permanent(conn):
         handler(_row(conn, "instagram"))
 
 
-def test_instagram_auth_blocked_is_permanent_not_retried_forever(conn):
-    # Deliberate: an expired/revoked token can't be fixed by retrying — only
-    # a human re-authorizing fixes it, so retrying just burns the attempt
-    # budget before the human notices.
+def test_instagram_auth_blocked_pauses_instagram_instead_of_failing_the_row(conn):
+    # An expired/revoked token blocks every post, not this one: the platform
+    # pauses until a human re-authorizes (tests/test_platform_auth_pause.py).
     adapter = _FakeAdapter(to_raise=InstagramAuthBlockedError("token expired"))
     handler = make_instagram_handler(adapter, conn, lambda p, i: _record(), _loader())
-    with pytest.raises(PermanentDeliveryError):
+    with pytest.raises(ThrottledDeliveryError):
         handler(_row(conn, "instagram"))
+    assert is_platform_paused(conn, "instagram")
 
 
 def test_instagram_retryable_error_stays_retryable(conn):
@@ -219,11 +220,12 @@ def test_facebook_unsafe_upload_host_is_permanent(conn):
         handler(_row(conn, "facebook"))
 
 
-def test_facebook_auth_blocked_is_permanent(conn):
+def test_facebook_auth_blocked_pauses_facebook_instead_of_failing_the_row(conn):
     adapter = _FakeAdapter(to_raise=FacebookAuthBlockedError("token expired"))
     handler = make_facebook_handler(adapter, conn, lambda p, i: _record(), _loader())
-    with pytest.raises(PermanentDeliveryError):
+    with pytest.raises(ThrottledDeliveryError):
         handler(_row(conn, "facebook"))
+    assert is_platform_paused(conn, "facebook")
 
 
 def test_facebook_retryable_error_stays_retryable(conn):

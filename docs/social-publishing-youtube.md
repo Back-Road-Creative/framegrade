@@ -53,7 +53,8 @@ than re-implementing its upload/retry/token/quota handling.
   uploads made since the row was first submitted (the queue's
   `first_submitted_at`, less `_ADOPT_CLOCK_SKEW`; `created_at` for an older
   row), so a retry hours later still finds it. A video another queue row
-  already holds as its `platform_upload_id` is never adopted. One match is
+  already records as its `platform_upload_id` is never a
+  candidate: it is that row's. One match is
   adopted instead of inserting; two or more raise
   `AmbiguousUploadMatchError` rather than guess. `playlistItems.list` and
   `videos.list` cost units in the combined 10,000/day bucket, not the

@@ -131,7 +131,15 @@ sync once after the collect loop, logs exit 1 (refusals, already filed) as a lin
 any other non-zero exit `SHORT_TEXT_SYNC_FAILED`. A night it does not run is alerted by health
 rule 13 (`seo_feedback_stale:sync`).
 A Short is also refused when its final place equals its neighbour's final place in the LF
-(new text if rewritten, stored otherwise; the later of two rewritten ones), when the generator
+(new text if rewritten, stored otherwise; the later of two rewritten ones). The generator
+only looks back, so the title place a kept next Short names (a hand title, a published
+Short) is taken for the rewrite, and a repeat of a kept neighbour is refused only when the
+rewritten Short had another measured place and no `no_alternative` of its own: a kept
+neighbour never changes, so refusing a Short that cannot vary would repeat every night. One
+title ledger spans the sidecar's LFs, as Phase D keeps one per drive. Across LFs, sidecars
+and projects, `check_batch`'s `neighbour-place` and `repeated-title` rules judge each
+rewritten Short against the YouTube Shorts either side of it by slot (the queue's active
+rows, read once per run). A Short is also refused when the generator
 refuses it alone (the LF is retried Short by Short; Shorts not being rewritten ride along as
 discarded stamped stand-ins, so their own composition cannot fail the others), or when a row on
 the same platform already holds the new plan hash (the queue's UNIQUE key; also checked before a

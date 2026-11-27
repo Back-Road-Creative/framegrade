@@ -602,6 +602,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "remote_checked_at" not in cols:
+            # When ``youtube_adapter`` last saw this row's video in ``videos.list``;
+            # NULL until it first looks, so an older row is checked first.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN remote_checked_at TEXT")
         if "uncounted_since" not in cols:
             # When the row's current run of retries that never count against
             # ``max_attempts`` began; NULL when it is not in one. Bounds that run
@@ -1252,6 +1256,33 @@ def record_live_publish(
     return True
 
 
+def parse_slot(value: Any) -> datetime:
+    """``value`` read as an ISO-8601 time (a trailing ``Z`` is UTC), or
+    ``ValueError`` naming it. A time with no zone comes back without one:
+    ``normalise_slot`` refuses it, and the drain reads it as UTC."""
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"scheduled_at must be an ISO-8601 timestamp; got {value!r}") from exc
+
+
+def normalise_slot(value: Any) -> str:
+    """``value`` as a UTC ISO-8601 string, the one form ``scheduled_at`` holds.
+
+    ``dispatch._select_due`` compares ``scheduled_at`` with its own UTC ``now``
+    as TEXT, so "09:00-05:00", "14:00Z" or "14:00" with a space would all sort
+    wrong against it even where they parse. A time with no zone is refused, not
+    guessed: it could be Eastern or UTC, and the drain's arithmetic on it raised
+    ``TypeError``."""
+    parsed = parse_slot(value)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"scheduled_at must name its time zone (for example +00:00 or -05:00); "
+            f"got {value!r}, which could be any zone"
+        )
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def reschedule_delivery(
     conn: sqlite3.Connection,
     delivery_id: int,
@@ -1275,18 +1306,16 @@ def reschedule_delivery(
     fire the row before its own wait (backoff, throttle, or deferral) has
     actually elapsed.
 
-    ``scheduled_at`` must be a readable timestamp. The column is TEXT
-    and ``dispatch._select_due`` compares it as a string, so an unparseable
-    value does not fail loudly -- it makes the row never due, or due for ever.
-    Refusing here rather than at any one caller means no caller can write one;
-    ``transition`` guards ``platform_published_at`` the same way."""
+    ``scheduled_at`` must be a readable timestamp with a zone, and is stored
+    as UTC (``normalise_slot``). The column is TEXT and
+    ``dispatch._select_due`` compares it as a string, so an unparseable or
+    differently written value does not fail loudly -- it makes the row never
+    due, or due for ever. Refusing here rather than at any one caller means no
+    caller can write one; ``transition`` guards ``platform_published_at`` the
+    same way. This writes the row only: ``plan_title_sync.move_delivery_slot``
+    moves the publish plan's slot with it."""
     now = now or _now_iso()
-    try:
-        datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"scheduled_at must be an ISO-8601 timestamp; got {scheduled_at!r}"
-        ) from exc
+    scheduled_at = normalise_slot(scheduled_at)
     if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     with conn:
@@ -1314,6 +1343,13 @@ def reschedule_delivery(
         return cur.rowcount == 1
 
 
+#: ``platform_pauses.reason`` of a pause taken because the platform refused its
+#: access token (``handlers._pause_for_auth``); the refusal follows after a
+#: space. ``health check`` raises one ``platform_auth_blocked`` incident for each
+#: platform paused this way and resolves it once the pause is lifted.
+AUTH_BLOCKED_PAUSE_REASON = "auth:blocked"
+
+
 def pause_platform(
     conn: sqlite3.Connection,
     platform: str,
@@ -1330,7 +1366,8 @@ def pause_platform(
     platform name rather than creating a pause row nothing will ever match.
 
     ``reason`` is optional and free-form (``None`` for a manual console
-    pause, ``"auto:suppressed"`` for the auto-pause path)."""
+    pause, ``"auto:suppressed"`` for the auto-pause path,
+    ``AUTH_BLOCKED_PAUSE_REASON`` for a refused access token)."""
     # Lazy import: queue.py is deliberately independent of publishing.models
     # (see module docstring) except for this one shared vocabulary check.
     from .models import KNOWN_PLATFORMS
@@ -1535,6 +1572,23 @@ def mark_missing_remote(
             ),
         )
     return True
+
+
+def mark_remote_checked(conn: sqlite3.Connection, delivery_ids: Iterable[int], now: str) -> None:
+    """Stamp ``remote_checked_at`` on rows whose video ``videos.list`` just returned.
+
+    ``updated_at`` is deliberately left alone: for a legacy published row it is the
+    upper bound ``select_due_first_comments`` uses for the publish moment, so a daily
+    check moving it would keep pushing that row's first comment back."""
+    ids = [int(i) for i in delivery_ids]
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    with conn:
+        conn.execute(
+            f"UPDATE deliveries SET remote_checked_at=? WHERE id IN ({marks})",  # noqa: S608
+            (now, *ids),
+        )
 
 
 def find_delivery(

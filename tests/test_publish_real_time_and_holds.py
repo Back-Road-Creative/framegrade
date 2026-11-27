@@ -209,14 +209,21 @@ def test_two_shorts_due_in_one_hour_second_moves_to_next_free_slot(conn, monkeyp
     assert written == [(1, datetime(2026, 11, 20, 13, 40, tzinfo=timezone.utc))]
 
 
-def test_other_platforms_in_the_same_hour_are_untouched(conn, tmp_path):
-    q.enqueue(conn, "proj", 0, "instagram", "h0", scheduled_at="2026-11-20T11:05:00+00:00")
-    q.enqueue(conn, "proj", 1, "instagram", "h1", scheduled_at="2026-11-20T11:40:00+00:00")
+def test_other_platforms_in_the_same_hour_keep_their_slots(conn, tmp_path):
+    """Only YouTube rows are moved to a new hour. Another platform's second row
+    keeps its slot and simply waits for the next pass (one post per pass)."""
+    slots = ["2026-11-20T11:05:00+00:00", "2026-11-20T11:40:00+00:00"]
+    ids = [
+        q.enqueue(conn, "proj", i, "instagram", f"h{i}", scheduled_at=s)
+        for i, s in enumerate(slots)
+    ]
     ran = []
     drain_queue(
         conn, {"instagram": lambda r: ran.append(r["id"])}, now=NOW, incidents_dir=tmp_path / "i"
     )
-    assert len(ran) == 2
+    assert ran == [ids[0]]
+    kept = conn.execute("SELECT scheduled_at FROM deliveries WHERE id=?", (ids[1],)).fetchone()[0]
+    assert kept == slots[1]
 
 
 def test_margin_constant_is_two_hours():
