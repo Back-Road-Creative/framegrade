@@ -644,7 +644,7 @@ class FailedRelaunch:
 def default_fingerprint_fn(config: Any, code_root: Path) -> Callable[[str, Any], Dict[str, Any]]:
     """The fingerprint of the code and inputs a launch would run now: the service interpreter's
     versions (read once), the project's manifest row, the drive config and the failed phase."""
-    python = str(Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python")
+    python = retry_policy.service_python(Path(code_root) / SERVICE_DIR)
     versions: Dict[str, Any] = {}
 
     def fingerprint_fn(project: str, phase: Any) -> Dict[str, Any]:
@@ -1355,7 +1355,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     if short:
         text = "; ".join(f"{s['free_gb']:.1f} GB free < {s['need_gb']:.1f} GB ({', '.join(s['uses'])})" for s in short)  # fmt: skip
         return {**res, "action": "refused", "reason": f"storage: {text}"}
-    python = Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python"
+    python = Path(retry_policy.service_python(Path(code_root) / SERVICE_DIR))
     if not python.is_file():
         return {**res, "action": "refused", "reason": f"no service interpreter at {python}"}
     bad = _subset(subset, row.sources, create=not dry_run)
