@@ -149,7 +149,7 @@ def bind_to_code_root(code_root: Path, recipe_argv: List[str]) -> Tuple[Optional
     if len(recipe_argv) < 3 or recipe_argv[1:3] != ["-m", "gomoveshift"]:
         return None, "recipe argv is not `<python> -m gomoveshift ...`; cannot rebind it"
     svc = Path(code_root) / SERVICE_DIR
-    python = svc / ".venv" / "bin" / "python"
+    python = Path(retry_policy.service_python(svc))
     if not python.is_file():
         return None, (
             f"no service interpreter at {python}; build the code root's virtualenv before a resume"
@@ -619,8 +619,8 @@ def run_heal(
 
     # The code identity a resume runs: the SHA plus the version installed in the interpreter heal
     # launches. A deferred install leaves the SHA ahead of the venv, so the SHA alone is not it.
-    python = Path(code_root) / SERVICE_DIR / ".venv" / "bin" / "python"
-    installed = installed_version_fn(str(python))
+    python = retry_policy.service_python(Path(code_root) / SERVICE_DIR)
+    installed = installed_version_fn(python)
     pinned = pinned_version_fn(Path(code_root))
     versions = {"gomoveshift": installed, **sibling_versions_fn(str(python))}
     config_sha = config_sha_fn(config)

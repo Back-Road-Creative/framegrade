@@ -252,4 +252,14 @@ def failure_stamp(
 
 
 def service_python(code_root: Path) -> str:
-    return str(Path(code_root) / ".venv" / "bin" / "python")
+    """The interpreter a launch from ``code_root`` runs and its versions are read from: the
+    published ``.venvs/current`` venv, else ``.venv``, resolved to its physical ``.venvs/<id>``
+    so a run keeps the venv it began with. The staging sync publishes a new venv by moving
+    ``.venvs/current`` and leaves ``.venv`` as it is while any process runs through it
+    (``_ops/sync-staging.sh`` ``venv_link``), so ``.venv`` alone can lag the install for hours.
+    The one place a health module picks the service interpreter."""
+    root = Path(code_root)
+    for venv in (root / ".venvs" / "current", root / ".venv"):
+        if (venv / "bin" / "python").is_file():
+            return str(venv.resolve() / "bin" / "python")
+    return str(root / ".venv" / "bin" / "python")

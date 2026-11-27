@@ -269,6 +269,8 @@ lookup unavailable, network timeouts), `publish_only` (YouTube quota, Drive uplo
 never (heal has no publish path: it records `refused`, naming class, a 12-char fingerprint hash and `use health publish`).
 A refusal is one `refused` attempt (deduped per fingerprint and reason) and one log line. While the checkout's `pyproject.toml`
 pins a version the venv lacks, heal skips with `install pending: checkout pins <v>, venv has <v'>`
+(the venv is the published one, `retry_policy.service_python`: the staging sync moves
+`.venvs/current` and leaves `.venv` alone while a process runs through it)
 (`heal.install_pending`; `health backlog`'s new drive and confirmed resume and `health publish` refuse
 with the same reason, so every render boundary is a gap the deferred install lands in; unknown either way launches).
 Otherwise heal launches
@@ -299,8 +301,9 @@ attempt only: guard (a) alone would relaunch a failed drive after each new stagi
 Delete the file to hand the drive back to heal.
 
 **Code-root binding.** A resume runs the code it records as `mirror_sha`, never the recipe
-writer's: the recipe's interpreter is replaced by `<code root>/.venv/bin/python`
-(recorded as the attempt's `interpreter`) and the cwd is the code root, not the recipe's `cwd`.
+writer's: the recipe's interpreter is replaced by the code root's published venv
+(`.venvs/current/bin/python`, else `.venv/bin/python`, resolved to its physical `.venvs/<id>`;
+recorded as the attempt's `interpreter`) and the cwd is the code root, not the recipe's `cwd`.
 Host-only overrides (`--allow-cross-fs-source`) are stripped; a resume re-runs the source checks.
 Stripping it cannot refuse a resume: source footage on another filesystem than staging is never
 refused (it logs a `PERFORMANCE:` WARNING instead of INFO); only dangling or unreadable source
