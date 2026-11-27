@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Tuple
 
+from ..pipeline.ffmpeg_filters import FONT_PATH, WEBSITE_TEXT, escape_ffmpeg_text
 from ..pipeline.orchestrator_lock import GpuLockBusyError, acquire_gpu_lock, release_gpu_lock
 from .asset_plan import build_asset_sidecar, write_asset_bundle
 from .dispatch import PRIVACY_REQUIRED_CLASSES, PRIVACY_VERIFIED
@@ -303,6 +304,18 @@ def lookup_journal_link(recording_date: str) -> str:
     return link
 
 
+#: Where a day reel's journal link is its first comment: Instagram links in
+#: comments are not clickable, so it gets none.
+JOURNAL_COMMENT_PLATFORMS = ("youtube", "facebook")
+
+
+def journal_first_comment(platforms, journal_url: str) -> dict:
+    """The day reel's first comments: the journal day link, on each routed
+    platform in :data:`JOURNAL_COMMENT_PLATFORMS`. The queue's comment step
+    posts them, so no comment is ever posted by hand."""
+    return {p: journal_url.strip() for p in platforms if p in JOURNAL_COMMENT_PLATFORMS}
+
+
 def _short_platforms(request: DayReelRequest, media) -> Tuple[Tuple[str, ...], str]:
     """The request's platforms plus YouTube, unless the render is not a Short.
     Returns ``(platforms, note)``; ``note`` says why YouTube was left out."""
@@ -468,10 +481,57 @@ def _default_privacy_reporter(*, blur: bool) -> dict:
     return attestable_privacy_classes(blur=blur)
 
 
+#: The site, burned small at the bottom right of every day reel for its whole length.
+SITE_TEXT = WEBSITE_TEXT
+# Right edge: clear of the like/comment/share column Instagram Reels and YouTube
+# Shorts draw down the right ~12-15% of a 9:16 frame.
+_SITE_RIGHT_MARGIN = 0.18
+# Bottom: above the band both platforms keep for the caption, channel name and
+# progress bar -- route_story's SHORT_BOTTOM_SAFE_PX (220 px of 1920).
+_SITE_BOTTOM_MARGIN = 220 / 1920
+# Text height, as a fraction of the frame's short side: one small line.
+_SITE_FONT_SIZE = 0.032
+
+
+def site_text_filter() -> str:
+    """The drawtext filter that burns :data:`SITE_TEXT` for the whole reel:
+    semi-transparent white with a dark edge, so it reads on sky and on grass."""
+    return (
+        f"drawtext=fontfile='{FONT_PATH}':text='{escape_ffmpeg_text(SITE_TEXT)}'"
+        f":fontsize='min(w,h)*{_SITE_FONT_SIZE}':fontcolor=white@0.85"
+        ":borderw=2:bordercolor=black@0.6:shadowcolor=black@0.5:shadowx=2:shadowy=2"
+        f":x='w-text_w-w*{_SITE_RIGHT_MARGIN}':y='h-text_h-h*{_SITE_BOTTOM_MARGIN:.4f}'"
+    )
+
+
+def burn_site_text(source: Path, output: Path) -> Path:
+    """Re-encode ``source`` with the site burned in, audio copied and all
+    metadata stripped again. Raises ``RuntimeError`` when ffmpeg fails, with
+    nothing left at ``output``."""
+    cmd = ["ffmpeg", "-y", "-nostats", "-loglevel", "error", "-i", str(source)]
+    cmd += ["-vf", site_text_filter(), "-map", "0:v:0", "-map", "0:a?", "-c:a", "copy"]
+    cmd += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    cmd += ["-map_metadata", "-1", "-movflags", "+faststart", str(output)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603 - fixed argv
+    if proc.returncode != 0:
+        Path(output).unlink(missing_ok=True)
+        raise RuntimeError(f"site text burn failed (rc={proc.returncode}): {proc.stderr[-800:]}")
+    return Path(output)
+
+
 def _default_renderer(source: Path, output: Path, mask: Path) -> dict:
+    """The privacy render, then the site burned over it, so every route that
+    renders a day reel -- the Drive requests and any direct enqueue -- gets both."""
     from ..pipeline.photos.night_private_video import _render_private_video
 
-    return _render_private_video(source, output, mask)
+    output = Path(output)
+    blurred = output.with_name(f"{output.stem}.private{output.suffix}")
+    try:
+        evidence = _render_private_video(source, blurred, mask)
+        burn_site_text(blurred, output)
+    finally:
+        blurred.unlink(missing_ok=True)
+    return {**evidence, "site_text": SITE_TEXT}
 
 
 def _default_location_check(path: Path) -> bool:
@@ -759,6 +819,7 @@ def _process_one(
         scheduled_at_utc=request.at or now_utc,
         project_name=f"day-reel-{request.video_file_id}",
         caption=request.caption,
+        first_comment=journal_first_comment(platforms, link),
     )
     sidecar_path, _ = write_asset_bundle(work, doc, {"classes": privacy})
     receipt = {"request": request.name, "video_file_id": request.video_file_id}

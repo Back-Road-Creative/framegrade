@@ -27,7 +27,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Tuple, Union
 
 from .dynamic_schedule import staggered_by_platform
 from .first_comment import COMMENT_PLATFORMS, full_drive_comment_text, parent_is_public_at
@@ -542,13 +542,17 @@ def enqueue_from_plan_sidecar(
 def _first_comment_for(
     record: dict, platform: str, platform_at: str, context: str
 ) -> Optional[str]:
-    """The full-drive first comment for ``platform``, or ``None`` (TikTok has
+    """The record's own first comment for ``platform`` when it names any
+    (``_own_first_comment``), else the full-drive one, or ``None`` (TikTok has
     no comment API; a record with no parent id is warned about and left for
     ``backfill_first_comment_text`` -- a comment must never block an enqueue).
     No comment when the drive is not public by ``platform_at``, the platform's
     own slot (``parent_is_public_at``): it would link a private video."""
     if platform not in COMMENT_PLATFORMS:
         return None
+    named, text = _own_first_comment(record, platform)
+    if named:
+        return text
     if not parent_is_public_at(platform_at, record.get("parent_lf_publish_at")):
         logger.warning(
             "first comment not scheduled: the full drive is not public by the %s slot (%s)",
@@ -563,6 +567,18 @@ def _first_comment_for(
         return None
 
 
+def _own_first_comment(record: dict, platform: str) -> Tuple[bool, Optional[str]]:
+    """``(True, text)`` when the record names its own first comments
+    (``first_comment_by_platform``, set by a route with no full drive to link,
+    such as a day reel's journal day); ``text`` is ``None`` for a platform it
+    leaves out. ``(False, None)`` when it names none: the full-drive link applies."""
+    own = record.get("first_comment_by_platform")
+    if not isinstance(own, dict):
+        return False, None
+    text = own.get(platform)
+    return True, text.strip() if isinstance(text, str) and text.strip() else None
+
+
 @dataclass(frozen=True, slots=True)
 class BackfillResult:
     filled: int = 0
@@ -572,12 +588,14 @@ class BackfillResult:
 def backfill_first_comment_text(conn: sqlite3.Connection) -> BackfillResult:
     """Fill ``first_comment_text`` on existing YouTube/Instagram/Facebook rows
     that lack it, from the row's own sidecar record (matched on project and
-    ``short_index``). Idempotent; a row already posted is never touched; an
+    ``short_index``): the record's own comment when it names one, else the
+    full-drive link. Idempotent; a row already posted is never touched; an
     unreadable sidecar or a missing parent id is skipped with a WARNING and
     never raises."""
     marks = ",".join("?" for _ in COMMENT_PLATFORMS)
     rows = conn.execute(
-        f"SELECT id, project_name, short_index, sidecar_path, scheduled_at FROM deliveries "  # noqa: S608
+        "SELECT id, project_name, short_index, platform, sidecar_path, scheduled_at "  # noqa: S608
+        "FROM deliveries "
         f"WHERE platform IN ({marks}) AND first_comment_posted_at IS NULL "
         "AND (first_comment_text IS NULL OR first_comment_text = '') ORDER BY id",
         COMMENT_PLATFORMS,
@@ -624,6 +642,9 @@ def _backfill_text(row, cache: dict) -> Optional[str]:
             record.get("short_index") == row["short_index"]
             and record.get("project_name") == row["project_name"]
         ):
+            named, text = _own_first_comment(record, row["platform"])
+            if named:
+                return text
             if not parent_is_public_at(row["scheduled_at"], record.get("parent_lf_publish_at")):
                 logger.warning(
                     "first-comment backfill: %s goes out before its full drive is public; skipped",

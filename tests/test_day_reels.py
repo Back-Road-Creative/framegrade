@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,9 @@ import pytest
 from gomoveshift.publishing import day_reels
 from gomoveshift.publishing.dispatch import PRIVACY_REQUIRED_CLASSES
 from gomoveshift.publishing.queue import open_queue_db
+
+# The real one, kept before the autouse fixture swaps in a fake ffprobe.
+_REAL_RUN = subprocess.run
 
 CAPTION = "Up on Peakeen Ridge, Sheep's Head. #Ireland #CountyCork #WestCork #SheepsHead"
 VIDEO_ID = "1-XmsePdmWUzVZ5EVTXZbzet"
@@ -765,3 +769,124 @@ def test_a_tracking_failure_never_undoes_a_queued_reel(tmp_path):
     assert [o.state for o in outcomes] == ["enqueued"]
     assert "tracking record not written: disk full" in outcomes[0].reason
     assert len(_rows(tmp_path)) == 3
+
+
+# --- the site on every reel, the journal day as its first comment -----------
+
+
+def test_every_day_reel_gets_its_journal_day_as_the_first_comment(tmp_path):
+    drive = FakeDrive({"day10.json": _request()})
+    _run(tmp_path, drive)
+    conn = open_queue_db(tmp_path / "queue")
+    try:
+        got = dict(conn.execute("SELECT platform, first_comment_text FROM deliveries"))
+    finally:
+        conn.close()
+    # Instagram links are not clickable, so it gets no comment.
+    assert got == {"facebook": DAY_10, "instagram": None, "youtube": DAY_10}
+
+
+def test_a_reel_kept_off_youtube_comments_on_facebook_only(tmp_path, _fake_ffprobe):
+    _fake_ffprobe.update(width=1920, height=1080)
+    _run(tmp_path, FakeDrive({"day10.json": _request()}))
+    assert _record(tmp_path)["first_comment_by_platform"] == {"facebook": DAY_10}
+
+
+def test_default_renderer_burns_the_site_over_the_privacy_render(tmp_path, monkeypatch):
+    from gomoveshift.pipeline.photos import night_private_video
+
+    rendered, cmds = [], []
+
+    def private(source, output, mask):
+        rendered.append(Path(output))
+        Path(output).write_bytes(b"blurred")
+        return {"masked_frames": 4}
+
+    def run(cmd, **kw):
+        cmds.append(cmd)
+        Path(cmd[-1]).write_bytes(b"blurred + site")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(night_private_video, "_render_private_video", private)
+    monkeypatch.setattr(subprocess, "run", run)
+    output = tmp_path / "short_01.mp4"
+    evidence = day_reels._default_renderer(tmp_path / "in.mp4", output, tmp_path / "m.mkv")
+
+    assert output.read_bytes() == b"blurred + site"
+    assert evidence == {"masked_frames": 4, "site_text": "gomoveshift.com"}
+    (cmd,) = cmds
+    assert cmd[cmd.index("-i") + 1] == str(rendered[0]), "the site goes over the blurred video"
+    assert "gomoveshift.com" in cmd[cmd.index("-vf") + 1]
+    assert cmd[cmd.index("-map_metadata") + 1] == "-1"
+    assert not rendered[0].exists(), "the intermediate render is removed"
+
+
+def test_a_failed_site_burn_raises_and_leaves_no_output(tmp_path, monkeypatch):
+    from gomoveshift.pipeline.photos import night_private_video
+
+    monkeypatch.setattr(
+        night_private_video,
+        "_render_private_video",
+        lambda s, o, m: Path(o).write_bytes(b"x") and {},
+    )
+    monkeypatch.setattr(
+        subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "boom")
+    )
+    output = tmp_path / "short_01.mp4"
+    with pytest.raises(RuntimeError, match="boom"):
+        day_reels._default_renderer(tmp_path / "in.mp4", output, tmp_path / "m.mkv")
+    assert not output.exists()
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+@pytest.mark.parametrize("width, height", [(1080, 1920), (720, 1280)])
+def test_site_text_is_small_bottom_right_and_clear_of_the_button_column(
+    tmp_path, monkeypatch, width, height
+):
+    import numpy as np
+
+    monkeypatch.setattr(subprocess, "run", _REAL_RUN)
+    black = tmp_path / "black.mp4"
+    _REAL_RUN(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=black:s={width}x{height}:d=1",
+            "-pix_fmt",
+            "yuv420p",
+            str(black),
+        ],
+        check=True,
+    )
+    out = tmp_path / "site.mp4"
+    day_reels.burn_site_text(black, out)
+    frame = _REAL_RUN(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            "0.5",
+            "-i",
+            str(out),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    lit = np.argwhere(np.frombuffer(frame, np.uint8).reshape(height, width) > 128)
+    ys, xs = lit[:, 0] / height, lit[:, 1] / width
+    assert len(lit), "the site text is drawn"
+    assert xs.min() > 0.4 and xs.max() < 0.85, "right half, left of the button column"
+    assert ys.min() > 0.8 and ys.max() < 0.9, "bottom, above the caption and progress bar"
+    assert ys.max() - ys.min() < 0.03, "small: one short line"

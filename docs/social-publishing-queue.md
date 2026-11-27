@@ -1027,6 +1027,21 @@ row for the same clip with a different plan) is recorded as `refused` for that r
 stops the requests after it. It has no clip GPS votes, so no final-text
 review applies; the drain's one-Short-per-hour rule may move it to the next free hour.
 
+**Every day reel shows the site and links its journal day, on every route.** `_default_renderer`
+burns `gomoveshift.com` (`ffmpeg_filters.WEBSITE_TEXT`) over the blurred render for the whole
+reel (`burn_site_text`): small (3.2% of the frame's short side), semi-transparent white with a
+dark edge, at the bottom right but 18% of the width in from the right edge, clear of the
+like/comment/share column Instagram Reels and YouTube Shorts draw there, and above the bottom
+220/1920 band they keep for the caption and progress bar (route-story's `SHORT_BOTTOM_SAFE_PX`).
+It is a second encode (CRF 18, audio copied, metadata stripped again), because redactcam's
+`apply_blur` takes no extra filter; the receipt's evidence records `site_text`. A direct enqueue
+that renders through `_default_renderer` gets it too. The journal day link is the reel's first
+comment on YouTube and Facebook (`JOURNAL_COMMENT_PLATFORMS`; links in Instagram comments are not
+clickable, so it gets none): the route passes `build_asset_sidecar(..., first_comment=...)`,
+which writes `first_comment_by_platform` on the record, `enqueue_from_plan` and
+`backfill_first_comment_text` use it in place of the full-drive link, and the existing comment
+drains post it once the reel is live. Nothing is commented by hand.
+
 **Drive access is a one-time read-only sign-in**: `day-reels authorize --folder-id <id>` runs
 `rclone authorize` with the `drive.readonly` scope through the pipeline's **own** Google OAuth
 client (the `client_id`/`client_secret` inside its Drive token, `GMS_DRIVE_TOKEN_ENC`), not

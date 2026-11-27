@@ -111,6 +111,7 @@ def build_asset_sidecar(
     format: Optional[str] = None,
     tiktok_privacy_level: str = DEFAULT_TIKTOK_PRIVACY_LEVEL,
     caption: Optional[str] = None,
+    first_comment: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """Build a ``{"shorts": [record]}`` document ``load_publish_plan``
     accepts for a single standalone asset. Raises ``ValueError`` on an
@@ -125,12 +126,27 @@ def build_asset_sidecar(
     ``caption``, when given, is the whole post text for Instagram (its
     ``caption``) and Facebook (its ``description``), byte for byte, instead
     of the title + description composition. A day reel's caption is one
-    owner-written line, not a title with a body."""
+    owner-written line, not a title with a body.
+
+    ``first_comment``, when given, maps a platform to the record's own first
+    comment (``first_comment_by_platform``), used instead of the full-drive
+    link: a standalone asset has no full drive. A platform left out gets no
+    comment. Raises ``ValueError`` for a platform not in ``platforms`` or a
+    blank text."""
     unknown = sorted(set(platforms) - KNOWN_PLATFORMS)
     if unknown:
         raise ValueError(f"build_asset_sidecar: unknown platform(s): {unknown}")
     if not platforms:
         raise ValueError("build_asset_sidecar: at least one platform is required")
+
+    if first_comment is not None:
+        stray = sorted(set(first_comment) - set(platforms))
+        if stray:
+            raise ValueError(
+                f"build_asset_sidecar: first comment for unrouted platform(s): {stray}"
+            )
+        if any(not isinstance(t, str) or not t.strip() for t in first_comment.values()):
+            raise ValueError("build_asset_sidecar: a first comment is blank")
 
     media = fingerprint_media(Path(video))
     if project_name is None:
@@ -177,6 +193,8 @@ def build_asset_sidecar(
         "routes": {"selected": list(platforms)},
         "format": format,
     }
+    if first_comment is not None:
+        record["first_comment_by_platform"] = dict(first_comment)
     return {"shorts": [record]}
 
 
