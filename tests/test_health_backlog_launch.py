@@ -554,6 +554,129 @@ def test_a_supersede_dry_run_of_a_refused_passed_audit_would_launch(tmp_path):
     assert (rig.stages / "day-a").is_dir() and not rig.launches
 
 
+# #662: the mask gate refuses a day whose blur mask was built on another frame count than its
+# source and asks for a re-render on the fixed renderer, and nothing did it: Kerry-to-Cork stood
+# refused every tick until a person superseded it. The backlog tick now re-renders such a drive
+# by itself, once per drive-day per renderer version, recorded on the gate's incident row.
+
+
+def _mask_incident(rig, reason="mask_frame_count_mismatch", date="2026-09-02", project="day-a"):
+    from gomoveshift.publishing import mask_frame_gate as gate
+
+    inc = rig.tmp / "inc"
+    inc.mkdir(exist_ok=True)
+    row = {"date": date, "reason": reason, "sidecar_frames": 306385, "container_frames": 306377}
+    if reason == gate.REASON_MISMATCH:
+        row["difference"] = 8
+    gate._record(inc, project, row, gate._describe(project, row))
+    return inc, gate._row_path(inc, project, date)
+
+
+def _mask_run(rig, inc, **kw):
+    return launch.run_backlog(**{**rig.kwargs(**kw), "incidents_dir": inc})
+
+
+def test_a_mask_mismatch_re_renders_its_drive_once_per_renderer_version(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    res = _mask_run(rig, inc)
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert "mask_frame_count_mismatch" in res["relaunch"], res
+    assert res["mask_rerender"]["project"] == "day-a" and res["mask_rerender"]["days"] == [
+        "2026-09-02"
+    ]
+    assert rig.registered[0]["project"] == "day-a" and rig.registered[0]["status"] == "auditing"
+    asked = json.loads(row_path.read_text())["rerender_requested"]
+    assert [a["renderer_version"] for a in asked] == ["0.3.25"]
+    # the re-render miscounts again on the same renderer: the next tick queues nothing for day-a
+    rig.launches.clear(), rig.registered.clear()
+    import shutil
+
+    superseded = (rig.stages / launch.SUPERSEDED_DIR, rig.out / launch.SUPERSEDED_DIR)  # same clock
+    for left in (rig.tmp / "prior" / "day-a", rig.out / "day-a", rig.stages / "day-a", *superseded):
+        shutil.rmtree(left, ignore_errors=True)
+    _stale(rig)  # the re-render's own run, refused again by the same gate
+    again = _mask_run(rig, inc)
+    assert again.get("relaunch") is None and again.get("project") != "day-a", again
+    assert not any(r["project"] == "day-a" for r in rig.registered)
+    assert len(json.loads(row_path.read_text())["rerender_requested"]) == 1
+
+
+def test_a_new_renderer_version_re_renders_a_standing_mismatch_again(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    row = json.loads(row_path.read_text())
+    row["rerender_requested"] = [{"renderer_version": "0.3.24", "at": "2026-11-26T10:00:00Z"}]
+    row_path.write_text(json.dumps(row))
+    res = _mask_run(rig, inc)
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    asked = json.loads(row_path.read_text())["rerender_requested"]
+    assert [a["renderer_version"] for a in asked] == ["0.3.24", "0.3.25"]
+
+
+def test_an_unknown_mask_count_is_never_re_rendered(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason="mask_frame_count_unknown: day-a")
+    inc, row_path = _mask_incident(rig, reason="mask_frame_count_unknown")
+    res = _mask_run(rig, inc)
+    assert res.get("relaunch") is None and "mask_rerender" not in res, res
+    assert not any(r["project"] == "day-a" for r in rig.registered)
+    assert "rerender_requested" not in json.loads(row_path.read_text())
+
+
+def test_an_unknown_renderer_version_re_renders_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed = None
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    res = _mask_run(rig, inc)
+    assert res.get("relaunch") is None and "mask_rerender" not in res, res
+    assert "rerender_requested" not in json.loads(row_path.read_text())
+
+
+def test_a_dry_run_reports_the_mask_re_render_and_writes_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    before = row_path.read_text()
+    res = _mask_run(rig, inc, dry_run=True)
+    assert (res["action"], res["project"]) == ("would_launch", "day-a"), res
+    assert res["mask_rerender"]["project"] == "day-a"
+    assert row_path.read_text() == before and not rig.launches and not rig.registered
+
+
+def test_a_resolved_mismatch_is_not_re_rendered(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    row = json.loads(row_path.read_text())
+    row["resolved_at"] = "2026-11-27T09:00:00Z"
+    row_path.write_text(json.dumps(row))
+    res = _mask_run(rig, inc)
+    assert res.get("relaunch") is None and "mask_rerender" not in res, res
+
+
+def test_a_mask_re_render_the_supersede_refuses_leaves_the_tick_as_it_was(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig, uploads='{"s01": {"video_id": "abc"}}')  # an upload record: never superseded
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    inc, row_path = _mask_incident(rig)
+    plain = rig.run()
+    rig.publishes.clear()
+    res = _mask_run(rig, inc)
+    assert "cannot supersede day-a" in res["mask_rerender"]["refused"], res
+    assert {k: v for k, v in res.items() if k != "mask_rerender"} == plain
+    assert "rerender_requested" not in json.loads(row_path.read_text())
+
+
 # 2026-11-27: Old Head to Courtmacsherry's passed audit is refused by the blur-mask frame gate
 # until its re-render, and the hourly tick returned that refusal before Galley Head's audit
 # (passed 2026-11-26) was ever offered for publish. A passed audit behind a refused one still

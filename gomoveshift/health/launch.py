@@ -1040,6 +1040,54 @@ def config_render_gate(config) -> Callable[[Path, Any], Optional[str]]:
     return gate
 
 
+#: The field ``health backlog`` appends to a ``mask_index_mismatch`` row (``mask_frame_gate``) when
+#: it re-renders that drive for it: one entry per renderer version, so a renderer that still
+#: miscounts is never asked again (#662).
+MASK_RERENDER_FIELD = "rerender_requested"
+
+
+def _mask_rerender_due(incidents_dir, region, rows, drives, renderer) -> Optional[Dict[str, Any]]:
+    """The first listed, unpublished ``failed`` or ``auditing`` drive of ``region`` with an open
+    ``mask_frame_count_mismatch`` day this renderer version has not been asked to re-render, else
+    None. ``mask_frame_count_unknown`` never qualifies (it fails closed, nothing to re-render
+    against), and neither does any day while the renderer version cannot be read."""
+    from ..publishing import mask_frame_gate as gate  # the gate imports health.store
+
+    if not renderer:
+        return None
+    listed = {r.project for r in rows if r.region == region}
+    cands = sorted(
+        d.project for d in drives
+        if d.region == region and d.status in ("failed", "auditing") and d.project in listed
+        and not _uploaded(d.output_dir)
+    )  # fmt: skip
+    if not cands:
+        return None
+    found, _bad = load_all(Path(incidents_dir))
+    for proj in cands:
+        due = [
+            r for r in found
+            if r.get("kind") == gate.KIND and r.get("drive") == proj and not r.get("resolved_at")
+            and r.get("reason") == gate.REASON_MISMATCH
+            and renderer not in {a.get("renderer_version") for a in r.get(MASK_RERENDER_FIELD) or []}
+        ]  # fmt: skip
+        if due:
+            days = sorted(str(r.get("day")) for r in due)
+            why = (f"{gate.REASON_MISMATCH} on {', '.join(days)}: re-render on renderer "
+                   f"{renderer} so the blur mask matches its source")  # fmt: skip
+            return {"project": proj, "days": days, "reason": why, "renderer": renderer, "rows": due}
+    return None
+
+
+def _record_mask_rerender(incidents_dir, due: Dict[str, Any], now: datetime) -> None:
+    at = utc_iso(now.timestamp())
+    for row in due["rows"]:
+        row.setdefault(MASK_RERENDER_FIELD, []).append(
+            {"renderer_version": due["renderer"], "at": at, "reason": due["reason"]}
+        )
+        write_row(Path(incidents_dir), row)
+
+
 def run_backlog(
     *,
     region: str,
@@ -1081,13 +1129,47 @@ def run_backlog(
     if not dry_run and not lease_acquire():
         return {**res, "reason": f"lease {LEASE_NAME} is held by another launch"}
     try:
-        out = _run(res, region, rows, drives, free_slots, known_projects, stages_root,
-                    output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    preflight, render_gate, launcher, register, retire, disk,
-                    installed_version, latest_version, supersede, publish, horizon_h,
-                    failed_relaunch,
-                    {"live": live_status, "now": now, "plan": None} if replace_scheduled else None,
-                    replace_store, pinned_version)  # fmt: skip
+
+        def tick(sup, dry, auto=False):
+            return _run(copy.deepcopy(res), region, rows, drives, free_slots, known_projects, stages_root,
+                        output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry,
+                        preflight, render_gate, launcher, register, retire, disk,
+                        installed_version, latest_version, sup, publish, horizon_h,
+                        failed_relaunch,
+                        {"live": live_status, "now": now, "plan": None} if replace_scheduled else None,
+                        replace_store, pinned_version, auto_supersede=auto)  # fmt: skip
+
+        mask = None
+        if supersede is None and incidents_dir is not None and publish is not None:
+            # #662: a day whose blur mask miscounts its source is re-rendered by the tick itself,
+            # through the supersede path, once per drive-day per renderer version. A dry pass
+            # decides first, so a re-render the supersede refuses leaves the tick as it was.
+            python = Path(retry_policy.service_python(Path(code_root) / SERVICE_DIR))
+            mask = _mask_rerender_due(
+                incidents_dir, region, rows, drives, installed_version(python)
+            )
+        out = None
+        if mask is not None:
+            info = {
+                "project": mask["project"],
+                "days": mask["days"],
+                "renderer_version": mask["renderer"],
+            }
+            sup = (mask["project"], mask["reason"])
+            probe = tick(sup, True, auto=True)
+            if probe.get("action") == "would_launch" and probe.get("project") == mask["project"]:
+                out = probe if dry_run else tick(sup, False, auto=True)
+                launched = out.get("action") == "launched" and out.get("project") == mask["project"]
+                if launched and not dry_run:
+                    _record_mask_rerender(incidents_dir, mask, now)
+                if out.get("action") not in ("launched", "would_launch"):
+                    info["refused"], out = str(out.get("reason")), None
+            else:
+                info["refused"] = str(probe.get("reason"))
+        if out is None:
+            out = tick(supersede, dry_run)
+        if mask is not None:
+            out["mask_rerender"] = info
         if stage_owners is not None:
             out["stage_roots"] = _stage_roots(
                 stages_root, rows, drives, stage_owners, release_list, now, dry_run
@@ -1144,7 +1226,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede, publish,
          horizon_h, failed_relaunch=None, replace=None, replace_store=None,
-         pinned_version=default_pinned_version):  # fmt: skip
+         pinned_version=default_pinned_version, auto_supersede=False):  # fmt: skip
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -1190,7 +1272,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                 continue
             refused = {"project": proj, "reason": done["reason"]}
             res.setdefault("publish_refusals", []).append(refused)
-    relaunch, auto = None, False
+    relaunch, auto = None, auto_supersede  # an automatic supersede launches only its own row
     if target_refused is not None:
         # superseding a ``failed`` row whose publish retry is refused (2026-11-27, Kerry-to-Cork's
         # mask gate asked for a re-render the store row refused): its run is set aside and the
@@ -1467,7 +1549,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             output_dir=str(out_dir), mirror_sha=mirror_sha, lf_mode=row.lf_mode,
             ingest_mode=row.ingest_mode,
         )  # fmt: skip
-    if auto:
+    if auto and not auto_supersede:  # the mask re-render is recorded on its own incident
         failed_relaunch.record_launch(row.project, res["relaunch"])
     return {**res, "action": "launched", "reason": f"{row.project} for {res['slot']}"}
 
