@@ -282,7 +282,7 @@ class _ChannelTexts:
             try:
                 plan = load_publish_plan(self._path)
                 self._records = {(r.project_name, r.short_index): r for r in plan.shorts}
-            except Exception:  # noqa: BLE001 -- a malformed record is the loop's error to raise
+            except (OSError, ValueError):  # a malformed record is the loop's error to raise
                 self._records = {}
         key = (raw["project_name"], raw["short_index"])
         record = self._records.get(key)

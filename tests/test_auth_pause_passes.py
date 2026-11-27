@@ -328,7 +328,6 @@ _NO_PLATFORM_CALL = {
     "publishing/queue_slot_refill.py:refill_slots": "local plan review",
     "publishing/replace_relink.py:relink_replaced_lf": "local stores",
     "publishing/tiktok_pack.py:sweep_queued": "local pack files",
-    "publishing/youtube_distinct.py:live_texts": "local plan sidecars",
     "publishing/tiktok_pack.py:reconcile_packed": (
         "only local reads are caught; list_videos raises to the caller, and pack mode "
         "needs no token to pack, so a refusal must not pause TikTok's packing"

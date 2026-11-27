@@ -46,6 +46,7 @@ from difflib import SequenceMatcher
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..pipeline.final_text_record import FinalTextReviewError
 from .anti_spam_gate import CROSS_BATCH_WINDOW_DAYS
 from .queue import (
     AUTH_PAUSED_ERROR_CLASS,
@@ -176,7 +177,8 @@ def sent_texts(record) -> Tuple[str, str]:
             review = build_short_final_text_review(record)
             if review.get("verdict") == "agree":
                 description = compose_description(review["surfaces"])
-        except Exception:  # noqa: BLE001 -- a refused review sends nothing; keep the plan text
+        except (FinalTextReviewError, OSError, ValueError, KeyError, TypeError):
+            # A refused or unbuildable review sends nothing: keep the plan text.
             pass
     return payload.title, description
 
@@ -240,7 +242,7 @@ def live_texts(
                 plans[path] = {
                     (r.project_name, r.short_index): r for r in load_publish_plan(path).shorts
                 }
-            except Exception as exc:  # noqa: BLE001 -- gone or malformed: the stored title only
+            except (OSError, ValueError) as exc:  # gone or malformed: the stored title only
                 logger.warning("youtube-distinct: unreadable sidecar %s: %s", path, exc)
                 plans[path] = None
         record = (plans.get(path) or {}).get((row["project_name"], row["short_index"]))
