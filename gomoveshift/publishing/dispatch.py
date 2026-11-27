@@ -1206,6 +1206,12 @@ def drain_queue(
     for row in sorted(due, key=_slot_order):
         delivery_id, platform, status = row["id"], row["platform"], row["status"]
 
+        # A pause taken during this pass holds the platform's remaining rows
+        # here, untouched, as ``_select_due`` holds them from the next pass on:
+        # a refused access token pauses its platform from inside the handler.
+        if is_platform_paused(conn, platform):
+            continue
+
         # Confirm a handler exists BEFORE acquiring the lease — otherwise a
         # platform with no adapter wired up locks its rows for the full
         # lease duration for no reason.

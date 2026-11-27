@@ -209,6 +209,13 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10, 13 and 15 (it would
    (`platform`, `date`), pushed once as `health_social_queue_gap`; it resolves when that day is
    filled or arrives, and the next empty day is a new incident. Read-only (queue opened `mode=ro`).
 
+16. **Platform paused: access token refused** (`platform_auth_blocked`). One incident per
+   platform in `platform_pauses` whose `reason` is `auth:blocked` (the dispatch handlers pause a
+   platform when Facebook, Instagram or TikTok refuses its access token, and leave its queued posts
+   queued). Key `platform_auth_blocked:<platform>`, fields `platform`, `paused_at`, `reason` (the
+   refusal); pushed once (`health_platform_auth_blocked`); resolves when the pause is lifted.
+   Read-only (queue opened `mode=ro`).
+
 ## Push and idempotency
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
@@ -218,7 +225,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `install_deferred` | `social_queue_gap`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `install_deferred` | `social_queue_gap` | `platform_auth_blocked`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,

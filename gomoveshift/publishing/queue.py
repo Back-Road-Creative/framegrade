@@ -592,6 +592,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "remote_checked_at" not in cols:
+            # When ``youtube_adapter`` last saw this row's video in ``videos.list``;
+            # NULL until it first looks, so an older row is checked first.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN remote_checked_at TEXT")
         if "uncounted_since" not in cols:
             # When the row's current run of retries that never count against
             # ``max_attempts`` began; NULL when it is not in one. Bounds that run
@@ -1321,6 +1325,13 @@ def reschedule_delivery(
         return cur.rowcount == 1
 
 
+#: ``platform_pauses.reason`` of a pause taken because the platform refused its
+#: access token (``handlers._pause_for_auth``); the refusal follows after a
+#: space. ``health check`` raises one ``platform_auth_blocked`` incident for each
+#: platform paused this way and resolves it once the pause is lifted.
+AUTH_BLOCKED_PAUSE_REASON = "auth:blocked"
+
+
 def pause_platform(
     conn: sqlite3.Connection,
     platform: str,
@@ -1337,7 +1348,8 @@ def pause_platform(
     platform name rather than creating a pause row nothing will ever match.
 
     ``reason`` is optional and free-form (``None`` for a manual console
-    pause, ``"auto:suppressed"`` for the auto-pause path)."""
+    pause, ``"auto:suppressed"`` for the auto-pause path,
+    ``AUTH_BLOCKED_PAUSE_REASON`` for a refused access token)."""
     # Lazy import: queue.py is deliberately independent of publishing.models
     # (see module docstring) except for this one shared vocabulary check.
     from .models import KNOWN_PLATFORMS
@@ -1542,6 +1554,23 @@ def mark_missing_remote(
             ),
         )
     return True
+
+
+def mark_remote_checked(conn: sqlite3.Connection, delivery_ids: Iterable[int], now: str) -> None:
+    """Stamp ``remote_checked_at`` on rows whose video ``videos.list`` just returned.
+
+    ``updated_at`` is deliberately left alone: for a legacy published row it is the
+    upper bound ``select_due_first_comments`` uses for the publish moment, so a daily
+    check moving it would keep pushing that row's first comment back."""
+    ids = [int(i) for i in delivery_ids]
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    with conn:
+        conn.execute(
+            f"UPDATE deliveries SET remote_checked_at=? WHERE id IN ({marks})",  # noqa: S608
+            (now, *ids),
+        )
 
 
 def find_delivery(

@@ -23,6 +23,7 @@ from gomoveshift.publishing.queue import (
     NEXT_ATTEMPT_AWAITING_MANUAL,
     acquire_lease,
     enqueue,
+    is_platform_paused,
     transition,
 )
 
@@ -67,14 +68,16 @@ def test_j08_02_auth_expiry_is_blocked_with_visible_reason(conn, asset):
 
     result = drain_queue(conn, handlers, now=NOW)
 
-    assert result.failed_permanent == 1 and result.succeeded == 0
+    # Held, never failed: the platform pauses until someone re-authorizes.
+    assert result.failed_permanent == 0 and result.succeeded == 0
     row = row_of(conn, did)
-    assert row["status"] == "failed_permanent"
+    assert row["status"] == "queued"
     assert "access token expired" in row["error_detail"]
     assert row["platform_post_id"] is None and row["published_at"] is None
     assert adapter.remote_posts == []
     assert any("access token expired" in e for e in result.errors)
-    # A blocked row is not retried by later drains.
+    assert is_platform_paused(conn, "instagram")
+    # A blocked row is not retried by later drains while the pause stands.
     drain_queue(conn, handlers, now=AFTER_BACKOFF)
     assert len(adapter.calls) == 1
 
