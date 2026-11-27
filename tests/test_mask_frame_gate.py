@@ -208,7 +208,7 @@ def test_health_publish_allows_an_agreeing_day(tmp_path, monkeypatch):
     assert rig.run()["action"] == "launched"
 
 
-def test_backlog_republish_goes_through_the_same_refusal(tmp_path, monkeypatch):
+def test_backlog_republish_goes_through_the_same_refusal(tmp_path, monkeypatch, incidents):
     rig = Rig(tmp_path)
     rig.audit()
     make_day(rig.stages / "day-a" / "day-a" / "_stages")
@@ -216,10 +216,53 @@ def test_backlog_republish_goes_through_the_same_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "open_schedule_store", lambda config: (rig.store, CAD))
     run = publish.backlog_publisher(
         None, region="usa", stages_root=rig.stages, code_root=tmp_path, jobs_dir=rig.jobs,
-        now=NOW,
+        now=NOW, incidents_dir=incidents,
     )  # fmt: skip
     out = run("day-a", False)
     assert out["action"] == "refused" and "306385" in out["reason"]
+
+
+def test_backlog_republish_records_the_row_where_the_backlog_reads_it(
+    tmp_path, monkeypatch, incidents
+):
+    """The cron passes ``--data-root`` to the backlog, which looks for this row there to decide a
+    re-render (#662). The gate wrote it under its own module's default root instead (the staging
+    mirror), so the backlog never saw it and Kerry-to-Cork and Old Head were never re-rendered."""
+    rig = Rig(tmp_path)
+    rig.audit()
+    make_day(rig.stages / "day-a" / "day-a" / "_stages")
+    probe(monkeypatch, 306377)
+    monkeypatch.setattr(publish, "open_schedule_store", lambda config: (rig.store, CAD))
+    tick = tmp_path / "tick-root" / "gms" / "incidents"
+    run = publish.backlog_publisher(
+        None, region="usa", stages_root=rig.stages, code_root=tmp_path, jobs_dir=rig.jobs,
+        now=NOW, incidents_dir=tick,
+    )  # fmt: skip
+    assert run("day-a", False)["action"] == "refused"
+    (row,) = rows(tick)
+    assert (
+        row["kind"] == gate.KIND
+        and row["drive"] == "day-a"
+        and row["reason"] == gate.REASON_MISMATCH
+    )
+    assert rows(incidents) == []
+
+
+def test_health_publish_records_the_row_in_the_given_incidents_dir(
+    tmp_path, monkeypatch, incidents
+):
+    rig = Rig(tmp_path)
+    rig.audit()
+    make_day(rig.stages / "day-a" / "day-a" / "_stages")
+    probe(monkeypatch, 306377)
+    tick = tmp_path / "cli-root" / "gms" / "incidents"
+    res = publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=tmp_path, jobs_dir=rig.jobs, now=NOW, dry_run=False, launcher=rig.launcher,
+        incidents_dir=tick,
+    )  # fmt: skip
+    assert res["action"] == "refused"
+    assert [r["drive"] for r in rows(tick)] == ["day-a"] and rows(incidents) == []
 
 
 def test_phase_d_upload_run_raises_before_anything_else(tmp_path, monkeypatch):

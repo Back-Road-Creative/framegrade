@@ -401,4 +401,6 @@ fail closed), and nothing is asked while the renderer's version cannot be read. 
 first: a re-render the supersede would refuse (an upload record, a sibling run) leaves the tick
 exactly as it would have been, with the refusal under `mask_rerender.refused`. The incident still
 resolves only when the gate passes the re-rendered day. A `--dry-run` reports `mask_rerender`
-and writes nothing.
+and writes nothing. The publish gate writes its rows into the tick's own incidents dir (from
+`--data-root`, or `GMS_HEALTH_INCIDENTS_DIR`), the same one the tick reads; `backlog_publisher`
+takes it with no default, so the rows never land under the code checkout instead.
