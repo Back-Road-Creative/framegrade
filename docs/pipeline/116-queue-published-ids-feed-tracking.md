@@ -15,8 +15,9 @@ because tracking bookkeeping did.
 
 `gomoveshift metrics backfill-ids` is the one-shot catch-up for rows that published before this
 hook existed: it walks every `published` row in the queue, applies the same
-`registered_platform_id` selection, and calls `update_platform_id` per row (best-effort, per-row
-`ValueError` skipped and printed, never aborts the walk). Idempotent — `update_platform_id`
+`registered_platform_id` selection, and calls `update_platform_id` per row (best-effort: a row's
+`ValueError`, or a project with no tracking record, is skipped and printed with its project and
+never aborts the walk). Idempotent — `update_platform_id`
 overwrites in place, so re-running registers the same ids again with no duplication.
 
 Both bridges also carry the posting time and, inseparably, WHICH moment it is. The queue
