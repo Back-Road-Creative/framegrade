@@ -61,6 +61,7 @@ class Rig:
         self.publish_result = None  # set -> run_backlog gets a publisher returning it
         self.publishes: list = []
         self.relaunch = None  # a ``launch.FailedRelaunch`` -> run_backlog gets it
+        self.ledger_live = None  # set -> run_backlog gets ``ledger_live_projects``
 
     def row(self, project, gb, region="usa"):
         files = []
@@ -115,6 +116,7 @@ class Rig:
             **({"replace_store": lambda: self.replace_store} if self.replace_store else {}),
             **({"publish": self.publish} if self.publish_result else {}),
             **({"failed_relaunch": self.relaunch} if self.relaunch else {}),
+            **({"ledger_live_projects": self.ledger_live} if self.ledger_live is not None else {}),
         )  # fmt: skip
 
     def publish(self, project, dry_run):
@@ -529,6 +531,52 @@ def test_a_supersede_relaunches_a_passed_audit_whose_publish_is_refused(tmp_path
     assert (res["action"], res["project"]) == ("launched", "day-a"), res
     assert res["relaunch"] == f"publish refused: {MISMATCH}"
     assert rig.registered[0]["project"] == "day-a"
+
+
+# 2026-11-27: with the relaunch allowed, Kerry-to-Cork's supersede was still refused "in the
+# content ledger": its failed publish had left 7 Shorts entries naming the project, none with a
+# video id. A relaunch re-renders the row's own run, so its own unpublished ledger entries do not
+# refuse it; an entry holding a video id (something is live) still does, and a caller that does
+# not say which ledger projects are live keeps every ledger project refusing.
+
+
+def _relaunch_with_ledger(rig, live):
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    rig.ledger = {"day-a"}
+    rig.ledger_live = live
+    rig.supersede = ("day-a", "re-render so the blur mask matches its source")
+
+
+def test_a_relaunch_is_not_refused_by_its_own_unpublished_ledger_entries(tmp_path):
+    rig = Rig(tmp_path)
+    _relaunch_with_ledger(rig, live=set())
+    res = rig.run()
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert res["relaunch"] == f"publish refused: {MISMATCH}"
+
+
+def test_a_relaunch_is_still_refused_by_a_ledger_entry_with_a_video_id(tmp_path):
+    rig = Rig(tmp_path)
+    _relaunch_with_ledger(rig, live={"day-a"})
+    res = rig.run(dry_run=True)
+    assert res["action"] == "refused" and "in the content ledger" in res["reason"], res
+    assert not rig.launches
+
+
+def test_without_live_ledger_projects_a_relaunch_keeps_the_ledger_refusal(tmp_path):
+    rig = Rig(tmp_path)
+    _relaunch_with_ledger(rig, live=None)
+    res = rig.run(dry_run=True)
+    assert res["action"] == "refused" and "in the content ledger" in res["reason"], res
+
+
+def test_unpublished_ledger_entries_still_skip_a_row_that_is_not_relaunched(tmp_path):
+    rig = Rig(tmp_path)
+    rig.ledger = {"day-a"}
+    rig.ledger_live = set()
+    res = rig.run(dry_run=True)
+    assert {"project": "day-a", "reason": "in the content ledger"} in res["skipped"], res
 
 
 def test_a_supersede_of_a_passed_audit_that_would_publish_is_refused(tmp_path):

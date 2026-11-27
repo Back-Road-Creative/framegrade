@@ -1076,7 +1076,11 @@ def run_backlog(
     replace_scheduled: bool = False,
     live_status: Optional[replace_scheduled_mod.LiveStatus] = None,
     replace_store: Optional[Callable[[], Any]] = None,
+    ledger_live_projects: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
+    """``ledger_live_projects``: the ``known_projects`` whose content-ledger entries hold a video
+    id. An operator's ``--supersede`` relaunch of a row (``res["relaunch"]``) is not refused by its
+    own ledger entries when none of them is live (the automatic failed-row relaunch still is); ``None`` (not said) keeps every ledger project refusing."""
     res: Dict[str, Any] = {"region": region, "action": "noop", "skipped": []}
     if not dry_run and not lease_acquire():
         return {**res, "reason": f"lease {LEASE_NAME} is held by another launch"}
@@ -1087,7 +1091,7 @@ def run_backlog(
                     installed_version, latest_version, supersede, publish, horizon_h,
                     failed_relaunch,
                     {"live": live_status, "now": now, "plan": None} if replace_scheduled else None,
-                    replace_store, pinned_version)  # fmt: skip
+                    replace_store, pinned_version, ledger_live_projects)  # fmt: skip
         if stage_owners is not None:
             out["stage_roots"] = _stage_roots(
                 stages_root, rows, drives, stage_owners, release_list, now, dry_run
@@ -1144,7 +1148,7 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
          code_root, jobs_dir, mirror_sha, now, dry_run, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede, publish,
          horizon_h, failed_relaunch=None, replace=None, replace_store=None,
-         pinned_version=default_pinned_version):  # fmt: skip
+         pinned_version=default_pinned_version, ledger_live=None):  # fmt: skip
     published = [d.project for d in drives if d.region == region and _uploaded(d.output_dir)]
     if published:
         res["published"] = published
@@ -1329,6 +1333,13 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
             reopen = True  # needs a replace plan: checked once the plan is known
             cand_status = {k: v for k, v in status.items() if k != cand.project}
             cand_known = known - {cand.project, cand.project.strip().lower()}
+        elif own and cand.project == relaunch and not auto and ledger_live is not None:
+            # an operator's relaunch re-renders the row's own run: its own ledger entries with no video id
+            # (a failed publish's Shorts placeholders, Kerry-to-Cork 2026-11-27) are rewritten by
+            # the new run, never duplicated; one that holds a video id is live and still refuses
+            names = {cand.project, cand.project.strip().lower()}
+            if not names & set(ledger_live):
+                cand_known = known - names
         why = _skip_reason(cand, cand_status, cand_known, mine_staged, stages_root, own_ok=own)
         if why is None:
             # the drive's own pre-ingest refusal, asked before anything is moved, launched or
@@ -1544,8 +1555,10 @@ def default_preflight(source_dir, output_dir, *, staging_dir, ingest_mode, pytho
 
 
 def load_inputs(config: Any, region: str, ledger_path: Optional[Path], now: datetime):
-    """``(region, rows, drives, free_slots, known_projects, register)`` from the live stores:
-    the manifest, ``schedule.sqlite3``, ``build_schedule_report`` and the content ledger."""
+    """``(region, rows, drives, free_slots, known_projects, register, ledger_live_projects)``
+    from the live stores: the manifest, ``schedule.sqlite3``, ``build_schedule_report`` and the
+    content ledger (``ledger_live_projects``: the known projects with an entry holding a video
+    id)."""
     from seo_manager.core.profile import canon_region
     from seo_manager.scheduling import backlog
     from seo_manager.scheduling.store import ScheduleStore
@@ -1565,8 +1578,9 @@ def load_inputs(config: Any, region: str, ledger_path: Optional[Path], now: date
     report = build_schedule_report(ledger, config, after=now)
     slots = report_slots(report, region)
     known = {(e.project_name or "").strip().lower() for e in ledger.entries} - {""}
+    live = {(e.project_name or "").strip().lower() for e in ledger.entries if e.video_id} - {""}
     rows = backlog.load(drive_backlog_path())
-    return region, rows, drives, slots, known, register
+    return region, rows, drives, slots, known, register, live
 
 
 def render_horizon_h(config: Any) -> int:
