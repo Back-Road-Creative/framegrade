@@ -59,7 +59,8 @@ instead of `published`, parking its own `next_attempt_at` far in the future so
 here."; an unreadable `$GMS_TIKTOK_MODE`: a neutral line) and a mark-published button per row; `POST
 /publishing/mark-published/{delivery_id}` calls `pubqueue.mark_published`, which transitions the
 row to `"published"` via `queue.transition` -- 409 if the row isn't currently
-`awaiting_manual_publish`, 404 for an unknown id.
+`awaiting_manual_publish` or `needs_operator`, 404 for an unknown id. The `needs_operator` group
+gets the same button, so a person who finds a parked post live, or posts it by hand, records it.
 
 **Per-platform pause is wired.** The tab used to render a static "not available yet" note
 citing a missing platform filter; that note outlived the thing it described. `queue.pause_platform`

@@ -14,7 +14,7 @@
   <p><em>Queue-finished. The Status column says which rows the platform confirmed, which it has only scheduled, and which are unverified.</em></p>
   {% endif %}
   <table border="1" class="delivery-table">
-    <tr><th>Project</th><th>Short</th><th>Status</th><th>Platform</th><th>Scheduled</th><th>Title</th><th>Routes</th><th>Attempts</th><th>Last error</th>{% if status == "published" %}<th>Publishes at</th><th>Permalink</th>{% endif %}{% if status == "awaiting_manual_publish" %}<th>Action</th>{% endif %}</tr>
+    <tr><th>Project</th><th>Short</th><th>Status</th><th>Platform</th><th>Scheduled</th><th>Title</th><th>Routes</th><th>Attempts</th><th>Last error</th>{% if status == "published" %}<th>Publishes at</th><th>Permalink</th>{% endif %}{% if status in ("awaiting_manual_publish", "needs_operator") %}<th>Action</th>{% endif %}</tr>
     {% for row in rows %}
     <tr><td data-label="Project"><a href="/publishing/{{ row.id }}">{{ row.project_name }}</a></td><td data-label="Short">{{ row.short_index }}</td><td data-label="Status">{{ row.delivery_state }}</td><td data-label="Platform">{{ row.platform }}</td>
     <td data-label="Scheduled">
@@ -43,7 +43,7 @@
     <td data-label="Publishes at">{{ row.platform_published_at or "" }}</td>
     <td data-label="Permalink">{% if row.permalink %}{% if row.permalink_href %}<a href="{{ row.permalink_href }}">{{ row.permalink }}</a>{% else %}{{ row.permalink }} <em>(not a link this console will open)</em>{% endif %}{% endif %}</td>
     {% endif %}
-    {% if status == "awaiting_manual_publish" %}
+    {% if status in ("awaiting_manual_publish", "needs_operator") %}
     <td data-label="Action">
       <form method="post" action="/publishing/mark-published/{{ row.id }}" style="display:inline">
         <label>Link to the post, if you have it (optional)

@@ -96,8 +96,10 @@ recoverable, never duplicated.
   watches the status, `publishing-status --validate` names it (without
   holding the rest of its project), and the summary line gains
   `needs_operator=<n>`. A person checks the platform. The console's cancel
-  works on it (not on a Page-photo attempt); no command yet closes one as
-  published (the console's mark-published takes TikTok manual rows only). A
+  works on it (not on a Page-photo attempt), and so does its mark-published,
+  which closes it as published when the post is live or was posted by hand. A
+  row parked off a dead worker's lease (the interrupted-lease reconcile) is
+  counted in `needs_operator=<n>` too. A
   Page-photo attempt cannot change status, so it keeps its read-only retries
   and gets the same incident. Before, an unknown Facebook
   outcome re-read its status every hour for good, with no alert.

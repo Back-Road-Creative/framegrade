@@ -130,7 +130,7 @@ def test_every_uncounted_retry_parks_for_a_person_once_it_outlives_the_bound(
     assert state["platform_upload_id"] == upload_id  # kept: never re-uploaded
     assert state["lease_owner"] is None
     assert len(calls) == calls_when_parked  # never selected again
-    assert parked == (0 if handler is None else 1)
+    assert parked == 1  # a dead worker's park is counted too
     rows, _ = load_all(incidents)
     open_rows = [r for r in rows if not r.get("resolved_at")]
     assert [(r["kind"], r["delivery_id"]) for r in open_rows] == [
