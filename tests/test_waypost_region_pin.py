@@ -11,7 +11,7 @@ from seo_manager.analytics.title_selection import (
 
 
 def test_pinned_waypost_supports_bounded_region_and_region_only_title():
-    assert final_text_review.BOUNDARY_PROOF_VERSION == "tiger2026-tailte2026-bounded-v2"
+    assert final_text_review.BOUNDARY_PROOF_VERSION == "tiger2026-tailte2026-bounded-v3"
     facts = TitleFacts(
         format="longform",
         baseline_title="Beaufort County, SC in 4K",
@@ -42,3 +42,25 @@ def test_pinned_waypost_accepts_gms_gap_float_noise():
     kw = {"region": "Beaufort County", "recording_date": "2026-02-20"}
     assert final_text_review._bounded_proof(proof, gaps=((941.129, 941.129 + 35.999),), **kw)
     assert not final_text_review._bounded_proof(proof, gaps=((941.129, 941.129 + 36.001),), **kw)
+
+
+def test_pinned_waypost_accepts_the_irish_other_counties_proof():
+    # framegrade#654: GMS measures a coastal Irish county against the other
+    # counties, so the pinned reviewer must accept that basis off the border.
+    proof = {
+        "verified": True,
+        "basis": "pinned_tailte_other_counties_bounded_speed_error_and_margin",
+        "source": "TAILTE2026/COUNTIES/counties-national-statutory-boundaries-ungeneralised-2026.geojson",
+        "sha256": "8b422a75fcac8e21f1eef2fe2480b925e7bed06e9aeed3e5daa73cfec45df881",  # pragma: allowlist secret
+        "region": "County Cork",
+        "country": "IE",
+        "recording_date": "2025-09-15",
+        "max_speed_m_s": 70.0,
+        "gps_error_m": 100.0,
+        "margin_m": 250.0,
+        "max_gap_s": 29.0,
+    }
+    kw = {"recording_date": "2025-09-15", "gaps": ((410.0, 439.0),)}
+    assert final_text_review._bounded_proof(proof, region="County Cork", **kw)
+    border = {**proof, "region": "County Donegal"}
+    assert not final_text_review._bounded_proof(border, region="County Donegal", **kw)

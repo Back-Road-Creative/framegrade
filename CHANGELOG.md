@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.181] - 2026-11-27
+
+### Fixed
+
+- `gomoveshift metrics backfill-ids` skips a published row whose project has no tracking record and goes on with the rest. On 2026-11-27 one such row (an old split drive) raised `FileNotFoundError` and ended the run, so no row after it got its id.
+- A day the blur-mask gate cannot count because its master runs at another frame rate now says so. The `mask_frame_count_unknown` reason names the master's rate and the mask's (Galley Head: 29.970 fps against 59.939 fps), instead of only `container frames None`, which read the same as a master that could not be probed.
+- A row parked at `needs_operator` can now be marked published from the console when a person finds the post live or posts it by hand; before, mark-published took TikTok manual rows only, so such a row could only be cancelled or retried.
+- A row parked at `needs_operator` off a dead worker's lease is now counted in the drain summary's `needs_operator=<n>`; before, the interrupted-lease reconcile parked it without counting it.
+- `health backlog --supersede` now re-renders a drive whose own passed audit cannot publish: a `failed` row whose publish retry is refused, or an `auditing` drive whose publish (asked as a dry run) is refused, is set aside and relaunched. A passed audit that could publish is still refused. On 2026-11-27 the blur-mask gate asked for Kerry-to-Cork and Old Head to Courtmacsherry to be re-rendered, and the supersede refused both.
+
 ## [0.3.180] - 2026-11-27
 
 ### Fixed
@@ -2029,7 +2039,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...HEAD
+[0.3.181]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...v0.3.181
 [0.3.180]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...v0.3.180
 [0.3.179]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...v0.3.179
 [0.3.178]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...v0.3.178

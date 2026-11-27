@@ -81,7 +81,7 @@ TIMESTAMP_SOURCE = (
     "(media seconds)"
 )
 CONTAINMENT_BASIS = "sampled_reverse_geocode"
-BOUNDARY_REVIEW_VERSION = "tiger2026-tailte2026-bounded-v2"
+BOUNDARY_REVIEW_VERSION = "tiger2026-tailte2026-bounded-v3"
 _CONTAINMENT_WORDS = re.compile(
     r"\bverified in\b|\bcontained\b|\bcontainment proven\b|\bproven (?:to be )?(?:in|within)\b",
     re.IGNORECASE,
@@ -1507,6 +1507,11 @@ def enforce_route_claims(
                         if proof.get("verified") is True:
                             proof["recording_date"] = str(recorded_on)
                             ev.boundary_proofs[claim["level"]] = proof
+                        else:
+                            ev.boundary_notes.append(
+                                f"boundary proof of {claim['level']} {claim['name']!r} "
+                                f"refused: {proof.get('reason') or 'no reason given'}"
+                            )
             try:
                 chosen, note = select_supported_label(label, ev, operator=idx in overrides)
             except RouteClaimRefusedError as exc:

@@ -1179,14 +1179,24 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
     # A refused retry is recorded and the tick goes on, so one drive's standing refusal never
     # starves the region's next passed audit (2026-11-25, Kerry-to-Cork held Old Head); the tick
     # still exits 2 while the refusal stands (``exit_code``).
+    target_refused = None  # the supersede target's own refused publish retry: it re-renders
     for proj in sorted(d.project for d in mine if d.status == "failed" and d.project in listed):
         if publish and _failed_publish(jobs_dir, proj) and _audit_passed(jobs_dir, proj):
             done = _publish_audited(dict(res), proj, publish, dry_run)
             if done.get("action") != "refused":
                 return done
+            if proj == target:
+                target_refused = done["reason"]
+                continue
             refused = {"project": proj, "reason": done["reason"]}
             res.setdefault("publish_refusals", []).append(refused)
     relaunch, auto = None, False
+    if target_refused is not None:
+        # superseding a ``failed`` row whose publish retry is refused (2026-11-27, Kerry-to-Cork's
+        # mask gate asked for a re-render the store row refused): its run is set aside and the
+        # row relaunches, re-registering the same store row, as a failed audit's supersede does
+        relaunch, res["relaunch"] = target, target_refused
+        mine = [d for d in mine if d.project != relaunch]
     held = None  # the first passed audit whose publish was refused (no --supersede)
     for proj in auditing:
         if held is not None:
@@ -1216,6 +1226,15 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                                      jobs_dir, dry_run, launcher, installed_version,
                                      latest_version, why=gate[2],
                                      manifest_row=row, pinned_version=pinned_version)  # fmt: skip
+        if not failed and publish and proj == target and _audit_passed(jobs_dir, proj):
+            # superseding a passed audit is a re-render only while its publish is refused
+            # (2026-11-27, Old Head's mask refusal held its own re-render "in progress"): asked
+            # as a dry run, so nothing publishes; one that can publish is never set aside
+            probe = _publish_audited(dict(res), proj, publish, True)
+            if probe.get("action") != "refused":
+                why = f"its passed audit can publish ({probe.get('reason')}); run health publish {proj}"  # fmt: skip
+                return {**res, "action": "refused", "project": proj, "reason": f"cannot supersede {proj}: {why}"}  # fmt: skip
+            failed = probe["reason"]
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
             done = _publish_audited(dict(res), proj, publish, dry_run)
             if done.get("action") != "refused":

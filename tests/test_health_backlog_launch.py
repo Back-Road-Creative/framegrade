@@ -496,6 +496,64 @@ def test_without_a_supersede_a_passed_audits_refused_publish_still_holds_the_reg
     assert not rig.launches
 
 
+# 2026-11-27: the mask gate refused Kerry-to-Cork's and Old Head to Courtmacsherry's publishes
+# with "re-render the day on the fixed renderer", yet neither could be re-rendered. Kerry's store
+# row is ``failed`` (its publish job failed), so ``--supersede`` refused it "in the schedule store
+# (failed)"; Old Head's passed audit sat ``auditing``, so ``--supersede`` returned "audit in
+# progress: Old Head holds the next slot". An operator's supersede of a drive whose passed audit
+# cannot publish sets that run aside and relaunches the row; one that can publish is refused.
+
+MISMATCH = "day-a blur mask does not match its source: mask_frame_count_mismatch (difference +8)"
+
+
+def test_a_supersede_relaunches_a_failed_publish_row_whose_retry_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _failed_publish(rig, action="refused", reason=MISMATCH)
+    rig.supersede = ("day-a", "re-render so the blur mask matches its source")
+    res = rig.run()
+    assert rig.publishes == [("day-a", False)], res  # the retry is still offered first
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert res["relaunch"] == f"publish refused: {MISMATCH}"
+    assert rig.registered[0]["project"] == "day-a" and rig.registered[0]["status"] == "auditing"
+    assert (rig.stages / launch.SUPERSEDED_DIR / f"day-a-{STAMP}").is_dir()
+
+
+def test_a_supersede_relaunches_a_passed_audit_whose_publish_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _audited(rig, action="refused", reason=MISMATCH)
+    rig.supersede = ("day-a", "re-render so the blur mask matches its source")
+    res = rig.run()
+    assert rig.publishes == [("day-a", True)], res  # asked as a dry run: nothing is published
+    assert (res["action"], res["project"]) == ("launched", "day-a"), res
+    assert res["relaunch"] == f"publish refused: {MISMATCH}"
+    assert rig.registered[0]["project"] == "day-a"
+
+
+def test_a_supersede_of_a_passed_audit_that_would_publish_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _audited(rig, action="would_publish", reason="day-a (dry run: nothing changed)")
+    rig.supersede = ("day-a", "re-render")
+    res = rig.run()
+    assert res["action"] == "refused", res
+    assert "cannot supersede day-a: its passed audit can publish" in res["reason"]
+    assert not rig.launches and not rig.registered
+    assert (rig.stages / "day-a").is_dir()  # nothing moved
+
+
+def test_a_supersede_dry_run_of_a_refused_passed_audit_would_launch(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    _audited(rig, action="refused", reason=MISMATCH)
+    rig.supersede = ("day-a", "re-render")
+    res = rig.run(dry_run=True)
+    assert (res["action"], res["project"]) == ("would_launch", "day-a"), res
+    assert rig.publishes == [("day-a", True)]
+    assert (rig.stages / "day-a").is_dir() and not rig.launches
+
+
 # 2026-11-27: Old Head to Courtmacsherry's passed audit is refused by the blur-mask frame gate
 # until its re-render, and the hourly tick returned that refusal before Galley Head's audit
 # (passed 2026-11-26) was ever offered for publish. A passed audit behind a refused one still

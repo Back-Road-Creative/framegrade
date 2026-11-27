@@ -27,6 +27,7 @@ from ..publishing.queue import (
     PUBLISHED_AT_PLATFORM_CONFIRMED,
     PUBLISHED_AT_PLATFORM_RECONCILED,
     PUBLISHED_AT_PLATFORM_SCHEDULED,
+    STATUS_NEEDS_OPERATOR,
     TERMINAL_STATUSES,
     cancel_delivery,
     clear_platform_daily_cap,
@@ -45,10 +46,15 @@ from .settings import current_brand
 
 logger = logging.getLogger(__name__)
 
-#: The only state ``mark_published`` accepts as a starting point --
-#: see ``publishing.handlers.STATUS_AWAITING_MANUAL_PUBLISH``, not imported
+#: See ``publishing.handlers.STATUS_AWAITING_MANUAL_PUBLISH``, not imported
 #: here to avoid a console -> handlers edge for one literal.
 _AWAITING_MANUAL_PUBLISH = "awaiting_manual_publish"
+
+#: The states ``mark_published`` accepts as a starting point: the two that wait
+#: on a person. A ``needs_operator`` row is parked for one to check the platform
+#: (``dispatch.UNCOUNTED_RETRY_BOUND``, or a near-duplicate hold); when the post
+#: is live, or they posted it by hand, this is how they record it.
+_MARKABLE_PUBLISHED = (_AWAITING_MANUAL_PUBLISH, STATUS_NEEDS_OPERATOR)
 
 #: Lifecycle order for grouping the queue view. ``awaiting_manual_publish``
 #: sorts FIRST: the only state a drain can never advance, so the only
@@ -556,8 +562,10 @@ def mark_published(
     permalink: Optional[str] = None,
     platform_post_id: Optional[str] = None,
 ) -> None:
-    """Confirm a human published this TikTok short (a pack-folder file
-    or an inbox draft), transitioning the row ``awaiting_manual_publish`` -> ``published`` via
+    """Confirm a human published this short: a TikTok pack-folder file or
+    inbox draft (``awaiting_manual_publish``), or a row parked at
+    ``needs_operator`` that a person found live or posted by hand.
+    Transitions the row to ``published`` via
     ``queue.transition`` (never raw SQL) -- the same compare-and-set every
     other status change in this queue goes through, so this can't move a
     row out of any other state. ``permalink``/``platform_post_id``, when
@@ -588,9 +596,9 @@ def mark_published(
         if status == "published":
             logger.info("delivery %s already published, confirmation is a no-op", delivery_id)
             return
-        if status != _AWAITING_MANUAL_PUBLISH:
+        if status not in _MARKABLE_PUBLISHED:
             raise ValueError(
-                f"delivery {delivery_id} is {status!r}, not {_AWAITING_MANUAL_PUBLISH!r}"
+                f"delivery {delivery_id} is {status!r}, not one of {_MARKABLE_PUBLISHED!r}"
             )
         fields: Dict[str, Any] = {}
         if permalink is not None:
@@ -598,7 +606,7 @@ def mark_published(
         if platform_post_id is not None:
             fields["platform_post_id"] = platform_post_id
         fields["published_at_source"] = PUBLISHED_AT_OPERATOR_CONFIRMED
-        changed = transition(conn, delivery_id, _AWAITING_MANUAL_PUBLISH, "published", **fields)
+        changed = transition(conn, delivery_id, status, "published", **fields)
         if not changed:
             # Lost the compare-and-set: the row moved between the read above
             # and this call. Re-read rather than assume -- if it landed on
