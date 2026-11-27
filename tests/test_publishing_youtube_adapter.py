@@ -60,7 +60,7 @@ def mock_service():
     return svc
 
 
-def _video_item(video_id: str, title: str, *, age: timedelta = timedelta(minutes=5)) -> dict:
+def _video_item(video_id: str, title: str, *, age: timedelta = timedelta(minutes=1)) -> dict:
     published = (datetime.now(timezone.utc) - age).isoformat().replace("+00:00", "Z")
     return {"id": video_id, "snippet": {"title": title, "publishedAt": published}}
 
@@ -133,6 +133,10 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
     mock_service, queue_conn, tmp_path
 ):
     adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    slot = (datetime.now(timezone.utc) + timedelta(days=2)).replace(microsecond=0)
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=slot)
+    )
     order = []
 
     def _fake_insert(*args, **kwargs):
@@ -145,7 +149,7 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
 
     body = mock_service.videos.return_value.insert.call_args.kwargs["body"]
     assert body["status"]["privacyStatus"] == "private"
-    assert body["status"]["publishAt"] == "2026-08-24T14:00:00Z"
+    assert body["status"]["publishAt"] == slot.isoformat().replace("+00:00", "Z")
     assert order == ["SHORTVID123"]  # video_id already persisted when playlist insert ran
     row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
     # The insert succeeded synchronously, but it set publishAt + private just
@@ -153,7 +157,51 @@ def test_publish_sets_publish_at_private_and_orders_id_before_playlist(
     # "scheduled", not "confirmed within seconds" -- and the receipt records
     # the same instant the body carries, so the two can never disagree.
     assert row["published_at_source"] == "platform_scheduled"
-    assert row["platform_published_at"] == "2026-08-24T14:00:00+00:00"
+    assert row["platform_published_at"] == slot.isoformat()
+
+
+@pytest.mark.parametrize("lead", [timedelta(days=-3), timedelta(0), timedelta(minutes=5)])
+def test_due_short_never_sends_a_publish_at_earlier_than_now(
+    mock_service, queue_conn, tmp_path, lead
+):
+    """The drain releases a row only once its slot has arrived, so a drained
+    Short's slot is now or past. No insert may carry a ``publishAt`` before now
+    (what YouTube does with one is unverified): it goes up public instead, and
+    the receipt names the send time, never the past slot."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    slot = datetime.now(timezone.utc) + lead
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=slot)
+    )
+    before = datetime.now(timezone.utc)
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    status = mock_service.videos.return_value.insert.call_args.kwargs["body"]["status"]
+    sent = status.get("publishAt")
+    assert sent is None or datetime.fromisoformat(sent.replace("Z", "+00:00")) >= before
+    assert status["privacyStatus"] == "public"
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
+    assert row["published_at_source"] == "platform_scheduled"
+    assert datetime.fromisoformat(row["platform_published_at"]) >= before
+
+
+def test_short_with_no_slot_stays_private_with_no_publish_at(mock_service, queue_conn, tmp_path):
+    """No slot says nothing about when the Short may go public, so it never
+    goes public by itself: private, no ``publishAt``, as before the due-slot fix."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    record = dataclasses.replace(
+        record, schedule=dataclasses.replace(record.schedule, scheduled_at_utc=None)
+    )
+    _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    status = mock_service.videos.return_value.insert.call_args.kwargs["body"]["status"]
+    assert status["privacyStatus"] == "private"
+    assert "publishAt" not in status
+    row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
+    assert (row["published_at_source"], row["platform_published_at"]) == (
+        "platform_confirmed",
+        None,
+    )
 
 
 def test_short_upload_sends_the_records_measured_recording_date(mock_service, queue_conn, tmp_path):
@@ -205,6 +253,32 @@ def test_daily_budget_defers_rather_than_fails(mock_service, queue_conn, tmp_pat
     assert row["status"] == "deferred"
     assert row["next_attempt_at"] is not None
     assert row["next_attempt_reason"] == "platform_deferral"
+
+
+def test_daily_budget_counts_uploads_on_the_pacific_quota_day(queue_conn):
+    """YouTube's quota day starts at midnight Pacific. An upload at 23:30 PST
+    (07:30Z) belongs to the day before 01:00 PST (09:00Z), and a row enqueued
+    days ago that uploaded today counts today, by its upload time."""
+    from gomoveshift.publishing import youtube_adapter as ya
+
+    now = datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc)
+
+    def _uploaded(index, created, uploaded):
+        did = enqueue(queue_conn, "proj", index, "youtube", f"h{index}")
+        transition(queue_conn, did, "queued", "uploaded", platform_upload_id=f"V{index}")
+        queue_conn.execute(
+            "UPDATE deliveries SET created_at=?, uploaded_at=? WHERE id=?",
+            (created.isoformat(), uploaded.isoformat(), did),
+        )
+        queue_conn.commit()
+
+    _uploaded(0, now - timedelta(hours=2), datetime(2026, 11, 26, 7, 30, tzinfo=timezone.utc))
+    assert ya._uploads_today(queue_conn, now=now) == 0
+    _uploaded(1, now - timedelta(days=3), datetime(2026, 11, 26, 8, 30, tzinfo=timezone.utc))
+    assert ya._uploads_today(queue_conn, now=now) == 1
+    assert ya._quota_day_start(plus_days=1, now=now) == datetime(
+        2026, 11, 27, 8, 0, tzinfo=timezone.utc
+    )
 
 
 def test_lost_response_reconciles_and_does_not_double_insert(mock_service, queue_conn, tmp_path):
@@ -430,6 +504,56 @@ def test_channel_scan_ignores_same_title_outside_recency_window(mock_service, qu
     assert mock_service.videos.return_value.insert.call_count == 1
 
 
+def test_retry_hours_after_the_lost_upload_still_adopts_it(mock_service, queue_conn, tmp_path):
+    """The window runs from the row's FIRST submit, not from now: a retry five
+    hours after the lost-response upload adopts it instead of posting twice."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    transition(queue_conn, delivery_id, "queued", "submitting")
+    submitted = datetime.now(timezone.utc) - timedelta(hours=5)
+    queue_conn.execute(
+        "UPDATE deliveries SET first_submitted_at=? WHERE id=?",
+        (submitted.isoformat(), delivery_id),
+    )
+    queue_conn.commit()
+    _seed_channel_scan(mock_service, "BEFORE", "LOSTVID")
+    mock_service.videos.return_value.list.return_value.execute.return_value = {
+        "items": [
+            _video_item("BEFORE", SHORT_TITLE, age=timedelta(hours=6)),  # before the submit
+            _video_item("LOSTVID", SHORT_TITLE, age=timedelta(hours=4, minutes=55)),
+        ]
+    }
+
+    result = _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    assert result.video_id == "LOSTVID"
+    mock_service.videos.return_value.insert.assert_not_called()
+
+
+def test_channel_scan_never_adopts_a_video_another_row_owns(mock_service, queue_conn, tmp_path):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    other = enqueue(queue_conn, "other-proj", 7, "youtube", "hash-other")
+    transition(queue_conn, other, "queued", "uploaded", platform_upload_id="TAKEN")
+    transition(queue_conn, delivery_id, "queued", "submitting")
+    _seed_channel_scan(mock_service, "TAKEN", "MINE")
+    mock_service.videos.return_value.list.return_value.execute.return_value = {
+        "items": [_video_item("TAKEN", SHORT_TITLE), _video_item("MINE", SHORT_TITLE)]
+    }
+
+    result = _publish(adapter, record, queue_conn, delivery_id, video_path)
+
+    assert result.video_id == "MINE"
+    mock_service.videos.return_value.insert.assert_not_called()
+
+
+def test_first_submit_time_survives_later_attempts(queue_conn):
+    did = enqueue(queue_conn, "proj", 1, "youtube", "h")
+    transition(queue_conn, did, "queued", "submitting")
+    first = find_delivery(queue_conn, "proj", 1, "youtube")["first_submitted_at"]
+    transition(queue_conn, did, "submitting", "retry_wait")
+    transition(queue_conn, did, "retry_wait", "submitting")
+    assert first and find_delivery(queue_conn, "proj", 1, "youtube")["first_submitted_at"] == first
+
+
 # ── Shorts playlist routing ────────────────────────────────────
 # ``sampled_regions[0]`` is a PLACE label, not a country. It used to be passed
 # as ``region`` and matched no rule, so shorts landed in "Unsorted (fallback)".
@@ -504,3 +628,56 @@ def test_short_without_sampled_regions_is_not_filed_in_unsorted(mock_service, qu
     mock_service.playlistItems.return_value.insert.assert_not_called()
     row = find_delivery(queue_conn, record.project_name, record.short_index, "youtube")
     assert row["status"] == "published"
+
+
+# ── quota on the read calls ─────────────────────────────────────────────
+
+
+def _quota_403_on_videos_list(mock_service):
+    import json
+
+    from googleapiclient.errors import HttpError
+
+    error = {"code": 403, "message": "quota", "errors": [{"reason": "quotaExceeded"}]}
+    body = json.dumps({"error": error}).encode("utf-8")
+    mock_service.videos.return_value.list.return_value.execute.side_effect = HttpError(
+        MagicMock(status=403, reason="Forbidden"), body, uri="fake://"
+    )
+
+
+def _handle(adapter, record, video_path, queue_conn, delivery_id):
+    """Run the real YouTube handler on the row; returns the row afterwards."""
+    from gomoveshift.publishing.dispatch import ThrottledDeliveryError
+    from gomoveshift.publishing.handlers import make_youtube_handler
+
+    handler = make_youtube_handler(adapter, queue_conn, lambda p, i: record, lambda r: video_path)
+    sql = "SELECT * FROM deliveries WHERE id=?"
+    with patch.object(yu, "MediaFileUpload", return_value=MagicMock()):
+        with pytest.raises(ThrottledDeliveryError):
+            handler(dict(queue_conn.execute(sql, (delivery_id,)).fetchone()))
+    return dict(queue_conn.execute(sql, (delivery_id,)).fetchone())
+
+
+def test_quota_on_the_reconcile_lookup_is_throttled_not_an_attempt(
+    mock_service, queue_conn, tmp_path
+):
+    """Spent quota on the ``videos.list`` that reconciles a persisted id waits
+    as throttled, as an insert's does; it never spends the row's attempts."""
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    transition(queue_conn, delivery_id, "queued", "uploaded", platform_upload_id="HAVEID")
+    _quota_403_on_videos_list(mock_service)
+
+    row = _handle(adapter, record, video_path, queue_conn, delivery_id)
+    mock_service.videos.return_value.insert.assert_not_called()
+    assert (row["status"], row["platform_upload_id"]) == ("uploaded", "HAVEID")
+
+
+def test_quota_on_the_post_upload_verify_is_throttled_and_keeps_the_id(
+    mock_service, queue_conn, tmp_path
+):
+    adapter, record, delivery_id, video_path = _setup(mock_service, queue_conn, tmp_path)
+    _quota_403_on_videos_list(mock_service)
+
+    row = _handle(adapter, record, video_path, queue_conn, delivery_id)
+    assert (row["status"], row["platform_upload_id"]) == ("uploaded", "SHORTVID123")
+    assert mock_service.videos.return_value.insert.call_count == 1

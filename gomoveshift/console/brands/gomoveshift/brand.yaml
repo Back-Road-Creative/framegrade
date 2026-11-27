@@ -5,7 +5,7 @@
 # The engine's defaults, stated explicitly (publishing/brand_policy.py MediaProfile).
 media:
   font: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-  brand_text: GoMoveShift
+  brand_text: gomoveshift.com
   website_text: gomoveshift.com
   still_card_style: letterbox
   upscale: "off"

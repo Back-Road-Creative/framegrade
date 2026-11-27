@@ -148,6 +148,10 @@ def test_a_raising_lookup_leaves_the_row_published(conn, incidents, scheduled):
 def test_adopt_refuses_a_video_another_row_already_owns(conn):
     _published(conn, 0, "VIDOWNED001")
     mine = q.enqueue(conn, "proj", 1, "youtube", "h1")
+    # Submitted just before the upload, so only ownership decides adoption.
+    conn.execute(
+        "UPDATE deliveries SET first_submitted_at=? WHERE id=?", ("2026-11-25T23:59:00+00:00", mine)
+    )
     payload = YouTubePayload(title="Same title", description="d")
     upload = Upload("VIDOWNED001", "Same title", "2026-11-26T00:00:00Z", None, "private", 30.0)
     adapter = YouTubeShortsAdapter(SimpleNamespace(_build_service=object), SimpleNamespace())

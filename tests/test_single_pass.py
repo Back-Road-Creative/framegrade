@@ -81,7 +81,7 @@ class TestCleanLocation:
 
 class TestLocationOverlayBranding:
     def test_overlay_contains_gomoveshift_brand(self):
-        """The filter chain must include GoMoveShift brand text."""
+        """The filter chain must include the brand line, which reads gomoveshift.com."""
         from gomoveshift.config import Config
 
         config = Config()
@@ -96,7 +96,8 @@ class TestLocationOverlayBranding:
                 video_width=3840,
             )
 
-        assert "GoMoveShift" in result
+        brand = next((p for p in result.split(",drawtext=") if "y=h*0.68" in p), "")
+        assert "text='gomoveshift.com'" in brand
 
     def test_overlay_contains_location_no_scenic_drive(self):
         """The filter chain must include the location line, with no genre word."""
@@ -118,7 +119,7 @@ class TestLocationOverlayBranding:
         assert "Scenic Drive" not in result
 
     def test_overlay_gomoveshift_fontsize_scales_at_4k(self):
-        """GoMoveShift brand line scales from 64 to 96 at 4K (1.5x cap)."""
+        """The brand line scales from 64 to 96 at 4K (1.5x cap)."""
         from gomoveshift.config import Config
 
         config = Config()
@@ -133,10 +134,10 @@ class TestLocationOverlayBranding:
                 video_width=3840,
             )
 
-        # GoMoveShift drawtext entry at 3840 should be 64*1.5=96
+        # The brand drawtext (y=h*0.68) at 3840 should be 64*1.5=96
         parts = result.split(",drawtext=")
-        gms_part = next((p for p in parts if "GoMoveShift" in p), None)
-        assert gms_part is not None, "GoMoveShift drawtext not found"
+        gms_part = next((p for p in parts if "y=h*0.68" in p), None)
+        assert gms_part is not None, "brand drawtext not found"
         assert "fontsize=96" in gms_part
 
     def test_overlay_location_fontsize_scales_at_4k(self):

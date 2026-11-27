@@ -256,3 +256,46 @@ def test_confirm_scheduled_live_sweep_uses_recorded_responses(conn):
     ).fetchone()[0]
     assert src(done) == q.PUBLISHED_AT_PLATFORM_LIVE
     assert src(waiting) == q.PUBLISHED_AT_PLATFORM_SCHEDULED
+
+
+def _answers(*items):
+    """``videos.list`` fake answering each call with the next item."""
+    answers = iter(items)
+
+    class _Svc:
+        def videos(self):
+            return self
+
+        def list(self, part, id):  # noqa: A002
+            return self
+
+        def execute(self):
+            return {"items": [next(answers)]}
+
+    return _Svc()
+
+
+def test_short_still_private_after_its_slot_raises_one_incident_then_resolves(conn, tmp_path):
+    """A Short marked published must not sit private unseen past its slot."""
+    from gomoveshift.publishing.youtube_adapter import NOT_PUBLIC_KIND, confirm_scheduled_live
+
+    did = _scheduled_published(conn, 0)
+    inc = tmp_path / "inc"
+    svc = _answers(STILL_PRIVATE, STILL_PRIVATE, PUBLIC)
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 0
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 0
+    (row,) = _incidents(inc)
+    assert (row["kind"], row["delivery_id"], row["resolved_at"]) == (NOT_PUBLIC_KIND, did, None)
+    assert "private" in row["detail"]
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 1
+    (row,) = _incidents(inc)
+    assert row["resolved_at"] == NOW
+
+
+def test_short_private_within_grace_raises_nothing(conn, tmp_path):
+    from gomoveshift.publishing.youtube_adapter import confirm_scheduled_live
+
+    _scheduled_published(conn, 0, slot="2026-11-20T11:30:00+00:00")
+    inc = tmp_path / "inc"
+    assert confirm_scheduled_live(conn, _answers(STILL_PRIVATE), now=NOW, incidents_dir=inc) == 0
+    assert _incidents(inc) == []

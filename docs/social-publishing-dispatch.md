@@ -210,7 +210,8 @@ Two handlers return normally without publishing anything. The TikTok inbox
 handler uploads a draft and parks the row at `awaiting_manual_publish`
 (`next_attempt_at=9999-01-01`, reason `awaiting_manual`) for a human to post
 from the app. The YouTube adapter, over its daily upload budget, moves the row
-to `deferred` until the next UTC midnight (reason `platform_deferral`).
+to `deferred` until the next midnight Pacific, when YouTube's quota day resets (reason
+`platform_deferral`).
 
 Without this, a TikTok delivery can read `published` without ever
 being posted. The park kept the drain's lease; the lease expired; the

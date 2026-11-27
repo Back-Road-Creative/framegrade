@@ -10,6 +10,7 @@ converted to permanent. See ``docs/social-publishing-dispatch.md``."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dataclasses
@@ -104,11 +105,39 @@ def test_youtube_ambiguous_upload_match_is_permanent(conn):
         handler(_row(conn, "youtube"))
 
 
-def test_youtube_quota_error_stays_retryable_not_permanent(conn):
-    adapter = _FakeAdapter(to_raise=YouTubeQuotaError("daily quota exhausted"))
+@pytest.mark.parametrize("reason", ["quotaExceeded", "uploadLimitExceeded"])
+def test_youtube_quota_error_is_throttled_and_never_spends_the_attempt_budget(conn, reason):
+    """Spent quota or the channel's daily upload limit lifts when YouTube's
+    day resets; retrying sooner cannot clear it. Eight such refusals must not
+    fail a sound Short: the row stays retryable on the throttle backoff. Like
+    every retry outside max_attempts it is bounded in time (#629): past
+    UNCOUNTED_RETRY_BOUND it parks for a person, and is still never failed."""
+    from gomoveshift.publishing.dispatch import (
+        STATUS_NEEDS_OPERATOR,
+        UNCOUNTED_RETRY_BOUND,
+        drain_queue,
+    )
+
+    adapter = _FakeAdapter(to_raise=YouTubeQuotaError(reason=reason))
     handler = make_youtube_handler(adapter, conn, lambda p, i: _record(), _loader(path=True))
-    with pytest.raises(YouTubeQuotaError):
+    with pytest.raises(ThrottledDeliveryError):
         handler(_row(conn, "youtube"))
+    did = conn.execute("SELECT id FROM deliveries").fetchone()[0]
+    start = when = datetime(2026, 11, 26, tzinfo=timezone.utc)
+    for _ in range(10):  # ten refusals, all inside the bound: more than max_attempts
+        conn.execute("UPDATE deliveries SET next_attempt_at=NULL WHERE id=?", (did,))
+        conn.commit()
+        result = drain_queue(conn, {"youtube": handler}, now=when.isoformat(), max_attempts=8)
+        assert (result.throttled, result.failed_permanent) == (1, 0)
+        when += timedelta(hours=2)
+    assert when - start < UNCOUNTED_RETRY_BOUND
+    assert conn.execute("SELECT status FROM deliveries").fetchone()[0] == "queued"
+    conn.execute("UPDATE deliveries SET next_attempt_at=NULL WHERE id=?", (did,))
+    conn.commit()
+    late = start + UNCOUNTED_RETRY_BOUND
+    result = drain_queue(conn, {"youtube": handler}, now=late.isoformat(), max_attempts=8)
+    assert result.failed_permanent == 0
+    assert conn.execute("SELECT status FROM deliveries").fetchone()[0] == STATUS_NEEDS_OPERATOR
 
 
 def test_youtube_unrecognised_exception_stays_retryable(conn):

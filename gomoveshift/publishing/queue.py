@@ -183,8 +183,9 @@ PUBLISHED_AT_OPERATOR_CONFIRMED = "operator_confirmed"  # human click, possibly 
 PUBLISHED_AT_PLATFORM_RECONCILED = "platform_reconciled"  # delayed poll noticed it -- unknown lag
 PUBLISHED_AT_PLATFORM_CONFIRMED = "platform_confirmed"  # publish call returned success -- seconds
 #: The platform ACCEPTED it and named a later time to make it public. The
-#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``,
-#: so its call returning success is not a publication -- calling that
+#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``
+#: (a Short already due goes up ``public``, its send time recorded here), so
+#: its call returning success is not a publication -- calling that
 #: ``platform_confirmed`` overstates the evidence by the whole length of the
 #: schedule. This source requires ``platform_published_at``: the claim it makes
 #: is that a specific later time is KNOWN, and without one it says less than
@@ -523,6 +524,15 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_account TEXT")
         if "upload_kind" not in cols:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_kind TEXT")
+        if "first_submitted_at" not in cols:
+            # When the row FIRST entered ``submitting`` (set by ``transition``,
+            # never moved). A YouTube retry looks for its own lost upload from
+            # here, not from "now". NULL for rows that predate it: never guessed.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_submitted_at TEXT")
+        if "uploaded_at" not in cols:
+            # When ``platform_upload_id`` was first written (``transition``): the
+            # upload moment the YouTube daily budget counts by. NULL for older rows.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN uploaded_at TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -1092,7 +1102,15 @@ def transition(
         fields["published_at_source"] = published_at_source
     set_cols = ", ".join(f"{k}=?" for k in fields)
     set_clause = f"status=?, updated_at=?{', ' + set_cols if set_cols else ''}"
-    params = [new_status, _now_iso(), *fields.values(), delivery_id, expected_status]
+    params = [new_status, _now_iso(), *fields.values()]
+    if new_status == "submitting":
+        # The first submit only: every later attempt keeps it (COALESCE).
+        set_clause += ", first_submitted_at=COALESCE(first_submitted_at, ?)"
+        params.append(_now_iso())
+    if fields.get("platform_upload_id"):
+        set_clause += ", uploaded_at=COALESCE(uploaded_at, ?)"
+        params.append(_now_iso())
+    params += [delivery_id, expected_status]
     account_guard = ""
     photo_guard = (
         " AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)"
