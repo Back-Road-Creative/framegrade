@@ -110,5 +110,8 @@ def test_adapter_and_ledger_unchanged_through_shared_lister():
             "gomoveshift.publishing.youtube_adapter.list_uploads", wraps=list_uploads
         ) as adapter_lister,
     ):
-        assert adapter._find_existing_upload(payload) == "v001"
+        existing = {"id": 1, "created_at": (moment - timedelta(hours=1)).isoformat()}
+        no_other_owner = MagicMock()
+        no_other_owner.execute.return_value = []
+        assert adapter._find_existing_upload(payload, existing, no_other_owner) == "v001"
     assert adapter_lister.call_args.kwargs["limit"] == 100

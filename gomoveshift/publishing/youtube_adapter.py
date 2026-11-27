@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from seo_manager.analytics.final_text_surfaces import compose_description
 
@@ -57,10 +58,21 @@ STATUS_RETRY_WAIT = "retry_wait"
 # another worker (or this one, on retry) to reclaim.
 LEASE_SEC = 900
 
+#: A slot nearer than one insert's lease ceiling could pass while the upload is
+#: still in flight, so such a Short goes up public instead of scheduled.
+_SCHEDULE_MIN_LEAD = timedelta(seconds=LEASE_SEC)
+
+#: How long after its go-public time a ``platform_scheduled`` Short may still
+#: read not-public before ``confirm_scheduled_live`` raises an incident: room for
+#: YouTube's processing of a fresh upload, short enough to be seen the same day.
+NOT_PUBLIC_GRACE = timedelta(hours=1)
+NOT_PUBLIC_KIND = "youtube_not_public_after_slot"
+
 # Bound on the channel-scan fallback (see ``_find_existing_upload``): only
-# uploads within this window of "now" are candidates, and at most this many
+# uploads made since the row was FIRST submitted (less this allowance for the
+# gap between our clock and YouTube's) are candidates, and at most this many
 # of the channel's most recent uploads are inspected.
-_ADOPT_RECENCY = timedelta(hours=2)
+_ADOPT_CLOCK_SKEW = timedelta(minutes=5)
 _ADOPT_SCAN_LIMIT = 100  # explicit bound passed to the shared lister
 
 # U-R1: after a fresh insert, ``videos.list`` must return the new id before
@@ -399,21 +411,103 @@ def live_publish_time(item: Dict[str, Any]) -> Optional[str]:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
+def upload_schedule(
+    slot: Optional[datetime], now: Optional[datetime] = None
+) -> tuple[Optional[datetime], str]:
+    """``(publish_at, privacy)`` for the insert of a Short whose slot is ``slot``.
+
+    The drain releases a row only once its slot has arrived
+    (``dispatch._select_due``), so a drained Short's slot is now or past. A past
+    ``publishAt`` is never sent: the API reference says one publishes at once,
+    but that is untested here. A slot less than ``_SCHEDULE_MIN_LEAD`` ahead
+    goes up ``public`` with no ``publishAt``, the documented ``videos.insert``
+    form; a later slot stays a private upload with ``publishAt``. A Short with
+    no slot stays private with no ``publishAt``, as it always has: nothing says
+    when it may go public."""
+    if slot is None:
+        return None, "private"
+    now = now or datetime.now(timezone.utc)
+    if slot - now < _SCHEDULE_MIN_LEAD:
+        return None, "public"
+    return slot, "private"
+
+
+def _quota_error(exc: BaseException) -> Optional[YouTubeQuotaError]:
+    """``exc`` as a ``YouTubeQuotaError`` when it is a read's quota-class refusal
+    (the reasons the uploader's insert path recognises, ``QUOTA_REASONS``), else
+    ``None``. Lets a spent quota on a ``videos.list`` wait as throttled, as an
+    insert's does, instead of spending the row's attempts."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status not in (400, 403):
+        return None
+    reason = youtube_uploader_module._extract_quota_reason(exc)
+    return YouTubeQuotaError(reason=reason, status_code=status, http_error=exc) if reason else None
+
+
+def _not_public_incident(row, privacy: str, now: str, incidents_dir: Optional[Path]) -> None:
+    """Open (once) or, with ``privacy`` ``None``, resolve the row's
+    ``youtube_not_public_after_slot`` incident. Never fatal."""
+    from ..health.store import (  # lazy: health imports the pipeline
+        default_data_root,
+        default_incidents_dir,
+        new_incident,
+        safe_name,
+        write_row,
+    )
+
+    key = f"{NOT_PUBLIC_KIND}:{row['id']}"
+    directory = incidents_dir or default_incidents_dir(default_data_root())
+    path = directory / f"{safe_name(key)}.json"
+    try:
+        existing = json.loads(path.read_text()) if path.is_file() else None
+        is_open = existing is not None and existing.get("resolved_at") is None
+        if privacy is None:
+            if is_open:
+                existing["resolved_at"] = now
+                write_row(directory, existing)
+            return
+        if is_open:
+            return
+        write_row(
+            directory,
+            new_incident(
+                NOT_PUBLIC_KIND,
+                key,
+                path.name,
+                now,
+                delivery_id=row["id"],
+                platform=PLATFORM,
+                video_id=row["platform_upload_id"],
+                detail=(
+                    f"youtube#{row['id']} video {row['platform_upload_id']} is still "
+                    f"{privacy} after its {row['platform_published_at']} go-public time"
+                ),
+            ),
+        )
+    except (OSError, ValueError):
+        logger.exception("could not write not-public incident for delivery %s", row["id"])
+
+
+def confirm_scheduled_live(
+    conn, service, now: Optional[str] = None, *, incidents_dir: Optional[Path] = None
+) -> int:
     """Replace the scheduled slot with the confirmed go-public time on every
     YouTube row still ``platform_scheduled`` whose slot has passed.
 
     One ``videos.list`` per row through the caller's ``service``; a lookup that
     raises or a video not yet public leaves the row on its scheduled source. A
-    video the channel does not return is looked up once more after
+    video still not public ``NOT_PUBLIC_GRACE`` after its slot raises one
+    ``youtube_not_public_after_slot`` health incident (resolved once it is
+    confirmed live): a Short marked published must not sit private unseen.
+    A video the channel does not return is looked up once more after
     ``VERIFY_RECHECK_SEC``; absent twice, the row is ``missing_remote`` with a
     health incident (``_mark_gone``) instead of staying ``published`` unseen.
     Returns how many rows were confirmed."""
     now = now or datetime.now(timezone.utc).isoformat()
     rows = conn.execute(
-        "SELECT id, platform_upload_id FROM deliveries WHERE platform='youtube' "
-        "AND status='published' AND published_at_source=? AND platform_upload_id IS NOT NULL "
-        "AND platform_published_at <= ? ORDER BY id",
+        "SELECT id, platform_upload_id, platform_published_at FROM deliveries "
+        "WHERE platform='youtube' AND status='published' AND published_at_source=? "
+        "AND platform_upload_id IS NOT NULL AND platform_published_at <= ? ORDER BY id",
         (PLATFORM_SCHEDULED, now),
     ).fetchall()
     confirmed = 0
@@ -433,6 +527,14 @@ def confirm_scheduled_live(conn, service, now: Optional[str] = None) -> int:
         live_at = live_publish_time(items[0]) if items else None
         if live_at and record_live_publish(conn, row["id"], live_at, now=now):
             confirmed += 1
+            _not_public_incident(row, None, now, incidents_dir)
+            continue
+        privacy = (items[0].get("status") or {}).get("privacyStatus") if items else None
+        if items and privacy != "public":
+            slot = datetime.fromisoformat(row["platform_published_at"])
+            slot = slot if slot.tzinfo else slot.replace(tzinfo=timezone.utc)
+            if datetime.fromisoformat(now) - slot > NOT_PUBLIC_GRACE:
+                _not_public_incident(row, privacy or "unknown", now, incidents_dir)
     return confirmed
 
 
@@ -531,29 +633,28 @@ def _mark_gone(conn, delivery_id: int, video_id: str, source: str, now: str) -> 
     return True
 
 
-def _utc_midnight(*, plus_days: int = 0) -> datetime:
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=plus_days)
+#: YouTube's quota day starts at midnight Pacific time, not UTC.
+_QUOTA_TZ = ZoneInfo("America/Los_Angeles")
 
 
-def _uploads_today(conn, platform: str = PLATFORM) -> int:
-    # Read from the queue, not an in-memory counter, so this survives a restart.
+def _quota_day_start(*, plus_days: int = 0, now: Optional[datetime] = None) -> datetime:
+    """Midnight Pacific opening today's (``plus_days`` later's) quota day, in UTC."""
+    local = (now or datetime.now(timezone.utc)).astimezone(_QUOTA_TZ)
+    day = local.date() + timedelta(days=plus_days)
+    return datetime(day.year, day.month, day.day, tzinfo=_QUOTA_TZ).astimezone(timezone.utc)
+
+
+def _uploads_today(conn, platform: str = PLATFORM, now: Optional[datetime] = None) -> int:
+    """Uploads made this quota day, counted by when each got its upload id
+    (``uploaded_at``), not when its row was enqueued: a row queued days ahead
+    uploads on its slot's day. ``created_at`` stands in for a row older than
+    ``uploaded_at``. Read from the queue, so this survives a restart."""
     row = conn.execute(
         "SELECT COUNT(*) FROM deliveries WHERE platform=? "
-        "AND platform_upload_id IS NOT NULL AND created_at >= ?",
-        (platform, _utc_midnight().isoformat()),
+        "AND platform_upload_id IS NOT NULL AND COALESCE(uploaded_at, created_at) >= ?",
+        (platform, _quota_day_start(now=now).isoformat()),
     ).fetchone()
     return int(row[0]) if row is not None else 0
-
-
-def _owned_elsewhere(conn, video_id: str, delivery_id: Optional[int]) -> bool:
-    return (
-        conn.execute(
-            "SELECT 1 FROM deliveries WHERE platform=? AND platform_upload_id=? AND id IS NOT ?",
-            (PLATFORM, video_id, delivery_id),
-        ).fetchone()
-        is not None
-    )
 
 
 class YouTubeShortsAdapter:
@@ -584,11 +685,19 @@ class YouTubeShortsAdapter:
 
         existing = find_delivery(conn, record.project_name, record.short_index, PLATFORM)
         current_status = existing["status"] if existing else STATUS_QUEUED
-        video_id = (
-            self._reconcile(existing, conn=conn, delivery_id=delivery_id, payload=payload)
-            if existing
-            else None
-        )
+        try:
+            video_id = (
+                self._reconcile(existing, conn=conn, delivery_id=delivery_id, payload=payload)
+                if existing
+                else None
+            )
+        except Exception as exc:
+            quota = _quota_error(exc)
+            if quota is None:
+                raise
+            raise quota from exc
+        # An adopted or reconciled upload was sent by an earlier attempt: its slot.
+        go_public_at = record.schedule.scheduled_at_utc
 
         if not video_id:
             deferred = self._defer_if_over_budget(conn, delivery_id, record, current_status)
@@ -624,6 +733,9 @@ class YouTubeShortsAdapter:
                     "risk a duplicate videos.insert"
                 )
             transition(conn, delivery_id, current_status, STATUS_SUBMITTING)
+            sent_at = datetime.now(timezone.utc)
+            publish_at, privacy = upload_schedule(record.schedule.scheduled_at_utc, sent_at)
+            go_public_at = publish_at or (sent_at if privacy == "public" else None)
             try:
                 video_id = self._uploader.upload_video(
                     video_path,
@@ -631,8 +743,8 @@ class YouTubeShortsAdapter:
                     description=description,
                     tags=list(payload.tags),
                     category_id=payload.category or "2",
-                    publish_at=record.schedule.scheduled_at_utc,
-                    privacy="private",
+                    publish_at=publish_at,
+                    privacy=privacy,
                     # The measured filmed-on date (per_lf_recording_date via the
                     # plan builder), never a file time; blank sends nothing.
                     recording_date=(record.recording_date or "").strip() or None,
@@ -689,15 +801,14 @@ class YouTubeShortsAdapter:
                 record.sampled_regions,
             )
 
-        # The upload above set ``status.publishAt`` and ``privacy=private``,
-        # so the call returning success means YouTube ACCEPTED this video and
-        # will make it public at the scheduled instant -- usually hours from
-        # now. Calling that ``platform_confirmed`` ("within seconds of the
-        # real publish time") overstated the evidence by the whole length of
-        # the schedule. Record the instant YouTube was actually told, taken
-        # from the same value handed to ``upload_video`` rather than
-        # re-derived, so the two can never disagree.
-        scheduled_at = record.schedule.scheduled_at_utc
+        # The insert returning success means YouTube ACCEPTED this video, not
+        # that it is live: a scheduled one goes public at ``publishAt``, a
+        # public one once processed. Calling that ``platform_confirmed``
+        # ("within seconds of the real publish time") overstated the evidence.
+        # Record the instant YouTube was told -- the ``publishAt`` handed to
+        # ``upload_video``, or the moment a public upload was sent -- so
+        # ``confirm_scheduled_live`` checks every Short goes public after it.
+        scheduled_at = go_public_at
         fields = {
             "platform_upload_id": video_id,
             "platform_post_id": playlist_id,
@@ -714,7 +825,7 @@ class YouTubeShortsAdapter:
         budget = getattr(self._config.drive, "youtube_video_insert_daily_uploads", None)
         if not isinstance(budget, int) or _uploads_today(conn) < budget:
             return None
-        next_attempt = _utc_midnight(plus_days=1).isoformat()
+        next_attempt = _quota_day_start(plus_days=1).isoformat()
         transition(
             conn,
             delivery_id,
@@ -753,7 +864,7 @@ class YouTubeShortsAdapter:
         if existing.get("status") != STATUS_SUBMITTING:
             return None
 
-        adopted = self._find_existing_upload(payload, conn=conn, delivery_id=delivery_id)
+        adopted = self._find_existing_upload(payload, existing, conn)
         if adopted:
             transition(
                 conn, delivery_id, STATUS_SUBMITTING, STATUS_UPLOADED, platform_upload_id=adopted
@@ -763,7 +874,9 @@ class YouTubeShortsAdapter:
     def _channel_lacks(self, video_id: str) -> bool:
         """``True`` only when ``videos.list`` twice returns no item for
         ``video_id``. A lookup that raises proves nothing, so it is logged and
-        the row publishes; the nightly catalog pass checks it again."""
+        the row publishes; the nightly catalog pass checks it again. A quota
+        refusal is raised as ``YouTubeQuotaError`` instead: the row stays
+        ``uploaded`` with its id and is verified once the quota resets."""
         try:
             service = self._uploader._build_service()
             for attempt in range(2):
@@ -772,31 +885,57 @@ class YouTubeShortsAdapter:
                 resp = service.videos().list(part="status", id=video_id).execute()
                 if resp.get("items"):
                     return False
-        except Exception:  # noqa: BLE001 -- unknown is not missing
+        except Exception as exc:  # noqa: BLE001 -- unknown is not missing
+            quota = _quota_error(exc)
+            if quota is not None:
+                raise quota from exc
             logger.exception("post-upload videos.list failed for video_id=%s", video_id)
             return False
         return True
 
     def _find_existing_upload(
-        self, payload: YouTubePayload, *, conn=None, delivery_id: Optional[int] = None
+        self,
+        payload: YouTubePayload,
+        existing: Optional[Dict[str, Any]] = None,
+        conn=None,
+        *,
+        delivery_id: Optional[int] = None,
     ) -> Optional[str]:
         """Scan the channel's most recent uploads (pattern: see
         ``youtube_uploads_listing.list_uploads``) for a video matching
-        ``payload`` by exact title and upload recency. Read-only; costs
-        ``playlistItems.list``/``videos.list`` units (the combined
+        ``payload`` by exact title, uploaded since the row was first submitted
+        (``first_submitted_at``; ``created_at`` for a row that predates it), so
+        a retry hours later still finds its own lost upload. A video another
+        queue row already holds as its upload is never a candidate. Read-only;
+        costs ``playlistItems.list``/``videos.list`` units (the combined
         10,000/day bucket), never ``videos.insert`` quota. Never called
         outside the lost-response retry path (see ``_reconcile``).
 
         A video another queue row (any row but ``delivery_id``) already records
         as its upload is that row's, never a candidate: adopting it would leave
         two rows claiming one video and this Short never uploaded."""
+        if existing is None:
+            existing = dict(
+                conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+            )
         service = self._uploader._build_service()
-        cutoff = datetime.now(timezone.utc) - _ADOPT_RECENCY
+        since = existing.get("first_submitted_at") or existing["created_at"]
+        cutoff = datetime.fromisoformat(since) - _ADOPT_CLOCK_SKEW
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+        owned = {
+            r[0]
+            for r in conn.execute(
+                "SELECT platform_upload_id FROM deliveries WHERE platform=? AND id<>? "
+                "AND platform_upload_id IS NOT NULL",
+                (PLATFORM, existing["id"]),
+            )
+        }
         candidates: List[str] = []
         for upload in list_uploads(service, limit=_ADOPT_SCAN_LIMIT):
             if upload.title != payload.title or not upload.published_at:
                 continue
-            if conn is not None and _owned_elsewhere(conn, upload.video_id, delivery_id):
+            if upload.video_id in owned:
                 logger.warning(
                     "not adopting video_id=%s: another delivery already records it",
                     upload.video_id,
@@ -811,8 +950,8 @@ class YouTubeShortsAdapter:
 
         if len(candidates) > 1:
             raise AmbiguousUploadMatchError(
-                f"{len(candidates)} recent uploads match title={payload.title!r} within "
-                f"{_ADOPT_RECENCY} — refusing to guess which is this short's video"
+                f"{len(candidates)} unowned uploads since {since} match "
+                f"title={payload.title!r} — refusing to guess which is this short's video"
             )
         return candidates[0] if candidates else None
 
