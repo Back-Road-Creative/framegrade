@@ -5,6 +5,13 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.179] - 2026-11-27
+
+### Fixed
+
+- `health backlog --supersede <project>` is no longer refused because a different drive's passed audit has its publish refused (for example by the blur-mask frame gate). That refusal is listed under `publish_refusals` and the supersede goes on. The tick still exits 2 while the refusal stands. Without `--supersede`, such a refusal still holds the region.
+- `health backlog`: a passed audit whose publish is refused no longer stops a later passed audit from being offered for publish. If none publishes, the first refusal still holds the region.
+
 ## [0.3.178] - 2026-11-27
 
 ### Fixed
@@ -2016,7 +2023,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...HEAD
+[0.3.179]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...v0.3.179
 [0.3.178]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...v0.3.178
 [0.3.177]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...v0.3.177
 [0.3.176]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...v0.3.176
