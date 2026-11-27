@@ -14,7 +14,8 @@ once the finals exist, so a finished day usually has neither. The raw is then re
 inputs: the ``episode_*_<date>.mp4`` files whose size:mtime fingerprints the day's colour cache
 recorded at encode (the concat is a stream copy, so its frames are theirs summed). The master
 counts only when its frame rate is the mask's: a master encoded at another rate (half-rate for a
-59.94 fps source) is in a different frame space. A mismatch, a missing sidecar or count, episodes
+59.94 fps source) is in a different frame space; when nothing else can count such a day, its
+``mask_frame_count_unknown`` reason names both rates. A mismatch, a missing sidecar or count, episodes
 that are not the recorded ones, or no container that can be probed all refuse (fail closed). There is no override: the refusal ends when the counts agree.
 A refused day gets one ``mask_index_mismatch`` incident (``health/store.py`` row) per drive-day,
 and the row is resolved once the day passes."""
@@ -153,6 +154,18 @@ def container_frame_count(
     return None
 
 
+def _rate_note(day_dir: Path, date: str, source_fps: Optional[float]) -> Optional[str]:
+    """Why an unknown day's master was not counted, when it was set aside for its frame rate."""
+    master = day_dir / _MASTER_NAME.format(date=date)
+    if not source_fps or not master.is_file():
+        return None
+    rate = probe_rate(master)
+    if not rate or abs(rate / source_fps - 1) <= _RATE_TOLERANCE:
+        return None
+    return (f"master is {rate:.3f} fps, the mask's source {source_fps:.3f} fps, so the master "
+            "cannot count it; the raw or the recorded episodes can")  # fmt: skip
+
+
 def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
     """One row per rendered ``day_<date>`` stage dir (one holding any ``day_<date>_*`` file) that
     must not publish; ``[]`` when every such day agrees."""
@@ -165,10 +178,13 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
             continue  # no render artefacts (only shorts/work dirs): not a rendered day
         sidecar = day_dir / f"day_{date}_blur_regions.json"
         sidecar_n = sidecar_frame_count(sidecar)
-        container_n = container_frame_count(day_dir, date, sidecar_frame_rate(sidecar))
+        source_fps = sidecar_frame_rate(sidecar)
+        container_n = container_frame_count(day_dir, date, source_fps)
         if sidecar_n is None or container_n is None:
-            findings.append({"date": date, "reason": REASON_UNKNOWN,
-                             "sidecar_frames": sidecar_n, "container_frames": container_n})  # fmt: skip
+            row = {"date": date, "reason": REASON_UNKNOWN,
+                   "sidecar_frames": sidecar_n, "container_frames": container_n}  # fmt: skip
+            note = _rate_note(day_dir, date, source_fps) if container_n is None else None
+            findings.append({**row, "rate_note": note} if note else row)
         elif sidecar_n != container_n:
             findings.append({"date": date, "reason": REASON_MISMATCH, "sidecar_frames": sidecar_n,
                              "container_frames": container_n, "difference": sidecar_n - container_n})  # fmt: skip
@@ -177,8 +193,9 @@ def day_findings(stages_dir: Path) -> List[Dict[str, Any]]:
 
 def _describe(drive: str, row: Dict[str, Any]) -> str:
     if row["reason"] == REASON_UNKNOWN:
+        note = f"; {row['rate_note']}" if row.get("rate_note") else ""
         return (f"{REASON_UNKNOWN}: {drive} day {row['date']} (blur sidecar frames "
-                f"{row['sidecar_frames']}, container frames {row['container_frames']})")  # fmt: skip
+                f"{row['sidecar_frames']}, container frames {row['container_frames']}{note})")  # fmt: skip
     return (f"{REASON_MISMATCH}: {drive} day {row['date']} blur mask has {row['sidecar_frames']} "
             f"frames, source has {row['container_frames']} (difference {row['difference']:+d}); "
             "re-render the day on the fixed renderer")  # fmt: skip
