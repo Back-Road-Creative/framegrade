@@ -211,6 +211,25 @@ def _named(text: str, value: str) -> bool:
     return bool(value) and re.search(pattern, text or "", re.IGNORECASE) is not None
 
 
+def _region_places(claim: dict, route_places) -> list:
+    """Every route place inside a measured region claim, required ones first.
+
+    ``required_place_ids`` lists only the places above the required floor, but
+    Waypost reads an empty ``contains`` as "the route has no place", so a
+    region whose only places sit below the floor was refused as malformed. The
+    region test is the one ``RouteEvidence.region_claim`` measured with: the
+    county (or county pair) for a county claim, the state for a state claim.
+    Gaps, coverage and outside samples are unchanged."""
+    level, name = claim.get("level"), claim.get("name")
+    if level == "state":
+        inside = [p for p in route_places if p.get("state") == name]
+    else:
+        counties = set(claim.get("counties") or []) if level == "counties" else {name}
+        inside = [p for p in route_places if p.get("county") in counties]
+    ids = [*claim.get("required_place_ids", []), *(p["evidence_id"] for p in inside)]
+    return list(dict.fromkeys(ids))
+
+
 def _evaluated_decision(decision: dict, title: str, route_places, regions, location_places):
     """``decision`` with its chosen claims mapped onto retained-route evidence.
 
@@ -336,7 +355,7 @@ def build_final_text_review(state, lf, metadata: dict) -> Optional[dict]:
         "region_claims": [
             {
                 "evidence_id": r["evidence_id"],
-                "contains": r["claim"]["required_place_ids"],
+                "contains": _region_places(r["claim"], route_places),
                 "coverage": r["claim"]["coverage"],
                 "gaps": gaps,
                 "samples_outside": r["claim"]["samples_outside"],
