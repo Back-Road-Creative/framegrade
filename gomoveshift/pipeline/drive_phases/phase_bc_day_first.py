@@ -282,8 +282,10 @@ def _maybe_drop_day_master(artifacts, state, stages_dir: Path) -> None:
 # only reads it, so a stale record survives every phase-D re-run (2 = the
 # unresolved/outside sample split; 3 = the place gate's bins + windows_key; 4 = a
 # boundary proof for every gapped claim, and Irish county claims proven on the
-# Tailte map; renders are reused by their own fingerprints).
-PHASE_BC_CODE_VERSION = 4
+# Tailte map; 5 = an Irish county proven against the other counties, since its own
+# edge ends at the shore and refused every coastal drive, framegrade#654; renders
+# are reused by their own fingerprints).
+PHASE_BC_CODE_VERSION = 5
 
 # Fixes reverse-geocoded per LF for its title evidence. Every fix costs a
 # geocoder call, so the trace is sampled evenly (first and last fix kept).
