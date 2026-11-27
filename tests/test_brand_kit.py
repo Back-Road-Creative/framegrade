@@ -17,7 +17,7 @@ from gomoveshift.pipeline.ost_applier import FONT_PATH, LAYOUTS, _build_drawtext
 
 _GOLDEN_FILTER = (
     "drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':"
-    "text='GoMoveShift':fontsize=64:fontcolor=white@1.0:borderw=3:bordercolor=black@0.8:"
+    "text='gomoveshift.com':fontsize=64:fontcolor=white@1.0:borderw=3:bordercolor=black@0.8:"
     "x=(w-text_w)/2:y=h*0.68:shadowcolor=black@0.6:shadowx=5:shadowy=5:"
     "alpha='if(lt(t,14.5),1,if(lt(t,15.0),1-(t-(14.5))/0.5,0))':enable='between(t,0,15.0)',"
     "drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':"
