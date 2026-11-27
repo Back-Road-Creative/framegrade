@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.172] - 2026-11-26
+
+### Fixed
+
+- Two YouTube Shorts next to each other by publish slot can no longer name the same place, whatever long-form or drive each came from, and the very same title twice in a row, or one title body on three Shorts in a row, is refused; enqueue and the nightly text sync both check this.
+- The nightly text sync no longer refuses a Short every night for repeating a hand-titled neighbour it cannot vary, takes the next Short's place off its choices, keeps one title ledger across a plan's long-forms, and refuses a Short with no measured clip length instead of titling it "1 seconds".
+- An expired or revoked Facebook, Instagram or TikTok login no longer fails every queued post one by one: the platform pauses, its posts stay queued, and `health check` raises one `platform_auth_blocked` incident naming it.
+- A TikTok chunk upload that fails no longer fails the post: when TikTok provably never got the whole file, the row goes back to queued and the next try starts a fresh upload.
+- A Facebook reel is no longer recorded published just because the finish call returned: it is read back first, and a reel not found, failed in processing or not yet live stays an unknown outcome for the reconcile reads.
+
 ## [0.3.171] - 2026-11-26
 
 ### Fixed
@@ -1951,7 +1961,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...HEAD
+[0.3.172]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...v0.3.172
 [0.3.171]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...v0.3.171
 [0.3.170]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...v0.3.170
 [0.3.169]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.168...v0.3.169
