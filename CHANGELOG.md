@@ -5,6 +5,16 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.173] - 2026-11-26
+
+### Fixed
+
+- Moving a slot from the console now moves it in the publish plan too, so YouTube and Facebook publish at the new time. The time is stored as UTC, and a time with no zone is refused with a message saying so.
+- A delivery whose slot has no zone no longer stops the whole drain pass when it is held.
+- Within a platform, the drain now sends the delivery with the oldest slot first, not the one enqueued first, so a backlog after an outage goes out in slot order.
+- After the queue had been down, the next drain posted every overdue Facebook and Instagram row at once. A drain pass now sends at most one delivery per platform, on every platform; the rest wait for the next pass.
+- One delivery whose slot was written with no time zone, or is not a time at all, could end a whole drain pass. A zoneless slot is now read as UTC, and an unreadable one is held with an incident while the other deliveries go out.
+
 ## [0.3.172] - 2026-11-26
 
 ### Fixed
@@ -1961,7 +1971,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...HEAD
+[0.3.173]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...v0.3.173
 [0.3.172]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...v0.3.172
 [0.3.171]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...v0.3.171
 [0.3.170]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...v0.3.170
