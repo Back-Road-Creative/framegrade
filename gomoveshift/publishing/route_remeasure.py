@@ -145,6 +145,26 @@ def _find_short(raw: Mapping[str, Any], row, sidecar: Path) -> dict:
     raise RemeasureRefusedError(f"{sidecar}: no short {row['project_name']}#{row['short_index']}")
 
 
+def remeasure_inputs(stages_dir, date) -> Dict[str, Path]:
+    """The two files a re-measure of a Short recorded on ``date`` reads from ``stages_dir``."""
+    stages = Path(stages_dir)
+    return {
+        "day GPS points": stages / f"gps_points_{date}.json",
+        "shorts audit": stages / f"shorts_ost_audit_{date}.json",
+    }
+
+
+def remeasure_date(row) -> Optional[str]:
+    """The recording date whose :func:`remeasure_inputs` the row's re-measure would read, or
+    ``None`` when its route record already has ``bins`` (a re-measure then refuses, so it never
+    needs them). Raises when the sidecar or the row's Short in it cannot be read."""
+    sidecar = Path(row["sidecar_path"] or "")
+    short = _find_short(json.loads(sidecar.read_text(encoding="utf-8")), row, sidecar)
+    if "bins" in (short.get("route_record") or {}):
+        return None
+    return str(short.get("recording_date"))
+
+
 def remeasure_short_route(
     row,
     stages_dir,
@@ -170,9 +190,7 @@ def remeasure_short_route(
         raise RemeasureRefusedError("the route record already has 'bins'; nothing to re-measure")
     media = short.get("media") or {}
     date = short.get("recording_date")
-    stages = Path(stages_dir)
-    points = _read_json(stages / f"gps_points_{date}.json", "day GPS points")
-    audit = _read_json(stages / f"shorts_ost_audit_{date}.json", "shorts audit")
+    points, audit = (_read_json(p, what) for what, p in remeasure_inputs(stages_dir, date).items())
     frame_distance = None
     if rendered_dir is not None:
         entry, frame_distance = _frame_matched_entry(

@@ -6,6 +6,10 @@ says whose it is or when it may go, so it sits on the disk until the disk is ful
 gets a record in ``stage_owners.json``: owner, reason, linked issue and an expiry date. Once the
 expiry has passed, ``health backlog`` appends the name to the host-cleanup release list; the
 release itself is host-cleanup's rule 7c (every hold it has still applies), never done here.
+
+:func:`remeasure_holds` is the one rule every stage release here consults (the owner-record
+listing and ``gomoveshift cleanup``): a project whose queued Short may still need a route
+re-measure keeps its stages, whatever else says it may go.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set
 
 SCHEMA = "gms-stage-owners/1"
 DEFAULT_OWNERS_PATH = Path(__file__).with_name("stage_owners.json")
@@ -42,6 +46,48 @@ class Owner:
     reason: str
     issue: str
     expires: date
+
+
+class RemeasureHold(NamedTuple):
+    delivery_id: int
+    sidecar: str
+    #: The recording date whose ``route_remeasure.remeasure_inputs`` the re-measure reads;
+    #: ``None`` when the sidecar could not be read (held anyway: it proves nothing).
+    date: Optional[str]
+
+
+def remeasure_holds(db_path: Path) -> Dict[str, List[RemeasureHold]]:
+    """Projects whose stages must stay, each with the rows that hold them: every queued,
+    non-shadow YouTube row (``queue_repair.QUEUED_YOUTUBE_SQL``, the rows ``dispatch-queue``
+    repairs) whose route record has no ``bins``. Only such a row is ever re-measured (a record
+    with ``bins`` is refused as done), and the re-measure reads the project's ``_stages``; a row
+    that is published, failed or cancelled is never repaired again. A row whose sidecar cannot be
+    read holds too. The queue opens read-only; one that cannot be read raises, so a caller
+    releases nothing."""
+    import sqlite3
+
+    from ..publishing.queue_repair import QUEUED_YOUTUBE_SQL
+    from ..publishing.route_remeasure import remeasure_date
+
+    if not Path(db_path).is_file():
+        raise FileNotFoundError(f"social queue {db_path} does not exist")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(QUEUED_YOUTUBE_SQL).fetchall()
+    finally:
+        conn.close()
+    out: Dict[str, List[RemeasureHold]] = {}
+    for row in rows:
+        try:
+            when = remeasure_date(row)
+        except Exception:  # noqa: BLE001 -- an unreadable sidecar holds: it proves nothing
+            when = ""
+        if when is not None:
+            out.setdefault(row["project_name"], []).append(
+                RemeasureHold(row["id"], str(row["sidecar_path"] or ""), when or None)
+            )
+    return out
 
 
 def release_list_path(data_root: Path) -> Path:

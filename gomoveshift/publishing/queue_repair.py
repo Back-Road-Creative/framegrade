@@ -106,6 +106,21 @@ def _repair_copy(
     return refusal, changed
 
 
+def config_stages_dir_for(config) -> Callable[[Path, str], Path]:
+    """``stages_dir_for(sidecar, project)``: the ``_stages`` dir a row's re-measure reads (the
+    run's intermediate dir next to its output), as ``dispatch-queue`` and ``health check`` see it."""
+    from ..paths import gms_intermediate_dir
+
+    folder = getattr(getattr(config, "paths", None), "intermediate_folder", "") or ""
+
+    def stages_dir_for(sidecar: Path, project: str) -> Path:
+        return gms_intermediate_dir(
+            Path(sidecar).parent.parent, project, intermediate_folder=folder
+        )
+
+    return stages_dir_for
+
+
 def repair_queued_shorts(
     conn,
     *,

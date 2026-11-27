@@ -155,6 +155,13 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
     return 2 if result["action"] == "refused" else 0
 
 
+def _queue_db(config):
+    """The social queue a stage release asks (``stage_owners.remeasure_holds``); ``None`` only
+    for a config with no ``seo`` section (a real ``Config`` always has one)."""
+    storage = getattr(getattr(config, "seo", None), "storage_path", None)
+    return Path(storage) / "social_queue.sqlite3" if storage else None
+
+
 def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
     from datetime import datetime, timezone
 
@@ -187,6 +194,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         latest_version=launch.cached_latest_version(root / launch.LATEST_VERSION_CACHE_NAME),
         incidents_dir=incidents_dir, stage_owners=stage_owners.default_owners(),
         release_list=stage_owners.release_list_path(root),
+        queue_db=_queue_db(config),
         failed_relaunch=launch.FailedRelaunch(
             incidents_dir, args.stages_root,
             fingerprint_fn=launch.default_fingerprint_fn(config, code_root), now=now,
@@ -222,6 +230,8 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         verb = "would list" if args.dry_run else "listed"
         for name in roots.get("listed", []):
             print(f"{verb} stage root {name} for release (owner record expired)")
+        for name in roots.get("held", []):
+            print(f"kept stage root {name}: a queued Short may still need its route re-measured")
         for name in roots.get("unowned", []):
             print(f"unowned stage root {name}: no backlog row and no owner record")
         if result.get("storage_bound"):

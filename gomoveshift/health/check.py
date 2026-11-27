@@ -21,6 +21,7 @@ _EVENTS = {
     "placeless_label_unverifiable": "health_placeless_label_unverifiable",
     "failure_unattended": "health_failure_unattended",
     "queued_short_refused": "health_queued_short_refused",
+    "queued_short_stages_gone": "health_queued_short_stages_gone",
     "delivery_failed_permanent": "health_delivery_failed_permanent",
     "platform_auth_blocked": "health_platform_auth_blocked",
     "short_bad_run": "health_short_bad_run",
@@ -96,6 +97,15 @@ def _line(row: Dict[str, Any]) -> str:
             f"Queued YouTube Short {row['delivery_id']} ({row['project']} #{row['short_index']}) "
             f"is slotted {row['scheduled_at']} and the final-text review refuses it: "
             f"{row['reason']}. dispatch-queue could not repair it; it will fail at its slot."
+        )
+    if row["kind"] == "queued_short_stages_gone":
+        return (
+            f"Queued YouTube Shorts {', '.join(map(str, row['delivery_ids']))} of {row['project']} "
+            f"need a route re-measure, but {row['stages_dir']} no longer has "
+            f"{', '.join(row['missing'])}: dispatch-queue refuses them every tick and cannot "
+            f"repair them. A supersede re-render of {row['project']} is needed, then "
+            "`gomoveshift queue remeasure-short-route --id <id> --stages-dir <new _stages> "
+            "--rendered-shorts <its shorts dir> --apply`."
         )
     if row["kind"] == "delivery_failed_permanent":
         return (
@@ -333,6 +343,48 @@ def queued_short_refused_incidents(
     return out
 
 
+def stages_gone_incidents(
+    db_path: Path, stages_dir_for: Callable[[Path, str], Path], now_iso: str
+) -> List[Dict[str, Any]]:
+    """Rule 17: one ``queued_short_stages_gone`` incident per project whose queued YouTube Short
+    needs a route re-measure (``stage_owners.remeasure_holds``) while a file that re-measure reads
+    is gone from the project's ``_stages``. ``dispatch-queue``'s repair can only refuse such a row,
+    at every tick and with no deadline; only a re-render brings the stages back. A row whose
+    sidecar cannot be read proves nothing: no incident. Read-only."""
+    from ..publishing.route_remeasure import remeasure_inputs
+    from .stage_owners import remeasure_holds
+    from .store import safe_name
+
+    out: List[Dict[str, Any]] = []
+    for project, holds in sorted(remeasure_holds(db_path).items()):
+        ids: List[int] = []
+        missing: List[str] = []
+        stages: Optional[Path] = None
+        for hold in holds:
+            if hold.date is None:
+                continue
+            where = stages_dir_for(Path(hold.sidecar), project)
+            gone = [p.name for p in remeasure_inputs(where, hold.date).values() if not p.is_file()]
+            if gone:
+                stages = stages or where
+                ids.append(hold.delivery_id)
+                missing += [g for g in gone if g not in missing]
+        if ids:
+            out.append(
+                new_incident(
+                    "queued_short_stages_gone",
+                    f"queued_short_stages_gone:{project}",
+                    f"queued_short_stages_gone_{safe_name(project)}.json",
+                    now_iso,
+                    project=project,
+                    delivery_ids=ids,
+                    stages_dir=str(stages),
+                    missing=missing,
+                )
+            )
+    return out
+
+
 def failed_permanent_incidents(
     db_path: Path, now: datetime, now_iso: str, notes: List[str]
 ) -> List[Dict[str, Any]]:
@@ -554,7 +606,7 @@ def _blackout(notes: List[str]) -> Tuple[Any, ...]:
 def _cadence_rows(
     config: Any, ledger_path: Optional[Path], now: datetime, now_iso: str, notes: List[str]
 ):
-    """Rules 2, 4, 7, 8 and 15. ``found`` maps kind -> rows, only for a rule that actually ran."""
+    """Rules 2, 4, 7, 8, 15, 16 and 17. ``found`` maps kind -> rows, only for a rule that actually ran."""
     found: Dict[str, List[Dict[str, Any]]] = {}
     storage = Path(config.seo.storage_path)
     if not storage.is_absolute():
@@ -606,6 +658,14 @@ def _cadence_rows(
             found["platform_auth_blocked"] = auth_blocked_incidents(db, now_iso)
         except Exception as exc:  # noqa: BLE001
             notes.append(f"rule 16 not evaluated: {type(exc).__name__}: {exc}")
+        try:
+            from ..publishing.queue_repair import config_stages_dir_for
+
+            found["queued_short_stages_gone"] = stages_gone_incidents(
+                db, config_stages_dir_for(config), now_iso
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"rule 17 not evaluated: {type(exc).__name__}: {exc}")
     else:
         notes.append("social_queue.sqlite3 absent: rule 4 not evaluated")
     return found

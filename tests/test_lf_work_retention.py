@@ -47,7 +47,7 @@ def _run_cleanup(tmp_path, project_name, *, confirm=False, min_age=0):
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=tmp_path / "cache"),
     ):
-        return cleanup_handler.cmd_cleanup(args, None)
+        return cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
 
 
 def test_named_drive_with_an_output_dir_reclaims_its_stage_cache(tmp_path, capsys):
@@ -514,3 +514,11 @@ def test_a_shortfall_the_stale_work_cannot_cover_still_stops_the_day(tmp_path):
 
     with pytest.raises(RuntimeError, match="work space for LF 1"):
         _two_lf_day(tmp_path, state=make_state(ost_audit_confirmed=True), space=_space)
+
+
+def _empty_queue(tmp_path):
+    """A config whose social queue exists and is empty: ``cleanup`` reads it (stage holds)."""
+    from gomoveshift.publishing.queue import open_queue_db  # noqa: PLC0415
+
+    open_queue_db(tmp_path / "seo").close()
+    return SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo")))

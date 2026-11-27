@@ -329,12 +329,9 @@ def _run_queue_repair(conn, config, *, apply: bool) -> None:
     reads them (a refusal at dispatch burns an attempt and the slot is never refilled).
     One ``QUEUE_REPAIR`` line per row. Never fatal: a repair failure must not stop the
     drain of rows that are fine."""
-    from ...paths import gms_intermediate_dir
-    from ...publishing.queue_repair import repair_queued_shorts
+    from ...publishing.queue_repair import config_stages_dir_for, repair_queued_shorts
 
-    def stages_dir_for(sidecar: Path, project: str) -> Path:
-        folder = getattr(getattr(config, "paths", None), "intermediate_folder", "") or ""
-        return gms_intermediate_dir(sidecar.parent.parent, project, intermediate_folder=folder)
+    stages_dir_for = config_stages_dir_for(config)
 
     def geocoder():
         from ...pipeline.gps_enrichment import _build_shared_geocoder
