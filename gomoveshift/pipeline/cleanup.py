@@ -23,7 +23,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,11 @@ def _names_project(cmdline: str, project: str) -> bool:
         for tok in cmdline.split()
         for part in Path(tok.split("=", 1)[-1]).parts
     )
+
+
+def _held_reason(held) -> str:
+    ids = ", ".join(str(getattr(h, "delivery_id", h)) for h in held)
+    return f"queued Short(s) {ids} may still need a route re-measure from _stages"
 
 
 def abandoned_refusal(
@@ -216,6 +221,7 @@ class PipelineCleanup:
         stage_cache_base: Optional[Path] = None,
         *,
         live_drives_fn: Optional[Callable[[], List[str]]] = None,
+        remeasure_holds_fn: Optional[Callable[[], Mapping[str, object]]] = None,
     ):
         from ..paths import gms_output_dir, gms_staging_dir
 
@@ -226,6 +232,10 @@ class PipelineCleanup:
         # only ``output_base`` is scanned. The ``cleanup`` CLI always sets it.
         self.stage_cache_base = stage_cache_base
         self._live_drives_fn = live_drives_fn or _live_drive_cmdlines
+        # ``health.stage_owners.remeasure_holds`` bound to the social queue: a project it names
+        # keeps its _stages re-measure inputs and is never removed as abandoned. Unset: no
+        # queue is consulted (the ``cleanup`` CLI always sets it).
+        self._remeasure_holds_fn = remeasure_holds_fn
 
     def discover_projects(self) -> List[Path]:
         """Find project directories in the output base and the stage cache: ``<base>/<project>``
@@ -346,9 +356,19 @@ class PipelineCleanup:
             ffprobe_fn = _vv
 
         plan = CleanupPlan()
+        holds: Mapping[str, object] = {}
+        if self._remeasure_holds_fn is not None:
+            try:
+                holds = self._remeasure_holds_fn()
+            except Exception as exc:  # noqa: BLE001 -- cannot tell what the queue needs
+                why = f"social queue unreadable ({type(exc).__name__}: {exc}) — a queued Short may need _stages"  # fmt: skip
+                plan.skipped += [{"path": str(p), "reason": why} for p in projects]
+                return plan
 
         for project_dir in projects:
             project_name = project_dir.name
+            held = holds.get(project_name)
+            held_why = _held_reason(held) if held else None
             age_days = self._project_age_days(project_dir)
             state = self._load_pipeline_state(project_dir)
             pipeline_complete = self._is_pipeline_complete(state)
@@ -373,7 +393,7 @@ class PipelineCleanup:
             # Pipeline completion check
             if not pipeline_complete and abandoned:
                 stages_dir = project_dir / "_stages"
-                why = abandoned_refusal(stages_dir, live_drives_fn=self._live_drives_fn)
+                why = held_why or abandoned_refusal(stages_dir, live_drives_fn=self._live_drives_fn)
                 if why:
                     plan.skipped.append({"path": str(stages_dir), "reason": why})
                 else:
@@ -439,6 +459,9 @@ class PipelineCleanup:
                         if f.is_file() and f.suffix in {".mp4", ".json"}:
                             # Keep pipeline_state.json
                             if f.name == "pipeline_state.json":
+                                continue
+                            if held and _REMEASURE_INPUT_RE.match(f.name):
+                                plan.skipped.append({"path": str(f), "reason": held_why})
                                 continue
                             plan.files.append(
                                 {
@@ -669,6 +692,8 @@ class PipelineCleanup:
 # Final-file names emitted by ``run_day_pipeline`` that gate each intermediate.
 # Each final is the *non*-suffixed OST-applied artifact; work files live
 # alongside with a known suffix.
+#: ``publishing.route_remeasure.remeasure_inputs`` (a test pins the two agree).
+_REMEASURE_INPUT_RE = re.compile(r"^(gps_points|shorts_ost_audit)_[^/]+\.json$")
 _LF_FINAL_RE = re.compile(r"^lf_(\d{2})\.mp4$")
 _SHORT_FINAL_RE = re.compile(r"^short_(\d{2})\.mp4$")
 _SUPERLONG_FINAL_RE = re.compile(r"^sl_(\d{2})\.mp4$")

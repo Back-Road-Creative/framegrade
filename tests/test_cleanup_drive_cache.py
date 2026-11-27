@@ -225,7 +225,7 @@ def test_cli_dry_run_shows_sources_dir_and_size(tmp_path, capsys):
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
     ):
-        rc = cleanup_handler.cmd_cleanup(args, None)
+        rc = cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
     text = capsys.readouterr().out
     assert rc == 0
     assert f"SOURCES DIR: {_sources(project)}" in text
@@ -244,7 +244,7 @@ def test_cli_finds_drive_projects_in_the_stage_cache(tmp_path, capsys):
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
     ):
-        rc = cleanup_handler.cmd_cleanup(args, None)
+        rc = cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
     text = capsys.readouterr().out
     assert rc == 0
     assert "WOULD DELETE" in text and "lf_01.mp4" in text
@@ -262,7 +262,7 @@ def test_cli_named_project_resolves_in_the_stage_cache(tmp_path, capsys):
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
     ):
-        rc = cleanup_handler.cmd_cleanup(args, None)
+        rc = cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
     assert rc == 0
     assert "episode_01_2026-03-05.mp4" in capsys.readouterr().out
 
@@ -285,7 +285,7 @@ def test_cli_named_project_resolves_the_backlog_stage_layout(tmp_path, capsys):
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
     ):
-        rc = cleanup_handler.cmd_cleanup(args, None)
+        rc = cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
     text = capsys.readouterr().out
     assert rc == 0, text
     assert "lf_01.mp4" in text and "episode_01_2026-03-05.mp4" in text
@@ -303,7 +303,7 @@ def test_cli_discovers_backlog_staged_drives_under_the_stage_root(tmp_path, caps
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=cache),
     ):
-        rc = cleanup_handler.cmd_cleanup(args, None)
+        rc = cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
     assert rc == 0
     assert "lf_01.mp4" in capsys.readouterr().out
 
@@ -315,3 +315,11 @@ def test_intermediate_base_honours_the_env_override(monkeypatch, tmp_path):
     assert gms_intermediate_base() == tmp_path
     monkeypatch.delenv("GMS_INTERMEDIATE_DIR")
     assert gms_intermediate_base() == Path(os.path.expanduser("~/.cache/gomoveshift"))
+
+
+def _empty_queue(tmp_path):
+    """A config whose social queue exists and is empty: ``cleanup`` reads it (stage holds)."""
+    from gomoveshift.publishing.queue import open_queue_db  # noqa: PLC0415
+
+    open_queue_db(tmp_path / "seo").close()
+    return SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo")))

@@ -293,7 +293,7 @@ def _cli(tmp_path: Path, project: Path, **flags):
         patch("gomoveshift.paths.gms_intermediate_base", return_value=tmp_path / "cache"),
         patch("gomoveshift.health.heal.live_drive_cmdlines", return_value=[]),
     ):
-        return cleanup_handler.cmd_cleanup(args, None)
+        return cleanup_handler.cmd_cleanup(args, _empty_queue(tmp_path))
 
 
 def test_cli_dry_run_lists_the_abandoned_dir_and_deletes_nothing(tmp_path, capsys):
@@ -368,3 +368,11 @@ def test_importing_publishing_queue_first_does_not_cycle_through_cleanup():
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+def _empty_queue(tmp_path):
+    """A config whose social queue exists and is empty: ``cleanup`` reads it (stage holds)."""
+    from gomoveshift.publishing.queue import open_queue_db  # noqa: PLC0415
+
+    open_queue_db(tmp_path / "seo").close()
+    return SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo")))

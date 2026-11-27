@@ -17,11 +17,19 @@ def cmd_cleanup(args, config):
     # Drive runs keep _stages in the ext4 stage cache, not under output_base.
     stage_cache_base = gms_intermediate_base()
 
+    from pathlib import Path
+
+    from ...health.stage_owners import remeasure_holds
+
+    def holds():  # read at plan time; an unreadable queue plans nothing
+        return remeasure_holds(Path(config.seo.storage_path) / "social_queue.sqlite3")
+
     cleanup = PipelineCleanup(
         output_base=output_base,
         staging_dir=staging_dir,
         d_drive_base=getattr(args, "archive_base", None),
         stage_cache_base=stage_cache_base,
+        remeasure_holds_fn=holds,
     )
 
     abandoned = bool(getattr(args, "abandoned", False))

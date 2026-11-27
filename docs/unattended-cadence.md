@@ -131,4 +131,6 @@ missing a field, with a bad date or a repeated name is refused, never guessed pa
 the host-cleanup rule 7c, which keeps every hold it has (running spool job, `.keep`, live lease,
 process inside). The file name is the one `_ops/host-cleanup.sh` reads (`GMS_STAGES_RELEASE`); a
 test pins the literal. Extending a hold means editing `expires` in the same PR that cites the
-issue. A root with no row and no record is printed as `unowned stage root` on every tick.
+issue. A root with no row and no record is printed as `unowned stage root` on every tick. An expired
+root that a queued Short may still need for a route re-measure (`stage_owners.remeasure_holds`,
+`docs/pipeline/156-health-check.md` rule 17) is printed as `kept stage root` and not listed.

@@ -1121,6 +1121,7 @@ def run_backlog(
     incidents_dir: Optional[Path] = None,
     stage_owners: Optional[Sequence[owners_mod.Owner]] = None,
     release_list: Optional[Path] = None,
+    queue_db: Optional[Path] = None,
     replace_scheduled: bool = False,
     live_status: Optional[replace_scheduled_mod.LiveStatus] = None,
     replace_store: Optional[Callable[[], Any]] = None,
@@ -1172,7 +1173,7 @@ def run_backlog(
             out["mask_rerender"] = info
         if stage_owners is not None:
             out["stage_roots"] = _stage_roots(
-                stages_root, rows, drives, stage_owners, release_list, now, dry_run
+                stages_root, rows, drives, stage_owners, release_list, now, dry_run, queue_db
             )
         if incidents_dir is not None:
             _storage_incident(Path(incidents_dir), region, out, now, dry_run)
@@ -1182,18 +1183,31 @@ def run_backlog(
             lease_release()
 
 
-def _stage_roots(stages_root, rows, drives, owners, release_list, now, dry_run) -> Dict[str, Any]:
+def _stage_roots(
+    stages_root, rows, drives, owners, release_list, now, dry_run, queue_db=None
+) -> Dict[str, Any]:
     """Owner-record upkeep for stage roots no manifest row owns: the expired records' roots are
     appended to the host-cleanup release list (a dry run only names them), and every root with
-    neither a row, a store drive nor an owner record is reported."""
+    neither a row, a store drive nor an owner record is reported. With ``queue_db``, a root that
+    ``owners_mod.remeasure_holds`` holds is never listed (``held``); an unreadable queue lists
+    none."""
     today = now.astimezone(timezone.utc).date()
     known = {r.project for r in rows} | {d.project for d in drives}
     due = [o for o in owners_mod.expired(owners, today) if (Path(stages_root) / o.name).is_dir()]
+    held: List[str] = []
+    if queue_db is not None and due:
+        try:
+            holds = owners_mod.remeasure_holds(Path(queue_db))
+        except Exception as exc:  # noqa: BLE001 -- cannot tell what the queue needs: keep all
+            holds = {o.name: [f"social queue unreadable: {type(exc).__name__}: {exc}"] for o in due}
+        held = [o.name for o in due if o.name in holds]
+        due = [o for o in due if o.name not in holds]
     listed = [o.name for o in due]
     if release_list is not None and not dry_run:
         listed = owners_mod.list_for_release(Path(release_list), due, today)
     return {
         "listed": listed,
+        "held": held,
         "unowned": owners_mod.unowned_roots(Path(stages_root), known, owners),
     }
 
