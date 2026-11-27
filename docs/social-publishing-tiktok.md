@@ -142,6 +142,16 @@ bitrate: a master over the cap can take hours to publish, or sit
 Facebook and YouTube take the same masters without delay. The cap is on the
 average; masters are VBR with a 30 Mbps maxrate, so peaks can still exceed 25.
 
+**The rendition is capped at 1080x1920 and 30 fps.** It scales down to fit inside 1080x1920
+(aspect kept, even sides, then `setsar=1`) and passes `-fpsmax 30`, so a 29.97 fps short keeps
+its rate and a 60 fps master drops to 30. A master known (ffprobe) to be over that frame is
+transcoded even under the bitrate cap; an unknown frame is judged on bitrate alone. A cached
+rendition over the frame is rebuilt whatever its age. **Why:** the rendition keeps the H.264
+level 4.1 tag, which holds 1080x1920 at 30 fps, and Meta's Reels spec caps width at 1920 px. A
+2160x3840 60 fps day reel kept its frame, and both of its posts failed (a container stuck
+`IN_PROGRESS`, then `rupload ... ProcessingFailedError`, 2026-11-26/27) while 1080x1920 shorts
+published.
+
 ## Chunked upload contract
 
 `plan_chunks(video_size, chunk_size=None)`: default chunk size is

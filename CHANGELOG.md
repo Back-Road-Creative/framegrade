@@ -5,6 +5,19 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.183] - 2026-11-27
+
+### Fixed
+
+- The Instagram rendition is capped at 1080x1920 and 30 fps, a master over that frame is transcoded whatever its bitrate, and a cached rendition over it is rebuilt. A 2160x3840 60 fps day reel kept its frame in the rendition (tagged H.264 level 4.1, over Meta's 1920 px width), and on 2026-11-26 and 2026-11-27 both of its Instagram posts failed: a container stuck `IN_PROGRESS`, then `ProcessingFailedError`.
+- `health backlog` now re-renders a drive whose blur mask was built on another frame count than its source (`mask_frame_count_mismatch`), once per drive-day per renderer version, recorded as `rerender_requested` on the gate's incident row. A count that cannot be read (`mask_frame_count_unknown`) is still never re-rendered, and a re-render the supersede refuses leaves the tick as it was. Before, a mismatched day stood refused every tick until a person superseded it (Kerry-to-Cork, 2026-11-27, #662).
+
+## [0.3.182] - 2026-11-27
+
+### Fixed
+
+- An Irish county's boundary proof measures the route's reach against every other county on the Tailte map instead of the county's own edge, which ends at the shore, so a coastal drive such as Galley Head is no longer refused as a "possible boundary crossing" into the sea. Counties on the Northern Ireland border keep the full-boundary test, because the map has no Northern Ireland polygon. A refused proof's reason is now kept in the route record's `boundary_notes`. Waypost (`seo-manager`) is pinned to 7a6f21f (waypost#119) for proof version `tiger2026-tailte2026-bounded-v3`.
+
 ## [0.3.181] - 2026-11-27
 
 ### Fixed
@@ -2039,7 +2052,9 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.183...HEAD
+[0.3.183]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.182...v0.3.183
+[0.3.182]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...v0.3.182
 [0.3.181]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...v0.3.181
 [0.3.180]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...v0.3.180
 [0.3.179]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...v0.3.179

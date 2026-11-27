@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import subprocess  # noqa: S404 — fixed argv, no shell
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -153,15 +153,68 @@ def instagram_rendition_path(source: Path) -> Path:
     return source.with_name(source.stem + INSTAGRAM_RENDITION_SUFFIX)
 
 
+#: The rendition's frame ceiling. Meta's Reels spec caps width at 1920 px, and the H.264 level
+#: 4.1 the rendition is tagged with holds 1080x1920 at 30 fps, not a 2160x3840 60 fps day reel
+#: (2026-11-27: both of that reel's posts failed, a stuck container and ``ProcessingFailedError``).
+IG_MAX_WIDTH, IG_MAX_HEIGHT, IG_MAX_FPS = 1080, 1920, 30
+_IG_SCALE = (
+    f"scale=w='min(iw,{IG_MAX_WIDTH})':h='min(ih,{IG_MAX_HEIGHT})'"
+    ":force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1"
+)
+
+Frame = Tuple[int, int, float]  # width, height, frames per second
+
+
 def _instagram_argv(source: Path, target: Path) -> List[str]:
     argv = _ffmpeg_argv(source, target)
     for flag, value in (
+        ("-vf", _IG_SCALE),
         ("-b:v", _IG_TARGET_BITRATE),
         ("-maxrate", _IG_MAX_BITRATE),
         ("-bufsize", _IG_BUFSIZE),
     ):
         argv[argv.index(flag) + 1] = value
+    # caps the rate only: a 29.97 fps short keeps its own, a 60 fps master drops to 30
+    argv[-1:-1] = ["-fpsmax", str(IG_MAX_FPS)]
     return argv
+
+
+def _probe_frame(path: Path) -> Optional[Frame]:
+    """The first video stream's width, height and average fps via ffprobe, or None."""
+    try:
+        result = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,avg_frame_rate",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],  # fmt: skip
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        width, height, rate = result.stdout.strip().split(",")[:3]
+        num, _, den = rate.partition("/")
+        return int(width), int(height), float(num) / float(den or 1)
+    except (OSError, ValueError, ZeroDivisionError, subprocess.SubprocessError):
+        return None
+
+
+def _over_frame(frame: Optional[Frame]) -> bool:
+    """True when the frame is known to exceed the rendition ceiling (unknown is not over)."""
+    if frame is None:
+        return False
+    width, height, fps = frame
+    return width > IG_MAX_WIDTH or height > IG_MAX_HEIGHT or fps > IG_MAX_FPS + 0.01
 
 
 def _probe_bitrate(path: Path) -> Optional[int]:
@@ -193,6 +246,7 @@ def ensure_instagram_rendition(
     *,
     bitrate_bps: Optional[int] = None,
     probe: Callable[[Path], Optional[int]] = _probe_bitrate,
+    frame: Callable[[Path], Optional[Frame]] = _probe_frame,
     run: Callable[[List[str]], None] = _run_ffmpeg,
 ) -> Path:
     """Return the path Instagram should upload for ``source``.
@@ -207,19 +261,30 @@ def ensure_instagram_rendition(
     ``SHORTS_MAXRATE`` 30 Mbps (``pipeline/encoding_constants.py``), so an
     under-cap master can still peak above 25 Mbps; the cap is judged on
     AVERAGE bitrate.
+
+    A master whose ``frame`` is known to exceed 1080x1920 or 30 fps is transcoded whatever its
+    bitrate, and a cached rendition over that frame (one made before the cap) is rebuilt.
     """
     source = Path(source)
     if not source.is_file():
         raise TikTokRenditionError(f"short not found: {source}")
     bitrate = bitrate_bps if bitrate_bps is not None else probe(source)
-    if bitrate is not None and bitrate <= INSTAGRAM_MAX_BITRATE_BPS:
+    if (
+        bitrate is not None
+        and bitrate <= INSTAGRAM_MAX_BITRATE_BPS
+        and not _over_frame(frame(source))
+    ):
         return source
 
     target = instagram_rendition_path(source)
     if target.is_file() and target.stat().st_size > 0:
-        if target.stat().st_mtime >= source.stat().st_mtime:
+        if _over_frame(frame(target)):
+            logger.info("instagram rendition is over %sx%s@%s; rebuilding %s",
+                        IG_MAX_WIDTH, IG_MAX_HEIGHT, IG_MAX_FPS, target)  # fmt: skip
+        elif target.stat().st_mtime >= source.stat().st_mtime:
             return target
-        logger.info("instagram rendition older than its source; rebuilding %s", target)
+        else:
+            logger.info("instagram rendition older than its source; rebuilding %s", target)
 
     logger.info("transcoding %s for Instagram (master bitrate %s bps)", source.name, bitrate)
     run(_instagram_argv(source, target))
