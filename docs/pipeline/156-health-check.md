@@ -374,7 +374,10 @@ master once the finals exist, so a finished day is counted from the raw's inputs
 `source_fingerprints` that `day_<date>_color_cache.json` recorded at encode (the concat is a stream
 copy). `day_<date>_master.mp4` counts last, and only when its frame rate is within 1% of the
 sidecar's `source_fps`: a master encoded at another rate (Old Head: 184,421 frames at 29.97 fps
-against a 368,837-frame 59.94 fps mask) is in a different frame space. Unequal counts refuse, naming the day, both counts and the difference. A
+against a 368,837-frame 59.94 fps mask) is in a different frame space. When nothing else can
+count such a day, its `mask_frame_count_unknown` reason names both rates (row key `rate_note`;
+`tests/test_mask_gate_master_rate.py`), so a master set aside for its rate is not read as one
+that could not be probed. Unequal counts refuse, naming the day, both counts and the difference. A
 missing sidecar, a missing count, episodes that are not the recorded ones, or no probeable
 container refuses too, as
 `mask_frame_count_unknown` (fail closed). Each refused day gets one `mask_index_mismatch` incident
