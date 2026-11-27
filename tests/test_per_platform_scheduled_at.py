@@ -39,16 +39,19 @@ def _media(short_index: int) -> MediaFingerprint:
 
 
 def _post(short_index: int):
+    # A place of its own: two Shorts naming one place by the same title would send
+    # one description, which enqueue refuses (``youtube_distinct``).
+    place = ("County Kerry", "County Cork")[(short_index - 1) % 2]
     return SimpleNamespace(
         short_index=short_index,
-        caption="Rolling through County Kerry today",
-        youtube_title=f"County Kerry Drive #{short_index}",
+        caption=f"Rolling through {place} today",
+        youtube_title=f"{place} Drive #{short_index}",
         youtube_category="24",
-        youtube_tags="County Kerry,road trip",
+        youtube_tags=f"{place},road trip",
         youtube_description="A short drive through the hills.",
         tiktok_title=f"tt {short_index}",
-        sampled_regions=["County Kerry, Munster"],
-        title_decision=decide_title("short", f"County Kerry Drive #{short_index}", None, suffix=""),
+        sampled_regions=[f"{place}, Munster"],
+        title_decision=decide_title("short", f"{place} Drive #{short_index}", None, suffix=""),
     )
 
 

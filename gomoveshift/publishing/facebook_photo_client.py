@@ -64,6 +64,14 @@ class PhotoUploadUnknownError(Exception):
         self.photo_id = None
 
 
+class PhotoUploadAuthBlockedError(PhotoUploadUnknownError):
+    """The photo POST was refused for the Page token itself (HTTP 401, or Graph
+    code 190 and its subcodes). Still unconfirmed, so it authorizes no other
+    POST either; carries nothing from the response."""
+
+    queue_state = "auth_blocked"  # what ``queue.is_auth_blocked`` reads
+
+
 class PhotoReadbackUnknownError(Exception):
     """Status is unconfirmed; preserve known IDs and repeat only reads."""
 
@@ -97,6 +105,13 @@ class PhotoCommentUnknownError(Exception):
         self.story_id = story_id
 
 
+class PhotoCommentAuthBlockedError(PhotoCommentUnknownError):
+    """The first comment's read or write was refused for the Page token itself;
+    still unconfirmed, and no comment call works until someone re-authorizes."""
+
+    queue_state = "auth_blocked"  # what ``queue.is_auth_blocked`` reads
+
+
 #: Comment text bound for the approved first comment.
 COMMENT_LIMIT = 1000
 #: Pages of comments (100 each) read for an existing copy before posting.
@@ -109,7 +124,7 @@ class _UnconfirmedError(Exception):
     """Internal marker carrying no untrusted response details."""
 
 
-class _TokenRefusedError(_UnconfirmedError):
+class _TokenAuthBlockedError(_UnconfirmedError):
     """Internal marker: Graph refused the token (no response details kept)."""
 
 
@@ -175,7 +190,7 @@ class FacebookPagePhotoClient:
             **kwargs,
         )
         if response.status_code != 200:
-            raise _TokenRefusedError if _token_refused(response) else _UnconfirmedError
+            raise _TokenAuthBlockedError if _token_refused(response) else _UnconfirmedError
         body = response.json()
         if not isinstance(body, dict) or "error" in body:
             raise _UnconfirmedError
@@ -225,9 +240,11 @@ class FacebookPagePhotoClient:
             return PhotoUploadReceipt(
                 photo_id, self._page_id, digest, published, self._version, version
             )
+        except _TokenAuthBlockedError:
+            refused = True
         except Exception:  # noqa: BLE001 -- a write without a receipt must stay unknown
-            pass
-        raise PhotoUploadUnknownError(self._page_id)
+            refused = False
+        raise (PhotoUploadAuthBlockedError if refused else PhotoUploadUnknownError)(self._page_id)
 
     def read_status(self, receipt: PhotoUploadReceipt) -> PhotoStatus:
         """Read the exact Photo's story and verify publication and Page owner.
@@ -262,7 +279,7 @@ class FacebookPagePhotoClient:
             ):
                 raise _UnconfirmedError
             return PhotoStatus(receipt.photo_id, story_id, self._page_id, published)
-        except _TokenRefusedError:
+        except _TokenAuthBlockedError:
             raise PhotoReadbackAuthBlockedError(self._page_id, receipt.photo_id, story_id) from None
         except Exception:  # noqa: BLE001 -- readback cannot authorize repeating a write
             pass
@@ -319,6 +336,10 @@ class FacebookPagePhotoClient:
             if not _matches(comment_id, _COMMENT_ID):
                 raise _UnconfirmedError
             return comment_id
+        except _TokenAuthBlockedError:
+            refused = True
         except Exception:  # noqa: BLE001 -- an unconfirmed comment must stay unknown
-            pass
-        raise PhotoCommentUnknownError(self._page_id, story_id)
+            refused = False
+        raise (PhotoCommentAuthBlockedError if refused else PhotoCommentUnknownError)(
+            self._page_id, story_id
+        )

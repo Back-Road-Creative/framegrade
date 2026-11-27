@@ -56,6 +56,8 @@ from .queue import NEXT_ATTEMPT_RETRY_BACKOFF as RETRY_BACKOFF
 from .queue import PUBLISHED_AT_PLATFORM_CONFIRMED as CONFIRMED
 from .queue import PUBLISHED_AT_PLATFORM_RECONCILED as RECONCILED
 from .response_policy import Status, consecutive_healthy_days, daily_cap_for, should_auto_pause
+from .youtube_distinct import HOLD_ERROR_CLASS as NEAR_DUPLICATE_HOLD
+from .youtube_distinct import hold_near_duplicate_rows
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +135,8 @@ _WAITING_STATUSES = (
     _STATUS_DEFERRED,
     STATUS_AWAITING_IG_RECONCILE,
     _STATUS_AWAITING_FACEBOOK_RECONCILE,
+    # The YouTube adapter parks a near-identical Short here (``youtube_distinct``).
+    STATUS_NEEDS_OPERATOR,
 )
 #: Never selected by the drain whatever their ``next_attempt_at``: each waits
 #: on something other than a retry time (a person; the account scan).
@@ -314,6 +318,9 @@ class DrainResult:
     #: YouTube Shorts moved to the next free slot because another Short already
     #: held that clock hour (this pass or the queue).
     moved_same_hour: int = 0
+    #: Queued YouTube rows held this pass: their title or description is near-identical
+    #: to another post on the channel (``youtube_distinct.hold_near_duplicate_rows``).
+    held_near_duplicate: int = 0
     #: Due deliveries left queued because their platform already had its one
     #: post this pass. NOT a failure or a hold: no lease, no transition, no
     #: attempt charged; the next pass takes the next one.
@@ -1033,6 +1040,7 @@ def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = N
         cutoff = (datetime.fromisoformat(now) - UNCOUNTED_RETRY_BOUND).isoformat()
         stuck = conn.execute(
             "SELECT id, platform, project_name, short_index, attempt_count, error_detail, "  # noqa: S608
+            "error_class, "
             "CASE WHEN status = ? OR uncounted_since <= ? THEN ? ELSE ? END AS kind "
             "FROM deliveries WHERE (status = ? OR uncounted_since <= ? OR "
             "(error_class = 'TransientMediaError' AND attempt_count >= ?)) "
@@ -1069,6 +1077,8 @@ def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = N
                     f"media unreadable for {r['attempt_count']} attempts "
                     "(backoff at its ceiling); still retrying"
                 )
+            elif r["error_class"] == NEAR_DUPLICATE_HOLD:
+                what = "held before upload: its text is near-identical to another post"
             else:
                 what = (
                     f"retried {UNCOUNTED_RETRY_BOUND} without an outcome, outside "
@@ -1223,6 +1233,14 @@ def drain_queue(
         backoff_cap_seconds=backoff_cap_seconds,
         max_attempts=max_attempts,
     )
+    if "youtube" in handlers:
+        try:
+            held = hold_near_duplicate_rows(conn, now=now)
+        except Exception:  # noqa: BLE001 -- the publish-time re-check still guards each insert
+            logger.exception("dispatch: near-duplicate sweep failed")
+            held = []
+        result.held_near_duplicate = len(held)
+        result.errors.extend(f"youtube#{i}: held: near-identical text" for i in held)
     released_hours: set = set()
     sent_platforms: set = set()
     unreadable: List[Dict[str, Any]] = []

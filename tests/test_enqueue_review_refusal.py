@@ -80,8 +80,9 @@ def test_plan_builder_drops_an_unreviewable_tag_and_the_short_passes():
 
 
 def test_refused_short_is_not_enqueued_and_raises_an_incident(tmp_path, conn, incidents):
-    # Its own title: enqueue refuses a second Short with one already queued.
-    third = _short(3, title="Drive County Kerry")
+    # Its own title and description: enqueue refuses a second Short with either
+    # already queued, and a stamped title's description carries its stamp.
+    third = _short(3, title="Aug 20, 3rd stretch: County Kerry")
     sidecar = _sidecar(tmp_path, _short(1), _short(2, tags=(BAD_TAG,)), third)
     result = enqueue_from_plan_sidecar(conn, sidecar)
     assert _indexes(conn) == [1, 3]

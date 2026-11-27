@@ -1288,13 +1288,14 @@ class SocialGenerator:
             bodies = arm_bodies
         start = (facts.ordinal + self._project_seed(seed_suffix)) % len(bodies)
 
+        from ..publishing.youtube_distinct import NearIndex
         from .longform_metadata import load_published_titles
 
-        published = {t.strip().lower() for t in load_published_titles()}
+        published = NearIndex(load_published_titles())
         for offset in range(len(bodies)):
             body = bodies[(start + offset) % len(bodies)]
             candidate = f"{stamp}: {body.format_map(slots)}"[:max_len]
-            if candidate.strip().lower() not in published:
+            if candidate not in published:
                 return candidate
         return f"{stamp}: {bodies[start].format_map(slots)}"[:max_len]
 
@@ -1306,17 +1307,18 @@ class SocialGenerator:
         keeps a Short off the bare "Virginia to Pennsylvania"); ``""`` when none
         is left."""
         from ..publishing.anti_spam_gate import text_opener_key, title_prefix_key
+        from ..publishing.youtube_distinct import NearIndex
         from .longform_metadata import load_published_titles
 
         published_titles = load_published_titles()
-        published = {t.strip().lower() for t in published_titles}
         used = self._used_titles.get(seed_suffix, set())
+        # Near-identical, not only equal: "Tryon" is taken by a published "Tryon drive".
+        taken = NearIndex([*published_titles, *used])
         used_prefixes = {k for k in map(title_prefix_key, [*used, *published_titles]) if k}
         # The queue gate refuses a title whose whole opener key a spooled text already holds.
         spooled = set(self._spooled_opener_keys().get("youtube", []))
         for body in dict.fromkeys(b.strip() for b in bodies if b and b.strip()):
-            key = body.lower()
-            if len(body) > max_len or key in published or key in used:
+            if len(body) > max_len or body in taken:
                 continue
             if text_opener_key(body) in spooled:
                 continue

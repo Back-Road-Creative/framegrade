@@ -84,8 +84,9 @@ def _record(short_index=3, selected=("youtube",), media=None, payloads=None):
 
 def _titled(short_index):
     """A YouTube payload with a title of its own: enqueue refuses a second Short
-    whose normalised title another live row already holds."""
-    return PlatformPayloads(youtube=YouTubePayload(f"t{short_index}", "d"))
+    whose normalised title, or a near-identical description (``youtube_distinct``),
+    another live row already holds."""
+    return PlatformPayloads(youtube=YouTubePayload(f"t{short_index}", f"d{short_index}"))
 
 
 def _sidecar(out_dir, *records):

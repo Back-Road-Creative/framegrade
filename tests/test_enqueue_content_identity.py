@@ -44,7 +44,7 @@ def _plan(tmp_path, name, *records):
 
 def _short(index, title, media_index=None, project="proj"):
     record = _record(short_index=index, media=_media_for(media_index or index), payloads=_titled(0))
-    payloads = PlatformPayloads(youtube=YouTubePayload(title, "d"))
+    payloads = PlatformPayloads(youtube=YouTubePayload(title, f"{title}, described"))
     return dataclasses.replace(record, project_name=project, payloads=payloads)
 
 

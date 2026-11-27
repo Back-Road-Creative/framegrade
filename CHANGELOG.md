@@ -5,6 +5,24 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.178] - 2026-11-27
+
+### Fixed
+
+- A refused Facebook Page token now pauses Facebook when the Page photo upload or its first comment, the Reel delivery's upload or reconcile read, or the read-back of a just-posted first comment meets it. Before, each held the post as an unknown outcome, or logged the refusal and went on. Held attempts stay held, and no write is repeated.
+- The publish gate's blur-mask frame check can count a finished day again. The encode deletes the raw concat and the master-drop deletes the master, so a day refused every publish as `mask_frame_count_unknown` (rec0060, Kerry-to-Cork). The day's recorded episode files now stand in for the raw, summed, but only when their fingerprints match the colour cache's record.
+- A master encoded at a different frame rate from the mask no longer reads as a mismatch. Old Head's half-rate master (184,421 frames) was compared with its 368,837-frame mask. Such a master is now not used as the source count, and the gate stays fail-closed.
+- No two YouTube posts on one channel carry near-identical titles or descriptions. Enqueue refuses a Short whose title or sent description is near-identical to a queued or recently published row (a `near_duplicate_text_refused` incident), the YouTube adapter re-checks right before each insert, and each drain pass holds the later of two colliding queued rows at `needs_operator` with the reason. A stamped Short's reviewed description now carries its stamp, so the Shorts of one drive that name one place no longer all send "Drive through <place>", and a Short title is never one a published title says in other words.
+
+## [0.3.177] - 2026-11-27
+
+### Fixed
+
+- `metrics growth-review` matches `creatorContentType` values whatever their case or underscores (`VIDEO_ON_DEMAND`, `videoOnDemand`), so long-form watch hours and Shorts views are counted. An Analytics answer with rows but no known content type now logs `PARTNER_PROGRESS_UNMAPPED` and reports the counts as unmeasured instead of 0.
+- A refused token met after an upload went through now pauses the platform too: YouTube's post-upload check and playlist assign no longer log it and publish the Short unchecked, and a Facebook reel's read-back after finish pauses Facebook at once instead of a pass later. The row keeps its upload id and is reconciled, never uploaded again, once the platform is resumed.
+- A host worker restart, deploy or unit change no longer kills a running render. Each job runs in its own transient unit (`gms-job-<id>`), or in its own session where systemd refuses one, under `gomoveshift.hostworker.launch`. A stopping worker signals no job, and the next worker re-adopts each running job and only watches it, never relaunching it. The worker writes `capabilities.json` so host-reconcile knows it may restart it at once.
+- The worker runs two claim loops (`GMS_HOST_WORKER_LANES`, default 2): drive requests in their own lane and everything else in the other, so a short job no longer waits behind a render. The launcher now takes the GPU lock for non-drive jobs, and a busy lock still sends the request back to pending as `queued` (note 191).
+
 ## [0.3.176] - 2026-11-27
 
 ### Fixed
@@ -1998,7 +2016,9 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...HEAD
+[0.3.178]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...v0.3.178
+[0.3.177]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...v0.3.177
 [0.3.176]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...v0.3.176
 [0.3.175]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...v0.3.175
 [0.3.174]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...v0.3.174

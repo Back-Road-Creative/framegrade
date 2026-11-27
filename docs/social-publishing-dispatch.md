@@ -148,9 +148,12 @@ recoverable, never duplicated.
     drain runs (the Facebook photo reconciler too), and every other platform
     pass pauses the same way. `tests/test_auth_pause_passes.py` fails on a new
     per-row `except Exception` there that routes no refusal, and on any broad
-    `except` in a `publishing/*_adapter.py` that carries on without routing
-    one: a refusal after the upload (YouTube's post-upload check and playlist
-    assign, the Facebook reel read-back) pauses too, the row keeping its id.
+    `except` anywhere in `gomoveshift/publishing` that carries on without
+    routing one (catches that never call a platform are listed, each with its
+    reason): a refusal after the upload (YouTube's post-upload check and
+    playlist assign, the Facebook reel read-back) pauses too, the row keeping
+    its id, and so does one met by the Page photo client and delivery, the
+    Reel delivery or the first-comment read-back.
   - **TikTok**: no dedicated permanent exception subclass exists —
     `TikTokAdapterError` covers both transient and permanent failures with
     no way to tell them apart by type, so per the conservative default

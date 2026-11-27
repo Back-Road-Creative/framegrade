@@ -55,7 +55,7 @@ def _record(short_index, title, sampled_regions=("a",)):
         sampled_regions=sampled_regions,
         parent_lf_video_id="vid",
         parent_lf_publish_at=SCHEDULED,
-        payloads=PlatformPayloads(youtube=YouTubePayload(title, "a real description")),
+        payloads=PlatformPayloads(youtube=YouTubePayload(title, f"A real description of {title}")),
         consent_hash="c",
         reviewed_plan_hash="HASH1",
         routes=RouteSelection(selected=("youtube",)),

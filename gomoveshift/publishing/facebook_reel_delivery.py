@@ -15,7 +15,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from urllib.parse import urlsplit
 
-from .facebook_adapter import FacebookReelsAdapter, UploadHandle, reel_permalink
+from .facebook_adapter import (
+    FacebookAuthBlockedError,
+    FacebookReelsAdapter,
+    UploadHandle,
+    reel_permalink,
+)
 from .models import FacebookPayload
 
 
@@ -25,6 +30,14 @@ class ReelAuthorizationError(Exception):
 
 class ReelDeliveryPendingError(Exception):
     """Retained attempt needs reconciliation, never a blind write retry."""
+
+
+class ReelDeliveryAuthBlockedError(ReelDeliveryPendingError):
+    """Still retained for reconciliation, and Facebook refused the Page token:
+    the drain pauses Facebook (``queue.is_auth_blocked``) until someone
+    re-authorizes."""
+
+    queue_state = "auth_blocked"
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,10 +326,14 @@ class FacebookReelDelivery:
             ):
                 raise ValueError("publication outcome unknown")
             return self._confirm(identifier, "finish_confirmed")
+        except FacebookAuthBlockedError:
+            failed = refused = True
         except Exception:
-            failed = True
+            failed, refused = True, False
         if failed:
-            raise ReelDeliveryPendingError("Reel write outcome retained; reconcile without retry")
+            raise (ReelDeliveryAuthBlockedError if refused else ReelDeliveryPendingError)(
+                "Reel write outcome retained; reconcile without retry"
+            )
         raise AssertionError("unreachable")
 
     def _confirm(self, identifier, evidence):
@@ -349,8 +366,12 @@ class FacebookReelDelivery:
             if not isinstance(result, dict) or result.get("published") is not True:
                 raise ValueError("publication not confirmed")
             return self._confirm(identifier, "status_confirmed")
+        except FacebookAuthBlockedError:
+            failed = refused = True
         except Exception:
-            failed = True
+            failed, refused = True, False
         if failed:
-            raise ReelDeliveryPendingError("Reel publication remains unconfirmed")
+            raise (ReelDeliveryAuthBlockedError if refused else ReelDeliveryPendingError)(
+                "Reel publication remains unconfirmed"
+            )
         raise AssertionError("unreachable")

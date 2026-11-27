@@ -27,11 +27,11 @@ def incidents():
     return Path(os.environ["GMS_HEALTH_INCIDENTS_DIR"])
 
 
-def make_day(stages: Path, sidecar=306385, raw=True, date=DATE) -> Path:
+def make_day(stages: Path, sidecar=306385, raw=True, date=DATE, fps=59.9386) -> Path:
     day = stages / f"day_{date}"
     day.mkdir(parents=True)
     if sidecar is not None:
-        head = {"schema": "redactcam.timeline/v1", "source_hash": "x"}
+        head = {"schema": "redactcam.timeline/v1", "source_hash": "x", "source_fps": fps}
         if sidecar:
             head["source_frame_count"] = sidecar
         text = json.dumps(head, indent=2)[:-2] + ',\n  "frame_boxes": {}\n}'
@@ -79,6 +79,83 @@ def test_container_that_cannot_be_probed_is_refused(tmp_path, monkeypatch):
     make_day(tmp_path / "st", raw=False)
     why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry")
     assert why and "mask_frame_count_unknown" in why
+
+
+# ── a finished day: the raw is deleted at encode, the master by cleanup's master-drop ──
+
+
+def finished_day(stages: Path, episodes, sidecar=306385, master=False, record=True) -> Path:
+    """A day with no raw: ``episodes`` maps each ``episode_NN`` stem to its frame count. The colour
+    cache names their fingerprints, as the encode records them."""
+    day = make_day(stages, sidecar=sidecar, raw=False)
+    paths = []
+    for i, name in enumerate(episodes, start=1):
+        path = stages / f"{name}_{DATE}.mp4"
+        path.write_bytes(b"x" * i)
+        paths.append(path)
+    fps = [f"{p.stat().st_size}:{p.stat().st_mtime_ns}" for p in paths] if record else []
+    (day / f"day_{DATE}_color_cache.json").write_text(json.dumps({"source_fingerprints": fps}))
+    if master:
+        (day / f"day_{DATE}_master.mp4").write_bytes(b"")
+    return day
+
+
+def probe_by_name(monkeypatch, counts, rate=None):
+    monkeypatch.setattr(
+        gate, "probe_frames", lambda path: counts.get(Path(path).name.split("_")[1])
+    )
+    monkeypatch.setattr(gate, "probe_rate", lambda path: rate, raising=False)
+
+
+def test_a_finished_day_counts_the_episodes_the_colour_cache_recorded(tmp_path, monkeypatch):
+    finished_day(tmp_path / "st", ["episode_01", "episode_02"], sidecar=306377)
+    probe_by_name(monkeypatch, {"01": 200000, "02": 106377})
+    assert gate.mask_frame_refusal(tmp_path / "st", drive="kerry", record=False) is None
+
+
+def test_a_finished_day_whose_episodes_sum_short_is_a_mismatch(tmp_path, monkeypatch):
+    finished_day(tmp_path / "st", ["episode_01", "episode_02"])
+    probe_by_name(monkeypatch, {"01": 200000, "02": 106377})
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry", record=False)
+    assert why and "mask_frame_count_mismatch" in why and "306377" in why and "+8" in why
+
+
+def test_episodes_the_colour_cache_did_not_record_refuse_unknown(tmp_path, monkeypatch):
+    stages = tmp_path / "st"
+    finished_day(stages, ["episode_01", "episode_02"], sidecar=306377)
+    (stages / f"episode_02_{DATE}.mp4").write_bytes(b"changed")
+    probe_by_name(monkeypatch, {"01": 200000, "02": 106377})
+    why = gate.mask_frame_refusal(stages, drive="kerry", record=False)
+    assert why and "mask_frame_count_unknown" in why
+
+
+def test_a_day_with_no_colour_cache_record_refuses_unknown(tmp_path, monkeypatch):
+    finished_day(tmp_path / "st", ["episode_01"], sidecar=200000, record=False)
+    probe_by_name(monkeypatch, {"01": 200000})
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry", record=False)
+    assert why and "mask_frame_count_unknown" in why
+
+
+def test_a_half_rate_master_is_not_the_masks_frame_space(tmp_path, monkeypatch):
+    """Old Head: a 59.94 fps mask of 368,837 frames against a 29.97 fps master of 184,421."""
+    finished_day(tmp_path / "st", [], sidecar=368837, master=True, record=False)
+    probe_by_name(monkeypatch, {f"{DATE}": 184421}, rate=30000 / 1001)
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="old-head", record=False)
+    assert why and "mask_frame_count_unknown" in why and "mismatch" not in why
+
+
+def test_a_half_rate_master_defers_to_the_recorded_episodes(tmp_path, monkeypatch):
+    finished_day(tmp_path / "st", ["episode_01", "episode_02"], sidecar=368837, master=True)
+    probe_by_name(monkeypatch, {"01": 300000, "02": 68837, f"{DATE}": 184421}, rate=30000 / 1001)
+    assert gate.mask_frame_refusal(tmp_path / "st", drive="old-head", record=False) is None
+
+
+@pytest.mark.parametrize("master_frames, refused", [(306385, False), (306377, True)])
+def test_a_master_at_the_masks_rate_still_counts(tmp_path, monkeypatch, master_frames, refused):
+    finished_day(tmp_path / "st", [], master=True, record=False)
+    probe_by_name(monkeypatch, {f"{DATE}": master_frames}, rate=60000 / 1001)
+    why = gate.mask_frame_refusal(tmp_path / "st", drive="kerry", record=False)
+    assert bool(why) is refused and (not why or "mask_frame_count_mismatch" in why)
 
 
 def test_one_open_incident_across_repeated_ticks_then_resolved_when_counts_agree(
