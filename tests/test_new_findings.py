@@ -6,6 +6,7 @@ and silent OST failure warning.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -358,7 +359,7 @@ class TestDriveUploaderChunksize:
         )
         source = source_path.read_text()
         # Find the _upload_file method and verify chunksize is set
-        assert "chunksize=UPLOAD_CHUNKSIZE" in source
+        assert re.search(r"\bchunksize\s*=\s*UPLOAD_CHUNKSIZE\b", source)
         # Must NOT contain chunksize=-1
         assert "chunksize=-1" not in source
 
