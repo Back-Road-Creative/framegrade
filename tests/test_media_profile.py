@@ -106,9 +106,10 @@ def test_ost_filter_uses_profile_text():
     prof = MediaProfile(brand_text="AcmeCo", website_text="acme.example")
     custom = chain(media_profile=prof)
     assert "AcmeCo" in custom and "acme.example" in custom
-    assert "GoMoveShift" not in custom
+    assert "gomoveshift.com" not in custom
     default = chain()
-    assert "GoMoveShift" in default and "gomoveshift.com" in default
+    assert "GoMoveShift" not in default
+    assert default.count("text='gomoveshift.com'") == 3  # brand, corner URL, closing CTA
     assert chain(media_profile=MediaProfile()) == default
 
 

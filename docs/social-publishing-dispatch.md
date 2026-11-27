@@ -127,16 +127,31 @@ recoverable, never duplicated.
     terminal. `YouTubeQuotaError` and anything else propagate.
   - **Instagram** / **Facebook** (identical shape): `*PermanentError` (incl.
     `UnsafeUploadHostError`, and Facebook's `ScheduleWindowError`, both
-    subclasses) is terminal. `*AuthBlockedError` is ALSO terminal,
-    deliberately: an expired/revoked token is recoverable by a human
-    re-authorizing, never by retrying — the token is still dead on attempt
-    8, so retrying only burns the attempt budget and delays the human
-    noticing. `*RetryableError` / `*PublishingLimitError` (a
+    subclasses) is terminal. `*RetryableError` / `*PublishingLimitError` (a
     shared-quota refusal, which self-heals) propagate.
+  - **A refused access token** (`*AuthBlockedError` on Instagram, Facebook
+    and photos; `TikTokAuthBlockedError` for TikTok's `access_token_invalid`
+    and `scope_not_authorized`) is never a row failure: it blocks every post
+    to that platform, and only a person re-authorizing clears it.
+    `handlers._pause_for_auth` pauses the platform (reason `auth:blocked`),
+    puts the row back to `queued` when nothing of it reached the platform, and
+    raises `PlatformAuthPausedError`, a `ThrottledDeliveryError` (never
+    counted). The drain re-checks the pause before each row, so the platform's
+    other rows stay queued and untouched in the same pass; `health check` rule
+    16 raises one `platform_auth_blocked` incident naming the platform.
+    Resuming the platform lets them go again on the next pass, the row that hit
+    the refusal included: `queue.resume_platform` drops the 6 h throttle delay
+    from rows whose `error_class` is `PlatformAuthPausedError`.
+    On YouTube, `youtube_auth_refused` (a non-retryable `RefreshError` or a
+    401; never a 403) pauses it and the row stays `submitting` for the
+    adapter's reconcile. `dispatch._pause_on_auth` wraps every callable the
+    drain runs (the Facebook photo reconciler too), and every other platform
+    pass pauses the same way. `tests/test_auth_pause_passes.py` fails on a new
+    per-row `except Exception` there that routes no refusal.
   - **TikTok**: no dedicated permanent exception subclass exists —
     `TikTokAdapterError` covers both transient and permanent failures with
     no way to tell them apart by type, so per the conservative default
-    nothing is translated from it; only `confirm_publish`'s own terminal
+    nothing else is translated from it (a refused token is above); only `confirm_publish`'s own terminal
     *return value* (`PublishOutcome.delivery_status ==
     "failed_permanent"`) becomes `PermanentDeliveryError`.
     `TikTokPollTimeoutError` is never translated — a poll timeout is an
@@ -195,7 +210,8 @@ Two handlers return normally without publishing anything. The TikTok inbox
 handler uploads a draft and parks the row at `awaiting_manual_publish`
 (`next_attempt_at=9999-01-01`, reason `awaiting_manual`) for a human to post
 from the app. The YouTube adapter, over its daily upload budget, moves the row
-to `deferred` until the next UTC midnight (reason `platform_deferral`).
+to `deferred` until the next midnight Pacific, when YouTube's quota day resets (reason
+`platform_deferral`).
 
 Without this, a TikTok delivery can read `published` without ever
 being posted. The park kept the drain's lease; the lease expired; the

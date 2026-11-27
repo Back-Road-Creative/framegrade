@@ -590,11 +590,17 @@ def _make_http_error(status_code: int, reason: str | None = None, message: str =
 
 
 @pytest.mark.parametrize(
-    "reason",
-    ["quotaExceeded", "userRateLimitExceeded", "dailyLimitExceeded"],
+    "status,reason",
+    [
+        (403, "quotaExceeded"),
+        (403, "userRateLimitExceeded"),
+        (403, "dailyLimitExceeded"),
+        # videos.insert's badRequest when the channel's daily upload limit is hit.
+        (400, "uploadLimitExceeded"),
+    ],
 )
 def test_403_quota_raises_youtube_quota_error(
-    reason, mock_service, fake_creds_dict, fake_video_file
+    status, reason, mock_service, fake_creds_dict, fake_video_file
 ):
     """403 + quota-class ``reason`` must raise ``YouTubeQuotaError``.
 
@@ -608,7 +614,7 @@ def test_403_quota_raises_youtube_quota_error(
     from gomoveshift.pipeline.exceptions import YouTubeQuotaError
 
     insert_request = MagicMock()
-    insert_request.next_chunk.side_effect = _make_http_error(403, reason=reason)
+    insert_request.next_chunk.side_effect = _make_http_error(status, reason=reason)
     mock_service.videos.return_value.insert.return_value = insert_request
 
     with (

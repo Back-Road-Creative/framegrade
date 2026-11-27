@@ -5,6 +5,60 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.174] - 2026-11-26
+
+### Changed
+
+- The brand line burned into reels, Shorts and long-forms now reads "gomoveshift.com" instead of "GoMoveShift", so viewers see where to find the website, and the route-story film's mark reads "Made with gomoveshift.com". Videos already rendered keep the old text.
+
+### Fixed
+
+- A YouTube Short drained at or after its slot was uploaded private with a `publishAt` already in the past; it now goes up public at once (a future slot is still scheduled), and a Short still not public an hour after its go-public time opens a `youtube_not_public_after_slot` health incident.
+- A YouTube retry more than two hours after a lost-response upload no longer re-uploads the Short: the channel scan looks back to the row's first submit (`first_submitted_at`, a new queue column), and never adopts a video another queue row already owns.
+- YouTube quota refusals, and the channel's daily upload limit (`uploadLimitExceeded`, now recognised), no longer fail a Short after eight tries: they wait as throttled deliveries, and so does a quota refusal on the adapter's `videos.list` checks. The daily upload budget now counts by upload time on YouTube's Pacific-midnight quota day.
+
+## [0.3.173] - 2026-11-26
+
+### Fixed
+
+- Moving a slot from the console now moves it in the publish plan too, so YouTube and Facebook publish at the new time. The time is stored as UTC, and a time with no zone is refused with a message saying so.
+- A delivery whose slot has no zone no longer stops the whole drain pass when it is held.
+- Within a platform, the drain now sends the delivery with the oldest slot first, not the one enqueued first, so a backlog after an outage goes out in slot order.
+- After the queue had been down, the next drain posted every overdue Facebook and Instagram row at once. A drain pass now sends at most one delivery per platform, on every platform; the rest wait for the next pass.
+- One delivery whose slot was written with no time zone, or is not a time at all, could end a whole drain pass. A zoneless slot is now read as UTC, and an unreadable one is held with an incident while the other deliveries go out.
+
+## [0.3.172] - 2026-11-26
+
+### Fixed
+
+- Two YouTube Shorts next to each other by publish slot can no longer name the same place, whatever long-form or drive each came from, and the very same title twice in a row, or one title body on three Shorts in a row, is refused; enqueue and the nightly text sync both check this.
+- The nightly text sync no longer refuses a Short every night for repeating a hand-titled neighbour it cannot vary, takes the next Short's place off its choices, keeps one title ledger across a plan's long-forms, and refuses a Short with no measured clip length instead of titling it "1 seconds".
+- An expired or revoked Facebook, Instagram or TikTok login no longer fails every queued post one by one: the platform pauses, its posts stay queued, and `health check` raises one `platform_auth_blocked` incident naming it.
+- A TikTok chunk upload that fails no longer fails the post: when TikTok provably never got the whole file, the row goes back to queued and the next try starts a fresh upload.
+- A Facebook reel is no longer recorded published just because the finish call returned: it is read back first, and a reel not found, failed in processing or not yet live stays an unknown outcome for the reconcile reads.
+
+## [0.3.171] - 2026-11-26
+
+### Fixed
+
+- A released fix no longer sits pinned but uninstalled while renders run back to back: `health backlog` (a new drive or a confirmed OST resume) and `health publish` now refuse, as `health heal` already did, while the service venv lacks the version the code root pins, so the staging sync's deferred install lands between renders.
+- `health check` raises one `install_deferred` incident when that pinned version has still not been installed after 6 hours.
+- The same footage can no longer be queued twice under two names. A day reel and the drive Short of the same clip (or two reels of two Drive files) used to both publish, because the queue only compared project, Short number and platform. Each queued row now records its video's fingerprint and, on YouTube, its title, and enqueue refuses a Short whose video or title is already queued or published, with a health incident.
+- The nightly queue text sync no longer rewrites a Short title someone edited by hand in the plan. The plan now records the exact title the generator wrote, and only a title still equal to it is regenerated, whatever the edited title looks like.
+- A Short queued with a title-body experiment arm the generator no longer renders is now left as stored, instead of being refused, with an incident filed, every night.
+- A YouTube Short whose video later disappears from the channel no longer stays "published" unnoticed. Every dispatch run now checks a batch of published videos (each at most once a day) and moves one the channel no longer returns, after a second look, to missing with a health alert. A lost-upload recovery no longer adopts a video another queued Short already owns.
+
+## [0.3.170] - 2026-11-26
+
+### Fixed
+
+- The anti-spam shared-prefix check no longer refuses a Short for sharing its opening with its own stored copy: a Short is now told apart by project and Short number, not by its place in the list, and a refusal names the other Short. Two different Shorts with the same opening are still refused.
+- The nightly title sync no longer feeds a sidecar's other Shorts (ones queued under another spelling of the same file path) into the gates when that sidecar cannot be planned or written, so a Short is never checked against its own old text.
+- A delivery whose retries never counted against the 8-try limit (an unknown Facebook outcome, an Instagram container still processing, unreadable media, a platform throttle) no longer retries silently for good: after 24 h it parks at `needs_operator` with its upload ids kept and raises a `delivery_needs_operator` incident.
+- An upload that starts over (an expired Instagram container, a Facebook reel whose finish never ran) now gets a fresh attempt count, and an Instagram container still processing is polled again instead of spending the row's ordinary tries (delivery #391 failed for good this way).
+- `health check` now raises one `social_queue_gap` incident per platform naming the first day within the next 42 days with nothing scheduled in the social queue, so a thin stretch weeks ahead alarms while there is still time to render and enqueue Shorts for it, instead of days before.
+- Every replay of a drive's saved `resume.json` (`health heal`, a confirmed `health backlog` resume, `health publish`, `drive --from-recipe`) now re-resolves its input files first: a gone `--day-gpx` / `--bracket-gpx` takes the `drive_backlog.yaml` row's file and is written back into the recipe, and a gone input with no replacement (GPX, source directory, `--map-inset-bundle`, `--trail-profile`) is refused with the file named instead of launching a drive that dies in pre-flight. Before, `health publish` and `drive --from-recipe` replayed a renamed GPX as written.
+
 ## [0.3.169] - 2026-11-26
 
 ### Fixed
@@ -1929,7 +1983,12 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...HEAD
+[0.3.174]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...v0.3.174
+[0.3.173]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...v0.3.173
+[0.3.172]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...v0.3.172
+[0.3.171]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...v0.3.171
+[0.3.170]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...v0.3.170
 [0.3.169]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.168...v0.3.169
 [0.3.168]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...v0.3.168
 [0.3.167]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...v0.3.167

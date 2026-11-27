@@ -183,8 +183,9 @@ PUBLISHED_AT_OPERATOR_CONFIRMED = "operator_confirmed"  # human click, possibly 
 PUBLISHED_AT_PLATFORM_RECONCILED = "platform_reconciled"  # delayed poll noticed it -- unknown lag
 PUBLISHED_AT_PLATFORM_CONFIRMED = "platform_confirmed"  # publish call returned success -- seconds
 #: The platform ACCEPTED it and named a later time to make it public. The
-#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``,
-#: so its call returning success is not a publication -- calling that
+#: YouTube path uploads with ``publish_at=<scheduled>`` and ``privacy=private``
+#: (a Short already due goes up ``public``, its send time recorded here), so
+#: its call returning success is not a publication -- calling that
 #: ``platform_confirmed`` overstates the evidence by the whole length of the
 #: schedule. This source requires ``platform_published_at``: the claim it makes
 #: is that a specific later time is KNOWN, and without one it says less than
@@ -523,6 +524,15 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_account TEXT")
         if "upload_kind" not in cols:
             conn.execute("ALTER TABLE deliveries ADD COLUMN upload_kind TEXT")
+        if "first_submitted_at" not in cols:
+            # When the row FIRST entered ``submitting`` (set by ``transition``,
+            # never moved). A YouTube retry looks for its own lost upload from
+            # here, not from "now". NULL for rows that predate it: never guessed.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN first_submitted_at TEXT")
+        if "uploaded_at" not in cols:
+            # When ``platform_upload_id`` was first written (``transition``): the
+            # upload moment the YouTube daily budget counts by. NULL for older rows.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN uploaded_at TEXT")
         if "next_attempt_reason" not in cols:
             # NULL for rows written before this column existed. ``retry_delivery``
             # treats a non-NULL next_attempt_at with a NULL reason as the common
@@ -592,6 +602,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "remote_checked_at" not in cols:
+            # When ``youtube_adapter`` last saw this row's video in ``videos.list``;
+            # NULL until it first looks, so an older row is checked first.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN remote_checked_at TEXT")
         if "uncounted_since" not in cols:
             # When the row's current run of retries that never count against
             # ``max_attempts`` began; NULL when it is not in one. Bounds that run
@@ -1088,7 +1102,15 @@ def transition(
         fields["published_at_source"] = published_at_source
     set_cols = ", ".join(f"{k}=?" for k in fields)
     set_clause = f"status=?, updated_at=?{', ' + set_cols if set_cols else ''}"
-    params = [new_status, _now_iso(), *fields.values(), delivery_id, expected_status]
+    params = [new_status, _now_iso(), *fields.values()]
+    if new_status == "submitting":
+        # The first submit only: every later attempt keeps it (COALESCE).
+        set_clause += ", first_submitted_at=COALESCE(first_submitted_at, ?)"
+        params.append(_now_iso())
+    if fields.get("platform_upload_id"):
+        set_clause += ", uploaded_at=COALESCE(uploaded_at, ?)"
+        params.append(_now_iso())
+    params += [delivery_id, expected_status]
     account_guard = ""
     photo_guard = (
         " AND NOT EXISTS (SELECT 1 FROM facebook_photo_attempts WHERE delivery_id=deliveries.id)"
@@ -1234,6 +1256,33 @@ def record_live_publish(
     return True
 
 
+def parse_slot(value: Any) -> datetime:
+    """``value`` read as an ISO-8601 time (a trailing ``Z`` is UTC), or
+    ``ValueError`` naming it. A time with no zone comes back without one:
+    ``normalise_slot`` refuses it, and the drain reads it as UTC."""
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"scheduled_at must be an ISO-8601 timestamp; got {value!r}") from exc
+
+
+def normalise_slot(value: Any) -> str:
+    """``value`` as a UTC ISO-8601 string, the one form ``scheduled_at`` holds.
+
+    ``dispatch._select_due`` compares ``scheduled_at`` with its own UTC ``now``
+    as TEXT, so "09:00-05:00", "14:00Z" or "14:00" with a space would all sort
+    wrong against it even where they parse. A time with no zone is refused, not
+    guessed: it could be Eastern or UTC, and the drain's arithmetic on it raised
+    ``TypeError``."""
+    parsed = parse_slot(value)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"scheduled_at must name its time zone (for example +00:00 or -05:00); "
+            f"got {value!r}, which could be any zone"
+        )
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def reschedule_delivery(
     conn: sqlite3.Connection,
     delivery_id: int,
@@ -1257,18 +1306,16 @@ def reschedule_delivery(
     fire the row before its own wait (backoff, throttle, or deferral) has
     actually elapsed.
 
-    ``scheduled_at`` must be a readable timestamp. The column is TEXT
-    and ``dispatch._select_due`` compares it as a string, so an unparseable
-    value does not fail loudly -- it makes the row never due, or due for ever.
-    Refusing here rather than at any one caller means no caller can write one;
-    ``transition`` guards ``platform_published_at`` the same way."""
+    ``scheduled_at`` must be a readable timestamp with a zone, and is stored
+    as UTC (``normalise_slot``). The column is TEXT and
+    ``dispatch._select_due`` compares it as a string, so an unparseable or
+    differently written value does not fail loudly -- it makes the row never
+    due, or due for ever. Refusing here rather than at any one caller means no
+    caller can write one; ``transition`` guards ``platform_published_at`` the
+    same way. This writes the row only: ``plan_title_sync.move_delivery_slot``
+    moves the publish plan's slot with it."""
     now = now or _now_iso()
-    try:
-        datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"scheduled_at must be an ISO-8601 timestamp; got {scheduled_at!r}"
-        ) from exc
+    scheduled_at = normalise_slot(scheduled_at)
     if _has_live_foreign_lease(conn, delivery_id, now) or facebook_photo_attempt(conn, delivery_id):
         return False
     with conn:
@@ -1296,6 +1343,19 @@ def reschedule_delivery(
         return cur.rowcount == 1
 
 
+#: ``platform_pauses.reason`` of a pause taken because the platform refused its
+#: access token (``handlers._pause_for_auth``); the refusal follows after a
+#: space. ``health check`` raises one ``platform_auth_blocked`` incident for each
+#: platform paused this way and resolves it once the pause is lifted.
+AUTH_BLOCKED_PAUSE_REASON = "auth:blocked"
+
+#: ``deliveries.error_class`` of a row the drain held back because its platform
+#: was auth-paused (``handlers.PlatformAuthPausedError``). That row is pushed out
+#: by the throttle delay like any other throttle; ``resume_platform`` makes it due
+#: again at once.
+AUTH_PAUSED_ERROR_CLASS = "PlatformAuthPausedError"
+
+
 def pause_platform(
     conn: sqlite3.Connection,
     platform: str,
@@ -1312,7 +1372,8 @@ def pause_platform(
     platform name rather than creating a pause row nothing will ever match.
 
     ``reason`` is optional and free-form (``None`` for a manual console
-    pause, ``"auto:suppressed"`` for the auto-pause path)."""
+    pause, ``"auto:suppressed"`` for the auto-pause path,
+    ``AUTH_BLOCKED_PAUSE_REASON`` for a refused access token)."""
     # Lazy import: queue.py is deliberately independent of publishing.models
     # (see module docstring) except for this one shared vocabulary check.
     from .models import KNOWN_PLATFORMS
@@ -1330,15 +1391,50 @@ def pause_platform(
     return True
 
 
+def is_auth_blocked(exc: BaseException) -> bool:
+    """Whether ``exc`` is a platform refusing its access token. Each adapter's
+    refused-token error (``FacebookAuthBlockedError``, ``InstagramAuthBlockedError``,
+    ``PhotoAuthBlockedError``, ``TikTokAuthBlockedError``) carries
+    ``queue_state = "auth_blocked"``, so callers with no import edge onto the
+    adapters (``dispatch``'s reconcilers, the first-comment drain) can tell."""
+    return getattr(exc, "queue_state", None) == "auth_blocked"
+
+
+def pause_for_auth(conn: sqlite3.Connection, platform: str, exc: BaseException) -> str:
+    """Pause ``platform`` because it refused its access token (reason
+    ``AUTH_BLOCKED_PAUSE_REASON`` and the refusal), so every pass leaves it
+    alone and ``health check`` raises its one ``platform_auth_blocked``
+    incident until someone re-authorizes and resumes it. Returns the bounded
+    refusal text. A platform already paused for its token keeps that pause, so
+    its ``paused_at`` stays the time the block began."""
+    detail = (str(exc).strip() or exc.__class__.__name__)[:2000]
+    held = conn.execute(
+        "SELECT reason FROM platform_pauses WHERE platform=?", (platform,)
+    ).fetchone()
+    if held is None or not (held[0] or "").startswith(AUTH_BLOCKED_PAUSE_REASON):
+        pause_platform(conn, platform, reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    return detail
+
+
 def resume_platform(conn: sqlite3.Connection, platform: str) -> bool:
     """Undo ``pause_platform``: selection resumes with no other side
     effect -- no backfill, no catch-up burst throttle. Rows that piled up
     while paused simply become due again on the next drain pass; if that
     pass is large, that is a real, visible consequence of how long the
     platform was paused, not a bug to mask here. Returns ``False`` (not an
-    error) if the platform wasn't paused."""
+    error) if the platform wasn't paused.
+
+    One exception: the row the drain was on when the platform refused its
+    access token (``error_class`` ``AUTH_PAUSED_ERROR_CLASS``) was given the
+    6 h throttle delay. Lifting the pause means the token was fixed, so that
+    row loses the delay here and is due on the next pass with the rest."""
     with conn:
         cur = conn.execute("DELETE FROM platform_pauses WHERE platform=?", (platform,))
+        conn.execute(
+            f"UPDATE deliveries SET next_attempt_at=NULL, next_attempt_reason=NULL, "  # noqa: S608
+            f"updated_at=? WHERE platform=? AND error_class=? AND status NOT IN {_TERMINAL_SQL}",
+            (_now_iso(), platform, AUTH_PAUSED_ERROR_CLASS),
+        )
         return cur.rowcount == 1
 
 
@@ -1517,6 +1613,23 @@ def mark_missing_remote(
             ),
         )
     return True
+
+
+def mark_remote_checked(conn: sqlite3.Connection, delivery_ids: Iterable[int], now: str) -> None:
+    """Stamp ``remote_checked_at`` on rows whose video ``videos.list`` just returned.
+
+    ``updated_at`` is deliberately left alone: for a legacy published row it is the
+    upper bound ``select_due_first_comments`` uses for the publish moment, so a daily
+    check moving it would keep pushing that row's first comment back."""
+    ids = [int(i) for i in delivery_ids]
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    with conn:
+        conn.execute(
+            f"UPDATE deliveries SET remote_checked_at=? WHERE id IN ({marks})",  # noqa: S608
+            (now, *ids),
+        )
 
 
 def find_delivery(

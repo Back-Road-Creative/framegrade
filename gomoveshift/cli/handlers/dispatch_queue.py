@@ -45,10 +45,16 @@ from ...publishing.models import ShortPublishRecord
 from ...publishing.photo_adapter import PhotoPermanentError
 from ...publishing.photo_image_url import PhotoImageUrlError, image_url_for_media_path
 from ...publishing.plan_io import PublishPlanFormatError, load_publish_plan
-from ...publishing.queue import TERMINAL_STATUSES, open_queue_db
+from ...publishing.queue import (
+    TERMINAL_STATUSES,
+    is_auth_blocked,
+    is_platform_paused,
+    open_queue_db,
+    pause_for_auth,
+)
 from ...publishing.tiktok_pack import reconcile_packed, resolve_pack_dir, sweep_queued
 from ...publishing.tiktok_rendition import ensure_h264_rendition, ensure_instagram_rendition
-from ...publishing.youtube_adapter import confirm_scheduled_live
+from ...publishing.youtube_adapter import confirm_scheduled_live, recheck_published_videos
 from ...publishing.youtube_comments import drain_first_comments
 from .pub_status import VALIDATE_COMMAND, gating_problems, record_ignore_validate
 
@@ -451,6 +457,8 @@ def cmd_dispatch_queue(args, config) -> int:
             reconciler = build_tiktok_reconciler(config, routed)
         except Exception as exc:  # noqa: BLE001
             reconciler = None
+            if is_auth_blocked(exc):
+                _pause_tiktok_for_auth(conn, exc)
             print(f"reconcile: skipped ({exc.__class__.__name__})")
         if reconciler is not None:
             poll, permalink_for = reconciler
@@ -777,16 +785,24 @@ class _LazyYouTubeService:
 
 
 def _confirm_live(conn, config, routed) -> None:
-    """One ``confirm_scheduled_live`` pass per non-dry-run tick (see its docstring)."""
+    """One ``confirm_scheduled_live`` pass and one ``recheck_published_videos``
+    batch per non-dry-run tick (see their docstrings), sharing one lazy client."""
     if "youtube" not in routed:
         logger.info("CONFIRMED_LIVE skipped: youtube is not routed first_party in this run")
         return
+    service = _LazyYouTubeService(config)
     try:
-        count = confirm_scheduled_live(conn, _LazyYouTubeService(config))
+        count = confirm_scheduled_live(conn, service)
     except Exception as exc:  # noqa: BLE001 -- dispatch already ran; the next tick retries
         logger.warning("CONFIRMED_LIVE failed: %s: %s", type(exc).__name__, exc)
+    else:
+        logger.info("CONFIRMED_LIVE count=%d", count)
+    try:
+        gone = recheck_published_videos(conn, service)
+    except Exception as exc:  # noqa: BLE001 -- the next tick asks again
+        logger.warning("PUBLISHED_RECHECK failed: %s: %s", type(exc).__name__, exc)
         return
-    logger.info("CONFIRMED_LIVE count=%d", count)
+    logger.info("PUBLISHED_RECHECK missing_remote=%d", gone)
 
 
 def build_pack_reconciler(config):
@@ -899,6 +915,15 @@ def _meta_comment_factories(config, routed):
     return factories
 
 
+def _pause_tiktok_for_auth(conn, exc: BaseException) -> None:
+    """Pause TikTok for a refused or unrefreshable token, once: a platform
+    already paused keeps its first ``paused_at``, which ``health check``
+    reports as when the block began."""
+    if not is_platform_paused(conn, "tiktok"):
+        detail = pause_for_auth(conn, "tiktok", exc)
+        print(f"tiktok: paused, access token refused: {detail}")
+
+
 def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter"):
     """Construct adapters only for routed platforms — credentials are
     decrypted through SOPS, so an unrouted platform must not pay that cost
@@ -978,23 +1003,36 @@ def _build_routed_handlers(conn, loader, config, routed, *, worker_id="adapter")
 
     if "tiktok" in routed:
         from ...publishing.handlers import TikTokCredentials
-        from ...publishing.tiktok_auth import get_valid_tiktok_credentials
+        from ...publishing.tiktok_auth import TikTokAuthError, get_valid_tiktok_credentials
 
         # Pack mode never calls TikTok: a dead TikTok token must not stop the
         # pass that drains every other platform.
         if resolve_tiktok_mode() == "pack":
             creds = {"access_token": ""}
         else:
-            creds = get_valid_tiktok_credentials(Path(config.seo.credentials_dir))
-        tiktok = (
-            TikTokCredentials(
-                access_token=creds["access_token"],
-                audit_approved=bool(
-                    getattr(config.drive, "publishing_tiktok_audit_approved", False)
+            try:
+                creds = get_valid_tiktok_credentials(Path(config.seo.credentials_dir))
+            except TikTokAuthError as exc:
+                # No token, so no TikTok handler this pass; every other
+                # platform still drains. An expired refresh token pauses
+                # TikTok (its rows stay queued, ``health check`` names it);
+                # any other refresh failure leaves its rows to
+                # ``skipped_no_handler`` on the summary line.
+                creds = None
+                if is_auth_blocked(exc):
+                    _pause_tiktok_for_auth(conn, exc)
+                else:
+                    print(f"tiktok: skipped for this pass ({exc})")
+        if creds is not None:
+            tiktok = (
+                TikTokCredentials(
+                    access_token=creds["access_token"],
+                    audit_approved=bool(
+                        getattr(config.drive, "publishing_tiktok_audit_approved", False)
+                    ),
                 ),
-            ),
-            _read_tiktok_media,
-        )
+                _read_tiktok_media,
+            )
 
     return build_handlers(
         conn,

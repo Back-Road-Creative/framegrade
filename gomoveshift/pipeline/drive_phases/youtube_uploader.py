@@ -23,8 +23,9 @@ Key behaviors:
 - Upload media backstop: see `_enforce_youtube_upload_media_limits`.
 - Quota disambiguation: HTTP
   403s carrying a quota-class ``reason`` (``quotaExceeded``,
-  ``userRateLimitExceeded``, ``dailyLimitExceeded``) raise
-  ``YouTubeQuotaError`` rather than the generic permanent-403 HttpError.
+  ``userRateLimitExceeded``, ``dailyLimitExceeded``), and the 400
+  ``uploadLimitExceeded`` (the channel's daily upload limit), raise
+  ``YouTubeQuotaError`` rather than the generic HttpError.
   Phase D's outer upload loop traps this distinctly from ``RefreshError``
   (auth) and from other 403s (permanent auth failure), banners the
   operator recovery steps, and exits cleanly so the upload batch
@@ -100,6 +101,20 @@ RETRIABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # HTTP status codes that are permanent — never retry
 PERMANENT_STATUS_CODES = {401, 403, 404}
 
+
+def youtube_auth_refused(exc: BaseException) -> bool:
+    """Whether YouTube refused the channel's OAuth token, which only a person
+    re-authorizing clears: a ``RefreshError`` Google does not mark retryable
+    (a revoked or expired grant), or an HTTP 401 the client's own refresh did
+    not clear. A 403 is not one: it is a quota, a missing scope or a refusal
+    of that one video. The YouTube passes pause YouTube on it
+    (``queue.pause_for_auth``), as the Meta and TikTok ones do on
+    ``queue.is_auth_blocked``."""
+    if isinstance(exc, RefreshError):
+        return not getattr(exc, "retryable", False)
+    return isinstance(exc, HttpError) and getattr(exc.resp, "status", None) == 401
+
+
 # HTTP 403 ``reason`` strings that indicate quota / rate-limit exhaustion
 # (recoverable after a time-based backoff) rather than permanent auth
 # failure. YouTube Data API v3 surfaces both classes as 403 but carries
@@ -110,6 +125,10 @@ QUOTA_REASONS = frozenset(
         "quotaExceeded",
         "dailyLimitExceeded",
         "userRateLimitExceeded",
+        # ``videos.insert`` answers ``badRequest (400)`` with this when the
+        # channel's daily upload limit is reached: a platform limit separate
+        # from API quota, lifted by waiting just the same.
+        "uploadLimitExceeded",
     }
 )
 
@@ -513,7 +532,7 @@ class YouTubeUploader:
                 # banner the recovery steps and exit cleanly for resume.
                 # Non-quota 403s fall through to the original permanent
                 # path unchanged — keeps legit auth-failure semantics.
-                if code == 403:
+                if code in (400, 403):
                     quota_reason = _extract_quota_reason(e)
                     if quota_reason is not None:
                         logger.error(
@@ -525,7 +544,7 @@ class YouTubeUploader:
                         )
                         raise YouTubeQuotaError(
                             reason=quota_reason,
-                            status_code=403,
+                            status_code=code,
                             http_error=e,
                         ) from e
                 # HTTP 401 — refresh-and-retry once.

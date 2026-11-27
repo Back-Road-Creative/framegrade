@@ -405,3 +405,104 @@ def test_recent_platform_texts_reads_spooled_sidecar_text(tmp_path):
     assert recent_platform_texts(conn, now=now, exclude_projects={"proj"}) == {}
     assert recent_platform_texts(conn, now=now + timedelta(days=61)) == {}
     conn.close()
+
+
+# -- neighbour-place: the Shorts either side by scheduled slot -----------------------------
+
+
+def _placed(project, lf_index, short_index, hours, title, reason="distinct"):
+    """A YouTube Short of ``project``/LF ``lf_index`` slotted ``hours`` after SCHEDULED whose
+    title names ``title``, recorded by its generator with ``reason``."""
+    from dataclasses import replace
+    from datetime import timedelta
+
+    record = _record(short_index, youtube=_yt(f"{title} #Shorts"), sampled_regions=("Polk",))
+    return replace(
+        record,
+        project_name=project,
+        lf_index=lf_index,
+        schedule=ScheduleWindow(SCHEDULED + timedelta(hours=hours), "America/Chicago"),
+        place_variety={"title": {"body": title, "reason": reason, "kind": "town"}},
+    )
+
+
+def _two_measured(monkeypatch):
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator,
+        "measured_places",
+        lambda *a, **k: [("town", "Tryon"), ("town", "Saluda"), ("county", "Polk County")],
+    )
+
+
+def _neighbour(violations):
+    return sorted(v.index for v in violations if v.rule == "neighbour-place")
+
+
+def test_consecutive_shorts_from_different_long_forms_cannot_share_a_title_place(monkeypatch):
+    _two_measured(monkeypatch)
+    batch = [_placed("drive-a", 1, 5, 0, "Tryon"), _placed("drive-b", 2, 1, 24, "Tryon")]
+    assert _neighbour(check_batch(batch, per_location_cap=None, queued_youtube=[])) == [0, 1]
+    # the same with the neighbour already in the queue, from another sidecar
+    queued = [(SCHEDULED + _hours(24), _placed("drive-b", 2, 1, 24, "Tryon"))]
+    found = check_batch(batch[:1], per_location_cap=None, queued_youtube=queued)
+    assert _neighbour(found) == [0] and "next YouTube Short" in found[-1].detail
+
+
+def test_non_adjacent_and_no_alternative_repeats_pass(monkeypatch):
+    _two_measured(monkeypatch)
+    apart = [
+        _placed("drive-a", 1, 5, 0, "Tryon"),
+        _placed("drive-c", 1, 1, 12, "Saluda"),
+        _placed("drive-b", 2, 1, 24, "Tryon"),
+    ]
+    assert _neighbour(check_batch(apart, per_location_cap=None, queued_youtube=[])) == []
+    sanctioned = [
+        _placed("drive-a", 1, 5, 0, "Tryon", reason="no_alternative"),
+        _placed("drive-b", 2, 1, 24, "Tryon", reason="no_alternative"),
+    ]
+    assert _neighbour(check_batch(sanctioned, per_location_cap=None, queued_youtube=[])) == []
+
+
+def test_the_neighbour_rule_runs_only_with_the_queue_and_skips_shorts_already_out(monkeypatch):
+    _two_measured(monkeypatch)
+    batch = [_placed("drive-a", 1, 5, 0, "Tryon"), _placed("drive-b", 2, 1, 24, "Tryon")]
+    assert _neighbour(check_batch(batch, per_location_cap=None)) == []
+    later = SCHEDULED + _hours(1)
+    assert _neighbour(check_batch(batch, per_location_cap=None, queued_youtube=[], now=later)) == []
+
+
+def _hours(n):
+    from datetime import timedelta
+
+    return timedelta(hours=n)
+
+
+def _titled(project, lf_index, short_index, hours, title):
+    from dataclasses import replace
+
+    record = _placed(project, lf_index, short_index, hours, "Virginia to Pennsylvania")
+    return replace(record, payloads=PlatformPayloads(youtube=_yt(f"{title} #Shorts")))
+
+
+def test_three_consecutive_shorts_never_all_carry_one_state_to_state_body(monkeypatch):
+    _two_measured(monkeypatch)
+    body = "Virginia to Pennsylvania"
+    run = [
+        _titled("drive-a", 1, 11, 0, f"Mar 5, 11th stretch: {body}"),
+        _titled("drive-a", 2, 12, 12, f"Mar 5, 12th stretch: {body}"),
+        _titled("drive-b", 1, 1, 24, f"Mar 6, 1st stretch: {body}"),
+    ]
+    found = check_batch(run, per_location_cap=None, queued_youtube=[])
+    assert [v.index for v in found if v.rule == "repeated-title"] == [1]
+    # a varied body in the middle breaks the run; the same whole title twice never passes
+    run[1] = _titled("drive-a", 2, 12, 12, f"Mar 5, 12th stretch: 38 seconds, {body}")
+    assert not [
+        v
+        for v in check_batch(run, per_location_cap=None, queued_youtube=[])
+        if v.rule == "repeated-title"
+    ]
+    twice = [_titled("drive-a", 1, 11, 0, body), _titled("drive-b", 1, 1, 24, body)]
+    found = check_batch(twice, per_location_cap=None, queued_youtube=[])
+    assert sorted(v.index for v in found if v.rule == "repeated-title") == [0, 1]

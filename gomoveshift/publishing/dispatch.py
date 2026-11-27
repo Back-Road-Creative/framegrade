@@ -39,8 +39,11 @@ from .queue import (
     TERMINAL_STATUSES,
     acquire_lease,
     get_platform_daily_cap,
+    is_auth_blocked,
     is_platform_paused,
     log_response,
+    parse_slot,
+    pause_for_auth,
     pause_platform,
     reschedule_delivery,
     set_platform_daily_cap,
@@ -68,6 +71,11 @@ _DEFAULT_LEASE_SECONDS = 300
 #: idle queue.
 HELD_PAST_SLOT_MARGIN = timedelta(hours=2)
 HELD_PAST_SLOT_KIND = "delivery_held_past_slot"
+#: A due row whose ``scheduled_at`` cannot be read as a time at all. It is held
+#: (never sent: nobody knows when it was meant to go) and named once.
+UNREADABLE_SLOT_KIND = "delivery_slot_unreadable"
+#: Where a row with no ``scheduled_at`` sorts: due now, so oldest of all.
+_NO_SLOT = datetime.min.replace(tzinfo=timezone.utc)
 
 #: Backoff base/cap and the retry bound. Instagram's 100-posts/24h quota is
 #: account-wide — a stuck delivery must cost
@@ -313,6 +321,13 @@ class DrainResult:
     #: Queued YouTube rows held this pass: their title or description is near-identical
     #: to another post on the channel (``youtube_distinct.hold_near_duplicate_rows``).
     held_near_duplicate: int = 0
+    #: Due deliveries left queued because their platform already had its one
+    #: post this pass. NOT a failure or a hold: no lease, no transition, no
+    #: attempt charged; the next pass takes the next one.
+    spaced_one_per_pass: int = 0
+    #: Due deliveries held because their ``scheduled_at`` is not a readable
+    #: time. Same contract as the other holds; each raises one incident.
+    held_unreadable_slot: int = 0
     #: Subset of `retried`, counted separately: a throttled pass is a
     #: standing instruction to a human, not queue noise.
     throttled: int = 0
@@ -352,6 +367,22 @@ class DrainResult:
         return self.held_privacy_unverified > 0
 
 
+def _slot_time(value: Any) -> Optional[datetime]:
+    """A stored slot as an aware time, the one way dispatch reads one: ``None``
+    when unset, a zoneless time read as UTC (rows written before
+    ``queue.normalise_slot``). An unreadable one raises ``ValueError``;
+    ``_select_due`` holds such a row back, so nothing after it meets one."""
+    if not value:
+        return None
+    parsed = parse_slot(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _slot_order(row: Dict[str, Any]) -> Tuple[datetime, int]:
+    """Oldest slot first (no slot is oldest of all), then ``id``."""
+    return (_slot_time(row.get("scheduled_at")) or _NO_SLOT, row["id"])
+
+
 def _select_due(
     conn,
     now: str,
@@ -359,6 +390,7 @@ def _select_due(
     platform: Optional[str] = None,
     status: Optional[str] = None,
     scheduled_through: Optional[str] = None,
+    unreadable: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Non-terminal, NON-SHADOW rows whose ``next_attempt_at`` AND
     ``scheduled_at`` have both arrived (or are unset). Read-only; no
@@ -411,7 +443,12 @@ def _select_due(
     TikTok pack sweep (``tiktok_pack.sweep_queued``) packs files up to nine
     days before their slot, yet must still honour the pause, shadow, backoff,
     blackout, quiet-window and daily-cap rules above. ``now`` stays the clock
-    for the backoff, the quiet window and the caps."""
+    for the backoff, the quiet window and the caps.
+
+    A row whose ``scheduled_at`` is not a readable time is left out too, and
+    appended to ``unreadable`` when the caller passes a list (the drain raises
+    an incident for it). Every later step parses the slot; one bad row there
+    used to raise and end the whole pass."""
     conditions = [f"status NOT IN {_TERMINAL_SQL}", "shadow = 0"]
     params: List[Any] = []
     if status is None:
@@ -432,7 +469,15 @@ def _select_due(
         "SELECT * FROM deliveries WHERE " + " AND ".join(conditions) + " ORDER BY id",  # noqa: S608
         params,
     ).fetchall()
-    due = [dict(row) for row in rows]
+    due = []
+    for row in map(dict, rows):
+        try:
+            _slot_time(row.get("scheduled_at"))
+        except ValueError:
+            if unreadable is not None:
+                unreadable.append(row)
+            continue
+        due.append(row)
     due = _exclude_blackout(due, now)
     due = _exclude_quiet_window(conn, due, now)
     return _apply_daily_caps(conn, due, now)
@@ -446,11 +491,8 @@ def _exclude_blackout(due: List[Dict[str, Any]], now: str) -> List[Dict[str, Any
     now_date = datetime.fromisoformat(now).date()
     kept = []
     for row in due:
-        scheduled_at = row.get("scheduled_at")
-        if scheduled_at:
-            row_date = datetime.fromisoformat(scheduled_at).date()
-        else:
-            row_date = now_date
+        slot = _slot_time(row.get("scheduled_at"))
+        row_date = slot.date() if slot else now_date
         if row_date in blackout_dates:
             continue
         kept.append(row)
@@ -582,6 +624,37 @@ def _detail(exc: BaseException) -> str:
     """
     text = str(exc).strip() or exc.__class__.__name__
     return text[:_ERROR_DETAIL_MAX]
+
+
+class PlatformAuthPausedError(ThrottledDeliveryError):
+    """A throttle whose cause is a refused access token: the platform is now
+    paused. Its own class name (``queue.AUTH_PAUSED_ERROR_CLASS``) is what lets
+    ``queue.resume_platform`` drop the throttle delay from the row it hit."""
+
+
+def _pause_on_auth(conn, handler: Optional[Callable[[Dict[str, Any]], None]]):
+    """``handler``, but a refused access token it lets escape
+    (``queue.is_auth_blocked``) pauses the platform and becomes a
+    ``PlatformAuthPausedError``. The handlers translate their own adapters'
+    refusals (``handlers._pause_for_auth``); this is the net under every
+    other callable the drain runs, the Facebook photo reconciler included.
+    The row keeps its status: only the handler knows whether it is safe to
+    put back to ``queued``."""
+    if handler is None:
+        return None
+
+    def wrapped(row: Dict[str, Any]) -> None:
+        try:
+            handler(row)
+        except Exception as exc:
+            if not is_auth_blocked(exc):
+                raise
+            detail = pause_for_auth(conn, row["platform"], exc)
+            raise PlatformAuthPausedError(
+                f"{row['platform']} paused, access token refused: {detail}"
+            ) from exc
+
+    return wrapped
 
 
 #: What an interrupted attempt records instead of an exception class. There is
@@ -877,17 +950,37 @@ def _raise_held_incident(
     """One incident per delivery held past its slot by more than the margin.
 
     Never rewritten while open (the row is skipped if its file exists unresolved),
-    never fatal: an unwritable incidents dir must not stop the drain. ``pushed``
-    stays False; ``health check``'s generic ``detail`` fallback pushes it."""
+    never fatal: an unwritable incidents dir, or a ``scheduled_at`` written
+    before ``queue.normalise_slot`` (unreadable, or with no zone, which made the
+    subtraction raise ``TypeError``), must not stop the drain. A zoneless time
+    is read as UTC (``_slot_time``). ``pushed`` stays
+    False; ``health check``'s generic ``detail`` fallback pushes it."""
     scheduled_at = row.get("scheduled_at")
-    if not scheduled_at:
-        return
     try:
-        late = datetime.fromisoformat(now) - datetime.fromisoformat(scheduled_at)
+        slot = _slot_time(scheduled_at)
     except ValueError:
+        logger.warning("dispatch: delivery %s has an unreadable slot %r", row["id"], scheduled_at)
         return
+    if slot is None:
+        return
+    late = parse_response_log_at(now) - slot
     if late <= HELD_PAST_SLOT_MARGIN:
         return
+    hours = late.total_seconds() / 3600
+    _write_delivery_incident(
+        row,
+        now,
+        HELD_PAST_SLOT_KIND,
+        f"{row['platform']}#{row['id']} {row['project_name']} short "
+        f"{row['short_index']} is {hours:.1f} h past its {scheduled_at} slot: {reason}",
+        incidents_dir,
+    )
+
+
+def _write_delivery_incident(
+    row: Dict[str, Any], now: str, kind: str, detail: str, incidents_dir: Optional[Path]
+) -> None:
+    """Write one ``kind`` incident for ``row`` unless one is already open. Never fatal."""
     from ..health.store import (  # lazy: health imports the pipeline
         default_data_root,
         default_incidents_dir,
@@ -896,33 +989,29 @@ def _raise_held_incident(
         write_row,
     )
 
-    key = f"{HELD_PAST_SLOT_KIND}:{row['id']}"
+    key = f"{kind}:{row['id']}"
     directory = incidents_dir or default_incidents_dir(default_data_root())
     filename = f"{safe_name(key)}.json"
     try:
         existing = directory / filename
         if existing.is_file() and json.loads(existing.read_text()).get("resolved_at") is None:
             return
-        hours = late.total_seconds() / 3600
         write_row(
             directory,
             new_incident(
-                HELD_PAST_SLOT_KIND,
+                kind,
                 key,
                 filename,
                 now,
                 delivery_id=row["id"],
                 platform=row["platform"],
                 project=row["project_name"],
-                scheduled_at=scheduled_at,
-                detail=(
-                    f"{row['platform']}#{row['id']} {row['project_name']} short "
-                    f"{row['short_index']} is {hours:.1f} h past its {scheduled_at} slot: {reason}"
-                ),
+                scheduled_at=row.get("scheduled_at"),
+                detail=detail,
             ),
         )
     except (OSError, ValueError):
-        logger.exception("dispatch: could not write held-past-slot incident for %s", row["id"])
+        logger.exception("dispatch: could not write %s incident for %s", kind, row["id"])
 
 
 def sync_media_stall_incidents(conn, now: str, incidents_dir: Optional[Path] = None) -> None:
@@ -1025,20 +1114,19 @@ def _defer_same_hour(conn, row: Dict[str, Any], now: str, released_hours: set) -
     next free hour at the same minute, sidecar first (as ``queue-reslot`` does).
     A row whose sidecar cannot be written is left as it was."""
     now_dt = datetime.fromisoformat(now)
-    slot = datetime.fromisoformat(row["scheduled_at"]) if row.get("scheduled_at") else now_dt
-    if slot.tzinfo is None:
-        slot = slot.replace(tzinfo=timezone.utc)
-    others = [
-        datetime.fromisoformat(r[0])
-        for r in conn.execute(
-            "SELECT COALESCE(platform_published_at, scheduled_at) FROM deliveries "
-            "WHERE platform='youtube' AND id<>? AND shadow=0 "
-            "AND status NOT IN ('cancelled', 'failed_permanent', 'missing_remote') "
-            "AND COALESCE(platform_published_at, scheduled_at) IS NOT NULL",
-            (row["id"],),
-        )
-    ]
-    sibling_hours = {_floor_hour(t) for t in others}
+    slot = _slot_time(row.get("scheduled_at")) or now_dt
+    sibling_hours = set()
+    for (value,) in conn.execute(
+        "SELECT COALESCE(platform_published_at, scheduled_at) FROM deliveries "
+        "WHERE platform='youtube' AND id<>? AND shadow=0 "
+        "AND status NOT IN ('cancelled', 'failed_permanent', 'missing_remote') "
+        "AND COALESCE(platform_published_at, scheduled_at) IS NOT NULL",
+        (row["id"],),
+    ):
+        try:
+            sibling_hours.add(_floor_hour(_slot_time(value)))
+        except ValueError:
+            continue  # a sibling's unreadable slot holds no hour
     here = _floor_hour(slot)
     # Rows queued for the same hour only conflict once one is released; a
     # published/uploaded sibling already holds the hour.
@@ -1115,6 +1203,15 @@ def drain_queue(
     Two YouTube Shorts are never released in one clock hour: the second due row
     moves to the next free slot (row and sidecar ``publishAt``).
 
+    At most one delivery per platform is sent in one pass, on every platform,
+    oldest slot first.
+    After an outage every overdue row is due at once, and Facebook, Instagram
+    and TikTok post the moment they are called, so a single pass used to post
+    a whole backlog together, which the platforms read as spam. The rest stay
+    queued, untouched, for the next pass (``spaced_one_per_pass``). Enforced
+    here, at the lease, rather than in ``_select_due``: a held row must not use
+    up its platform's turn, and the TikTok pack sweep shares that selection.
+
     ``facebook_photo_reconciler`` is an explicitly trusted read-only port for
     persisted Page-photo kinds. It runs without current-draft validation or
     privacy loaders. If absent, those rows stay held instead of falling into
@@ -1145,8 +1242,26 @@ def drain_queue(
         result.held_near_duplicate = len(held)
         result.errors.extend(f"youtube#{i}: held: near-identical text" for i in held)
     released_hours: set = set()
-    for row in _select_due(conn, now):
+    sent_platforms: set = set()
+    unreadable: List[Dict[str, Any]] = []
+    due = _select_due(conn, now, unreadable=unreadable)
+    for row in unreadable:
+        result.held_unreadable_slot += 1
+        reason = f"held: scheduled_at {row['scheduled_at']!r} is not a readable time"
+        result.errors.append(f"{row['platform']}#{row['id']}: {reason}")
+        _write_delivery_incident(
+            row, now, UNREADABLE_SLOT_KIND, f"{row['platform']}#{row['id']} {reason}", incidents_dir
+        )
+    # Oldest slot first, so each platform's one turn this pass goes to the row
+    # that has waited longest, not to the lowest id.
+    for row in sorted(due, key=_slot_order):
         delivery_id, platform, status = row["id"], row["platform"], row["status"]
+
+        # A pause taken during this pass holds the platform's remaining rows
+        # here, untouched, as ``_select_due`` holds them from the next pass on:
+        # a refused access token pauses its platform from inside the handler.
+        if is_platform_paused(conn, platform):
+            continue
 
         # Confirm a handler exists BEFORE acquiring the lease — otherwise a
         # platform with no adapter wired up locks its rows for the full
@@ -1154,7 +1269,9 @@ def drain_queue(
         # A durable photo identity never falls back to current-record routing.
         # Only this explicit read-only port may bypass pre-publication checks.
         photo_read = platform == "facebook" and row["upload_kind"] == FACEBOOK_PHOTO_KIND
-        handler = facebook_photo_reconciler if photo_read else handlers.get(platform)
+        handler = _pause_on_auth(
+            conn, facebook_photo_reconciler if photo_read else handlers.get(platform)
+        )
         if handler is None:
             result.skipped_no_handler += 1
             result.skipped_no_handler_by_platform[platform] = (
@@ -1200,6 +1317,14 @@ def drain_queue(
             if _defer_same_hour(conn, row, now, released_hours):
                 result.moved_same_hour += 1
                 continue
+
+        # One post per platform per pass. The read-only photo reconciler posts
+        # nothing, so it never takes or waits for a turn.
+        if not photo_read:
+            if platform in sent_platforms:
+                result.spaced_one_per_pass += 1
+                continue
+            sent_platforms.add(platform)
 
         if not acquire_lease(conn, delivery_id, owner, expires_at, now=now):
             result.skipped_leased += 1  # another worker holds a live lease
@@ -1491,6 +1616,12 @@ def reconcile_awaiting_manual(
             # Any other status (SEND_TO_USER_INBOX, PROCESSING_*) is a draft
             # still waiting on a human. Leave it exactly where it is.
         except Exception as exc:  # noqa: BLE001 — one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # The token is dead for every row, not this one: pause the
+                # platform like the drain does and stop asking.
+                detail = pause_for_auth(conn, platform, exc)
+                result.errors.append(f"{platform}: paused, access token refused: {detail}")
+                break
             result.errors.append(f"{platform}#{delivery_id}: reconcile: {_detail(exc)}")
             logger.warning("reconcile: delivery %s could not be reconciled", delivery_id)
 
@@ -1695,6 +1826,11 @@ def reconcile_awaiting_ig(
             result.errors.append(f"instagram#{delivery_id}: still parked: {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 -- one bad row never aborts the pass
+            if is_auth_blocked(exc):
+                # A refused token fails every row's scan: pause Instagram, stop.
+                detail = pause_for_auth(conn, "instagram", exc)
+                result.errors.append(f"instagram: paused, access token refused: {detail}")
+                break
             result.errors.append(f"instagram#{delivery_id}: ig reconcile: {_detail(exc)}")
             continue
 

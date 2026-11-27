@@ -61,7 +61,7 @@ actually went live, and TikTok's `status/fetch` payload carries no
 publication timestamp of its own, so no true platform time is available and
 none is invented. `published_at_source` names which of four provenances set it — `PUBLISHED_AT_OPERATOR_CONFIRMED` (human click, least trustworthy), `PUBLISHED_AT_PLATFORM_RECONCILED` (delayed poll, unknown lag), `PUBLISHED_AT_PLATFORM_CONFIRMED` (call returned success, seconds-accurate), or `PUBLISHED_AT_PLATFORM_SCHEDULED` (the platform accepted it and named a later time). `transition(..., new_status="published")` raises unless one is passed; `NULL` predates this column, never guessed.
 
-**Column contract — `platform_published_at`:** when the platform itself goes live with the delivery, as the platform stated. Distinct from `published_at`, which is when THIS queue handed it over. The YouTube path uploads with `status.publishAt` + `privacyStatus=private`, so its insert returning success is an acceptance, not a publication — labelling that `platform_confirmed` ("within seconds of the real publish time") overstated the evidence by the whole length of the schedule, and the real instant, which YouTube had just been told, was thrown away. The adapter now records the same value it handed to `upload_video`, never a re-derived one, so the receipt and the API body cannot disagree.
+**Column contract — `platform_published_at`:** when the platform itself goes live with the delivery, as the platform stated. Distinct from `published_at`, which is when THIS queue handed it over. The YouTube path uploads with `status.publishAt` + `privacyStatus=private` (or, for a Short already due, `public`), so its insert returning success is an acceptance, not a publication — labelling that `platform_confirmed` ("within seconds of the real publish time") overstated the evidence by the whole length of the schedule, and the real instant, which YouTube had just been told, was thrown away. The adapter now records the same value it handed to `upload_video` (for a public upload, the moment it was sent), never a re-derived one, so the receipt and the API body cannot disagree.
 
 **Facebook defers server-side as well.** `make_facebook_handler` never passed a
 `scheduled_publish_time`, so `record.schedule` — the slot the scheduler picked for this short — was
@@ -164,7 +164,9 @@ its rows never carry text.
   `*PermanentError` (a deleted reel is Graph code 100). Nothing else counts:
   a 5xx, a rate limit or spent quota, a lapsed token, a missing scope or a
   network failure says nothing about the post, so an overnight outage never
-  uses up a live short's tries.
+  uses up a live short's tries. A refused Meta token (`*AuthBlockedError`)
+  also pauses that platform (`queue.pause_for_auth`), as the publish drain
+  does, and the pass stops trying its other rows; resuming it makes them due.
 - **Output.** Each drain prints `first_comment: posted=N failed=N
   [needs_reauth=1]` above the summary. A scheduler may keep only a pass's
   last line, so the summary line adds the two drains up too:
@@ -472,7 +474,12 @@ because "stop touching this platform" means something different to each:
 - `reconcile_awaiting_manual` skips a paused platform's rows **entirely**, before it ever calls
   `poll`. Every action it takes — polling the platform's API, transitioning to `published` or
   `failed_permanent` — is itself a platform-facing decision, so unlike the lease case there is no
-  bookkeeping-only half to salvage.
+  bookkeeping-only half to salvage. `reconcile_awaiting_ig` does the same for Instagram.
+
+Both reconcilers also take a pause themselves: when the platform refuses its access token
+(`queue.is_auth_blocked`, the adapters' `queue_state = "auth_blocked"`), they pause it with
+`queue.pause_for_auth`, exactly as the publish drain's handlers do, record one error line and stop
+the pass for that platform rather than asking about every parked row.
 
 A row already leased or in flight when the pause takes effect is never touched by any of the
 three paths: the platform call it may be mid-flight on cannot be un-sent.
@@ -521,7 +528,7 @@ For a YouTube `missing_remote` row it refuses unless all hold, in order:
    refuses, and so does a lookup that errors (unknown is not gone);
 3. the sidecar record loads and its media verifies (the file the drain uploads);
 4. the plan's YouTube slot (`schedule.scheduled_at_utc`) is still ahead of now. A passed slot
-   refuses: the upload is private with `publishAt`, and a past `publishAt` would never go public;
+   refuses: the drain would upload it public at once, late, instead of at a slot;
 5. privacy, exactly as for Instagram;
 6. the channel's last 200 uploads (`youtube_uploads_listing.list_uploads`) carry no video with the
    plan's exact title; an empty listing refuses because it cannot prove absence.
@@ -550,8 +557,8 @@ calls it, it posts nothing and renames no file. A refused row prints
 
 ## Overdue YouTube Shorts (`queue reslot-overdue-youtube`)
 
-A `queued` YouTube row with no upload id whose `scheduled_at` has passed would upload with a
-past `publishAt` and never go public. `gomoveshift queue reslot-overdue-youtube [--id N]
+A `queued` YouTube row with no upload id whose `scheduled_at` has passed would go up public
+at once, late, rather than at a slot (the adapter never sends a past `publishAt`). `gomoveshift queue reslot-overdue-youtube [--id N]
 [--apply]` lists each with its old slot and the proposed one: the next time in the region's
 Waypost shorts list (`seo_slots.shorts_pool`, the allocator `reslot-overdue-manual` uses) at least
 an hour ahead of now and not held by another YouTube row (any status except `cancelled`,
@@ -562,6 +569,11 @@ its slot). `--apply` writes the sidecar's `scheduled_at_utc` first, then the row
 called by the drain, and writes nothing to YouTube. `recover-terminal` uses the same allocator
 for a review-refused row (previous section). A refused row prints `REFUSED: <id>: <reason>` and
 the exit code is 1; the others are still processed.
+
+The console's "Move this slot" (`pubqueue.reschedule`) takes the same two steps through
+`plan_title_sync.move_delivery_slot`: the plan first (YouTube's shared `scheduled_at_utc`, or
+the platform's own `scheduled_at_utc_by_platform` entry, which its adapter publishes at), then
+the row. `reschedule_delivery` stores every slot as UTC and refuses a time with no zone.
 
 ## A Short with no measured route (`queue remeasure-short-route`)
 
@@ -615,11 +627,19 @@ next is the operator's per-row decision: dry-run `gomoveshift queue recover-term
 --authorized-by "<who, when>"` (gates above), then re-run it with `--apply` to re-queue. A row with a recovery row linked to it no longer
 counts as a validate problem; the new row is validated like any other.
 
-Two writers move a row there, both through `queue.mark_missing_remote` (YouTube rows with an
+Three writers move a row there, all through `queue.mark_missing_remote` (YouTube rows with an
 upload id, from `uploaded` or `published` only; one `response_log` row per mark):
 
 1. the adapter's post-upload verify (`docs/social-publishing-youtube.md`);
-2. the catalog pass:
+2. every non-dry-run `dispatch-queue` tick, beside the `CONFIRMED_LIVE` sweep:
+   `confirm_scheduled_live` for each scheduled row it asks about, and
+   `youtube_adapter.recheck_published_videos` for every `published` row on a slow rotation
+   (one `videos.list` of up to 50 ids per tick, least recently seen first, each row at most
+   once per 24 h, stamped in `remote_checked_at`; logs `PUBLISHED_RECHECK missing_remote=<n>`).
+   An id the channel does not return is looked up once more after `VERIFY_RECHECK_SEC`;
+   absent twice, its row is marked and one `youtube_video_missing` health incident is
+   written. A lookup that raises proves nothing and changes nothing;
+3. the catalog pass:
 
    ```bash
    gomoveshift catalog-fetch --out live_catalog.json --known-ids-from-queue
@@ -1021,11 +1041,13 @@ Listing and reading a request give up fast (`READ_TIMEOUT_S` 60 s, `--low-level-
 `--contimeout 15s`); a throttled call prints `DAY_REELS failed: Google is throttling Drive reads
 …`, and the next hourly run retries. The clip download keeps its own long timeout.
 
-## Real go-public time, held rows and one Short per hour
+## Real go-public time, held rows, one Short per hour and one post per pass
 
-- **`platform_live`.** `platform_published_at` holds the scheduled slot only while `published_at_source=platform_scheduled`. `youtube_adapter.confirm_scheduled_live(conn, service)` asks `videos.list(part=status,snippet)` for each such row whose slot has passed; `live_publish_time` accepts an item only when `status.privacyStatus` is `public` and returns `snippet.publishedAt`. `queue.record_live_publish` then rewrites the row to `platform_live` with that time in `platform_published_at`; a video still private stays on the scheduled source. `recorded_publish_time` hands tracking the confirmed time, so `posted_at` stops being the upload moment. Every non-dry-run `dispatch-queue` tick runs the sweep once after dispatch, with the tick's own queue connection and the same YouTube credential path as the first-comment drain (built lazily, only when a row is due), and logs `CONFIRMED_LIVE count=<n>`. A dry run makes no API call; a tick without YouTube routed `first_party` logs `CONFIRMED_LIVE skipped`; an API or auth error logs one `CONFIRMED_LIVE failed` warning, leaves the exit code alone, and is retried on the next tick.
+- **`platform_live`.** `platform_published_at` holds the scheduled slot only while `published_at_source=platform_scheduled`. `youtube_adapter.confirm_scheduled_live(conn, service)` asks `videos.list(part=status,snippet)` for each such row whose slot has passed; `live_publish_time` accepts an item only when `status.privacyStatus` is `public` and returns `snippet.publishedAt`. `queue.record_live_publish` then rewrites the row to `platform_live` with that time in `platform_published_at`; a video still private stays on the scheduled source, and one still not public an hour (`NOT_PUBLIC_GRACE`) after that time opens one `youtube_not_public_after_slot` health incident, resolved when it is confirmed live. `recorded_publish_time` hands tracking the confirmed time, so `posted_at` stops being the upload moment. Every non-dry-run `dispatch-queue` tick runs the sweep once after dispatch, with the tick's own queue connection and the same YouTube credential path as the first-comment drain (built lazily, only when a row is due), and logs `CONFIRMED_LIVE count=<n>`. A dry run makes no API call; a tick without YouTube routed `first_party` logs `CONFIRMED_LIVE skipped`; an API or auth error logs one `CONFIRMED_LIVE failed` warning, leaves the exit code alone, and is retried on the next tick.
 - **Held past its slot.** A due row skipped by the validate hold or the privacy hold has no transition and no attempt, so it looked like an idle queue. The validate hold is per `(platform, project)`, not per row, so one problem row parks every healthy sibling of its project. When a held row is more than `dispatch.HELD_PAST_SLOT_MARGIN` (2 h) past `scheduled_at`, `drain_queue` writes one `delivery_held_past_slot` row under `incidents_dir` (default the health incidents dir): key `delivery_held_past_slot:<id>`, `pushed=False`, a plain `detail` line. An open row is not rewritten.
 - **One Short per hour.** `drain_queue` never releases two YouTube Shorts in one clock hour (UTC). The second due row, or one sharing its hour with an uploaded/published Short, moves to the next free hour at the same minute: sidecar `publishAt` (`plan_title_sync.write_plan_slot`) first, then `queue.reschedule_delivery`. `DrainResult.moved_same_hour` counts them.
+- **One post per platform per pass.** On every platform, `drain_queue` sends at most one delivery per pass, oldest `scheduled_at` first (a row with none counts as oldest), then lowest id. After an outage every overdue row is due at once; the rest stay queued, with no lease, attempt or new slot, and the next pass takes the next one. A held row (validate or privacy) does not use up its platform's turn. `DrainResult.spaced_one_per_pass` counts the rows left for later.
+- **Unreadable slots.** Dispatch reads every `scheduled_at` through `dispatch._slot_time`: a time with no zone (written before `queue.normalise_slot`) is read as UTC, and one that is not a time at all is held, with one `delivery_slot_unreadable` incident (`DrainResult.held_unreadable_slot`), while the rest of the pass goes on.
 
 ## Reconciliation view (console, read-only)
 

@@ -139,6 +139,10 @@ def test_expired_refresh_token_raises_actionable_error(tmp_path):
     with pytest.raises(tiktok_auth.TikTokAuthError) as exc_info:
         tiktok_auth.get_valid_tiktok_credentials(tmp_path / "credentials")
     assert "re-create the TikTok credential record" in str(exc_info.value)
+    # Only a re-authorization clears it: dispatch-queue pauses TikTok on this.
+    from gomoveshift.publishing.queue import is_auth_blocked
+
+    assert is_auth_blocked(exc_info.value)
 
 
 def test_no_token_or_secret_leaks_on_refresh_failure(tmp_path, monkeypatch, caplog):

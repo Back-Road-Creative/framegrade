@@ -686,8 +686,12 @@ class TitleFacts:
 
     def __post_init__(self) -> None:
         _parse_iso_date(self.date)
-        if self.ordinal < 1 or self.secs < 1:
-            raise ValueError(f"TitleFacts needs ordinal >= 1 and secs >= 1: {self!r}")
+        # ``secs`` is the clip's MEASURED length, never a stand-in: a missing or zero length
+        # is refused, so a title cannot say "1 seconds" (or "None seconds") about a clip.
+        for name in ("ordinal", "secs"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"TitleFacts needs a measured {name} >= 1: {self!r}")
 
 
 def ordinal_suffix(n: int) -> str:

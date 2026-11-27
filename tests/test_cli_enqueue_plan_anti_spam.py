@@ -264,3 +264,40 @@ def _final_text_review_not_under_test(monkeypatch):
     from gomoveshift.publishing import youtube_adapter
 
     monkeypatch.setattr(youtube_adapter, "short_review_refusal", lambda record: None)
+
+
+def test_a_short_naming_the_place_of_the_queued_short_next_to_it_refuses_the_batch(
+    tmp_path, monkeypatch, capsys
+):
+    # Another drive's Short already queued an hour later names the same town: neighbours by
+    # slot, whatever long-form or project they came from.
+    import dataclasses
+    from datetime import datetime, timedelta, timezone
+
+    from gomoveshift.pipeline import social_generator
+
+    monkeypatch.setattr(
+        social_generator, "measured_places", lambda *a, **k: [("town", "Tryon"), ("town", "Saluda")]
+    )
+    slot = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=3)
+
+    def placed(project, at, title):
+        return dataclasses.replace(
+            _record(1, title),
+            project_name=project,
+            schedule=ScheduleWindow(at, "America/Chicago"),
+            place_variety={"title": {"body": "Tryon", "reason": "distinct", "kind": "town"}},
+        )
+
+    first = tmp_path / "first"
+    first.mkdir()
+    _sidecar(first, placed("other", slot + timedelta(hours=1), "Tryon"))
+    assert _run(tmp_path, first, brand="no-such-brand") == 0
+    second = tmp_path / "second"
+    second.mkdir()
+    _sidecar(second, placed("proj", slot, "Tryon in the rain"))
+    capsys.readouterr()
+
+    assert _run(tmp_path, second, brand="no-such-brand") == 1
+    assert "rule=neighbour-place" in capsys.readouterr().out
+    assert _spooled_count(tmp_path) == 0

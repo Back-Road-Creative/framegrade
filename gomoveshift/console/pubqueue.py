@@ -21,6 +21,7 @@ from ..publishing.brand_policy import load_brand_policy
 from ..publishing.dispatch import parse_response_log_at, platform_quiet_alert_at
 from ..publishing.models import KNOWN_PLATFORMS
 from ..publishing.plan_io import PublishPlanFormatError, load_publish_plan
+from ..publishing.plan_title_sync import move_delivery_slot
 from ..publishing.queue import (
     PUBLISHED_AT_OPERATOR_CONFIRMED,
     PUBLISHED_AT_PLATFORM_CONFIRMED,
@@ -32,7 +33,6 @@ from ..publishing.queue import (
     is_platform_paused,
     open_queue_db,
     pause_platform,
-    reschedule_delivery,
     resume_platform,
     retry_delivery,
     set_platform_daily_cap,
@@ -463,6 +463,10 @@ def rows_by_state(rows: List[Dict[str, Any]]) -> List[tuple]:
 _ERROR_CLASS_EXPLANATIONS = {
     "PermanentDeliveryError": "The platform rejected this outright; it will not retry.",
     "ThrottledDeliveryError": "The platform rate-limited this; retrying after a fixed delay.",
+    "PlatformAuthPausedError": (
+        "The platform refused its access token, so it is paused; re-authorize, then "
+        "resume it here and this goes on the next pass."
+    ),
     "TransientMediaError": "A transient media problem; retrying with backoff.",
     "quota": "YouTube's daily upload quota was exhausted; this retries once it resets.",
     "tiktok_publish_failed": "TikTok reported this manually-published draft failed to publish.",
@@ -687,9 +691,12 @@ def reschedule(db_path: Union[str, Path], delivery_id: int, scheduled_at: str) -
     ``ValueError`` the route renders on the page rather than a redirect to an
     unchanged one. ``KeyError`` for a missing db or unknown id.
 
-    The queue's own ``ValueError`` (an unreadable timestamp) is allowed
-    through unchanged: it already names the value, and rewording it here would
-    put a second copy of that rule in the console."""
+    The slot moves in the row AND its publish plan (``move_delivery_slot``,
+    the path ``queue-reslot`` takes), since the adapters publish at the plan's
+    time. Its own ``ValueError`` (an unreadable or zoneless timestamp, or a
+    plan it could not write) is allowed through unchanged: it already names
+    the value, and rewording it here would put a second copy of that rule in
+    the console."""
     db_path = Path(db_path)
     if not db_path.exists():
         raise KeyError(delivery_id)
@@ -703,7 +710,7 @@ def reschedule(db_path: Union[str, Path], delivery_id: int, scheduled_at: str) -
                 "this short is already in the TikTok pack under its slot; change its time "
                 "in TikTok Studio, not here"
             )
-        if not reschedule_delivery(conn, delivery_id, scheduled_at):
+        if not move_delivery_slot(conn, delivery_id, scheduled_at):
             fresh = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
             raise ValueError(_refusal_reason(dict(fresh or row), "reschedule"))
         logger.info("delivery %s rescheduled to %s from the console", delivery_id, scheduled_at)

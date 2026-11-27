@@ -272,3 +272,12 @@ def test_the_place_record_names_the_place_the_title_says():
     assert first.youtube_title == "Polk County"
     assert first.place_variety["title"]["body"] == "Polk County"
     assert "Polk County" not in second.youtube_title
+
+
+@pytest.mark.parametrize("secs", [0, None, 0.0, True, "38"])
+def test_a_title_length_comes_only_from_a_measured_clip(secs):
+    # "{secs} seconds" in a title is the clip's measured length: a missing one is refused,
+    # never stood in for (38 s is the real clip window, short_planner's target, not a fallback).
+    with pytest.raises(ValueError, match="measured secs"):
+        TitleFacts(DATE, 1, secs, True)
+    assert TitleFacts(DATE, 1, 38, True).secs == 38

@@ -264,10 +264,20 @@ def _burn_filter(tmp_path, **kw):
 
 def test_ost_burn_can_drop_the_website_cta(tmp_path):
     kept, cta = _burn_filter(tmp_path)
-    centred = f"text='{cta}':"  # the closing CTA is centred; the corner URL watermark stays
-    assert kept.count(cta) == 2 and "x=(w-text_w)/2" in kept.split(centred)[2]
+
+    def carrying(chain):
+        # The brand line, the corner URL watermark and the closing CTA all read
+        # the website, so each is told apart by where it sits.
+        return [p for p in chain.split("drawtext=") if f"text='{cta}':" in p]
+
+    from gomoveshift.pipeline import ost_applier
+
+    closing = f"y=h*{ost_applier.LAYOUTS['regular_lf']['cta_y_frac']}:"
+    assert any(closing in p and "x=(w-text_w)/2" in p for p in carrying(kept))
     dropped, _ = _burn_filter(tmp_path, website_cta=False)
-    assert dropped.count(cta) == 1 and "x=w-text_w-40" in dropped.split(centred)[1]
+    assert not any(closing in p for p in carrying(dropped))
+    assert any("x=w-text_w-40" in p for p in carrying(dropped))
+    assert len(carrying(kept)) == len(carrying(dropped)) + 1
     assert "Greene County" in dropped
 
 

@@ -8,7 +8,11 @@ than re-implementing its upload/retry/token/quota handling.
 - **Guard:** shorts are canonical (`short_NN.mp4`), so
   `config.drive.youtube_upload_filename_pattern` widened to `^(?:lf|sl|short)_\d{2}\.mp4$`.
 - **Recording facts:** every `videos.insert` sends `snippet.defaultAudioLanguage` (the `drive.youtube_default_language` value, same as `defaultLanguage`), and a Short sends `recordingDetails.recordingDate` from its record's measured `recording_date` (the GPS-measured day, never file mtime); a blank date omits the field.
-- **Ordering:** private upload with `status.publishAt`; `video_id` persists
+- **Ordering:** a Short whose slot is at least one lease (`LEASE_SEC`, 15 min) ahead
+  is a private upload with `status.publishAt`; one due sooner, which is every
+  drained row (the drain waits for the slot), goes up `public` with no
+  `publishAt` (`youtube_adapter.upload_schedule`), so no past `publishAt` is
+  ever sent. A Short with no slot stays private with no `publishAt`. `video_id` persists
   to the queue (`status=uploaded`) BEFORE the playlist call — a lost id there
   would re-issue `videos.insert` for content already live. A playlist failure after upload leaves `uploaded`
   with the id intact; resume retries only the playlist step, via
@@ -27,9 +31,10 @@ than re-implementing its upload/retry/token/quota handling.
 - **Daily budget:** `videos.insert` has its own bucket
   (`config.drive.youtube_video_insert_daily_uploads`, default 100/day),
   separate from `youtube_quota_daily_budget` (unchanged, still governs
-  `playlistItems.insert`). Once today's (UTC) uploads reach it, the
-  adapter defers to next UTC midnight (`status=deferred`) rather than
-  failing — `publishAt` tolerates the delay.
+  `playlistItems.insert`). Uploads are counted by when each got its id (the
+  queue's `uploaded_at`) on YouTube's quota day, which starts at midnight
+  Pacific. Once that day's uploads reach it, the adapter defers to the next
+  Pacific midnight (`status=deferred`) rather than failing.
 - **Reconciliation:** a timeout or lost response after `videos.insert` is an
   unknown outcome, never a failure. Before any new create call, `publish()`
   looks up the persisted `video_id` for the delivery (`find_delivery`) and,
@@ -44,8 +49,12 @@ than re-implementing its upload/retry/token/quota handling.
   double-post. `_reconcile` now runs a channel-scan fallback in that one
   case — and ONLY that case, never on a first `queued` attempt: it walks
   `channels().list(mine=True)` → `relatedPlaylists.uploads` →
-  `playlistItems().list` → `videos().list`, matching on exact title within a
-  2-hour recency window (`youtube_adapter._ADOPT_RECENCY`). One match is
+  `playlistItems().list` → `videos().list`, matching on exact title among
+  uploads made since the row was first submitted (the queue's
+  `first_submitted_at`, less `_ADOPT_CLOCK_SKEW`; `created_at` for an older
+  row), so a retry hours later still finds it. A video another queue row
+  already records as its `platform_upload_id` is never a
+  candidate: it is that row's. One match is
   adopted instead of inserting; two or more raise
   `AmbiguousUploadMatchError` rather than guess. `playlistItems.list` and
   `videos.list` cost units in the combined 10,000/day bucket, not the
@@ -60,12 +69,17 @@ than re-implementing its upload/retry/token/quota handling.
   plan hash. The drain counts it as `failed_permanent`, never published. A
   lookup that *errors* proves nothing, so the row publishes, and the nightly
   catalog pass (`queue mark-missing-remote`, see
-  `docs/social-publishing-queue.md`) checks it again.
+  `docs/social-publishing-queue.md`) checks it again. A quota refusal on this
+  lookup, or on the reconcile lookups below, is raised as `YouTubeQuotaError`
+  and waits as throttled (see Queue states); the row keeps its id.
 - **Queue states:** `queued` → `submitting` (worker lease held, insert in
   flight) → `uploaded` (id persisted) → `published` (playlist assigned), or
   `uploaded` → `missing_remote` (terminal; the channel returns no such video).
-  `YouTubeQuotaError` lands in `retry_wait` (`error_class="quota"`), not a
-  permanent failure — the daily quota window resets.
+  `YouTubeQuotaError` (a quota-class 403, or the 400 `uploadLimitExceeded`
+  of the channel's daily upload limit) lands in `retry_wait`, and the handler
+  raises it on as `ThrottledDeliveryError`: the row waits the drain's throttle
+  backoff, and that branch never fails a row on `max_attempts` (it still adds
+  to `attempt_count`).
 - **Worker lease:** a `submitting` delivery holds a lease
   (`queue.acquire_lease`, 15-minute ceiling); a live lease refuses a racing
   second insert, and an expired lease (killed worker) is reclaimable by the

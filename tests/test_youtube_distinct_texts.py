@@ -243,10 +243,42 @@ def test_the_drain_holds_the_later_of_two_queued_collisions_and_raises_an_incide
         conn, {"youtube": lambda row: sent.append(row["id"])}, incidents_dir=tmp_path / "incidents"
     )
     assert result.held_near_duplicate == 1
-    assert late_id not in sent and len(sent) == 2
+    assert sent and late_id not in sent  # one post per platform per pass (#639)
     row = conn.execute("SELECT * FROM deliveries WHERE id=?", (late_id,)).fetchone()
     assert row["status"] == "needs_operator" and row["error_class"] == HOLD_ERROR_CLASS
     assert hold_near_duplicate_rows(conn) == []  # a held row blocks nothing and is held once
     rows, _ = load_all(tmp_path / "incidents")
     (incident,) = [r for r in rows if r["kind"] == "delivery_needs_operator"]
     assert "held before upload" in incident["detail"] and "Tryon" in incident["detail"]
+
+
+def test_a_hold_and_an_auth_pause_never_overwrite_each_other(conn, tmp_path):
+    from gomoveshift.publishing.queue import (
+        AUTH_PAUSED_ERROR_CLASS,
+        enqueue,
+        pause_for_auth,
+        resume_platform,
+    )
+
+    _enqueue(conn, tmp_path, "a", _short(1, "Tryon", "Pt.1"))
+    rows = []
+    for index, project in ((2, "p2"), (3, "p3")):
+        out = tmp_path / project
+        out.mkdir()
+        record = dataclasses.replace(_short(index, "Tryon 🚗", f"Pt.{index}"), project_name=project)
+        rows.append(
+            enqueue(conn, project, index, "youtube", "h", sidecar_path=str(_sidecar(out, record)))
+        )
+    paused, held = rows
+    # The auth pause held the first collision back with its own reason.
+    transition(conn, paused, "queued", "queued", error_class=AUTH_PAUSED_ERROR_CLASS)
+    assert hold_near_duplicate_rows(conn) == [held]
+
+    class RefusedError(Exception):
+        queue_state = "auth_blocked"
+
+    pause_for_auth(conn, "youtube", RefusedError("token refused"))
+    resume_platform(conn, "youtube")
+    got = dict(conn.execute("SELECT id, status || ':' || error_class FROM deliveries").fetchall())
+    assert got[paused] == f"queued:{AUTH_PAUSED_ERROR_CLASS}"
+    assert got[held] == f"needs_operator:{HOLD_ERROR_CLASS}"

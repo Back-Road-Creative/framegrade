@@ -1846,8 +1846,8 @@ class DriveConfig(BaseModel):
     # ``videos.insert`` now has its OWN daily bucket (Google project
     # default 100/day), separate from the combined budget above (which
     # still governs ``playlistItems.insert``). ``publishing.youtube_adapter``
-    # meters against this and DEFERS overflow to next UTC day rather than
-    # failing — a deferred short's ``publishAt`` tolerates the delay.
+    # meters against this and DEFERS overflow to the next quota day (midnight
+    # Pacific) rather than failing.
     youtube_video_insert_daily_uploads: int = 100
     # WARN by default, refuse only when the operator opts in. The budget and
     # per-call costs above are Google's numbers, not ours: a project with a

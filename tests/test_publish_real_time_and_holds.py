@@ -209,14 +209,21 @@ def test_two_shorts_due_in_one_hour_second_moves_to_next_free_slot(conn, monkeyp
     assert written == [(1, datetime(2026, 11, 20, 13, 40, tzinfo=timezone.utc))]
 
 
-def test_other_platforms_in_the_same_hour_are_untouched(conn, tmp_path):
-    q.enqueue(conn, "proj", 0, "instagram", "h0", scheduled_at="2026-11-20T11:05:00+00:00")
-    q.enqueue(conn, "proj", 1, "instagram", "h1", scheduled_at="2026-11-20T11:40:00+00:00")
+def test_other_platforms_in_the_same_hour_keep_their_slots(conn, tmp_path):
+    """Only YouTube rows are moved to a new hour. Another platform's second row
+    keeps its slot and simply waits for the next pass (one post per pass)."""
+    slots = ["2026-11-20T11:05:00+00:00", "2026-11-20T11:40:00+00:00"]
+    ids = [
+        q.enqueue(conn, "proj", i, "instagram", f"h{i}", scheduled_at=s)
+        for i, s in enumerate(slots)
+    ]
     ran = []
     drain_queue(
         conn, {"instagram": lambda r: ran.append(r["id"])}, now=NOW, incidents_dir=tmp_path / "i"
     )
-    assert len(ran) == 2
+    assert ran == [ids[0]]
+    kept = conn.execute("SELECT scheduled_at FROM deliveries WHERE id=?", (ids[1],)).fetchone()[0]
+    assert kept == slots[1]
 
 
 def test_margin_constant_is_two_hours():
@@ -249,3 +256,46 @@ def test_confirm_scheduled_live_sweep_uses_recorded_responses(conn):
     ).fetchone()[0]
     assert src(done) == q.PUBLISHED_AT_PLATFORM_LIVE
     assert src(waiting) == q.PUBLISHED_AT_PLATFORM_SCHEDULED
+
+
+def _answers(*items):
+    """``videos.list`` fake answering each call with the next item."""
+    answers = iter(items)
+
+    class _Svc:
+        def videos(self):
+            return self
+
+        def list(self, part, id):  # noqa: A002
+            return self
+
+        def execute(self):
+            return {"items": [next(answers)]}
+
+    return _Svc()
+
+
+def test_short_still_private_after_its_slot_raises_one_incident_then_resolves(conn, tmp_path):
+    """A Short marked published must not sit private unseen past its slot."""
+    from gomoveshift.publishing.youtube_adapter import NOT_PUBLIC_KIND, confirm_scheduled_live
+
+    did = _scheduled_published(conn, 0)
+    inc = tmp_path / "inc"
+    svc = _answers(STILL_PRIVATE, STILL_PRIVATE, PUBLIC)
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 0
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 0
+    (row,) = _incidents(inc)
+    assert (row["kind"], row["delivery_id"], row["resolved_at"]) == (NOT_PUBLIC_KIND, did, None)
+    assert "private" in row["detail"]
+    assert confirm_scheduled_live(conn, svc, now=NOW, incidents_dir=inc) == 1
+    (row,) = _incidents(inc)
+    assert row["resolved_at"] == NOW
+
+
+def test_short_private_within_grace_raises_nothing(conn, tmp_path):
+    from gomoveshift.publishing.youtube_adapter import confirm_scheduled_live
+
+    _scheduled_published(conn, 0, slot="2026-11-20T11:30:00+00:00")
+    inc = tmp_path / "inc"
+    assert confirm_scheduled_live(conn, _answers(STILL_PRIVATE), now=NOW, incidents_dir=inc) == 0
+    assert _incidents(inc) == []

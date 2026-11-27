@@ -28,7 +28,8 @@ Three doors: ``enqueue_from_plan_sidecar`` refuses a Short whose YouTube text
 is near-identical to a live row's; ``YouTubeShortsAdapter.publish`` re-checks
 against rows that already reached YouTube and holds the row; each drain pass
 (:func:`hold_near_duplicate_rows`) holds the later of two queued rows that
-collide. A hold parks the row at ``needs_operator`` with
+collide; a row the auth pause held back (``queue.AUTH_PAUSED_ERROR_CLASS``)
+keeps its reason and is left to the publish re-check. A hold parks the row at ``needs_operator`` with
 :data:`HOLD_ERROR_CLASS` and the reason in ``error_detail``; nothing is deleted
 and nothing is uploaded, and ``dispatch.sync_media_stall_incidents`` raises
 the ``delivery_needs_operator`` incident the health check pushes.
@@ -47,6 +48,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .anti_spam_gate import CROSS_BATCH_WINDOW_DAYS
 from .queue import (
+    AUTH_PAUSED_ERROR_CLASS,
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
     NEXT_ATTEMPT_NEEDS_OPERATOR,
     STATUS_MISSING_REMOTE,
@@ -256,7 +258,12 @@ def live_texts(
                 delivery_id=row["id"],
                 status=status,
                 reached=reached,
-                holdable=status in _HOLDABLE and not reached and not leased,
+                # A row the auth pause held back keeps its own reason; the publish
+                # re-check still holds it once the platform is resumed.
+                holdable=status in _HOLDABLE
+                and not reached
+                and not leased
+                and row["error_class"] != AUTH_PAUSED_ERROR_CLASS,
             )
         )
     return [t for t in out if t.reached] + [t for t in out if not t.reached]
