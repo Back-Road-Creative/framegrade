@@ -990,6 +990,9 @@ with nothing downloaded. Otherwise the reel is downloaded, blurred by `_render_p
 blurred file is spooled through `asset_plan.build_asset_sidecar(..., caption=...)`. A failed
 render or leftover location tag refuses it for good; the original is deleted after the render.
 A ledger under `<gms_data_home>/day_reels/requests/` makes each request file run once.
+The GPU lock is tried once, never waited on: while a render holds it the request is `held`
+(`shared GPU lock busy`) and stays pending for the next hour, so `dispatch-queue` in the same
+tick is never delayed behind it (note 191).
 
 **Every day reel is also a YouTube Short**, whether or not `platforms` lists `"youtube"`: the
 render is saved as `short_01.mp4` (the YouTube filename guard) and queued for YouTube beside the

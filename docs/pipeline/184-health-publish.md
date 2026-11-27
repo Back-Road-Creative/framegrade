@@ -14,7 +14,8 @@ never goes stale (a hand-launched `drive ... --youtube-upload --phase D` bypasse
    unreadable or empty is `refused` before any write). `health backlog` registers every drive with 1, so a
    count that differs is a `count:` step and is written back with the reopen: the claim books one weekly
    slot per long-form, the same series Phase D dates them by;
-   no drive job running; its `resume.json` under `<stages root>/<project>` must rebind to the code
+   no live drive on its own stages or project dir (`heal.drive_conflict`; a render of any other
+   drive never holds a publish back, note 191); its `resume.json` under `<stages root>/<project>` must rebind to the code
    root's venv, and its `pipeline_state.json` must hold no completed phase whose stamped code
    version the current code re-runs (`heal.stale_phases`; Phase D would refuse the missing
    prerequisite only after the slot is booked), else `refused` naming the phases: re-audit it;

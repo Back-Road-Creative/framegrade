@@ -39,7 +39,7 @@ class Rig:
         self.jobs = tmp_path / "jobs"
         self.launches: list = []
         self.pushes: list = []
-        self.running = False
+        self.conflict = None  # what ``conflict_fn`` says: a live drive on this recipe's own dirs
         self.changed: list = []  # git is pathspec-filtered: only generator files can appear
         self.slot = FUTURE
         self.launch_ok = True
@@ -89,7 +89,7 @@ class Rig:
             launcher=lambda argv, cwd: (self.launches.append((argv, cwd)) or (self.launch_ok, "")),
             notify_fn=lambda e, i, s: self.pushes.append((e, s)) or True,
             git_changed=lambda a, b, paths: self.changed,
-            drive_running=lambda jobs: self.running,
+            conflict_fn=lambda jobs, recipe_path, recipe: self.conflict,
             slot_fn=lambda row, recipe: self.slot,
             installed_version_fn=lambda python: self.installed,
             pinned_version_fn=lambda code_root: self.pinned,
@@ -291,13 +291,13 @@ def test_a_heal_of_a_heal_does_not_repeat_the_audit_only_flags(tmp_path):
     assert tail.count("--skip-upload") == 1 and tail.count("--no-youtube-upload") == 1
 
 
-def test_guard_b_skips_while_a_drive_job_is_running(tmp_path):
+def test_guard_b_skips_while_a_drive_on_the_same_dirs_is_running(tmp_path):
     rig = Rig(tmp_path)
-    rig.running = True
+    rig.conflict = "a drive on the same stages dir is running (pid 7)"
     rig.run()
     att = rig.row()["resume_attempts"][0]
-    assert rig.launches == [] and att["action"] == "skipped" and "running" in att["reason"]
-    rig.running = False
+    assert rig.launches == [] and att["action"] == "skipped" and att["reason"] == rig.conflict
+    rig.conflict = None
     rig.run()
     assert len(rig.launches) == 1
 
@@ -361,7 +361,7 @@ def test_guard_d_passes_the_generator_paths_to_git(tmp_path):
         incidents_dir=rig.inc, jobs_dir=rig.jobs, code_root=tmp_path, mirror_sha=SHA, now=NOW,
         launcher=lambda a, c: (True, ""), notify_fn=lambda *a: True,
         git_changed=lambda a, b, paths: seen.append((a, b, tuple(paths))) or [],
-        drive_running=lambda j: False, slot_fn=lambda r, c: FUTURE,
+        conflict_fn=lambda j, rp, recipe: None, slot_fn=lambda r, c: FUTURE,
     )  # fmt: skip
     assert seen == [("old", SHA, tuple(heal.GENERATOR_PATHS))]
 
@@ -407,33 +407,50 @@ def test_resolved_rows_are_left_alone(tmp_path):
     assert rig.launches == []
 
 
-def _running_record(jobs: Path, run_id: str, worker: dict) -> None:
+def _running_record(jobs: Path, run_id: str, worker: dict, out: str = "/out/demo") -> None:
     d = jobs / run_id
     d.mkdir(parents=True)
-    log = jobs / f"{run_id}.log"
-    log.write_text("INFO gomoveshift.pipeline.drive_orchestrator Phase A start\n")
     (d / "job.json").write_text(json.dumps({
-        "schema": "job/1", "run_id": run_id, "name": "demo-audit", "argv": ["bash", "x.sh"],
-        "created_at": 1.0, "expect": [str(log)], "result": {"state": "running"},
+        "schema": "job/1", "run_id": run_id, "name": "demo-audit", "created_at": 1.0,
+        "argv": ["py", "-m", "gomoveshift", "drive", "/src/demo", "--output-dir", out],
+        "result": {"state": "running"},
         "nanny": {"pid": 1, "start_ticks": "1", "boot_id": "b"}, "worker": worker,
     }))  # fmt: skip
 
 
-def test_stale_running_record_with_dead_worker_is_not_a_running_drive(tmp_path):
+_RECIPE = {"argv": ["py", "-m", "gomoveshift", "drive", "/src/demo", "--output-dir", "/out/demo"], "cwd": "/"}  # fmt: skip
+
+
+def _conflict(tmp_path, alive=lambda ident: True):
+    return heal.drive_conflict(
+        tmp_path / "jobs", tmp_path / "st" / "resume.json", _RECIPE, alive_fn=alive,
+        holder_fn=lambda lock: None,
+    )  # fmt: skip
+
+
+def test_stale_running_record_with_dead_worker_is_not_a_conflict(tmp_path):
     # A record left at "running" by a killed nanny must not block heal forever.
-    jobs = tmp_path / "jobs"
-    _running_record(jobs, "old", {"pid": 7, "start_ticks": "9", "boot_id": "b"})
-    assert (
-        heal.default_drive_running(jobs, alive_fn=lambda ident: False, pgrep_fn=lambda: False)
-        is False
-    )
+    _running_record(tmp_path / "jobs", "old", {"pid": 7, "start_ticks": "9", "boot_id": "b"})
+    assert _conflict(tmp_path, alive=lambda ident: False) is None
 
 
-def test_running_record_with_live_worker_is_a_running_drive(tmp_path):
-    jobs = tmp_path / "jobs"
-    _running_record(jobs, "live", {"pid": 7, "start_ticks": "9", "boot_id": "b"})
-    alive = lambda ident: ident.get("pid") == 7  # noqa: E731
-    assert heal.default_drive_running(jobs, alive_fn=alive, pgrep_fn=lambda: False) is True
+def test_a_live_job_on_the_same_output_dir_is_a_conflict(tmp_path):
+    _running_record(tmp_path / "jobs", "live", {"pid": 7, "start_ticks": "9", "boot_id": "b"})
+    assert "same output dir" in _conflict(tmp_path)
+
+
+def test_a_live_job_of_another_drive_is_never_a_conflict(tmp_path):
+    _running_record(tmp_path / "jobs", "other", {"pid": 7}, out="/out/another-drive")
+    assert _conflict(tmp_path) is None
+
+
+def test_a_live_run_lock_on_the_stages_or_project_dir_is_a_conflict(tmp_path):
+    for held in (tmp_path / "st" / "pipeline_state.lock", Path("/out/demo/pipeline_project.lock")):  # fmt: skip
+        why = heal.drive_conflict(
+            tmp_path / "jobs", tmp_path / "st" / "resume.json", _RECIPE,
+            holder_fn=lambda lock, held=held: {"pid": 7} if lock == held else None,
+        )  # fmt: skip
+        assert why and "pid 7" in why
 
 
 # ── The code that runs is the code whose SHA is recorded ─────────────
@@ -823,17 +840,17 @@ def test_a_preflight_failed_retry_still_obeys_the_other_guards(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     _finish_heal_job(rig, 1, PREFLIGHT_LOG)
-    rig.running = True
+    rig.conflict = "a drive on the same stages dir is running (pid 7)"
     rig.run(now=_tick(1))
     assert len(rig.launches) == 1
-    assert rig.row()["resume_attempts"][-1]["reason"] == "a drive job is running"
+    assert rig.row()["resume_attempts"][-1]["reason"] == rig.conflict
 
 
 def test_the_outcome_notice_says_failed_pre_flight_with_the_blocker(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     _finish_heal_job(rig, 1, PREFLIGHT_LOG)
-    rig.running = True
+    rig.conflict = "a drive on the same stages dir is running (pid 7)"
     rig.run(now=_tick(1))
     text = [s for e, s in rig.pushes if e == "health_heal_outcome"][0]
     assert "failed pre-flight: 1. [staging disk] Insufficient cache space" in text
@@ -843,7 +860,7 @@ def test_the_preflight_detail_is_truncated_to_300_chars(tmp_path):
     rig = Rig(tmp_path)
     rig.run()
     _finish_heal_job(rig, 1, PREFLIGHT_LOG.replace("need ~351.4 GB", "x" * 500))
-    rig.running = True
+    rig.conflict = "a drive on the same stages dir is running (pid 7)"
     rig.run(now=_tick(1))
     assert len(rig.row()["resume_attempts"][0]["outcome_detail"]) == 300
 

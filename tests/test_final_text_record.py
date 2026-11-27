@@ -531,3 +531,54 @@ def test_claim_id_missing_from_location_evidence_is_kept_not_crashed():
     out = _evaluated_decision(decision, "Drive", route, [], [known])
 
     assert out["candidates"][0]["claim_evidence"] == ["route-1", "loc-unknown"]
+
+
+class TestRegionContains:
+    """A region claim contains every route place inside it, not only the
+    required ones: Waypost reads an empty ``contains`` as "the route has no
+    place" and refuses the claim as malformed (Galley Head LF 2, whose only
+    place was retained 42 s). Gaps, coverage and outside samples are sent
+    unchanged."""
+
+    def _review(self, required):
+        from gomoveshift.pipeline.final_text_record import MIN_PLACE_S
+
+        state = _irish_state("County Ashby, Lornia")
+        entry = state.per_lf_route_record[1]
+        if not required:
+            for p in entry["record"]["places"]:
+                p["required"], p["retained_seconds"] = False, MIN_PLACE_S - 1.0
+            for c in entry["region_claims"]:
+                c["required_place_ids"] = []
+        return _metadata(state, title="County Ashby, Lornia" + SUFFIX)["final_text_review"]
+
+    def test_region_with_only_unrequired_places_agrees(self):
+        review = self._review(required=False)
+        assert not any("region_claim_malformed" in r for r in review["reasons"]), review
+        assert review["verdict"] == "agree", review
+
+    def test_contains_lists_every_place_inside_the_region(self):
+        review = self._review(required=False)
+        places = {p["evidence_id"] for p in review["route_places"]}
+        assert places and review["region_claims"], review
+        for claim in review["region_claims"]:
+            assert set(claim["contains"]) == places, claim
+
+    def test_a_bridged_gap_still_refuses_without_a_boundary_proof(self):
+        # Waypost reviews every gap of a region claim, bridged or not
+        # (docs/pipeline/80-census-boundary-proof.md); this fix never drops one.
+        state = _irish_state("County Ashby, Lornia")
+        state.per_lf_route_record[1]["record"]["gaps"] = [
+            {
+                "segment": "lf01-s0",
+                "source": "ep0",
+                "media_start_s": 200.0,
+                "length_s": 19.8,
+                "fix_before_s": 200.0,
+                "fix_after_s": 262.0,
+                "interval_s": 62.0,
+                "county": "County Ashby",
+            }
+        ]
+        review = _metadata(state, title="County Ashby, Lornia" + SUFFIX)["final_text_review"]
+        assert any(r.startswith("region_gaps:") for r in review["reasons"]), review["reasons"]

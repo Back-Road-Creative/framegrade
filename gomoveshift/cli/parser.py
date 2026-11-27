@@ -1360,7 +1360,7 @@ def _add_cleanup_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Also reclaim the named project's INCOMPLETE _stages dir when it is an "
             "abandoned run: no no-auto-resume hold, no run lock held by a live pid, and "
-            "no gomoveshift drive running anywhere (a killed or superseded run). Needs a "
+            "no live gomoveshift drive naming the project (a killed or superseded run). Needs a "
             "project name; still dry-run without --confirm."
         ),
     )

@@ -3,7 +3,8 @@ Waypost, and the hourly reconcile that closes its claim.
 
 Order, each a stop that leaves the store as it was: the drive must be ``auditing`` in
 ``schedule.sqlite3`` (or ``failed`` -- a publish job that died before uploading -- which is
-reopened to ``auditing`` at the first write) with no upload receipt; no drive job running; its ``resume.json`` recipe must
+reopened to ``auditing`` at the first write) with no upload receipt; no live drive on its own stages or project
+dir (``heal.drive_conflict``: a render of any other drive never holds a publish back); its ``resume.json`` recipe must
 rebind to the code root's venv, which must hold the version the code root pins
 (``heal.install_pending``), and its checkpoint hold no phase the current code re-runs (Phase D
 refuses a missing prerequisite, after the slot is booked); and no older ``ready`` drive may sit ahead of it (Waypost claims the
@@ -38,6 +39,7 @@ from .heal import (
     _job_records,
     bind_to_code_root,
     default_pinned_version,
+    drive_conflict,
     install_pending,
     job_runner,
     refresh_recipe,
@@ -118,7 +120,7 @@ def run_publish(
     jobs_dir: Path,
     now: datetime,
     dry_run: bool,
-    drive_running: Callable[[Path], bool],
+    conflict_fn: Callable[[Path, Path, Dict[str, Any]], Optional[str]] = drive_conflict,
     launcher: Callable[..., Any] = default_launcher,
     lead_hours: Optional[int] = None,
     expect_sha: Optional[str] = None,
@@ -137,12 +139,12 @@ def run_publish(
         return _refuse(res, f"{project} is {d.status}; only an auditing drive can be approved")
     if _uploaded(d.output_dir):
         return _refuse(res, f"{project} already has an upload receipt under {d.output_dir}")
-    if drive_running(jobs_dir):
-        return _refuse(res, "a drive is running; one heavy drive at a time")
     recipe_path = find_recipe(stages_root, project)
     recipe = resume.read_recipe(recipe_path) if recipe_path else None
     if recipe is None:
         return _refuse(res, f"no readable resume.json under {Path(stages_root) / project}")
+    if clash := conflict_fn(jobs_dir, recipe_path, recipe):
+        return _refuse(res, clash)
     # Phase D slices the recipe's --day-gpx too: a gone one takes the backlog row's, else refuses.
     fresh, refreshed, why = refresh_recipe(recipe_path, recipe, manifest_row_fn({"drive": project}),
                                            cwd=Path(code_root) / SERVICE_DIR, dry_run=dry_run)  # fmt: skip
@@ -226,7 +228,8 @@ def run_publish(
     slot = c.slots[0]
     day, date = _DAYS[slot.weekday()], slot.date().isoformat()
     argv = [
-        "python3", str(job_runner(code_root)), "--name", f"{JOB_PREFIX}{project}", "--heavy",
+        # never ``--heavy``: an upload is not a render, so nothing that waits on heavy jobs waits on it
+        "python3", str(job_runner(code_root)), "--name", f"{JOB_PREFIX}{project}",
         "--detach", "--stall", _STALL_S, "--log-root", str(jobs_dir), "--",
         *phase_d_args(bound, day, date),
     ]  # fmt: skip
@@ -299,7 +302,6 @@ def backlog_publisher(
     code_root: Path,
     jobs_dir: Path,
     now: datetime,
-    drive_running: Callable[[Path], bool],
 ) -> Callable[[str, bool], Dict[str, Any]]:
     """``publish(project, dry_run)`` for ``health backlog``: ``run_publish`` with the tick's own
     roots and Waypost's default lead window; the store is opened only when a drive is due."""
@@ -312,7 +314,6 @@ def backlog_publisher(
         return run_publish(
             project=project, region=region, store=store, cadence=cadence, stages_root=stages_root,
             code_root=code_root, jobs_dir=jobs_dir, now=now, dry_run=dry_run,
-            drive_running=drive_running,
         )  # fmt: skip
 
     return publish
