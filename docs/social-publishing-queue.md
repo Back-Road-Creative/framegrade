@@ -235,6 +235,19 @@ exactly the file that produced the row, never a directory guess.
   The plan builder (`plan_builder.build_publish_plan`) first drops a Short's unreviewable
   tags with `reviewable_short_tags`, the filter `queue sync-plan-tags` applies, and logs
   a warning for a Short that still fails.
+- **The same content never queues twice under two names**: the queue's own
+  uniqueness knows a row only by `(project, short_index, platform)`, and a day reel is
+  `day-reel-<drive file id>`, so it and the drive Short of the same footage both went
+  out. Every row now stores `content_sha256` (the record's media sha256) and, on
+  YouTube, `content_title_key` (the title before its closing hashtags, whitespace
+  collapsed, lowercased). A record whose sha or title another row on the same platform
+  already holds under a different `(project, short_index)` is refused on every platform
+  through the same path as a review refusal (`EnqueueResult.refused`, one
+  `duplicate_content_refused` incident); the other records still enqueue. Only a row that
+  is active, `published` or `missing_remote` counts (`queue.content_twin`); a `cancelled`
+  or `failed_permanent` row, or a shadow row, blocks nothing. Rows queued before these
+  columns existed hold `NULL` and are not compared. `day-reels` records such a reel as
+  refused.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises
@@ -700,8 +713,9 @@ changed. Both are listed in `RebuildResult.untouched`. A rerun changes nothing.
 **Media stall.** A delivery whose `TransientMediaError` persists until the backoff reaches its
 ceiling (`dispatch.MEDIA_STALL_ATTEMPTS`, 7 attempts at 60 s doubling to the 3600 s cap) opens a
 `delivery_media_stalled` incident in `status --json` at the end of the drain. The row keeps retrying
-(the error is exempt from `max_attempts`); the incident closes when the row no longer carries the
-error, i.e. after it uploads.
+(the error is exempt from `max_attempts`) for up to `dispatch.UNCOUNTED_RETRY_BOUND` (24 h), then
+parks at `needs_operator` and the incident becomes a `delivery_needs_operator` one; the incident
+closes when the row no longer carries the error, i.e. after it uploads.
 
 ## A replaced long-form upload (`relink_replaced_lf`)
 

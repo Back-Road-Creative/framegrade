@@ -18,8 +18,12 @@ A Short is refused whole (nothing written) when any delivery row of it, on any p
 is neither ``queued`` nor terminal, holds a live lease, has no ``scheduled_at``, or has a
 slot inside the lead time, or when a recovery row exists. A Short with a hand title
 (``<plan dir>/social/titles.yaml``, as Phase D reads it) is reported ``unchanged`` /
-``hand_title``. The no-repeated-place chain is seeded from the STORED text of the Short
-before each rewritten one, and the generator's date is pinned to the LF's publish date.
+``hand_title``, and so is one whose stored title differs from the ``generator_title`` the
+plan recorded (a hand edit in the sidecar). A Short carrying a stored arm of a factor the
+generator no longer renders (``UNRENDERED_FACTORS``) is ``unchanged`` too: it posts its stored
+text, and regenerating it could only drop the arm. The no-repeated-place chain is seeded
+from the STORED text of the Short before each rewritten one, and the generator's date is
+pinned to the LF's publish date.
 
 Each rewritten Short must pass ``short_review_refusal``, ``models.validate_payloads`` and
 ``anti_spam_gate.check_batch`` (the gates enqueue runs, with the queue's recent text);
@@ -39,7 +43,8 @@ planned before it, never a later one's, so a rerun sees the same inputs and is a
 A Short is also checked, across sidecars, against those earlier records inside the same
 refusal loop as the neighbour-place check, so a refusal always re-checks the final text.
 A sidecar that cannot be planned (a bad ``titles.yaml``, a trial plan the gates reject) still
-contributes its STORED text, as it stays queued unchanged, to the sidecars around it.
+contributes the STORED text of the Shorts it queues, as it stays queued unchanged, to the
+sidecars around it (never its file's other Shorts: a Short is never gated against itself).
 The title ledger and the nightly title snapshot are read once per run. The brand's per-location
 cap (``per_location_cap``) is counted within ONE sidecar's own untrimmed plan, never across
 sidecars (the cross-sidecar passes run without it): an approximation of enqueue, which counts
@@ -70,6 +75,12 @@ from .plan_bracket_sync import (
 )
 from .plan_io import load_publish_plan, plan_from_raw
 from .queue import TERMINAL_STATUSES
+
+#: Shorts-experiment factors the generator no longer renders at all (``SocialGenerator.
+#: _shorts_arm_factors``: a fact title has no body variant, so ``yt_title_body`` is never
+#: carried). A Short queued with such an arm posts its stored text; the sync leaves it as stored
+#: instead of refusing it every night.
+UNRENDERED_FACTORS = ("yt_title_body",)
 
 #: A row whose slot is closer than this is left alone: the platform may already be
 #: preparing the upload, and a late text change would race the dispatcher.
@@ -247,6 +258,8 @@ def _rewrite(short: dict, text: dict) -> Tuple[dict, Tuple[str, ...]]:
             fields.append(f"youtube.{name}")
     if fields:
         yt = new["payloads"]["youtube"]
+        # what the generator wrote, so a later hand edit is told apart (``generated_title``)
+        new["generator_title"] = yt["title"]
         new["reviewed_plan_hash"] = review_hash(
             yt["title"], yt["description"], yt["tags"], new["media"]["sha256"]
         )
@@ -619,6 +632,15 @@ def _sidecar_changes(
             settle(row, pos, "refused", forced[(row["project_name"], int(row["short_index"]))])
         elif int(shorts[pos]["short_index"]) in hand:
             settle(row, pos, "unchanged", "hand_title")
+        elif shorts[pos].get("generator_title") and not generated_title(shorts[pos]):
+            # the stored title is not the one the generator recorded: someone set it by hand
+            settle(row, pos, "unchanged", "hand_title (edited in the plan)")
+        elif any(
+            a in SHORTS_ARMS.get(f, ())
+            for f, a in _stored_arms(shorts[pos]).items()
+            if f in UNRENDERED_FACTORS
+        ):
+            settle(row, pos, "unchanged", "stored arm the generator no longer renders: kept")
         else:
             targets[pos] = row
             siblings[pos] = sib
@@ -864,12 +886,16 @@ def _new_text_clashes(new_records: Sequence, later: Sequence) -> Dict[Tuple[str,
     return {k: f"anti-spam gate: {why} (against a later sidecar's text)" for k, why in out.items()}
 
 
-def _stored_records(path: str) -> list:
-    """The records of the sidecar as stored ([] when it cannot be loaded)."""
+def _stored_records(path: str, rows: Sequence[sqlite3.Row]) -> list:
+    """The stored records of the Shorts ``rows`` queue from the sidecar ([] when it cannot be
+    loaded): never the sidecar's other Shorts, which another row's text may already stand for
+    (the same file under a second ``sidecar_path`` spelling), so a Short never meets itself."""
+    queued = {(r["project_name"], int(r["short_index"])) for r in rows}
     try:
-        return list(load_publish_plan(Path(path)).shorts)
+        shorts = load_publish_plan(Path(path)).shorts
     except (OSError, ValueError, LookupError):
         return []
+    return [r for r in shorts if (r.project_name, r.short_index) in queued]
 
 
 def _clash_note(clash: Mapping[Tuple[str, int], str]) -> str:
@@ -958,7 +984,7 @@ def sync_short_text(
                     unusable[path] = f"sidecar unusable: {exc}"
                     # It stays queued as stored, so its STORED text still reaches every other
                     # sidecar's gates (as an earlier or a later one); unloadable = nothing to see.
-                    finals[path] = _stored_records(path)
+                    finals[path] = _stored_records(path, by_sidecar[path])
                     earlier.extend(finals[path])
                     continue
                 finals[path] = planned[path][3]
@@ -993,7 +1019,7 @@ def sync_short_text(
             # Skipped, so it stays as STORED: what was written before the failure is checked
             # against that, as for the sidecar whose own write failed (below).
             why = "an earlier sidecar's write failed; retried next run"
-            clash = _new_text_clashes(written_new, _stored_records(path))
+            clash = _new_text_clashes(written_new, _stored_records(path, group))
             if clash:
                 why += _clash_note(clash)
             refuse_all(group, why, transient=not clash)
@@ -1010,7 +1036,7 @@ def sync_short_text(
                 why = f"sidecar unusable: write failed: {exc if known else f'{type(exc).__name__}: {exc}'}"
                 # The sidecars written before this one were checked against its PLANNED text;
                 # it stays as STORED, so check what they wrote against that.
-                clash = _new_text_clashes(written_new, _stored_records(path))
+                clash = _new_text_clashes(written_new, _stored_records(path, group))
                 if clash:
                     why += _clash_note(clash)
                 # Transient only when the write lost a race or met a busy database AND nothing

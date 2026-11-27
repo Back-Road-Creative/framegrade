@@ -2350,3 +2350,41 @@ def test_a_dry_run_that_waypost_accepts_would_launch_and_writes_nothing(tmp_path
     assert res["action"] == "would_launch", res
     assert [c["dry_run"] for c in rig.replace_store.calls] == [True]
     _untouched(rig)
+
+
+# 2026-11-26: a released fix stayed pinned but uninstalled for days while renders ran back to
+# back. The staging sync defers the install while any render is live, and each tick started the
+# next render on the old venv (the release-tag check reads a list cached for 24 h). Every launch
+# now refuses while the venv lacks the pinned version, so the install gets the gap between renders.
+def _pin(rig, version):
+    (rig.tmp / "pyproject.toml").write_text(f'[project]\nname = "x"\nversion = "{version}"\n')
+
+
+def test_a_new_drive_waits_while_the_pinned_version_is_not_installed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed = rig.latest = "0.3.163"
+    _pin(rig, "0.3.167")
+    res = rig.run()
+    assert res["action"] == "refused", res
+    assert res["reason"] == "install pending: checkout pins 0.3.167, venv has 0.3.163"
+    assert not rig.launches and not rig.preflights and not rig.registered
+    rig.installed = rig.latest = "0.3.167"  # the install landed
+    assert rig.run()["action"] == "launched"
+
+
+def test_an_unknown_pin_still_launches_a_new_drive(tmp_path):
+    rig = Rig(tmp_path)  # no pyproject.toml in the code root: the pin cannot be read
+    assert rig.run()["action"] == "launched"
+
+
+def test_a_confirmed_resume_waits_while_the_pinned_version_is_not_installed(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed = rig.latest = "0.3.163"
+    _pin(rig, "0.3.167")
+    _, sidecar = _waiting(rig)
+    _confirm(sidecar, ENDED + 600)
+    res = rig.run()
+    assert res["action"] == "refused" and not rig.launches, res
+    assert res["reason"] == "day-a: install pending: checkout pins 0.3.167, venv has 0.3.163"
+    _pin(rig, "0.3.163")
+    assert rig.run()["action"] == "launched"

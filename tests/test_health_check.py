@@ -886,3 +886,137 @@ def test_a_row_resolved_without_a_reason_is_still_refiled_while_its_job_is_faile
     _recheck(tmp_path)
     (row,) = _drive_rows(tmp_path, "demo-drive-a")
     assert not row.get("resolved_at")
+
+
+# 2026-11-26: a released fix stayed pinned but uninstalled for days and nothing alerted.
+def _check_at(tmp_path, notify, when, versions):
+    cfg = SimpleNamespace(seo=SimpleNamespace(storage_path="relative/seo"))
+    return run_check(
+        cfg, incidents_dir=tmp_path / "inc", jobs_dir=tmp_path / "jobs", code_root=tmp_path,
+        staging_sha="abc123", now=when, notify_fn=notify, versions_fn=lambda: versions,
+    )  # fmt: skip
+
+
+def _deferred(out):
+    return [r for r in out["incidents"] if r["kind"] == "install_deferred"]
+
+
+def test_a_pin_the_venv_lacks_for_6_hours_raises_install_deferred_once(tmp_path):
+    sent = []
+
+    def notify(event, payload, text):
+        sent.append((event, text))
+        return True
+
+    pending = ("0.3.163", "0.3.167")
+    assert not _deferred(_check_at(tmp_path, notify, NOW, pending))
+    assert not _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=5, minutes=59), pending))
+    (row,) = _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=6), pending))
+    assert row["installed_version"] == "0.3.163" and row["pinned_version"] == "0.3.167"
+    assert row["pending_since"] == "2026-01-10T12:00:00+00:00"
+    assert [e for e, _ in sent] == ["health_install_deferred"]
+    assert "0.3.167" in sent[0][1] and "0.3.163" in sent[0][1]
+    assert _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=7), pending))
+    assert len(sent) == 1  # pushed once
+    # an unreadable version proves nothing: the incident stays open
+    assert _deferred(_check_at(tmp_path, notify, NOW + timedelta(hours=8), (None, "0.3.167")))
+    out = _check_at(tmp_path, notify, NOW + timedelta(hours=9), ("0.3.167", "0.3.167"))
+    assert not _deferred(out) and "install_deferred" in out["resolved"]
+    # the clock restarts: a later pending install waits its own 6 hours
+    later = NOW + timedelta(hours=10)
+    assert not _deferred(_check_at(tmp_path, notify, later, ("0.3.167", "0.3.168")))
+    assert len(sent) == 1
+
+
+def test_matching_or_unknown_versions_raise_no_install_deferred(tmp_path):
+    for versions in (("0.3.167", "0.3.167"), (None, "0.3.167"), ("0.3.163", None)):
+        out = _check_at(tmp_path, lambda *a: True, NOW + timedelta(days=3), versions)
+        assert not _deferred(out)
+
+
+# 2026-11-26: the queue was thin Dec 15 - Jan 15 and no rule looked further than a week ahead,
+# so a hole 3+ weeks out raised nothing until days before it.
+def _slotted(tmp_path, days, *, platform="youtube", status="queued", shadow=0):
+    """One delivery per day ``n`` in ``days`` (``n`` days after NOW's date, 14:00 UTC)."""
+    conn = open_queue_db(tmp_path / "seo")
+    with conn:
+        for n in days:
+            at = datetime.combine(NOW.date() + timedelta(days=n), datetime.min.time(), timezone.utc)
+            conn.execute(
+                "INSERT INTO deliveries (project_name, short_index, platform, plan_hash, status,"
+                " shadow, scheduled_at, created_at, updated_at) VALUES (?, ?, ?, 'h', ?, ?, ?, ?, ?)",
+                (f"p{n}", n, platform, status, shadow, (at + timedelta(hours=14)).isoformat(),
+                 NOW.isoformat(), NOW.isoformat()),
+            )  # fmt: skip
+    conn.close()
+    return tmp_path / "seo" / "social_queue.sqlite3"
+
+
+def test_queue_gap_names_the_first_empty_day_inside_the_runway(tmp_path):
+    db = _slotted(tmp_path, range(1, 20))
+    (row,) = cadence.queue_gaps(db, NOW, NOW.isoformat())
+    day = (NOW.date() + timedelta(days=20)).isoformat()
+    assert row["kind"] == "social_queue_gap" and row["platform"] == "youtube"
+    assert row["date"] == day and row["key"] == f"social_queue_gap:youtube:{day}"
+    assert day in check_mod._line(row) and "youtube" in check_mod._line(row)
+
+
+def test_full_queue_raises_no_gap(tmp_path):
+    db = _slotted(tmp_path, range(1, cadence.QUEUE_RUNWAY_DAYS + 1))
+    assert cadence.queue_gaps(db, NOW, NOW.isoformat()) == []
+
+
+def test_scheduled_uploads_and_blackout_days_fill_a_day_and_free_rows_do_not(tmp_path):
+    db = _slotted(tmp_path, range(1, cadence.QUEUE_RUNWAY_DAYS + 1), status="published")
+    _slotted(tmp_path, [50], platform="facebook")  # a posting platform with nothing near
+    conn = open_queue_db(tmp_path / "seo")
+    with conn:
+        conn.execute("UPDATE deliveries SET status='cancelled' WHERE short_index=5")
+    conn.close()
+    rows = {r["platform"]: r["date"] for r in cadence.queue_gaps(db, NOW, NOW.isoformat())}
+    assert rows == {
+        "youtube": (NOW.date() + timedelta(days=5)).isoformat(),
+        "facebook": (NOW.date() + timedelta(days=1)).isoformat(),
+    }
+    skip = [NOW.date() + timedelta(days=5)]
+    rows = {r["platform"]: r["date"] for r in cadence.queue_gaps(db, NOW, NOW.isoformat(), skip)}
+    assert "youtube" not in rows
+
+
+def test_shadow_paused_or_retired_platforms_raise_no_gap(tmp_path):
+    db = _slotted(tmp_path, [1], platform="tiktok", shadow=1)
+    _slotted(tmp_path, [-cadence.QUEUE_ACTIVE_LOOKBACK_DAYS - 1], platform="instagram")
+    _slotted(tmp_path, [1], platform="facebook")
+    conn = open_queue_db(tmp_path / "seo")
+    with conn:
+        conn.execute("INSERT INTO platform_pauses (platform, paused_at) VALUES ('facebook', 'x')")
+    conn.close()
+    assert cadence.queue_gaps(db, NOW, NOW.isoformat()) == []
+
+
+def test_queue_gap_is_pushed_once_and_resolves_when_the_day_is_filled(tmp_path):
+    db = _slotted(tmp_path, range(1, 20))
+    cfg = SimpleNamespace(seo=SimpleNamespace(storage_path=str(tmp_path / "seo")))
+    sent = []
+
+    def check():
+        return run_check(
+            cfg, incidents_dir=tmp_path / "inc", jobs_dir=tmp_path / "jobs", code_root=tmp_path,
+            staging_sha="abc123", now=NOW, notify_fn=lambda e, p, t: sent.append(e) or True,
+        )  # fmt: skip
+
+    key = f"social_queue_gap:youtube:{(NOW.date() + timedelta(days=20)).isoformat()}"
+    assert key in check()["pushed"]
+    assert key not in check()["pushed"] and sent.count("health_social_queue_gap") == 1
+    _slotted(tmp_path, range(20, cadence.QUEUE_RUNWAY_DAYS + 1))
+    out = check()
+    assert key in out["resolved"] and not [
+        r for r in out["incidents"] if r["kind"] == "social_queue_gap"
+    ]
+    assert db.exists()
+
+
+def test_the_queue_runway_looks_at_least_four_weeks_ahead():
+    # a hole must alarm while Shorts can still be rendered, reviewed and enqueued for it
+    assert cadence.QUEUE_RUNWAY_DAYS >= 28
+    assert cadence.QUEUE_RUNWAY_DAYS * 24 > cadence.COVERAGE_HORIZON_H

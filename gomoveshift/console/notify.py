@@ -63,7 +63,9 @@ DEFAULT_GATE_STALE_MIN = 30
 #: Delivery statuses worth pushing a notification for. `awaiting_manual_publish`
 #: is not itself a failure, but it needs a human before it can move on -- same
 #: as a failed job, it goes unnoticed unless someone happens to open the tab.
-_WATCHED_STATUSES = ("failed_permanent", "awaiting_manual_publish")
+#: ``needs_operator``: a delivery whose uncounted retries ran out of time
+#: (``dispatch.UNCOUNTED_RETRY_BOUND``); parked until a person decides it.
+_WATCHED_STATUSES = ("failed_permanent", "awaiting_manual_publish", "needs_operator")
 
 _SECRET_KEY_RE = re.compile(
     r"""(?i)((?:access_token|refresh_token|id_token|client_secret|api_key|token)["']?\s*[=:]\s*["']?)"""

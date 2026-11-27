@@ -60,6 +60,7 @@ _AWAITING_MANUAL_PUBLISH = "awaiting_manual_publish"
 #: listed above it.
 _STATE_ORDER = (
     _AWAITING_MANUAL_PUBLISH,
+    "needs_operator",  # parked by dispatch.UNCOUNTED_RETRY_BOUND; only a person moves it
     "queued",
     "submitting",
     "uploaded",

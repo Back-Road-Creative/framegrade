@@ -23,7 +23,12 @@ from gomoveshift.publishing.models import FacebookPayload, ShortPublishRecord
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_RECONCILED as PLATFORM_RECONCILED
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_SCHEDULED as PLATFORM_SCHEDULED
-from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
+from gomoveshift.publishing.queue import (
+    acquire_lease,
+    find_delivery,
+    restart_delivery,
+    transition,
+)
 
 #: Exact-host allowlist for any upload URL, checked before any bytes are sent.
 ALLOWED_UPLOAD_HOSTS = frozenset({"rupload.facebook.com", "graph.facebook.com"})
@@ -546,8 +551,9 @@ class FacebookShortsAdapter:
 
         The one exception: a live read proving the bytes never all landed and
         publishing never began (``finish_never_ran``) means no finish ran, so
-        the reel can never publish. The id is dropped (row back to queued) and
-        ``None`` returned so the caller starts a fresh upload.
+        the reel can never publish. The id is dropped (row back to queued, its
+        attempt count reset) and ``None`` returned so the caller starts a fresh
+        upload.
         """
         video_id = existing.get("platform_upload_id")
         if existing.get("platform_post_id"):
@@ -580,13 +586,9 @@ class FacebookShortsAdapter:
             and status.get("published") is not True
             and status.get("finish_never_ran") is True
         ):
-            if transition(
-                conn,
-                delivery_id,
-                STATUS_AWAITING_FACEBOOK_RECONCILE,
-                STATUS_QUEUED,
-                platform_upload_id=None,
-            ):
+            # Starts over through ``restart_delivery``: the tries the reads
+            # spent belong to the dead upload, not the fresh one.
+            if restart_delivery(conn, delivery_id, STATUS_AWAITING_FACEBOOK_RECONCILE):
                 return None
             raise FacebookFinishUnknownError(
                 "Facebook reconciliation checkpoint changed; outcome unconfirmed"

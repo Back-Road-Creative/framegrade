@@ -1,13 +1,14 @@
 """Rule 2 (an LF slot inside 48 h with nothing booked while a ready drive exists), rule 2b (a
-region's next free LF slot inside a week with no ready drive at all) and rule 4 (the dispatch
-queue has due work and nothing has touched it in 24 h)."""
+region's next free LF slot inside a week with no ready drive at all), rule 4 (the dispatch
+queue has due work and nothing has touched it in 24 h) and rule 15 (a posting platform's social
+queue has a day with nothing scheduled within ``QUEUE_RUNWAY_DAYS``)."""
 
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from ..publishing.queue import TERMINAL_STATUSES
 from .store import new_incident, safe_name
@@ -17,6 +18,16 @@ SLOT_HORIZON_H = 48
 # accepted, which can take days, not the hours a booking does.
 COVERAGE_HORIZON_H = 7 * 24
 DISPATCH_QUIET_H = 24
+#: Rule 15 looks this many days ahead. The other rules see 48 h (slots) and a week (coverage),
+#: which is days before a hole: a queue thin from 3+ weeks out needs Shorts rendered, reviewed
+#: and enqueued, so the alarm must come while there is still time for that.
+QUEUE_RUNWAY_DAYS = 42
+#: A platform is posting when it holds a non-shadow delivery slotted no earlier than this many
+#: days ago; one retired longer ago raises nothing.
+QUEUE_ACTIVE_LOOKBACK_DAYS = 28
+#: The statuses in which a delivery holds no day (as ``queue_slot_refill``): every other status,
+#: ``published`` included (a YouTube upload is scheduled ahead of its slot), fills its day.
+_FREE_STATUSES = ("cancelled", "failed_permanent", "missing_remote")
 
 
 def _aware(value: Optional[str]) -> Optional[datetime]:
@@ -127,3 +138,50 @@ def queue_stalled(db_path: Path, now: datetime, now_iso: str) -> Optional[Dict[s
         last_updated_at=last,
         quiet_hours=DISPATCH_QUIET_H,
     )
+
+
+def queue_gaps(
+    db_path: Path, now: datetime, now_iso: str, skip_dates: Iterable[date] = ()
+) -> List[Dict[str, Any]]:
+    """One row per posting, unpaused platform: the first day from tomorrow through
+    ``QUEUE_RUNWAY_DAYS`` ahead with no non-shadow delivery slotted on it. A day is the UTC date
+    of ``scheduled_at``, as dispatch's blackout reads it; ``skip_dates`` (the brand's blackout
+    dates) are never a gap. Keyed by platform and date, so filling that day (or the day
+    arriving) resolves it and the next empty day is its own incident. Opened read-only."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        marks = ",".join("?" * len(_FREE_STATUSES))
+        paused = {r[0] for r in conn.execute("SELECT platform FROM platform_pauses")}
+        rows = conn.execute(
+            "SELECT platform, scheduled_at FROM deliveries WHERE shadow = 0 "  # noqa: S608
+            f"AND scheduled_at IS NOT NULL AND status NOT IN ({marks})",
+            _FREE_STATUSES,
+        ).fetchall()
+    finally:
+        conn.close()
+    today = now.astimezone(timezone.utc).date()
+    since = today - timedelta(days=QUEUE_ACTIVE_LOOKBACK_DAYS)
+    held: Dict[str, Set[date]] = {}
+    for platform, at in rows:
+        moment = _aware(at)
+        if moment is not None and moment.astimezone(timezone.utc).date() >= since:
+            held.setdefault(platform, set()).add(moment.astimezone(timezone.utc).date())
+    skip = set(skip_dates)
+    out: List[Dict[str, Any]] = []
+    for platform in sorted(set(held) - paused):
+        for n in range(1, QUEUE_RUNWAY_DAYS + 1):
+            day = today + timedelta(days=n)
+            if day in skip or day in held[platform]:
+                continue
+            out.append(
+                new_incident(
+                    "social_queue_gap",
+                    f"social_queue_gap:{platform}:{day.isoformat()}",
+                    f"social_queue_gap_{safe_name(str(platform))}_{day:%Y%m%d}.json",
+                    now_iso,
+                    platform=platform,
+                    date=day.isoformat(),
+                )
+            )
+            break
+    return out

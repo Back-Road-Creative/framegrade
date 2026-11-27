@@ -715,6 +715,8 @@ def cmd_dispatch_queue(args, config) -> int:
             # Only when non-zero: the cron log is read by eye and a
             # permanent `throttled=0` trains everyone to skip the field.
             + (f" throttled={result.throttled}" if result.throttled else "")
+            # Parked this pass by dispatch.UNCOUNTED_RETRY_BOUND; each has an incident.
+            + (f" needs_operator={result.needs_operator}" if result.needs_operator else "")
             # Same rule, and this one matters more: a non-zero value means a
             # worker died mid-attempt since the last pass. Printing
             # `reconciled_interrupted=0` on every healthy run is how that
