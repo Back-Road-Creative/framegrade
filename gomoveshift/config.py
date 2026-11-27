@@ -1694,6 +1694,15 @@ class DriveConfig(BaseModel):
     # real oncoming car scores 0.63-0.95 — so 0.6 keeps cars
     # and drops sign false positives (signs must stay readable, like the plate band).
     blur_vehicle_conf: float = 0.6
+    # A PLATE blurs only once its center sits inside a vehicle box (redactcam
+    # ``plate_vehicle_conf``): the vehicle model at this confidence, with no size or
+    # bottom-strip gate, on every frame that finds a plate, or a tracked vehicle. The
+    # plate model boxes some signs and logos at plate shape and size (Galley Head
+    # 2025-09-20: a SPAR logo on a fuel sign, a yield sign), and those have no car around
+    # them. 0.6 matches ``blur_vehicle_conf``: rectangular signs score as a car at
+    # ~0.35-0.55, real cars 0.63-0.95, so a lower value would let a sign's own "car" box
+    # corroborate its plate box. 0 disables (every plate blurs, as before).
+    blur_plate_vehicle_conf: float = 0.6
     # Only blur vehicles worth it: tall enough that occupants are discernible
     # (``blur_vehicle_min_height_frac`` × frame height) and not glued to the bottom
     # strip (box top above ``1 - blur_vehicle_ignore_bottom_frac`` of the frame — the

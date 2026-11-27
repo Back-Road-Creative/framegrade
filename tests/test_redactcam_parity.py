@@ -58,6 +58,11 @@ UNPASSED_DETECT_AND_TRACK_DEFAULTS = {
     "checkpoint_path": None,
     "checkpoint_every_frames": 0,
     "checkpoint_overlap_frames": 90,
+    # ``redactcam explain``'s window and trace (redactcam #23): the pipeline runs the
+    # whole video and records no trace, so these stay off.
+    "start_frame": 0,
+    "max_frames": None,
+    "trace": None,
     # Detection heartbeat: a once-a-minute INFO line from
     # detect_and_track, which reaches drive.log through the root logger. A
     # multi-hour blur pass was otherwise silent and read as a hang.
@@ -128,6 +133,7 @@ class TestDetectAndTrackDefaults:
             "vehicle_conf",
             "vehicle_min_height_frac",
             "vehicle_ignore_bottom_frac",
+            "plate_vehicle_conf",
             "track_person",
             "person_model_path",
             "person_conf",
@@ -265,3 +271,24 @@ class TestSidecarSchemaChanged:
         legacy = tmp_path / "proj_blur_regions.json"
         legacy.write_text(json.dumps({"schema": "blur_regions/v2", "source_hash": "abc"}))
         assert redactcam_timeline.load_sidecar(legacy) is None
+
+
+def test_every_blur_call_site_passes_plate_vehicle_conf_from_config():
+    """Each detect_and_track call site passes the sign guard from config.drive.
+
+    A site that leaves it out gets redactcam's default 0 and blurs every sign the
+    plate model boxes, which is the over-blur this setting exists to stop.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "gomoveshift" / "pipeline"
+    sites = [
+        root / "day_master_encoder.py",
+        root / "photos" / "night_private_video.py",
+        root / "stages" / "blur_detection.py",
+    ]
+    for site in sites:
+        text = site.read_text()
+        assert "detect_and_track" in text, site
+        assert "plate_vehicle_conf=drive.blur_plate_vehicle_conf" in text, site
+    assert DriveConfig().blur_plate_vehicle_conf == 0.6
