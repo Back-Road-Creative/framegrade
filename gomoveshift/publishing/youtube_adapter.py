@@ -792,7 +792,9 @@ class YouTubeShortsAdapter:
 
         try:
             playlist_id = self._assign_playlist(video_id, record)
-        except Exception:
+        except Exception as exc:
+            if youtube_auth_refused(exc):
+                raise  # the handler pauses YouTube; the row stays ``uploaded`` with its id
             logger.exception(
                 "playlist assign failed for video_id=%s — kept; resume retries it", video_id
             )
@@ -884,8 +886,10 @@ class YouTubeShortsAdapter:
         """``True`` only when ``videos.list`` twice returns no item for
         ``video_id``. A lookup that raises proves nothing, so it is logged and
         the row publishes; the nightly catalog pass checks it again. A quota
-        refusal is raised as ``YouTubeQuotaError`` instead: the row stays
-        ``uploaded`` with its id and is verified once the quota resets."""
+        refusal is raised as ``YouTubeQuotaError`` instead, and a refused token
+        (``youtube_auth_refused``) is raised as it is, for the handler to pause
+        YouTube: the row stays ``uploaded`` with its id and is verified once the
+        quota resets or the platform is resumed."""
         try:
             service = self._uploader._build_service()
             for attempt in range(2):
@@ -895,6 +899,8 @@ class YouTubeShortsAdapter:
                 if resp.get("items"):
                     return False
         except Exception as exc:  # noqa: BLE001 -- unknown is not missing
+            if youtube_auth_refused(exc):
+                raise
             quota = _quota_error(exc)
             if quota is not None:
                 raise quota from exc

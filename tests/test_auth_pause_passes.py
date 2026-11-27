@@ -368,6 +368,87 @@ def test_every_per_row_catch_in_a_publishing_pass_routes_a_refused_token():
     assert set(_NO_PLATFORM_CALL) - unrouted == set(), "stale _NO_PLATFORM_CALL entries"
 
 
+#: Broad ``except`` clauses in an adapter module that keep going (neither
+#: re-raise nor route a refusal) and need no auth routing, and why. A catch
+#: around a platform call does not belong here: route the refusal.
+_ADAPTER_NO_TOKEN_CALL = {
+    "publishing/tiktok_adapter.py:_http_failure_detail": "decodes a response already received",
+}
+
+
+def _always_raises(body) -> bool:
+    for stmt in body:
+        if isinstance(stmt, ast.Raise):
+            return True
+        if isinstance(stmt, ast.If) and _always_raises(stmt.body) and _always_raises(stmt.orelse):
+            return True
+    return False
+
+
+def _swallowing_adapter_catches(root: Path = _ROOT):
+    """Every function in a ``publishing/*_adapter.py`` with a broad ``except``
+    that carries on (it does not always raise) while nothing in its ``try``
+    routes a refused token: one of the routes above, or an earlier
+    ``except <...>AuthBlockedError`` clause. Unlike the per-row guard, a catch
+    outside any loop counts too: one call that logs a refused token and returns
+    lets that row go on unchecked (``_channel_lacks``, the playlist assign)."""
+    found = set()
+    for path in sorted((root / "publishing").glob("*_adapter.py")):
+        tree = ast.parse(path.read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in (n for n in ast.walk(fn) if isinstance(n, ast.Try)):
+                names = {getattr(n, "id", getattr(n, "attr", None)) for n in ast.walk(node)}
+                routed = names & _ROUTES or any(
+                    str(name).endswith("AuthBlockedError") for name in names
+                )
+                if not routed and any(
+                    _broad(h) and not _always_raises(h.body) for h in node.handlers
+                ):
+                    found.add(f"publishing/{path.name}:{fn.name}")
+    return found
+
+
+def test_no_adapter_catch_swallows_a_refused_token():
+    found = _swallowing_adapter_catches()
+    assert found - set(_ADAPTER_NO_TOKEN_CALL) == set(), (
+        "an adapter's broad `except` here carries on and can swallow a refused access "
+        "token: re-raise it (`except <Platform>AuthBlockedError: raise`, or "
+        "`if youtube_auth_refused(exc): raise`) so the handler pauses the platform, "
+        "or add the function to _ADAPTER_NO_TOKEN_CALL with the reason it calls no platform"
+    )
+    assert set(_ADAPTER_NO_TOKEN_CALL) - found == set(), "stale _ADAPTER_NO_TOKEN_CALL entries"
+
+
+def test_the_adapter_guard_would_catch_a_swallowing_check(tmp_path):
+    module = tmp_path / "publishing"
+    module.mkdir()
+    (module / "new_adapter.py").write_text(
+        "class Adapter:\n"
+        "    def _check(self, service):\n"
+        "        try:\n"
+        "            return service.list().execute()\n"
+        "        except Exception:\n"
+        "            return None\n"
+        "    def _routed(self, service):\n"
+        "        try:\n"
+        "            return service.list().execute()\n"
+        "        except NewAuthBlockedError:\n"
+        "            raise\n"
+        "        except Exception:\n"
+        "            return None\n"
+        "    def _reraised(self, service):\n"
+        "        try:\n"
+        "            return service.list().execute()\n"
+        "        except Exception as exc:\n"
+        "            if exc is None:\n"
+        "                raise\n"
+        "            raise RuntimeError() from exc\n"
+    )
+    assert _swallowing_adapter_catches(tmp_path) == {"publishing/new_adapter.py:_check"}
+
+
 def test_the_guard_would_catch_a_swallowing_pass(tmp_path):
     module = tmp_path / "publishing"
     module.mkdir()

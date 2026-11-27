@@ -503,6 +503,8 @@ class FacebookShortsAdapter:
         # not have failed: it publishes at its slot.
         try:
             state = self._reels.check_video_status(video_id)
+        except FacebookAuthBlockedError:
+            raise  # a dead token: the handler pauses Facebook; the row stays unknown
         except Exception:
             state = None
         if (
