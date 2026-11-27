@@ -74,6 +74,27 @@ def title_hashtag_backed(tag: str, regions: Iterable[str]) -> bool:
     return name in filler or name in _allowed_tags(regions)
 
 
+def _backed_stamp_match(body: str, recording_date: str):
+    """The stamped-title match of ``body`` when its stamp is exactly the one
+    ``recording_date`` produces, else ``None``."""
+    match = _STAMPED.fullmatch(body)
+    if match is None:
+        return None
+    try:
+        return match if title_stamp(recording_date, int(match["n"])) == match["stamp"] else None
+    except ValueError:
+        return None
+
+
+def backed_title_stamp(title: str, recording_date: str) -> str:
+    """The stamp ("Mar 5, 2nd stretch") of a stamped ``title`` the record backs, else ``""``.
+
+    The Short's description repeats it, so Shorts of one drive that name one place
+    never send the same description (the reviewed line is otherwise only the place)."""
+    match = _backed_stamp_match(split_trailing_hashtags(title or "")[0], recording_date)
+    return match["stamp"] if match is not None else ""
+
+
 def short_title_filler(title: str, recording_date: str, regions: Iterable[str]) -> tuple:
     """Words of ``title`` that the record backs and so are not names to cite."""
     body, hashtags = split_trailing_hashtags(title or "")
@@ -83,14 +104,8 @@ def short_title_filler(title: str, recording_date: str, regions: Iterable[str]) 
         name = tag.lstrip("#").casefold()
         if name in allowed_tags:
             backed.add(name)
-    match = _STAMPED.fullmatch(body)
+    match = _backed_stamp_match(body, recording_date)
     if match is None:
-        return tuple(sorted(backed))
-    try:
-        stamp_ok = title_stamp(recording_date, int(match["n"])) == match["stamp"]
-    except ValueError:
-        return tuple(sorted(backed))
-    if not stamp_ok:
         return tuple(sorted(backed))
     backed |= _words(match["stamp"])
     weekday = weekday_name(recording_date)

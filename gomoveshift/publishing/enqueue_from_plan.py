@@ -261,6 +261,55 @@ def _twin_refusal(conn, project_name: str, short_index: int, identities: dict) -
     return None
 
 
+class _ChannelTexts:
+    """The channel's live YouTube texts (``youtube_distinct.live_texts``), read once
+    per sidecar, plus each Short this call spools, so two Shorts of one plan are
+    compared too."""
+
+    def __init__(self, conn, path: Path) -> None:
+        self._conn, self._path = conn, path
+        self._texts: Optional[list] = None
+        self._records: Optional[dict] = None
+
+    def text_of(self, raw: dict):
+        """The record's YouTube ``PostText``: the text the adapter sends when the
+        sidecar loads as a plan, else the raw payload's title and description."""
+        from . import youtube_distinct
+
+        if self._records is None:
+            from .plan_io import load_publish_plan
+
+            try:
+                plan = load_publish_plan(self._path)
+                self._records = {(r.project_name, r.short_index): r for r in plan.shorts}
+            except Exception:  # noqa: BLE001 -- a malformed record is the loop's error to raise
+                self._records = {}
+        key = (raw["project_name"], raw["short_index"])
+        record = self._records.get(key)
+        if record is not None and record.payloads.youtube is not None:
+            title, description = youtube_distinct.sent_texts(record)
+        else:
+            payloads = raw.get("payloads")
+            youtube = payloads.get("youtube") if isinstance(payloads, dict) else None
+            youtube = youtube if isinstance(youtube, dict) else {}
+            title = str(youtube.get("title") or "")
+            description = str(youtube.get("description") or "")
+        return youtube_distinct.PostText(*key, title, description)
+
+    def refusal(self, text) -> Optional[str]:
+        if text is None:
+            return None
+        from . import youtube_distinct
+
+        if self._texts is None:
+            self._texts = youtube_distinct.live_texts(self._conn)
+        return youtube_distinct.find_near_duplicate(text, self._texts)
+
+    def add(self, text) -> None:
+        if self._texts is not None:
+            self._texts.append(text)
+
+
 def _platform_scheduled_at(
     by_platform: dict, platform: str, fallback: str, path: Path, context: str
 ) -> str:
@@ -344,6 +393,7 @@ def enqueue_from_plan_sidecar(
         sidecar_review_refusals(path, [r for r in capped if isinstance(r, dict)]) if review else {}
     )
 
+    channel = _ChannelTexts(conn, path)
     for record in capped:
         if not isinstance(record, dict):
             raise PublishPlanSidecarError(
@@ -423,6 +473,23 @@ def enqueue_from_plan_sidecar(
             )
             refused.append((project_name, short_index, reason))
             continue
+        # A YouTube text near-identical to a live row on the channel is refused the
+        # same way (``youtube_distinct``); a refused Short never takes a slot.
+        text = channel.text_of(record) if "youtube" in routes["selected"] else None
+        reason = channel.refusal(text)
+        if reason:
+            _raise_refusal_incident(
+                project_name,
+                short_index,
+                reason,
+                path,
+                kind="near_duplicate_text_refused",
+                why="its YouTube title or description is near-identical to a live post",
+            )
+            refused.append((project_name, short_index, reason))
+            continue
+        if text is not None and not shadow:
+            channel.add(text)
 
         for platform in routes["selected"]:
             sha, title_key = identities[platform]

@@ -27,6 +27,7 @@ from ..pipeline.final_text_record import (
 from ..pipeline.location_evidence import _evidence_id
 from ..pipeline.playlist_resolver import resolve_playlist, short_region
 from ..pipeline.title_decision import decide_title, short_place_facts
+from . import youtube_distinct
 from .asset_plan import review_hash
 from .clip_place_evidence import clip_places as _clip_places
 from .clip_place_evidence import clip_towns as _clip_towns
@@ -41,7 +42,7 @@ from .queue import (
     record_live_publish,
     transition,
 )
-from .short_title_review import short_text_policy
+from .short_title_review import backed_title_stamp, short_text_policy
 from .youtube_uploads_listing import list_uploads
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,16 @@ def _parent_entry(record: ShortPublishRecord):
     return build_visible([block])[0], item
 
 
+def _place_line(place: str, title: str, recording_date: str) -> str:
+    """``Drive through <place>``, plus the title's backed stamp on a stamped title.
+
+    Every Short of one drive that names one place sent the same description; the
+    stamp (the Short's day and its place in that day) is the record's own fact that
+    tells them apart, and the title's review already backs its words."""
+    stamp = backed_title_stamp(title, recording_date)
+    return f"Drive through {place}, {stamp}" if stamp else f"Drive through {place}"
+
+
 def _short_text_entries(
     record: ShortPublishRecord, places: list, roads: list, named, segment_places: list
 ) -> list:
@@ -159,7 +170,7 @@ def _short_text_entries(
         {
             "surface": "description",
             "kind": "place_line",
-            "text": f"Drive through {named['value']}",
+            "text": _place_line(named["value"], payload.title, record.recording_date),
             "evidence_ids": [named["evidence_id"]],
             "scope": "segment",
             "segment_places": segment_places,
@@ -368,6 +379,9 @@ class ShortsPublishResult:
     video_id: str
     playlist_id: Optional[str]
     deferred: bool = False
+    #: Parked at ``needs_operator``: its text is near-identical to a post already
+    #: on the channel (``youtube_distinct``); nothing was uploaded.
+    held: bool = False
     #: U-R1: the insert returned an id YouTube then did not list -- the row
     #: is ``missing_remote``, not ``published``.
     missing_remote: bool = False
@@ -497,6 +511,8 @@ class YouTubeShortsAdapter:
             if ft_review is not None:
                 # Send the text Waypost reviewed, not a second build of it.
                 description = compose_description(ft_review["surfaces"])
+            if self._held_as_near_duplicate(conn, delivery_id, record, description):
+                return ShortsPublishResult(video_id="", playlist_id=None, held=True)
             lease_expires = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SEC)).isoformat()
             if not acquire_lease(conn, delivery_id, self._worker_id, lease_expires):
                 raise RuntimeError(
@@ -587,6 +603,29 @@ class YouTubeShortsAdapter:
             fields["platform_published_at"] = scheduled_at.isoformat()
         transition(conn, delivery_id, STATUS_UPLOADED, STATUS_PUBLISHED, **fields)
         return ShortsPublishResult(video_id=video_id, playlist_id=playlist_id)
+
+    def _held_as_near_duplicate(
+        self, conn, delivery_id: int, record: ShortPublishRecord, description: str
+    ) -> bool:
+        """Re-check, right before the insert, that no row already on the channel
+        (``youtube_distinct``) carries a near-identical title or description; a
+        collision parks this row at ``needs_operator`` with the reason, never uploaded."""
+        row = conn.execute(
+            "SELECT status, COALESCE(upload_account, destination_account, '') AS account "
+            "FROM deliveries WHERE id=?",
+            (delivery_id,),
+        ).fetchone()
+        mine = youtube_distinct.PostText(
+            record.project_name, record.short_index, record.payloads.youtube.title, description
+        )
+        account = row["account"] if row is not None else ""
+        others = youtube_distinct.live_texts(conn, account=account, reached_only=True)
+        reason = youtube_distinct.find_near_duplicate(mine, others)
+        if reason is None:
+            return False
+        if row is None or not youtube_distinct.hold(conn, delivery_id, row["status"], reason):
+            raise RuntimeError(f"delivery {delivery_id} could not be held, not uploaded: {reason}")
+        return True
 
     def _defer_if_over_budget(
         self, conn, delivery_id: int, record: ShortPublishRecord, current_status: str

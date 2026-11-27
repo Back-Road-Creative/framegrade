@@ -246,6 +246,20 @@ exactly the file that produced the row, never a directory guess.
   or `failed_permanent` row, or a shadow row, blocks nothing. Rows queued before these
   columns existed hold `NULL` and are not compared. `day-reels` records such a reel as
   refused.
+- **No two YouTube posts on one channel say the same thing**
+  (`publishing/youtube_distinct.py`): two texts are near-identical when their fact words
+  match (case, accents, punctuation, emoji, links, closing hashtags and filler such as
+  "drive", "4k", "pov" dropped), or when both have ten or more and a word-level ratio of
+  0.9 or more. A number is a fact: "Mar 5, 2nd stretch" and "Mar 5, 3rd stretch" are
+  distinct, "Tryon" and "Tryon drive 🚗" are not. It compares the title and the
+  description the adapter sends (a reviewed Short's `Drive through <place>` line, which
+  now carries a stamped title's stamp) over the channel's live rows: queued, in flight,
+  and published in the last 60 days. Enqueue refuses such a Short like a twin (one
+  `near_duplicate_text_refused` incident); the YouTube adapter re-checks against rows
+  that reached YouTube before each insert; and every drain pass holds the later of two
+  colliding queued rows. A hold parks the row at `needs_operator` with
+  `error_class=near_duplicate_text` and the reason; it is never uploaded or deleted, and
+  raises a `delivery_needs_operator` incident.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises
