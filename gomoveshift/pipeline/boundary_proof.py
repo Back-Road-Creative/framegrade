@@ -70,6 +70,13 @@ _MAX_IE_BYTES = 150_000_000  # Official GeoJSON is ~92 MB; reject excess.
 #: inward, so every allowance gains this inward margin.
 IE_MARGIN_M = 250.0
 _IE_BASIS = "pinned_tailte_polygon_bounded_speed_error_and_margin"
+#: The county's own polygon ends at the shoreline, so its complement counts the
+#: sea as a crossing. Off the land border the reach is tested against the other
+#: counties instead: the sea is not a county a car can be in.
+_IE_NEIGHBOUR_BASIS = "pinned_tailte_other_counties_bounded_speed_error_and_margin"
+#: Counties on the land border with Northern Ireland. The Tailte map holds no
+#: Northern Ireland polygon, so these keep the full-boundary test.
+IE_BORDER_COUNTIES = frozenset({"cavan", "donegal", "leitrim", "louth", "monaghan"})
 _IE_COUNTRIES = {"ireland", "ie", "éire", "eire"}
 
 
@@ -107,6 +114,20 @@ def is_irish(claim: dict) -> bool:
         and not claim.get("state")
         and str(claim.get("country") or "").casefold() in _IE_COUNTRIES
     )
+
+
+def _ie_names(claim: dict) -> list:
+    names = claim.get("counties") if claim.get("level") == "counties" else [claim.get("name")]
+    return [str(n or "") for n in names or ()]
+
+
+def _ie_key(name: str) -> str:
+    return name.removeprefix("County ").casefold()
+
+
+def ie_borders_ni(claim: dict) -> bool:
+    """Whether any county of an Irish claim is on the Northern Ireland border."""
+    return any(_ie_key(n) in IE_BORDER_COUNTIES for n in _ie_names(claim))
 
 
 def vintage_covers(claim: dict, recorded_on) -> bool:
@@ -147,7 +168,10 @@ def pinned_boundary_proof(proof: dict, claim: dict) -> bool:
             return False
         return (
             bounded
-            and proof.get("basis") == _IE_BASIS
+            and (
+                proof.get("basis") == _IE_BASIS
+                or (proof.get("basis") == _IE_NEIGHBOUR_BASIS and not ie_borders_ni(claim))
+            )
             and proof.get("source") == f"TAILTE2026/COUNTIES/{_IE_SOURCE[0]}"
             and proof.get("sha256") == _IE_SOURCE[1]
             and proof.get("country") == "IE"
@@ -309,10 +333,10 @@ class CensusBoundaryProver:
             f"Census {level} archive",
         )
 
-    def load_ie_county(self, name: str):
-        """The union of every Tailte 2026 statutory polygon of ``name`` ("County
-        Cork" or "Cork"), in ITM metres. Any invalid or non-areal part refuses."""
-        key = ("ie", name.casefold())
+    def _ie_parts(self) -> dict:
+        """Every Tailte 2026 statutory polygon, by casefolded county name, in ITM
+        metres. Any invalid or non-areal part refuses the whole map."""
+        key = ("ie", "*")
         if key in self._shapes:
             return self._shapes[key]
         data = self._fetch_pinned(
@@ -321,36 +345,59 @@ class CensusBoundaryProver:
         doc = json.loads(data)
         if ((doc.get("crs") or {}).get("properties") or {}).get("name") != "EPSG:2157":
             raise BoundaryArchiveError("Tailte county map is not in Irish Transverse Mercator")
-        wanted = name.removeprefix("County ").casefold()
-        parts = []
+        parts: dict = {}
         for feature in doc.get("features") or []:
-            if (
-                str((feature.get("properties") or {}).get("ENG_NAME_VALUE", "")).casefold()
-                != wanted
-            ):
-                continue
+            name = str((feature.get("properties") or {}).get("ENG_NAME_VALUE", ""))
             part = force_2d(shape(feature["geometry"]))
             if not isinstance(part, (Polygon, MultiPolygon)) or not part.is_valid:
                 raise BoundaryArchiveError(f"Tailte polygon of {name!r} is invalid")
-            parts.append(part)
-        if not parts:
-            raise BoundaryArchiveError(f"Tailte county polygon {name!r} not found")
+            parts.setdefault(name.casefold(), []).append(part)
+        self._shapes[key] = parts
+        return parts
+
+    def _ie_union(self, parts: list, what: str):
         polygon = unary_union(parts)
         if not polygon.is_valid or polygon.is_empty:
-            raise BoundaryArchiveError(f"Tailte polygon of {name!r} is invalid")
-        self._shapes[key] = polygon
+            raise BoundaryArchiveError(f"Tailte polygon of {what} is invalid")
         return polygon
 
+    def load_ie_county(self, name: str):
+        """The union of every Tailte 2026 statutory polygon of ``name`` ("County
+        Cork" or "Cork"), in ITM metres."""
+        key = ("ie", _ie_key(name))
+        if key not in self._shapes:
+            parts = self._ie_parts().get(_ie_key(name))
+            if not parts:
+                raise BoundaryArchiveError(f"Tailte county polygon {name!r} not found")
+            self._shapes[key] = self._ie_union(parts, repr(name))
+        return self._shapes[key]
+
+    def load_ie_others(self, names):
+        """The union of every Tailte county polygon not named in ``names``: what a
+        car leaving the claimed counties by road could be in."""
+        wanted = frozenset(_ie_key(n) for n in names)
+        key = ("ie-others", wanted)
+        if key not in self._shapes:
+            parts = [p for n, ps in self._ie_parts().items() if n not in wanted for p in ps]
+            if not parts:
+                raise BoundaryArchiveError("Tailte county map has no other county")
+            self._shapes[key] = self._ie_union(parts, "the other counties")
+        return self._shapes[key]
+
     def _prove_ie(self, windows, claim: dict) -> dict:
-        names = claim["counties"] if claim["level"] == "counties" else [claim["name"]]
+        names = _ie_names(claim)
+        border = ie_borders_ni(claim)
         try:
             polygon = unary_union([self.load_ie_county(n) for n in names])
-            result = prove_windows_inside(windows, polygon, to_xy=itm, margin_m=IE_MARGIN_M)
+            outside = None if border else self.load_ie_others(names)
+            result = prove_windows_inside(
+                windows, polygon, to_xy=itm, margin_m=IE_MARGIN_M, outside=outside
+            )
         except (BoundaryArchiveError, OSError, ValueError, KeyError, TypeError) as exc:
             return {"verified": False, "reason": str(exc)}
         if result.get("verified") is True:
             result.update(
-                basis=_IE_BASIS,
+                basis=_IE_BASIS if border else _IE_NEIGHBOUR_BASIS,
                 source=f"TAILTE2026/COUNTIES/{self.ie_source[0]}",
                 sha256=self.ie_source[1],
                 region=claim["name"],
@@ -542,6 +589,7 @@ def prove_windows_inside(
     gps_error_m: float = GPS_ERROR_M,
     to_xy=None,
     margin_m: float = 0.0,
+    outside=None,
 ) -> dict:
     """Prove each possible interval stays inside under explicit error bounds.
 
@@ -550,6 +598,10 @@ def prove_windows_inside(
     ``margin_m``. No path is interpolated. A near-border interval refuses even
     when endpoints are in. ``to_xy(lat, lon)`` projects fixes onto a polygon
     already in metres; without it the polygon is in degrees.
+
+    ``outside``, in the polygon's units, replaces the polygon's boundary as what
+    the travel must not reach: the other counties, so a shoreline is not a
+    crossing. Fixes must still lie inside ``polygon``.
     """
     windows = list(windows)
     if not windows:
@@ -561,6 +613,7 @@ def prove_windows_inside(
         or gps_error_m <= 0
         or not math.isfinite(margin_m)
         or margin_m < 0
+        or (outside is not None and (to_xy is None or not outside.is_valid or outside.is_empty))
     ):
         return {"verified": False, "reason": "invalid polygon or uncertainty policy"}
     if to_xy is None:
@@ -577,7 +630,7 @@ def prove_windows_inside(
 
     else:
         projected = polygon
-    boundary = projected.boundary
+    boundary = projected.boundary if outside is None else outside
     gps_error_m += margin_m
     longest = 0.0
     for window in windows:
