@@ -7,6 +7,13 @@
       "reason": "stage root held as evidence for the Mizen re-measure; no drive_backlog.yaml row owns it",
       "issue": "framegrade#398",
       "expires": "2026-12-18"
+    },
+    {
+      "name": "early-clonakilty-remeasure",
+      "owner": "JP",
+      "reason": "audit-only re-render of Early Clonakilty, uploads off, so its queued YouTube Shorts can re-measure their route bins; the original stages were removed and a supersede refuses a drive with upload records",
+      "issue": "framegrade#681",
+      "expires": "2027-01-15"
     }
   ]
 }
