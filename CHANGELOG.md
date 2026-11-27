@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.180] - 2026-11-27
+
+### Fixed
+
+- The health loop (heal resume, `health publish`, `health backlog`, retry fingerprints and the install-pending check) now uses the published venv, `.venvs/current`, else `.venv`. The staging sync leaves `.venv` on the old venv while any process runs through it, so on 2026-11-27 every launch was refused as `install pending: checkout pins 0.3.177, venv has 0.3.174` although 0.3.177 was installed and published.
+
 ## [0.3.179] - 2026-11-27
 
 ### Fixed
@@ -2023,7 +2029,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...HEAD
+[0.3.180]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.179...v0.3.180
 [0.3.179]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...v0.3.179
 [0.3.178]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...v0.3.178
 [0.3.177]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...v0.3.177
