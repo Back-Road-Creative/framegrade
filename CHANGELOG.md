@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.175] - 2026-11-27
+
+### Fixed
+
+- Resuming a platform that was paused for a refused access token now sends the post that hit the refusal on the next pass, instead of 6 hours later.
+- A refused Facebook, Instagram or TikTok token met while reconciling parked posts or posting first comments now pauses that platform too, instead of failing each row in turn.
+- An expired TikTok refresh token no longer stops the whole `dispatch-queue` pass: TikTok pauses (and `health check` names it) while YouTube, Instagram and Facebook still drain. Any other TikTok refresh failure skips only TikTok for that pass.
+- A revoked YouTube login now pauses YouTube instead of failing each queued short in turn, and so does a refused token met by the YouTube first-comment drain, YouTube's live check, the published-video recheck, the stale-comment corrections, the Facebook reel read-back, the Facebook Page photo read-back or an Instagram carousel's first item.
+
 ## [0.3.174] - 2026-11-26
 
 ### Changed
@@ -1983,7 +1992,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...HEAD
+[0.3.175]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...v0.3.175
 [0.3.174]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...v0.3.174
 [0.3.173]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...v0.3.173
 [0.3.172]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...v0.3.172
