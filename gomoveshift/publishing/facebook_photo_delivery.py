@@ -16,6 +16,7 @@ from .facebook_photo_client import (
     FacebookPagePhotoClient,
     PhotoReadbackUnknownError,
     PhotoUploadReceipt,
+    PhotoUploadUnknownError,
 )
 from .queue import (
     FACEBOOK_PHOTO_KIND,
@@ -25,6 +26,7 @@ from .queue import (
     begin_facebook_photo_attempt,
     confirm_facebook_photo,
     facebook_photo_attempt,
+    is_auth_blocked,
     retain_facebook_photo_receipt,
     retain_facebook_photo_story,
 )
@@ -201,11 +203,16 @@ class FacebookPhotoDelivery:
                 raise ValueError("Mismatched creation receipt")
             if not retain_facebook_photo_receipt(self._conn, row["id"], asdict(receipt)):
                 raise ValueError("Receipt checkpoint refused")
+        except PhotoUploadUnknownError as exc:
+            refused = is_auth_blocked(exc)
         except Exception:  # noqa: BLE001 -- never expose sensitive transport details or repeat POST
-            pass
+            refused = False
         else:
             return self.reconcile(row)
-        raise PhotoDeliveryPendingError("Photo creation uncertain; hold recorded attempt")
+        # A refused Page token holds the attempt the same way, and pauses Facebook.
+        raise (PhotoDeliveryAuthBlockedError if refused else PhotoDeliveryPendingError)(
+            "Photo creation uncertain; hold recorded attempt"
+        )
 
     def reconcile(self, supplied_row: dict) -> None:
         """Read-only remote path: no authority callback, draft or file loading."""
@@ -237,7 +244,7 @@ class FacebookPhotoDelivery:
                 raise ValueError("Retained receipt identity mismatch")
             status = self._client.read_status(receipt)
         except PhotoReadbackUnknownError as exc:
-            refused = getattr(exc, "queue_state", None) == "auth_blocked"
+            refused = is_auth_blocked(exc)
             if (
                 exc.page_id == row["upload_account"]
                 and exc.photo_id == row["platform_upload_id"]

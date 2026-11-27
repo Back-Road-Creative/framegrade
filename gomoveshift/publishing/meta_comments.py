@@ -60,6 +60,8 @@ def _author_mismatch(adapter: object, posted_id: object) -> Optional[str]:
         said = adapter.read_comment(str(posted_id))
         own = adapter.own_id()
     except Exception as exc:  # noqa: BLE001 -- best effort: the post already landed
+        if is_auth_blocked(exc):
+            raise  # the caller pauses the platform; the posted comment is still recorded
         logger.warning("first comment: could not read back comment %s: %s", posted_id, exc)
         return None
     author = getattr(said, "author", None)
@@ -159,7 +161,14 @@ def drain_meta_first_comments(
                 result.failed += 1
                 result.errors.append(f"delivery {row['id']}: {detail}")
             continue
-        mismatch = _author_mismatch(adapter_for(platform), posted_id)
+        try:
+            mismatch = _author_mismatch(adapter_for(platform), posted_id)
+        except Exception as exc:  # noqa: BLE001 -- only a refused token comes out of it
+            if not is_auth_blocked(exc):
+                raise
+            detail = pause_for_auth(conn, platform, exc)
+            result.errors.append(f"{platform}: paused, access token refused: {detail}")
+            mismatch = None
         if mismatch:
             result.errors.append(
                 f"delivery {row['id']}: comment {posted_id} posted, but it reads back with "
