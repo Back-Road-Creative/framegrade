@@ -47,6 +47,15 @@ class TikTokAuthError(RuntimeError):
     """Credential load/refresh failure — message is always generic."""
 
 
+class TikTokRefreshExpiredError(TikTokAuthError):
+    """The refresh token itself has expired, so no access token can be had
+    until the owner re-authorizes. Like ``TikTokAuthBlockedError`` it carries
+    ``queue_state = "auth_blocked"``, so ``dispatch-queue`` pauses TikTok
+    (``queue.pause_for_auth``) instead of stopping the whole pass."""
+
+    queue_state = "auth_blocked"
+
+
 def _run_sops(args: list) -> subprocess.CompletedProcess:
     return subprocess.run(  # noqa: S603, S607 — fixed args, sops must be on PATH
         ["sops", *args], capture_output=True, text=True, timeout=30, check=False
@@ -131,7 +140,9 @@ def get_valid_tiktok_credentials(
     if now < datetime.fromisoformat(creds["access_expires_at"]) - ACCESS_TOKEN_REFRESH_MARGIN:
         return creds
     if now >= datetime.fromisoformat(creds["refresh_expires_at"]):
-        raise TikTokAuthError(f"TikTok refresh token has expired — {_REAUTH_HINT} to re-authorize.")
+        raise TikTokRefreshExpiredError(
+            f"TikTok refresh token has expired — {_REAUTH_HINT} to re-authorize."
+        )
     try:
         resp = requests.post(
             TOKEN_URL,

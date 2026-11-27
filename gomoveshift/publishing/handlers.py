@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from ..pipeline.exceptions import YouTubeQuotaError
 from .dispatch import (
     PermanentDeliveryError,
+    PlatformAuthPausedError,
     ReconcilePendingError,
     ThrottledDeliveryError,
     _detail,
@@ -48,7 +49,6 @@ from .instagram_adapter import (
 from .models import FORMAT_CAROUSEL, FORMAT_PHOTO, MediaFingerprint, ShortPublishRecord
 from .photo_adapter import PhotoAuthBlockedError, PhotoCarouselAdapter, PhotoPermanentError
 from .queue import (
-    AUTH_BLOCKED_PAUSE_REASON,
     AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT,
     FACEBOOK_PHOTO_KIND,
     NEXT_ATTEMPT_AWAITING_IG_RECONCILE,
@@ -56,7 +56,8 @@ from .queue import (
     STATUS_AWAITING_MANUAL_PUBLISH,
     acquire_lease,
     find_delivery,
-    pause_platform,
+    is_auth_blocked,
+    pause_for_auth,
     transition,
 )
 from .queue import NEXT_ATTEMPT_AWAITING_MANUAL as AWAITING_MANUAL
@@ -71,7 +72,11 @@ from .tiktok_adapter import (
     upload_video_chunks,
 )
 from .tiktok_pack import pack_and_park
-from .youtube_adapter import AmbiguousUploadMatchError, YouTubeShortsAdapter
+from .youtube_adapter import (
+    AmbiguousUploadMatchError,
+    YouTubeShortsAdapter,
+    youtube_auth_refused,
+)
 
 RecordLoader = Callable[[str, int], ShortPublishRecord]
 Handler = Callable[[Dict[str, Any]], None]
@@ -104,33 +109,38 @@ _MAX_PENDING_INBOX_DRAFTS = 3
 _AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT = AWAITING_MANUAL_PUBLISH_NEXT_ATTEMPT
 
 
-def _pause_for_auth(conn, row: Dict[str, Any], exc: Exception) -> ThrottledDeliveryError:
+def _pause_for_auth(
+    conn, row: Dict[str, Any], exc: Exception, *, requeue: bool = True
+) -> ThrottledDeliveryError:
     """The error a handler raises when the platform refused its access token.
 
     A dead token blocks every post to that platform, not just this one, and
     only a person re-authorizing clears it. So the platform is paused
-    (``queue.pause_platform``, reason ``AUTH_BLOCKED_PAUSE_REASON``): the drain
+    (``queue.pause_for_auth``, reason ``AUTH_BLOCKED_PAUSE_REASON``): the drain
     leaves its other rows queued and untouched, and ``health check`` raises one
     ``platform_auth_blocked`` incident naming it. This row goes back to
     ``queued`` when nothing of it reached the platform (it keeps its status and
     ids otherwise), and the returned ``ThrottledDeliveryError`` never counts
     against ``max_attempts``. Before this each row was failed in turn, so one
     expired login quietly failed every queued Facebook, Instagram and TikTok
-    post. Resuming the platform in the console lets them go again."""
-    detail = _detail(exc)
-    pause_platform(conn, row["platform"], reason=f"{AUTH_BLOCKED_PAUSE_REASON} {detail}")
+    post. Resuming the platform in the console lets them go again.
+
+    ``requeue=False`` keeps a ``submitting`` row as it is, for an adapter whose
+    next attempt must reconcile that row before it uploads again (YouTube)."""
+    detail = pause_for_auth(conn, row["platform"], exc)
     live = conn.execute(
         "SELECT status, platform_upload_id, platform_post_id FROM deliveries WHERE id=?",
         (row["id"],),
     ).fetchone()
     if (
-        live is not None
+        requeue
+        and live is not None
         and live["status"] == "submitting"
         and not live["platform_upload_id"]
         and not live["platform_post_id"]
     ):
         transition(conn, row["id"], "submitting", "queued")
-    return ThrottledDeliveryError(f"{row['platform']} paused, access token refused: {detail}")
+    return PlatformAuthPausedError(f"{row['platform']} paused, access token refused: {detail}")
 
 
 def make_youtube_handler(
@@ -146,9 +156,9 @@ def make_youtube_handler(
     quota, or the channel's daily upload limit) is a
     :class:`ThrottledDeliveryError`: the platform refuses more until its day
     resets, so the row waits and is never failed on ``max_attempts`` for it
-    -- eight quota refusals used to fail a sound Short.
-    Everything else propagates unrecognised, handled by ``drain_queue``'s
-    default retryable path."""
+    -- eight quota refusals used to fail a sound Short. A refused OAuth token
+    (``youtube_auth_refused``) pauses YouTube. Everything else propagates
+    unrecognised, handled by ``drain_queue``'s default retryable path."""
 
     def handler(row: Dict[str, Any]) -> None:
         record = record_loader(row["project_name"], row["short_index"])
@@ -159,6 +169,12 @@ def make_youtube_handler(
             raise PermanentDeliveryError(str(exc)) from exc
         except YouTubeQuotaError as exc:
             raise ThrottledDeliveryError(str(exc)) from exc
+        except Exception as exc:
+            if not youtube_auth_refused(exc):
+                raise
+            # The row stays ``submitting``: the next attempt reconciles it
+            # against the channel's uploads before it ever inserts again.
+            raise _pause_for_auth(conn, row, exc, requeue=False) from exc
 
     return handler
 
@@ -292,6 +308,11 @@ def make_photo_handler(
                 media_image_url_loader=media_image_url_loader,
             )
         except PhotoPermanentError as exc:
+            if is_auth_blocked(exc.__cause__):
+                # A carousel part-built when the token died stays failed (its
+                # orphaned items are a person's call), but Facebook or
+                # Instagram pauses so the next row is not tried with it.
+                pause_for_auth(conn, row["platform"], exc.__cause__)
             raise PermanentDeliveryError(str(exc)) from exc
         except PhotoAuthBlockedError as exc:
             raise _pause_for_auth(conn, row, exc) from exc

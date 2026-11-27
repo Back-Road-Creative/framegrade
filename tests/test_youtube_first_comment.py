@@ -244,10 +244,10 @@ def test_drain_first_comments_counts_comments_turned_off(conn):
         _make_http_error(503, reason="backendError", message="Backend Error"),
         _make_http_error(429, reason="rateLimitExceeded", message="rate limited"),
         _make_http_error(403, reason="quotaExceeded", message="quota exceeded"),
-        _make_http_error(401, reason="authError", message="Invalid Credentials"),
         TimeoutError("timed out"),
     ],
-    ids=["5xx", "rate-limit", "quota-spent", "lapsed-token", "network-down"],
+    # A lapsed token (401) pauses YouTube instead: test_auth_pause_passes.
+    ids=["5xx", "rate-limit", "quota-spent", "network-down"],
 )
 def test_drain_first_comments_never_counts_an_outage_toward_the_cap(conn, exc):
     # An overnight outage or a spent daily quota says nothing about the video:

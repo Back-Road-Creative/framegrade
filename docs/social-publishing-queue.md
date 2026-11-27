@@ -164,7 +164,9 @@ its rows never carry text.
   `*PermanentError` (a deleted reel is Graph code 100). Nothing else counts:
   a 5xx, a rate limit or spent quota, a lapsed token, a missing scope or a
   network failure says nothing about the post, so an overnight outage never
-  uses up a live short's tries.
+  uses up a live short's tries. A refused Meta token (`*AuthBlockedError`)
+  also pauses that platform (`queue.pause_for_auth`), as the publish drain
+  does, and the pass stops trying its other rows; resuming it makes them due.
 - **Output.** Each drain prints `first_comment: posted=N failed=N
   [needs_reauth=1]` above the summary. A scheduler may keep only a pass's
   last line, so the summary line adds the two drains up too:
@@ -246,6 +248,20 @@ exactly the file that produced the row, never a directory guess.
   or `failed_permanent` row, or a shadow row, blocks nothing. Rows queued before these
   columns existed hold `NULL` and are not compared. `day-reels` records such a reel as
   refused.
+- **No two YouTube posts on one channel say the same thing**
+  (`publishing/youtube_distinct.py`): two texts are near-identical when their fact words
+  match (case, accents, punctuation, emoji, links, closing hashtags and filler such as
+  "drive", "4k", "pov" dropped), or when both have ten or more and a word-level ratio of
+  0.9 or more. A number is a fact: "Mar 5, 2nd stretch" and "Mar 5, 3rd stretch" are
+  distinct, "Tryon" and "Tryon drive 🚗" are not. It compares the title and the
+  description the adapter sends (a reviewed Short's `Drive through <place>` line, which
+  now carries a stamped title's stamp) over the channel's live rows: queued, in flight,
+  and published in the last 60 days. Enqueue refuses such a Short like a twin (one
+  `near_duplicate_text_refused` incident); the YouTube adapter re-checks against rows
+  that reached YouTube before each insert; and every drain pass holds the later of two
+  colliding queued rows. A hold parks the row at `needs_operator` with
+  `error_class=near_duplicate_text` and the reason; it is never uploaded or deleted, and
+  raises a `delivery_needs_operator` incident.
 - **Untrusted-input handling**: the sidecar is JSON on disk, so malformed
   JSON, a missing key, a wrong-typed field, or a platform outside
   `KNOWN_PLATFORMS` (`gomoveshift/publishing/models.py`) raises
@@ -458,7 +474,12 @@ because "stop touching this platform" means something different to each:
 - `reconcile_awaiting_manual` skips a paused platform's rows **entirely**, before it ever calls
   `poll`. Every action it takes — polling the platform's API, transitioning to `published` or
   `failed_permanent` — is itself a platform-facing decision, so unlike the lease case there is no
-  bookkeeping-only half to salvage.
+  bookkeeping-only half to salvage. `reconcile_awaiting_ig` does the same for Instagram.
+
+Both reconcilers also take a pause themselves: when the platform refuses its access token
+(`queue.is_auth_blocked`, the adapters' `queue_state = "auth_blocked"`), they pause it with
+`queue.pause_for_auth`, exactly as the publish drain's handlers do, record one error line and stop
+the pass for that platform rather than asking about every parked row.
 
 A row already leased or in flight when the pause takes effect is never touched by any of the
 three paths: the platform call it may be mid-flight on cannot be un-sent.
@@ -983,6 +1004,9 @@ with nothing downloaded. Otherwise the reel is downloaded, blurred by `_render_p
 blurred file is spooled through `asset_plan.build_asset_sidecar(..., caption=...)`. A failed
 render or leftover location tag refuses it for good; the original is deleted after the render.
 A ledger under `<gms_data_home>/day_reels/requests/` makes each request file run once.
+The GPU lock is tried once, never waited on: while a render holds it the request is `held`
+(`shared GPU lock busy`) and stays pending for the next hour, so `dispatch-queue` in the same
+tick is never delayed behind it (note 191).
 
 **Every day reel is also a YouTube Short**, whether or not `platforms` lists `"youtube"`: the
 render is saved as `short_01.mp4` (the YouTube filename guard) and queued for YouTube beside the

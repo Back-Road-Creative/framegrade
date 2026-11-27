@@ -450,9 +450,11 @@ def no_gpu_lock() -> Iterator[None]:
 
 
 @contextmanager
-def shared_gpu_lock(wait_s: float = 60.0) -> Iterator[None]:
-    """The host's shared GPU lock; raises ``GpuLockBusyError`` if still held
-    after ``wait_s`` (the request stays pending for the next run)."""
+def shared_gpu_lock(wait_s: float = 0.0) -> Iterator[None]:
+    """The host's shared GPU lock, tried once by default; raises ``GpuLockBusyError`` while it
+    is held (the request stays pending, ``held``, for the next run). Never waits: a render holds
+    the lock for hours, and day-reels runs ahead of dispatch-queue in the same cron tick, so a
+    wait here only delayed social posting."""
     fd, path = acquire_gpu_lock(wait_s=wait_s)
     try:
         yield

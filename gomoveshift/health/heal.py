@@ -14,7 +14,8 @@ publishes). A refusal is a recorded ``refused`` attempt naming class, fingerprin
 Guards, each a recorded skip that ends by itself: (a) retry backoff. With n launched attempts of
 this recipe (counted across every row sharing it) under the current fingerprint, the next waits
 ``min(HEAL_RETRY_BASE_S * 2**(n-1), HEAL_RETRY_MAX_S)`` (1 h, 2 h, 4 h ... 24 h) after the newest.
-A changed fingerprint retries at once. (b) a drive job is running. (c) none: the publish slot is
+A changed fingerprint retries at once. (b) a live drive on the same stages or project dir
+(``drive_conflict``); a drive elsewhere is no reason, since a render queues on the GPU lock. (c) none: the publish slot is
 recorded, never gating, because an audit-only drive keeps only the weekday check
 (``_launch_anchor_refusal``); ``health backlog`` and ``health publish`` claim a fresh slot after
 a passed audit. (d) a metadata-gate failure with no generator change since the failure retries once
@@ -379,30 +380,78 @@ def _proc_alive(ident: Any) -> bool:
 DRIVE_PROCESS_PATTERN = r"gomoveshift( -[^ ]+)* drive "
 
 
-def _pgrep_drive() -> bool:
+def live_drive_cmdlines() -> List[str]:
+    """The command line of each live ``gomoveshift ... drive`` process (``pgrep -af``); empty
+    when there is none or ``pgrep`` cannot run."""
     try:
         done = subprocess.run(  # noqa: S603,S607 -- fixed argv
-            ["pgrep", "-f", DRIVE_PROCESS_PATTERN], capture_output=True, timeout=10, check=False
-        )
+            ["pgrep", "-af", DRIVE_PROCESS_PATTERN],
+            capture_output=True, text=True, timeout=10, check=False,
+        )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
+        return []
+    return [ln for ln in done.stdout.splitlines() if ln.strip()] if done.returncode == 0 else []
 
 
-def default_drive_running(
+def _opt(argv: List[str], flag: str) -> Optional[str]:
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def _run_dirs(recipe_path: Path, recipe: Dict[str, Any]) -> Tuple[List[Path], Optional[str]]:
+    """``(run-lock dirs, --output-dir)`` of a run of this recipe: its stages dir (the recipe's own)
+    and its project dir, derived as ``DriveOrchestrator._resolve_paths`` does. A dir the argv does
+    not name is left out."""
+    argv, base = [str(a) for a in recipe.get("argv") or []], Path(str(recipe.get("cwd") or "."))
+    dirs, out = [Path(recipe_path).parent], _opt(argv, "--output-dir")
+    if out and "drive" in argv[3:]:
+        i = argv.index("drive", 3) + 1
+        if i < len(argv) and not argv[i].startswith("-"):
+            name = Path(argv[i]).stem.replace(" ", "_").lower()
+            out_base = base / out
+            dirs.append(out_base if out_base.name.lower() == name else out_base / name)
+    return dirs, (os.path.normpath(str(base / out)) if out else None)
+
+
+def drive_conflict(
     jobs_dir: Path,
+    recipe_path: Path,
+    recipe: Dict[str, Any],
     *,
     alive_fn: Callable[[Any], bool] = _proc_alive,
-    pgrep_fn: Callable[[], bool] = _pgrep_drive,
-) -> bool:
-    """An unfinished drive job record whose nanny or worker is still alive, or a live
-    ``gomoveshift ... drive`` process. A record a killed nanny left at "running" does not count."""
-    for rec in _job_records(jobs_dir):
+    holder_fn: Optional[Callable[[Path], Optional[Dict[str, Any]]]] = None,
+) -> Optional[str]:
+    """Why a run of this recipe would collide with a live drive, else ``None``: a live run holds
+    the run lock of its stages dir or project dir (the locks ``ConcurrentRunError`` enforces), or
+    a live drive job (a render or a Phase D publish) has the same ``--output-dir``, which covers
+    a job still starting up. Any other live drive is never a reason: a render waits on the shared
+    GPU lock, and an upload needs no GPU."""
+    from ..pipeline.orchestrator_lock import (  # noqa: PLC0415 -- heal imports no pipeline at load
+        PROJECT_RUN_LOCK_NAME,
+        live_run_lock_holder,
+    )
+
+    holder_fn = holder_fn or live_run_lock_holder
+    dirs, out = _run_dirs(recipe_path, recipe)
+    for i, d in enumerate(dirs):
+        held = holder_fn(d / ("pipeline_state.lock" if i == 0 else PROJECT_RUN_LOCK_NAME))
+        if held:
+            return f"a drive on the same {'stages' if i == 0 else 'project'} dir is running (pid {held.get('pid')})"
+    for rec in _job_records(jobs_dir) if out else []:
         state = (rec.get("result") or {}).get("state")
-        if state in (None, "running") and drives._is_drive_job(rec):
-            if alive_fn(rec.get("worker")) or alive_fn(rec.get("nanny")):
-                return True
-    return pgrep_fn()
+        if state not in (None, "running") or not drives._is_drive_job(rec):
+            continue
+        argv = [str(a) for a in rec.get("argv") or []]
+        theirs = _opt(argv, "--output-dir")
+        cwd = str(rec.get("cwd") or recipe.get("cwd") or ".")
+        same = theirs and os.path.normpath(os.path.join(cwd, theirs)) == out
+        if same and (alive_fn(rec.get("worker")) or alive_fn(rec.get("nanny"))):
+            return f"drive job {rec.get('name')} on the same output dir is running"
+    return None
 
 
 def _parse_when(text: Any) -> Optional[datetime]:
@@ -527,7 +576,7 @@ def run_heal(
     launcher: Optional[Launcher] = None,
     notify_fn: Optional[Callable[[str, Dict[str, Any], str], bool]] = None,
     git_changed: Optional[Callable[[str, str, Tuple[str, ...]], Optional[List[str]]]] = None,
-    drive_running: Optional[Callable[[Path], bool]] = None,
+    conflict_fn: Optional[Callable[[Path, Path, Dict[str, Any]], Optional[str]]] = None,
     slot_fn: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Optional[datetime]]] = None,
     only_key: Optional[str] = None,
     installed_version_fn: Optional[Callable[[str], Optional[str]]] = None,
@@ -546,7 +595,7 @@ def run_heal(
     sha = mirror_sha or code_sha(code_root)
     launcher = launcher or _default_launcher
     git_changed = git_changed or _default_git_changed(code_root)
-    drive_running = drive_running or default_drive_running
+    conflict_fn = conflict_fn or drive_conflict
     slot_fn = slot_fn or default_slot(config, now)
     installed_version_fn = installed_version_fn or default_installed_version
     pinned_version_fn = pinned_version_fn or default_pinned_version
@@ -675,8 +724,8 @@ def run_heal(
             )
         elif pending := install_pending(installed, pinned):
             att["reason"] = pending
-        elif drive_running(jobs_dir):
-            att["reason"] = "a drive job is running"
+        elif clash := conflict_fn(jobs_dir, Path(recipe_path), recipe):
+            att["reason"] = clash  # (b) only the same drive's dirs; any other drive never waits it
         else:
             # Guard (c) is gone: an audit-only resume keeps only the drive CLI's weekday check
             # (``_launch_anchor_refusal``), so a passed or unknown slot refuses nothing. The slot

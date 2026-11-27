@@ -41,7 +41,6 @@ class Rig:
         self.drives: list = []
         self.slots = [(FRI, "fri"), (TUE, "tue")]
         self.ledger: set = set()
-        self.running = False
         self.lease_free = True
         self.leases: list = []
         self.devices = {self.stages: (1, 500.0), self.out: (2, 500.0)}
@@ -106,7 +105,7 @@ class Rig:
             mirror_sha="abc1234", now=NOW, dry_run=dry_run,
             lease_acquire=self.lease_acquire,
             lease_release=lambda: self.leases.append("release"),
-            drive_running=lambda: self.running, disk=self.disk, preflight=self.preflight,
+            disk=self.disk, preflight=self.preflight,
             render_gate=self.render_gate, launcher=self.launcher,
             register=lambda **kw: self.registered.append(kw), retire=self.retired.append,
             installed_version=lambda python: self.installed,
@@ -204,12 +203,13 @@ def test_lease_held_is_a_noop_and_never_released_by_us(tmp_path):
     assert rig.leases == ["acquire"] and not rig.launches
 
 
-def test_running_drive_is_a_noop(tmp_path):
+def test_another_drive_rendering_never_holds_the_launch(tmp_path):
+    # 2026-11-26: renders run back to back for up to 45 h; a new render queues on the GPU lock
     rig = Rig(tmp_path)
-    rig.running = True
+    job(rig, "elsewhere", "other-drive", "running", 100.0)
     res = rig.run()
-    assert res["action"] == "noop" and "running" in res["reason"]
-    assert not rig.launches and rig.leases == ["acquire", "release"]
+    assert res["action"] == "launched" and len(rig.launches) == 1, res
+    assert rig.leases == ["acquire", "release"]
 
 
 def test_repeat_invocation_after_a_launch_is_a_noop(tmp_path):
@@ -400,12 +400,12 @@ def test_a_failed_drive_with_no_failed_publish_is_not_published(tmp_path):
         assert rig.publishes == []
 
 
-def test_a_failed_publish_waits_for_a_running_drive(tmp_path):
+def test_a_failed_publish_never_waits_for_a_running_drive(tmp_path):
     rig = Rig(tmp_path)
     _failed_publish(rig)
-    rig.running = True
+    job(rig, "elsewhere", "other-drive", "running", 300.0)
     res = rig.run()
-    assert rig.publishes == [] and "running" in res["reason"]
+    assert rig.publishes == [("day-a", False)] and res["action"] == "launched", res
 
 
 # 2026-11-20 root cause (Kerry-to-Cork): the retry keyed on the publish job's ``state`` being
@@ -577,12 +577,12 @@ def test_a_failed_audit_or_one_waiting_at_the_ost_gate_is_never_published(tmp_pa
     assert rig.publishes == []
 
 
-def test_a_running_drive_holds_the_publish_too(tmp_path):
+def test_a_running_drive_never_holds_the_publish(tmp_path):
     rig = Rig(tmp_path)
     _audited(rig, action="launched", reason="x")
-    rig.running = True
+    job(rig, "elsewhere", "other-drive", "running", 300.0)
     res = rig.run()
-    assert rig.publishes == [] and "running" in res["reason"]
+    assert rig.publishes == [("day-a", False)] and res["action"] == "launched", res
 
 
 # 2026-11-17: ireland-2025-09-19-old-head-courtmacsherry failed on an Overpass outage and every
@@ -710,7 +710,7 @@ def test_retiring_holds_the_drives_recipe_so_heal_never_resumes_it(tmp_path):
 # resume failed in ~11 s and heal relaunched it on the next mirror SHA, starving both regions.
 def test_retiring_and_holding_run_even_while_a_drive_is_running(tmp_path):
     rig = Rig(tmp_path)
-    rig.running = True
+    job(rig, "elsewhere", "other-drive", "running", 50.0)
     rig.drives.append(drive("dropped", "auditing"))
     rig.drives.append(drive("gone", "failed"))
     job(rig, "9ee99a65", "dropped", "failed", 100.0)
@@ -721,8 +721,7 @@ def test_retiring_and_holding_run_even_while_a_drive_is_running(tmp_path):
         (stages / "resume.json").write_text("{}")
         held.append(stages)
     res = rig.run()
-    assert res["reason"] == "a drive is running; one heavy drive at a time"
-    assert rig.retired == ["dropped"] and not rig.launches
+    assert rig.retired == ["dropped"]
     assert res["held"] == [str(s) for s in held]
     assert all(heal.resume.is_held(s / "resume.json") for s in held)
 
@@ -1214,7 +1213,7 @@ def test_no_service_interpreter_refuses(tmp_path):
 def test_an_exception_mid_run_still_releases_the_lease(tmp_path):
     rig = Rig(tmp_path)
 
-    def boom():
+    def boom(*_a):
         raise OSError("probe failed")
 
     with pytest.raises(OSError):
@@ -1223,7 +1222,7 @@ def test_an_exception_mid_run_still_releases_the_lease(tmp_path):
             stages_root=rig.stages, output_root=rig.out, sources_root=rig.sources,
             code_root=rig.tmp, jobs_dir=rig.tmp, mirror_sha="x", now=NOW, dry_run=False,
             lease_acquire=rig.lease_acquire, lease_release=lambda: rig.leases.append("release"),
-            drive_running=boom, disk=rig.disk, preflight=rig.preflight, render_gate=rig.render_gate, launcher=rig.launcher,
+            disk=rig.disk, preflight=rig.preflight, render_gate=boom, launcher=rig.launcher,
             register=lambda **kw: None, retire=lambda project: None,
         )  # fmt: skip
     assert rig.leases == ["acquire", "release"]

@@ -45,7 +45,12 @@ from gomoveshift.publishing.models import (
     PublishRecord,
 )
 from gomoveshift.publishing.queue import PUBLISHED_AT_PLATFORM_CONFIRMED as PLATFORM_CONFIRMED
-from gomoveshift.publishing.queue import acquire_lease, find_delivery, transition
+from gomoveshift.publishing.queue import (
+    acquire_lease,
+    find_delivery,
+    is_auth_blocked,
+    transition,
+)
 
 # Ceiling on a single publish attempt's worker lease -- mirrors the video
 # adapters' LEASE_SEC (a worker that dies mid-attempt frees this window for
@@ -205,6 +210,8 @@ class PhotoCarouselAdapter:
                         self._client.create_carousel_item_container(media_image_url_loader(media))
                     )
                 except Exception as exc:  # noqa: BLE001 -- see class docstring: ALWAYS permanent
+                    if not item_ids and is_auth_blocked(exc):
+                        raise  # nothing created yet: a dead token, paused by the handler
                     raise PartialCarouselError(
                         f"carousel item {index} of {len(media_items)} failed to upload after "
                         f"{len(item_ids)} item(s) already succeeded: {exc}",

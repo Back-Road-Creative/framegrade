@@ -23,13 +23,9 @@ def _no_gpu() -> None:
     raise HostWorkerError("nvidia-smi failed")
 
 
-def _spawn_script(script: str):
-    """Swap the allowlisted argv for a python -c script (keeps log/env wiring)."""
-
-    def spawn(argv, **kw):
-        return subprocess.Popen([sys.executable, "-c", script], **kw)
-
-    return spawn
+def _script(script: str):
+    """Swap the allowlisted argv for a python -c script (keeps log/env/lock wiring)."""
+    return lambda argv: [sys.executable, "-c", script]
 
 
 def _make(tmp_path, script="print('hi')", **kw):
@@ -38,7 +34,8 @@ def _make(tmp_path, script="print('hi')", **kw):
     kw.setdefault("lock_wait_s", 0.3)
     kw.setdefault("grace_s", 0.5)
     kw.setdefault("heartbeat_s", 0.1)
-    kw.setdefault("spawn", _spawn_script(script))
+    kw.setdefault("runner", "detached")
+    kw.setdefault("child_argv", _script(script))
     return HostWorker(tmp_path / "spool", **kw)
 
 
@@ -282,17 +279,60 @@ def test_drive_child_refuses_foreign_gpu_lock(tmp_path):
         os.close(fd)
 
 
-def test_busy_gpu_lock_fails_loudly_and_never_runs(tmp_path):
-    _submit(tmp_path, argv=[sys.executable, "-m", "gomoveshift", "route-story-film", "x"])
+_FILM = [sys.executable, "-m", "gomoveshift", "route-story-film", "x"]
+
+
+def _hold_gpu(tmp_path) -> int:
+    """A render holding the shared GPU lock (the caller closes the fd)."""
     fd = os.open(tmp_path / "gpu.lock", os.O_RDWR | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
+    os.write(fd, json.dumps({"owner": "gomoveshift", "pid": os.getpid()}).encode())
+    return fd
+
+
+# 2026-11-26: a route-story-film request was failed after 120 s whenever a drive held the card;
+# renders run back to back for up to 45 h, so it could never run. It now waits its turn.
+def test_a_busy_gpu_lock_keeps_the_request_queued_and_never_runs_it(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
     try:
-        w = _make(tmp_path, spawn=lambda *a, **k: pytest.fail("ran without lock"))
-        w.run_once()
+        w = _make(tmp_path, "print('RAN', flush=True)")
+        assert w.run_once() is False  # the lane polls instead of spinning on it
     finally:
         os.close(fd)
     st = _status(tmp_path)
-    assert st["state"] == "failed" and "GPU lock" in st["error"]
+    assert st["state"] == "queued" and "GPU lock" in st["waiting"] and st["error"] is None
+    assert (tmp_path / "spool" / "pending" / "j1.json").exists()
+    assert not (tmp_path / "spool" / "done" / "j1.json").exists()
+    assert not (tmp_path / "spool" / "logs" / "j1.log").exists()  # the child never started
+
+
+def test_a_request_that_waited_for_the_lock_runs_once_it_is_free(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _make(tmp_path).run_once() is True
+    assert _status(tmp_path)["state"] == "succeeded"
+    assert (tmp_path / "spool" / "done" / "j1.json").exists()
+
+
+def test_a_waiting_request_goes_behind_the_next_one_and_can_be_cancelled(tmp_path):
+    _submit(tmp_path, "j1", argv=_FILM)
+    _submit(tmp_path, "j2")  # a drive request, which takes its own lock
+    os.utime(tmp_path / "spool" / "pending" / "j1.json", (1, 1))  # j1 was first in line
+    os.utime(tmp_path / "spool" / "pending" / "j2.json", (2, 2))
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()  # j1 waits: back of the line, so j2 is next
+        assert _make(tmp_path).claim_next().name == "j2.json"
+        _cancel(tmp_path, "j1")
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _status(tmp_path, "j1")["state"] == "cancelled"
     assert (tmp_path / "spool" / "done" / "j1.json").exists()
 
 
@@ -429,32 +469,209 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def test_a_stop_request_mid_job_kills_the_child_and_marks_it_failed(tmp_path):
+def _wait(cond, timeout=20.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _state(tmp_path, job_id="j1"):
+    try:
+        return _status(tmp_path, job_id)["state"]
+    except (OSError, ValueError):
+        return None
+
+
+def _held_job(tmp_path, name="j1"):
+    """A job that records each start and any SIGTERM, then waits for ``<name>.go``."""
+    go, mark = tmp_path / f"{name}.go", tmp_path / f"{name}.marks"
+    return (
+        (
+            "import os,signal,time\n"
+            f"m=open({str(mark)!r},'a',buffering=1)\n"
+            "signal.signal(signal.SIGTERM, lambda *a: m.write('TERM\\n'))\n"
+            "m.write('START\\n')\n"
+            "print('up', flush=True)\n"
+            "t=time.time()\n"
+            f"while not os.path.exists({str(go)!r}) and time.time()-t<30: time.sleep(0.05)\n"
+        ),
+        go,
+        mark,
+    )
+
+
+def _serve(w):
     import threading
 
-    _submit(tmp_path)
-    w = _make(tmp_path, "import time; print('started', flush=True); time.sleep(25)")
-    w.stop_event = threading.Event()
-    threading.Timer(0.8, w.stop_event.set).start()
-    started = time.time()
-    assert w.run_once() is True
-    assert time.time() - started < 20
-    st = _status(tmp_path)
-    assert st["state"] == "failed" and "stopped" in st["error"]
-    assert not _pid_alive(st["pid"])
-    assert (tmp_path / "spool" / "done" / "j1.json").exists()
-
-
-def test_serve_hands_its_stop_event_to_the_running_job(tmp_path):
-    import threading
-
-    _submit(tmp_path)
-    w = _make(tmp_path, "import time; time.sleep(25)")
     stop = threading.Event()
-    threading.Timer(0.8, stop.set).start()
-    w.serve(stop)
+    t = threading.Thread(target=w.serve, args=(stop,), daemon=True)
+    t.start()
+    return stop, t
+
+
+def test_a_worker_restart_leaves_the_job_unsignalled_and_the_new_worker_re_adopts_it(tmp_path):
+    """Joe's rule: a deploy, restart or unit change goes ahead at once and the render
+    runs to completion. The old worker killed it and marked it failed."""
+    script, go, mark = _held_job(tmp_path)
+    _submit(tmp_path)
+    old = _make(tmp_path, script, poll_s=0.05)
+    stop, t = _serve(old)
+    ident = tmp_path / "spool" / "jobs" / "j1.proc.json"
+    assert _wait(lambda: mark.exists() and "START" in mark.read_text())
+    assert _wait(
+        lambda: (
+            _state(tmp_path) == "running"
+            and ident.exists()
+            and _status(tmp_path)["pid"] == json.loads(ident.read_text())["child_pid"]
+        )
+    )
+    pid = _status(tmp_path)["pid"]
+    stop.set()  # what SIGTERM does in __main__
+    t.join(timeout=10)
+    assert not t.is_alive()
+    time.sleep(0.5)
+    assert _pid_alive(pid), "the worker stop killed the job"
+    assert "TERM" not in mark.read_text(), "the worker stop signalled the job"
+    assert (tmp_path / "spool" / "running" / "j1.json").exists()
+    assert _state(tmp_path) == "running"
+
+    new = _make(tmp_path, child_argv=lambda argv: pytest.fail("relaunched"), poll_s=0.05)
+    stop, t = _serve(new)
+    try:
+        time.sleep(0.5)
+        assert _pid_alive(pid)
+        go.write_text("")
+        assert _wait(lambda: (tmp_path / "spool" / "done" / "j1.json").exists())
+    finally:
+        go.write_text("")
+        stop.set()
+        t.join(timeout=10)
     st = _status(tmp_path)
-    assert st["state"] == "failed" and not _pid_alive(st["pid"])
+    assert st["state"] == "succeeded" and st["exit_code"] == 0
+    assert mark.read_text().split() == ["START"], "relaunched, or signalled"
+
+
+def test_drive_runs_in_its_own_lane_so_a_short_job_never_waits_behind_a_render(tmp_path):
+    long_script, go, _ = _held_job(tmp_path, "long")
+    _submit(tmp_path, "long")  # a drive render, first in line
+    time.sleep(0.02)
+    _submit(tmp_path, "render2")  # a second drive: waits in the drive lane
+    time.sleep(0.02)
+    _submit(tmp_path, "short", argv=_FILM)
+
+    def child(argv):
+        if argv[3] != "drive":
+            return [sys.executable, "-c", "print('short done')"]
+        return [sys.executable, "-c", long_script]
+
+    w = _make(tmp_path, child_argv=child, poll_s=0.05, lanes=2)
+    stop, t = _serve(w)
+    try:
+        assert _wait(lambda: _state(tmp_path, "short") == "succeeded", timeout=15)
+        assert _state(tmp_path, "long") == "running"
+        assert (tmp_path / "spool" / "pending" / "render2.json").exists()  # one render at a time
+    finally:
+        go.write_text("")
+        assert _wait(lambda: _state(tmp_path, "long") == "succeeded")
+        assert _wait(lambda: _state(tmp_path, "render2") == "succeeded")
+        stop.set()
+        t.join(timeout=10)
+
+
+def test_a_lane_claims_only_its_own_kind(tmp_path):
+    _submit(tmp_path, "d1")
+    time.sleep(0.02)
+    _submit(tmp_path, "f1", argv=_FILM)
+    w = _make(tmp_path)
+    assert w.claim_next(drive=False).name == "f1.json"
+    assert w.claim_next(drive=False) is None
+    assert w.claim_next(drive=True).name == "d1.json"
+
+
+def test_the_lane_count_defaults_to_two(tmp_path, monkeypatch):
+    monkeypatch.delenv("GMS_HOST_WORKER_LANES", raising=False)
+    assert _make(tmp_path, lanes=None).lanes == 2
+    monkeypatch.setenv("GMS_HOST_WORKER_LANES", "3")
+    assert _make(tmp_path, lanes=None).lanes == 3
+
+
+def test_the_worker_writes_its_adoption_capability_for_host_reconcile(tmp_path):
+    _make(tmp_path)
+    cap = json.loads((tmp_path / "spool" / "capabilities.json").read_text())
+    assert cap == {"adopts_running_jobs": True, "pid": os.getpid()}
+
+
+def test_a_running_entry_left_by_a_child_running_worker_is_failed_never_relaunched(tmp_path):
+    _submit(tmp_path)
+    spool = tmp_path / "spool"
+    (spool / "running").mkdir(parents=True, exist_ok=True)
+    (spool / "pending" / "j1.json").rename(spool / "running" / "j1.json")
+    w = _make(tmp_path, child_argv=lambda argv: pytest.fail("relaunched"), poll_s=0.05)
+    stop, t = _serve(w)
+    assert _wait(lambda: (spool / "done" / "j1.json").exists())
+    stop.set()
+    t.join(timeout=10)
+    st = _status(tmp_path)
+    assert st["state"] == "failed" and "interrupted" in st["error"]
+
+
+def test_an_adopted_job_whose_launcher_died_without_an_exit_record_is_failed(tmp_path):
+    _submit(tmp_path)
+    spool = tmp_path / "spool"
+    w = _make(tmp_path, child_argv=lambda argv: pytest.fail("relaunched"), poll_s=0.05)
+    (spool / "pending" / "j1.json").rename(spool / "running" / "j1.json")
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (spool / "jobs" / "j1.launch.json").write_text(json.dumps({"launched_at": 1}))
+    (spool / "jobs" / "j1.proc.json").write_text(json.dumps({"pid": dead.pid, "start": "1"}))
+    stop, t = _serve(w)
+    assert _wait(lambda: (spool / "done" / "j1.json").exists())
+    stop.set()
+    t.join(timeout=10)
+    st = _status(tmp_path)
+    assert st["state"] == "failed" and "without an exit record" in st["error"]
+
+
+def _shim(tmp_path, body):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    shim = bin_dir / "systemd-run"
+    shim.write_text("#!/bin/sh\n" + body)
+    shim.chmod(0o755)
+    return bin_dir
+
+
+def test_each_job_gets_its_own_transient_unit(tmp_path, monkeypatch):
+    args = tmp_path / "systemd-run.args"
+    body = (
+        f'printf "%s\\n" "$@" > {args}\n'
+        'while [ "${1#-}" != "$1" ]; do shift; done\n'
+        'setsid "$@" </dev/null >/dev/null 2>&1 &\n'
+    )
+    monkeypatch.setenv("PATH", f"{_shim(tmp_path, body)}:{os.environ['PATH']}")
+    _submit(tmp_path)
+    spawned = []
+    w = _make(
+        tmp_path, "print('in unit')", runner="systemd-run", spawn=lambda *a, **k: spawned.append(a)
+    )
+    w.run_once()
+    got = args.read_text().split("\n")
+    assert "--unit=gms-job-j1" in got and "--collect" in got
+    assert got[got.index("-m") + 1] == "gomoveshift.hostworker.launch"
+    assert not spawned, "ran outside its unit"
+    assert _status(tmp_path)["state"] == "succeeded" and "in unit" in _log(tmp_path)
+
+
+def test_a_refused_transient_unit_falls_back_to_its_own_session(tmp_path, monkeypatch, caplog):
+    body = 'echo "Failed to start transient service unit: Access denied" >&2\nexit 1\n'
+    monkeypatch.setenv("PATH", f"{_shim(tmp_path, body)}:{os.environ['PATH']}")
+    _submit(tmp_path)
+    _make(tmp_path, "print('fallback')", runner="systemd-run").run_once()
+    assert _status(tmp_path)["state"] == "succeeded" and "fallback" in _log(tmp_path)
+    assert "Access denied" in caplog.text
 
 
 # -- mutant pins (each one fails if the named guard is removed) -----------------
@@ -616,11 +833,11 @@ def test_the_child_runs_under_the_workers_own_interpreter(tmp_path, subcommand, 
     _submit(tmp_path, argv=[interp, "-m", "gomoveshift", subcommand, argument, "--flag"])
     spawned = []
 
-    def spawn(argv, **kw):
+    def child(argv):
         spawned.append(argv)
-        return subprocess.Popen([sys.executable, "-c", "pass"], **kw)
+        return [sys.executable, "-c", "pass"]
 
-    _make(tmp_path, spawn=spawn).run_once()
+    _make(tmp_path, child_argv=child).run_once()
     assert spawned == [[sys.executable, "-m", "gomoveshift", subcommand, argument, "--flag"]]
     assert _status(tmp_path)["state"] == "succeeded"
 

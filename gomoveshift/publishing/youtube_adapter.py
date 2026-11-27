@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from seo_manager.analytics.final_text_surfaces import compose_description
 
 from ..pipeline.drive_phases import youtube_uploader as youtube_uploader_module
-from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader
+from ..pipeline.drive_phases.youtube_uploader import YouTubeUploader, youtube_auth_refused
 from ..pipeline.exceptions import YouTubeQuotaError
 from ..pipeline.final_text_record import (
     GMS_TEXT_POLICY,
@@ -28,6 +28,7 @@ from ..pipeline.final_text_record import (
 from ..pipeline.location_evidence import _evidence_id
 from ..pipeline.playlist_resolver import resolve_playlist, short_region
 from ..pipeline.title_decision import decide_title, short_place_facts
+from . import youtube_distinct
 from .asset_plan import review_hash
 from .clip_place_evidence import clip_places as _clip_places
 from .clip_place_evidence import clip_towns as _clip_towns
@@ -40,10 +41,11 @@ from .queue import (
     find_delivery,
     mark_missing_remote,
     mark_remote_checked,
+    pause_for_auth,
     record_live_publish,
     transition,
 )
-from .short_title_review import short_text_policy
+from .short_title_review import backed_title_stamp, short_text_policy
 from .youtube_uploads_listing import list_uploads
 
 logger = logging.getLogger(__name__)
@@ -153,6 +155,16 @@ def _parent_entry(record: ShortPublishRecord):
     return build_visible([block])[0], item
 
 
+def _place_line(place: str, title: str, recording_date: str) -> str:
+    """``Drive through <place>``, plus the title's backed stamp on a stamped title.
+
+    Every Short of one drive that names one place sent the same description; the
+    stamp (the Short's day and its place in that day) is the record's own fact that
+    tells them apart, and the title's review already backs its words."""
+    stamp = backed_title_stamp(title, recording_date)
+    return f"Drive through {place}, {stamp}" if stamp else f"Drive through {place}"
+
+
 def _short_text_entries(
     record: ShortPublishRecord, places: list, roads: list, named, segment_places: list
 ) -> list:
@@ -179,7 +191,7 @@ def _short_text_entries(
         {
             "surface": "description",
             "kind": "place_line",
-            "text": f"Drive through {named['value']}",
+            "text": _place_line(named["value"], payload.title, record.recording_date),
             "evidence_ids": [named["evidence_id"]],
             "scope": "segment",
             "segment_places": segment_places,
@@ -388,6 +400,9 @@ class ShortsPublishResult:
     video_id: str
     playlist_id: Optional[str]
     deferred: bool = False
+    #: Parked at ``needs_operator``: its text is near-identical to a post already
+    #: on the channel (``youtube_distinct``); nothing was uploaded.
+    held: bool = False
     #: U-R1: the insert returned an id YouTube then did not list -- the row
     #: is ``missing_remote``, not ``published``.
     missing_remote: bool = False
@@ -520,7 +535,11 @@ def confirm_scheduled_live(
                 if not _listed(service, [video_id]):
                     _mark_gone(conn, row["id"], video_id, "confirm_scheduled_live", now)
                     continue
-        except Exception:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+        except Exception as exc:  # noqa: BLE001 -- unknown is not live; the next pass asks again
+            if youtube_auth_refused(exc):
+                pause_for_auth(conn, "youtube", exc)  # every row's lookup would fail alike
+                logger.warning("live check: YouTube paused, access token refused")
+                break
             logger.exception("live check failed for video_id=%s", video_id)
             continue
         mark_remote_checked(conn, [row["id"]], now)
@@ -569,7 +588,11 @@ def recheck_published_videos(conn, service, now: Optional[str] = None) -> int:
         if absent:
             _sleep(VERIFY_RECHECK_SEC)
             present |= {item.get("id") for item in _listed(service, absent)}
-    except Exception:  # noqa: BLE001 -- unknown is not missing; the next pass asks again
+    except Exception as exc:  # noqa: BLE001 -- unknown is not missing; the next pass asks again
+        if youtube_auth_refused(exc):
+            pause_for_auth(conn, "youtube", exc)
+            logger.warning("published-video recheck: YouTube paused, access token refused")
+            return 0
         logger.exception("published-video recheck failed for %d ids", len(by_video))
         return 0
     mark_remote_checked(conn, [i for vid in present if vid in by_video for i in by_video[vid]], now)
@@ -726,6 +749,8 @@ class YouTubeShortsAdapter:
             if ft_review is not None:
                 # Send the text Waypost reviewed, not a second build of it.
                 description = compose_description(ft_review["surfaces"])
+            if self._held_as_near_duplicate(conn, delivery_id, record, description):
+                return ShortsPublishResult(video_id="", playlist_id=None, held=True)
             lease_expires = (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SEC)).isoformat()
             if not acquire_lease(conn, delivery_id, self._worker_id, lease_expires):
                 raise RuntimeError(
@@ -783,7 +808,9 @@ class YouTubeShortsAdapter:
 
         try:
             playlist_id = self._assign_playlist(video_id, record)
-        except Exception:
+        except Exception as exc:
+            if youtube_auth_refused(exc):
+                raise  # the handler pauses YouTube; the row stays ``uploaded`` with its id
             logger.exception(
                 "playlist assign failed for video_id=%s — kept; resume retries it", video_id
             )
@@ -818,6 +845,29 @@ class YouTubeShortsAdapter:
             fields["platform_published_at"] = scheduled_at.isoformat()
         transition(conn, delivery_id, STATUS_UPLOADED, STATUS_PUBLISHED, **fields)
         return ShortsPublishResult(video_id=video_id, playlist_id=playlist_id)
+
+    def _held_as_near_duplicate(
+        self, conn, delivery_id: int, record: ShortPublishRecord, description: str
+    ) -> bool:
+        """Re-check, right before the insert, that no row already on the channel
+        (``youtube_distinct``) carries a near-identical title or description; a
+        collision parks this row at ``needs_operator`` with the reason, never uploaded."""
+        row = conn.execute(
+            "SELECT status, COALESCE(upload_account, destination_account, '') AS account "
+            "FROM deliveries WHERE id=?",
+            (delivery_id,),
+        ).fetchone()
+        mine = youtube_distinct.PostText(
+            record.project_name, record.short_index, record.payloads.youtube.title, description
+        )
+        account = row["account"] if row is not None else ""
+        others = youtube_distinct.live_texts(conn, account=account, reached_only=True)
+        reason = youtube_distinct.find_near_duplicate(mine, others)
+        if reason is None:
+            return False
+        if row is None or not youtube_distinct.hold(conn, delivery_id, row["status"], reason):
+            raise RuntimeError(f"delivery {delivery_id} could not be held, not uploaded: {reason}")
+        return True
 
     def _defer_if_over_budget(
         self, conn, delivery_id: int, record: ShortPublishRecord, current_status: str
@@ -875,8 +925,10 @@ class YouTubeShortsAdapter:
         """``True`` only when ``videos.list`` twice returns no item for
         ``video_id``. A lookup that raises proves nothing, so it is logged and
         the row publishes; the nightly catalog pass checks it again. A quota
-        refusal is raised as ``YouTubeQuotaError`` instead: the row stays
-        ``uploaded`` with its id and is verified once the quota resets."""
+        refusal is raised as ``YouTubeQuotaError`` instead, and a refused token
+        (``youtube_auth_refused``) is raised as it is, for the handler to pause
+        YouTube: the row stays ``uploaded`` with its id and is verified once the
+        quota resets or the platform is resumed."""
         try:
             service = self._uploader._build_service()
             for attempt in range(2):
@@ -886,6 +938,8 @@ class YouTubeShortsAdapter:
                 if resp.get("items"):
                     return False
         except Exception as exc:  # noqa: BLE001 -- unknown is not missing
+            if youtube_auth_refused(exc):
+                raise
             quota = _quota_error(exc)
             if quota is not None:
                 raise quota from exc

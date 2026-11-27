@@ -25,12 +25,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
 
-from ..pipeline.drive_phases.youtube_uploader import QUOTA_REASONS, RETRIABLE_STATUS_CODES
+from ..pipeline.drive_phases.youtube_uploader import (
+    QUOTA_REASONS,
+    RETRIABLE_STATUS_CODES,
+    youtube_auth_refused,
+)
 from .first_comment import AuthoredText, ForeignCommentId, PriorCommentLiveError
 from .first_comment_stale import raise_stale_incident, run_corrections
 from .queue import (
     first_comment_prior_texts,
     first_comment_still_current,
+    is_platform_paused,
+    pause_for_auth,
     record_stale_live_comment,
     select_due_first_comments,
 )
@@ -345,6 +351,7 @@ def drain_first_comments(
         result=result,
         incidents_dir=incidents_dir,
         gone=_comment_gone,
+        auth_refused=youtube_auth_refused,
     )
     due = select_due_first_comments(conn, now, platforms=("youtube",))
     if not due:
@@ -352,6 +359,8 @@ def drain_first_comments(
     service = service_once()
     logged_scope_error = False
     for row in due:
+        if is_platform_paused(conn, "youtube"):
+            break  # a refused token below paused YouTube: the rest wait for the resume
         # A relink may have rewritten the text after selection: post what the row says NOW.
         fresh = first_comment_still_current(conn, row["id"])
         if fresh is None:
@@ -374,7 +383,11 @@ def drain_first_comments(
                     "first_comment_attempts=first_comment_attempts+? WHERE id=?",
                     (detail[:_ERROR_DETAIL_MAX], int(refused), row["id"]),
                 )
-            if _is_scope_error(exc):
+            if youtube_auth_refused(exc):
+                detail = pause_for_auth(conn, "youtube", exc)
+                result.failed += 1
+                result.errors.append(f"youtube: paused, access token refused: {detail}")
+            elif _is_scope_error(exc):
                 result.skipped_scope_error += 1
                 if not logged_scope_error:
                     logger.warning(

@@ -101,6 +101,20 @@ RETRIABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # HTTP status codes that are permanent — never retry
 PERMANENT_STATUS_CODES = {401, 403, 404}
 
+
+def youtube_auth_refused(exc: BaseException) -> bool:
+    """Whether YouTube refused the channel's OAuth token, which only a person
+    re-authorizing clears: a ``RefreshError`` Google does not mark retryable
+    (a revoked or expired grant), or an HTTP 401 the client's own refresh did
+    not clear. A 403 is not one: it is a quota, a missing scope or a refusal
+    of that one video. The YouTube passes pause YouTube on it
+    (``queue.pause_for_auth``), as the Meta and TikTok ones do on
+    ``queue.is_auth_blocked``."""
+    if isinstance(exc, RefreshError):
+        return not getattr(exc, "retryable", False)
+    return isinstance(exc, HttpError) and getattr(exc.resp, "status", None) == 401
+
+
 # HTTP 403 ``reason`` strings that indicate quota / rate-limit exhaustion
 # (recoverable after a time-based backoff) rather than permanent auth
 # failure. YouTube Data API v3 surfaces both classes as 403 but carries

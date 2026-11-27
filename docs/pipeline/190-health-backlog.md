@@ -15,13 +15,15 @@ a legacy row (no stamp, or no incident row) getting one launch. Due: the stale s
 `_superseded/` (the `--supersede` helper), the row is re-registered `auditing` and it launches from source on that tick,
 no operator command. Not due: nothing moves, and one `refused` attempt (deduped per fingerprint and reason) lands in
 `resume_attempts` of the project's `backlog_relaunch` incident row, written already resolved, as is each launch. Never a
-published row (upload receipt), a booked or `ready` row, or one in the content ledger; a drive running still blocks it
-(one heavy drive at a time), and a running audit is never replaced. `--dry-run` plans the moves and writes nothing.
+published row (upload receipt), a booked or `ready` row, or one in the content ledger; a running job of the drive
+itself (its audit, a heal of it or its publish) still blocks it, another drive's render never does, and a running
+audit is never replaced. `--dry-run` plans the moves and writes nothing.
 
 **Selection.** The region's free LF slots inside the render horizon (from `build_schedule_report`) are
 sorted; every `ready` or `auditing` drive in `schedule.sqlite3` covers one, and the first slot
-left over is the target. An `auditing` drive for the region, or a drive job already running
-(job/1 record with no result, or `pgrep`), is a `noop`: a repeat call never starts a second run.
+left over is the target. An `auditing` drive for the region in progress is a `noop`: a repeat call never
+starts a second run for the region. A drive running elsewhere (another region's render, a Phase D upload) is no
+reason to wait: the publishes below go ahead, and a new render queues on the shared GPU lock (note 191).
 The render horizon is `launch.render_horizon_h`: the wider of 7 days and the cadence's
 `lead_hours` (the packaged `brand.yaml` sets 1680 h, 70 days). A finished drive can claim a
 slot only inside `lead_hours`, so the horizon matches it: each drive renders, publishes into the
@@ -57,8 +59,7 @@ SHA instead of re-resuming a drive that can never pass. A drive whose store row 
 `failed` and has no row (retired before holds existed, or set `failed` by hand) gets the same
 hold on the next run; the result lists every stage dir held under `held`, and an existing hold
 is left as it is. An audit with a row, one still running,
-or one with no job record is never retired. Retiring and holding launch nothing, so they run
-before the one-heavy-drive check and happen even while a drive runs. On 11-08, heal's own resume
+or one with no job record is never retired. Retiring and holding happen even while a drive runs. On 11-08, heal's own resume
 of the dead 03-04 drive started two seconds before each hourly backlog, so the hold was never
 written. The text output, which is what the cron logs, prints `retired <project>: <reason>` and
 `held <stages dir> (no-auto-resume)`, or `would retire` and `would hold` under `--dry-run`.

@@ -1275,7 +1275,13 @@ class DrivePipelineOrchestrator:
         # short-circuit ever fires; an explicit ``--phase`` filter bypasses
         # the phase_a short-circuit's own return entirely, falling through
         # to whatever single phase was requested.
-        skip_gpu_lock = (
+        #
+        # Phase D alone (``--phase D``, the ``health publish`` job) never takes it: once
+        # phase_bc_day_first is complete no encode is left (``state_invariants`` skips its NVENC
+        # probe for the same reason), and ``--phase`` refuses to run phase_d without it. An
+        # upload never waits on another drive's render. A render queues behind another render's
+        # lock (``queue_behind_renders``) instead of failing after ``GMS_GPU_LOCK_WAIT_S``.
+        skip_gpu_lock = (phase == "phase_d" and not self.config.drive.preview) or (
             self._labels_only
             and (resolve_lf_mode(self.config.drive) == "full_drive")
             and not self.config.drive.preview
@@ -1287,12 +1293,13 @@ class DrivePipelineOrchestrator:
             elif self._labels_only:
                 gpu_lock_fd, gpu_lock_path = acquire_gpu_lock(wait_s=0)
             else:
-                gpu_lock_fd, gpu_lock_path = acquire_gpu_lock()
+                gpu_lock_fd, gpu_lock_path = acquire_gpu_lock(queue_behind_renders=True)
         except BaseException:
             _release_run_lock(run_lock_fd, run_lock_path)
             _release_run_lock(proj_lock_fd, proj_lock_path)
             _release_worktree_lease(self._worktree_lease_handle)
             raise
+        self._gpu_lock = (gpu_lock_fd, gpu_lock_path)
         try:
             state, upload_flag_explicit, skip_upload, youtube_upload = self._build_initial_state(
                 source_dir=source_dir,
@@ -1763,10 +1770,18 @@ class DrivePipelineOrchestrator:
                 timings=timings,
             )
         finally:
-            release_gpu_lock(gpu_lock_fd, gpu_lock_path)
+            self._drop_gpu_lock()
             _release_run_lock(run_lock_fd, run_lock_path)
             _release_run_lock(proj_lock_fd, proj_lock_path)
             _release_worktree_lease(self._worktree_lease_handle)
+
+    def _drop_gpu_lock(self) -> None:
+        """Release the shared GPU lock this run holds, once (later calls are no-ops)."""
+        fd, path = getattr(self, "_gpu_lock", (None, None))
+        self._gpu_lock = (None, None)
+        if fd is not None:
+            logger.info("Released the shared GPU lock: no GPU work is left in this run.")
+        release_gpu_lock(fd, path)
 
     def _purge_stale_stage_artifacts(self, state, stages_dir) -> None:
         """Delete a prior run's plan + checkpoint so ``--fresh`` can't inherit them.
@@ -2054,6 +2069,10 @@ class DrivePipelineOrchestrator:
                         if list_lfs or label_dry_run:
                             return _print_labels_and_return(), ost_audit_pending
                     continue
+                if phase_name == "phase_d":
+                    # Phase D only probes, uploads and writes metadata: the next render may
+                    # take the card while this one's uploads run.
+                    self._drop_gpu_lock()
                 t0 = time.time()
                 logger.info(
                     "PHASE START %s (%d/%d)", phase_name, len(stages_completed) + 1, len(phase_defs)
