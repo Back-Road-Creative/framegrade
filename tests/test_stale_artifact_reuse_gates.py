@@ -532,3 +532,17 @@ def test_pre_place_gate_checkpoint_re_enters_phase_bc():
     saved = {"phase_code_versions": {"phase_bc_day_first": 2}}
     kept = invalidate_phases_if_code_version_stale(saved, ["phase_bc_day_first", "phase_a"])
     assert "phase_bc_day_first" not in kept
+
+
+def test_pre_coastal_proof_checkpoint_re_enters_phase_bc():
+    # A phase_bc stamped 4 proved an Irish county against its own edge, which ends at the shore,
+    # so a coastal drive's route record holds no boundary proof (Galley Head, framegrade#654).
+    # Phase D only reads that record, so the resume must re-run phase_bc to re-prove against
+    # the other counties, and phase D to review the new proof (2026-11-27).
+    from gomoveshift.pipeline.orchestrator_fingerprint import (
+        invalidate_phases_if_code_version_stale,
+    )
+
+    saved = {"phase_code_versions": {"phase_bc_day_first": 4}}
+    kept = invalidate_phases_if_code_version_stale(saved, ["phase_bc_day_first", "phase_d"])
+    assert kept == []

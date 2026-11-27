@@ -40,6 +40,12 @@ the other-counties basis is refused for those counties. A refused proof's
 reason is kept in the route record's `boundary_notes`. On the real map the two
 Galley Head long-forms took about 36 s and 18 s to prove.
 
+Phase D only reads the route record, so a drive checkpointed before this change
+would keep its refused proof on every resume. `PHASE_BC_CODE_VERSION` is 5 for it:
+a resume stamped 4 re-runs Phase B/C (re-measuring and re-proving each LF; renders
+are reused by their own fingerprints) and then Phase D, and `health publish`
+refuses such a drive (`heal.stale_phases`) until it is re-audited.
+
 For every retained segment, the verifier checks each valid source fix is at
 least 100 metres inside the polygon. It also checks that the distance to the
 boundary exceeds 100 metres (plus the Irish margin) plus the distance possible
