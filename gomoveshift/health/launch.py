@@ -1196,7 +1196,16 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
                                      latest_version, why=gate[2],
                                      manifest_row=row, pinned_version=pinned_version)  # fmt: skip
         if not failed and publish and proj != target and _audit_passed(jobs_dir, proj):
-            return _publish_audited(res, proj, publish, dry_run)
+            done = _publish_audited(dict(res), proj, publish, dry_run)
+            if not (supersede and done.get("action") == "refused"):
+                return done
+            # an operator's supersede of another row is never held by this drive's standing
+            # publish refusal (2026-11-26, Old Head held Kerry-to-Cork's re-render): recorded,
+            # and the supersede goes on; the tick still exits 2 while the refusal stands
+            res.setdefault("publish_refusals", []).append(
+                {"project": proj, "reason": done["reason"]}
+            )
+            continue
         if (
             failed_relaunch is not None and not supersede and not _audit_running(jobs_dir, proj)
             and (why := failed_relaunch.due(proj))
