@@ -27,6 +27,19 @@ recording, an Irish proof accepts any recording up to 2026 and adds a 250-metre
 inward margin to every allowance below; the proof records `margin_m` and
 `country: "IE"`.
 
+A Tailte county polygon ends at the shoreline, so the distance to its own edge
+counts the sea as a possible crossing and refuses every coastal drive (Galley
+Head, framegrade#654). An Irish county proof therefore measures each allowance
+to the union of every **other** county on the map, with basis
+`pinned_tailte_other_counties_bounded_speed_error_and_margin`; every fix must
+still lie inside the claimed county, and a map with no other county refuses.
+The map has no Northern Ireland polygon, so a claim naming Cavan, Donegal,
+Leitrim, Louth or Monaghan keeps the full-boundary test and basis
+`pinned_tailte_polygon_bounded_speed_error_and_margin`, and a pinned proof with
+the other-counties basis is refused for those counties. A refused proof's
+reason is kept in the route record's `boundary_notes`. On the real map the two
+Galley Head long-forms took about 36 s and 18 s to prove.
+
 For every retained segment, the verifier checks each valid source fix is at
 least 100 metres inside the polygon. It also checks that the distance to the
 boundary exceeds 100 metres (plus the Irish margin) plus the distance possible
@@ -43,7 +56,7 @@ label with a state suffix also needs the state proof. A route with any GPS gap i
 proven even when its label passes, because Waypost reviews every gap of a region
 claim, including one bridged to the county. Waypost chooses a title
 against the retained route before encode; Phase D reviews each boundary proof.
-The pinned reviewer must expose `BOUNDARY_PROOF_VERSION = "tiger2026-tailte2026-bounded-v2"`
+The pinned reviewer must expose `BOUNDARY_PROOF_VERSION = "tiger2026-tailte2026-bounded-v3"`
 or the fallback refuses before encoding. Never alter coverage, gaps or outside
 samples to make an unsupported reviewer agree.
 
