@@ -33,7 +33,7 @@ import json
 import logging
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -41,7 +41,7 @@ from ...console.library import privacy_status_blocks_publish, privacy_status_for
 from ...console.settings import current_brand
 from ...pipeline.drive_state_model import PipelineState
 from ...pipeline.review_gate import compute_gate_cd_hash
-from ...publishing.anti_spam_gate import check_batch, recent_platform_texts
+from ...publishing.anti_spam_gate import check_batch, queued_youtube_records, recent_platform_texts
 from ...publishing.brand_policy import load_brand_policy
 from ...publishing.dynamic_schedule import weekly_volume_from_ladder
 from ...publishing.enqueue_from_plan import (
@@ -615,6 +615,11 @@ def cmd_enqueue_plan(args, config) -> int:
             recent_texts=recent_platform_texts(
                 conn, exclude_projects={r.project_name for r in planned_records}
             ),
+            # the queue's other active YouTube Shorts, so a neighbour by slot is seen
+            queued_youtube=queued_youtube_records(
+                conn, exclude_shorts={(r.project_name, r.short_index) for r in planned_records}
+            ),
+            now=datetime.now(timezone.utc),
         )
         if anti_spam_violations:
             print(

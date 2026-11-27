@@ -44,7 +44,10 @@ from gomoveshift.publishing.queue import (
     open_queue_db,
     transition,
 )
-from gomoveshift.publishing.youtube_adapter import confirm_scheduled_live
+from gomoveshift.publishing.youtube_adapter import (
+    confirm_scheduled_live,
+    recheck_published_videos,
+)
 
 NOW = "2026-11-26T12:00:00+00:00"
 REVOKED = RefreshError("invalid_grant: Token has been expired or revoked.")
@@ -198,6 +201,23 @@ def test_a_refused_youtube_token_pauses_youtube_on_the_live_check(conn):
     assert service.calls == 1 and _paused_for_auth(conn, "youtube")
 
 
+def test_a_refused_youtube_token_pauses_youtube_on_the_published_recheck(conn):
+    ids = []
+    for i in range(3):
+        did = enqueue(conn, "example-2026-08", i, "youtube", "hash-a")
+        transition(
+            conn, did, "queued", "published", platform_upload_id=f"v{i}",
+            published_at_source="platform_confirmed",
+        )  # fmt: skip
+        ids.append(did)
+    service = _LiveCheckService(_make_http_error(401, reason="authError"))
+
+    assert recheck_published_videos(conn, service, now=NOW) == 0
+
+    assert service.calls == 1 and _paused_for_auth(conn, "youtube")
+    assert [_status(conn, i)["status"] for i in ids] == ["published"] * 3
+
+
 # --- Facebook reel read-back ---------------------------------------------------
 
 
@@ -299,6 +319,7 @@ _NO_PLATFORM_CALL = {
     "cli/handlers/publish_journal.py:run_replay_pending": "local journey files",
     "cli/handlers/queue_recover.py:_cmd_sync_plan_titles": "local plan sidecars",
     "publishing/anti_spam_gate.py:recent_text_entries": "local plan sidecars",
+    "publishing/anti_spam_gate.py:queued_youtube_records": "local plan sidecars",
     "publishing/dispatch.py:drain_queue": "every handler is wrapped in _pause_on_auth",
     "publishing/plan_bracket_sync.py:sync_bracket_short_text": "the local text generator",
     "publishing/queue_repair.py:repair_queued_shorts": "local plans and the geocoder",

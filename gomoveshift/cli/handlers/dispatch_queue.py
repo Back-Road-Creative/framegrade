@@ -54,7 +54,7 @@ from ...publishing.queue import (
 )
 from ...publishing.tiktok_pack import reconcile_packed, resolve_pack_dir, sweep_queued
 from ...publishing.tiktok_rendition import ensure_h264_rendition, ensure_instagram_rendition
-from ...publishing.youtube_adapter import confirm_scheduled_live
+from ...publishing.youtube_adapter import confirm_scheduled_live, recheck_published_videos
 from ...publishing.youtube_comments import drain_first_comments
 from .pub_status import VALIDATE_COMMAND, gating_problems, record_ignore_validate
 
@@ -785,16 +785,24 @@ class _LazyYouTubeService:
 
 
 def _confirm_live(conn, config, routed) -> None:
-    """One ``confirm_scheduled_live`` pass per non-dry-run tick (see its docstring)."""
+    """One ``confirm_scheduled_live`` pass and one ``recheck_published_videos``
+    batch per non-dry-run tick (see their docstrings), sharing one lazy client."""
     if "youtube" not in routed:
         logger.info("CONFIRMED_LIVE skipped: youtube is not routed first_party in this run")
         return
+    service = _LazyYouTubeService(config)
     try:
-        count = confirm_scheduled_live(conn, _LazyYouTubeService(config))
+        count = confirm_scheduled_live(conn, service)
     except Exception as exc:  # noqa: BLE001 -- dispatch already ran; the next tick retries
         logger.warning("CONFIRMED_LIVE failed: %s: %s", type(exc).__name__, exc)
+    else:
+        logger.info("CONFIRMED_LIVE count=%d", count)
+    try:
+        gone = recheck_published_videos(conn, service)
+    except Exception as exc:  # noqa: BLE001 -- the next tick asks again
+        logger.warning("PUBLISHED_RECHECK failed: %s: %s", type(exc).__name__, exc)
         return
-    logger.info("CONFIRMED_LIVE count=%d", count)
+    logger.info("PUBLISHED_RECHECK missing_remote=%d", gone)
 
 
 def build_pack_reconciler(config):

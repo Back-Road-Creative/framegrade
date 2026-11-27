@@ -45,7 +45,9 @@ than re-implementing its upload/retry/token/quota handling.
   case — and ONLY that case, never on a first `queued` attempt: it walks
   `channels().list(mine=True)` → `relatedPlaylists.uploads` →
   `playlistItems().list` → `videos().list`, matching on exact title within a
-  2-hour recency window (`youtube_adapter._ADOPT_RECENCY`). One match is
+  2-hour recency window (`youtube_adapter._ADOPT_RECENCY`). A video another
+  queue row already records as its `platform_upload_id` is never a candidate:
+  it is that row's. One match is
   adopted instead of inserting; two or more raise
   `AmbiguousUploadMatchError` rather than guess. `playlistItems.list` and
   `videos.list` cost units in the combined 10,000/day bucket, not the

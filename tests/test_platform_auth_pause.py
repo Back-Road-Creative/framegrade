@@ -152,7 +152,9 @@ def test_resuming_makes_the_row_that_hit_the_refusal_due_on_the_next_pass(
     conn, tmp_path, platform, monkeypatch
 ):
     """Row 1 got the 6 h throttle delay when the token was refused. Once the
-    platform is resumed it goes on the next pass with the rest, not 6 h later."""
+    platform is resumed it is the one post of the next pass, not 6 h later (a
+    pass posts one delivery per platform, so a still-delayed row 1 would have
+    left the turn to row 2)."""
     ids = [enqueue(conn, "example-2026-08", i, platform, "hash-a") for i in range(ROWS)]
     handlers, _calls = _handlers(conn, platform, monkeypatch)
     drain_queue(conn, handlers, now=NOW, incidents_dir=tmp_path / "incidents")
@@ -166,8 +168,8 @@ def test_resuming_makes_the_row_that_hit_the_refusal_due_on_the_next_pass(
         incidents_dir=tmp_path / "incidents",
     )
 
-    assert sorted(seen) == sorted(ids)
-    assert after.attempted == ROWS
+    assert seen == [ids[0]]
+    assert after.attempted == 1
 
 
 def test_resume_leaves_other_throttled_rows_on_their_delay(conn):
