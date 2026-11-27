@@ -202,13 +202,27 @@ def test_a_dry_run_refusal_writes_no_record(tmp_path):
     assert _attempts(rig) == []
 
 
-def test_a_running_drive_blocks_the_relaunch(tmp_path):
+@pytest.mark.parametrize("name", [None, "gms-publish-day-a"])
+def test_a_running_job_of_the_drive_itself_blocks_the_relaunch(tmp_path, name):
     rig = Rig(tmp_path)
     _failed_row(rig)
     _relaunch(rig, NEW)
-    rig.running = True
-    rig.run()
-    assert (rig.stages / "day-a").is_dir() and not rig.launches
+    job(rig, "live", "day-a", "running", 100.0, name=name)
+    res = rig.run()
+    assert (rig.stages / "day-a").is_dir() and "relaunch" not in res
+    assert [a[a.index("--name") + 1] for a, _cwd, _env in rig.launches] in (
+        [],
+        ["gms-backlog-day-b"],
+    )
+
+
+def test_another_drive_rendering_never_blocks_the_relaunch(tmp_path):
+    rig = Rig(tmp_path)
+    _failed_row(rig)
+    _relaunch(rig, NEW)
+    job(rig, "live", "other-drive", "running", 100.0)
+    res = rig.run()
+    assert res.get("relaunch") and len(rig.launches) == 1, res
 
 
 REC0060_ERROR = (

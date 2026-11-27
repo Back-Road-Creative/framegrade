@@ -282,17 +282,59 @@ def test_drive_child_refuses_foreign_gpu_lock(tmp_path):
         os.close(fd)
 
 
-def test_busy_gpu_lock_fails_loudly_and_never_runs(tmp_path):
-    _submit(tmp_path, argv=[sys.executable, "-m", "gomoveshift", "route-story-film", "x"])
+_FILM = [sys.executable, "-m", "gomoveshift", "route-story-film", "x"]
+
+
+def _hold_gpu(tmp_path) -> int:
+    """A render holding the shared GPU lock (the caller closes the fd)."""
     fd = os.open(tmp_path / "gpu.lock", os.O_RDWR | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
+    os.write(fd, json.dumps({"owner": "gomoveshift", "pid": os.getpid()}).encode())
+    return fd
+
+
+# 2026-11-26: a route-story-film request was failed after 120 s whenever a drive held the card;
+# renders run back to back for up to 45 h, so it could never run. It now waits its turn.
+def test_a_busy_gpu_lock_keeps_the_request_queued_and_never_runs_it(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
     try:
         w = _make(tmp_path, spawn=lambda *a, **k: pytest.fail("ran without lock"))
-        w.run_once()
+        assert w.run_once() is False  # the service loop polls instead of spinning on it
     finally:
         os.close(fd)
     st = _status(tmp_path)
-    assert st["state"] == "failed" and "GPU lock" in st["error"]
+    assert st["state"] == "queued" and "GPU lock" in st["waiting"] and st["error"] is None
+    assert (tmp_path / "spool" / "pending" / "j1.json").exists()
+    assert not (tmp_path / "spool" / "done" / "j1.json").exists()
+
+
+def test_a_request_that_waited_for_the_lock_runs_once_it_is_free(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _make(tmp_path).run_once() is True
+    assert _status(tmp_path)["state"] == "succeeded"
+    assert (tmp_path / "spool" / "done" / "j1.json").exists()
+
+
+def test_a_waiting_request_goes_behind_the_next_one_and_can_be_cancelled(tmp_path):
+    _submit(tmp_path, "j1", argv=_FILM)
+    _submit(tmp_path, "j2")  # a drive request, which takes its own lock
+    os.utime(tmp_path / "spool" / "pending" / "j1.json", (1, 1))  # j1 was first in line
+    os.utime(tmp_path / "spool" / "pending" / "j2.json", (2, 2))
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()  # j1 waits: back of the line, so j2 is next
+        assert _make(tmp_path).claim_next().name == "j2.json"
+        _cancel(tmp_path, "j1")
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _status(tmp_path, "j1")["state"] == "cancelled"
     assert (tmp_path / "spool" / "done" / "j1.json").exists()
 
 

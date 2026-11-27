@@ -31,7 +31,7 @@ class Rig:
         py.write_text("")
         self.launches: list = []
         self.launch_ok = True
-        self.running = False
+        self.conflict = None  # what ``conflict_fn`` says: a live drive on this drive's own dirs
         self.manifest_row = None  # the drive's drive_backlog.yaml row; None = not found
 
     def audit(self, project="day-a", status="auditing", recipe=True, lfs=1):
@@ -67,7 +67,7 @@ class Rig:
         return publish.run_publish(
             project=project, region="usa", store=self.store, cadence=CAD, stages_root=self.stages,
             code_root=self.tmp, jobs_dir=self.jobs, now=NOW, dry_run=dry_run,
-            drive_running=lambda jobs: self.running, launcher=self.launcher,
+            conflict_fn=lambda jobs, recipe_path, recipe: self.conflict, launcher=self.launcher,
             manifest_row_fn=lambda row: self.manifest_row,
         )  # fmt: skip
 
@@ -170,12 +170,13 @@ def test_launch_failure_puts_the_drive_back_to_auditing(tmp_path):
     assert rig.store.drive("day-a").status == "auditing" and rig.store.bookings() == []
 
 
-def test_a_running_drive_refuses_before_any_write(tmp_path):
+def test_a_live_drive_on_its_own_dirs_refuses_before_any_write(tmp_path):
     rig = Rig(tmp_path)
     rig.audit()
-    rig.running = True
+    rig.conflict = "a drive on the same stages dir is running (pid 7)"
     before = rig.snapshot()
-    assert rig.run()["action"] == "refused" and rig.snapshot() == before
+    res = rig.run()
+    assert res["action"] == "refused" and res["reason"] == rig.conflict and rig.snapshot() == before
 
 
 # -- reconcile (the hourly tick) ------------------------------------------------------------
@@ -480,7 +481,7 @@ def _publish(rig, installed):
     return publish.run_publish(
         project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
         code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=False,
-        drive_running=lambda jobs: False, launcher=rig.launcher,
+        launcher=rig.launcher,
         installed_version=lambda python: installed,
     )  # fmt: skip
 
