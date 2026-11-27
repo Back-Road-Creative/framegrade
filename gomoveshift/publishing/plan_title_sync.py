@@ -37,7 +37,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 from .plan_io import load_publish_plan
-from .queue import TERMINAL_STATUSES, log_response
+from .queue import (
+    TERMINAL_STATUSES,
+    _has_live_foreign_lease,
+    facebook_photo_attempt,
+    log_response,
+    normalise_slot,
+    reschedule_delivery,
+)
 
 SYNC_COMMAND = "gomoveshift queue sync-plan-titles --audit <retitle audit log> --apply"
 
@@ -124,16 +131,25 @@ def _write_youtube_field(
 
 
 def write_plan_slot(
-    sidecar: Path, project_name: str, short_index: int, slot: datetime, *, apply: bool = True
+    sidecar: Path,
+    project_name: str,
+    short_index: int,
+    slot: datetime,
+    *,
+    apply: bool = True,
+    platform: str = "youtube",
 ) -> None:
-    """Move one short's shared publish time (``schedule.scheduled_at_utc``, the YouTube
-    ``publishAt``) to ``slot``, a FUTURE UTC time.
+    """Move one short's publish time for ``platform`` to ``slot``, a UTC time.
 
-    A platform on the shared slot with no ``scheduled_at_utc_by_platform`` entry of its
-    own would follow it, so each other routed platform is pinned to the slot it had:
-    only YouTube moves. Parsed by ``load_publish_plan`` before it replaces the file, and
-    the same parse runs without ``apply``, exactly as ``_write_youtube_field``."""
-    if slot.tzinfo is None or slot <= datetime.now(timezone.utc):
+    For YouTube that is the shared ``schedule.scheduled_at_utc`` (its ``publishAt``),
+    which must be in the FUTURE. A platform on the shared slot with no
+    ``scheduled_at_utc_by_platform`` entry of its own would follow it, so each other
+    routed platform is pinned to the slot it had: only YouTube moves. Any other
+    platform gets its own ``scheduled_at_utc_by_platform`` entry, the slot its adapter
+    reads, and the shared slot stays. Parsed by ``load_publish_plan`` before it
+    replaces the file, and the same parse runs without ``apply``, exactly as
+    ``_write_youtube_field``."""
+    if slot.tzinfo is None or (platform == "youtube" and slot <= datetime.now(timezone.utc)):
         raise ValueError(f"publishAt must be a future UTC time; got {slot.isoformat()}")
     raw = json.loads(sidecar.read_text(encoding="utf-8"))
     for short in raw["shorts"]:
@@ -141,9 +157,13 @@ def write_plan_slot(
             schedule = short["schedule"]
             old = schedule["scheduled_at_utc"]
             by_platform = dict(schedule.get("scheduled_at_utc_by_platform") or {})
-            for platform in short["routes"]["selected"]:
-                if platform != "youtube":
-                    by_platform.setdefault(platform, old)
+            if platform != "youtube":
+                by_platform[platform] = slot.astimezone(timezone.utc).isoformat()
+                schedule["scheduled_at_utc_by_platform"] = by_platform
+                break
+            for other in short["routes"]["selected"]:
+                if other != "youtube":
+                    by_platform.setdefault(other, old)
             by_platform.pop("youtube", None)
             schedule["scheduled_at_utc_by_platform"] = by_platform
             schedule["scheduled_at_utc"] = slot.astimezone(timezone.utc).isoformat()
@@ -161,6 +181,45 @@ def write_plan_slot(
         os.replace(tmp, sidecar)
     else:
         tmp.unlink()
+
+
+def move_delivery_slot(conn, delivery_id: int, scheduled_at: str, *, now=None) -> bool:
+    """Move one delivery's slot in its publish plan AND its queue row, or neither.
+
+    The adapters publish at the PLAN's time (YouTube's ``publishAt``, Facebook's
+    scheduled time), and the row's ``scheduled_at`` only says when the drain may
+    send it. Moving the row alone left the two disagreeing. ``scheduled_at`` is
+    normalised to UTC first (``queue.normalise_slot``: a zoneless or unreadable
+    time raises ``ValueError``). ``False`` when the queue's own rules refuse the
+    row (terminal, a live foreign lease, a durable photo attempt); those are
+    checked before the plan is touched. A plan that cannot be written raises
+    ``ValueError`` and the row is left as it was. Plan first, as ``queue-reslot``
+    does, so a crash between the two never leaves a row due ahead of its plan."""
+    slot = normalise_slot(scheduled_at)
+    now = now or datetime.now(timezone.utc).isoformat()
+    row = conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+    if (
+        row is None
+        or row["status"] in TERMINAL_STATUSES
+        or _has_live_foreign_lease(conn, delivery_id, now)
+        or facebook_photo_attempt(conn, delivery_id)
+    ):
+        return False
+    if row["sidecar_path"]:
+        sidecar = Path(row["sidecar_path"])
+        try:
+            write_plan_slot(
+                sidecar,
+                row["project_name"],
+                row["short_index"],
+                datetime.fromisoformat(slot),
+                platform=row["platform"],
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"could not move the slot in its publish plan {sidecar}: {exc}; nothing was changed"
+            ) from exc
+    return reschedule_delivery(conn, delivery_id, slot, now=now)
 
 
 def sync_plan_title(
