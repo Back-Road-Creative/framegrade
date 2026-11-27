@@ -67,8 +67,9 @@ LOC_MAX_WIDTH = DEFAULT_OUTPUT_WIDTH - 80  # 40px margin each side
 # surfaces — long-form (ost_applier), shorts (build_ost_filter below) and the
 # single-video path (single_pass) — cannot drift apart on the literal strings.
 # Per-surface POSITION / timing legitimately differ and stay in each surface; only the
-# words are shared here.
-BRAND_TEXT = "GoMoveShift"
+# words are shared here. The brand line reads as the website, so a viewer of a
+# reel or Short sees where to find the rest (owner, 2026-11-27).
+BRAND_TEXT = "gomoveshift.com"
 WEBSITE_TEXT = "gomoveshift.com"
 YOUTUBE_CTA_TEXT = "Full drive on YouTube"
 

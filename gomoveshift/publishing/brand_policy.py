@@ -275,7 +275,7 @@ class MediaProfile:
     preset_defaults: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     upscale: str = "off"
     claim_native_resolution_only: bool = True
-    brand_text: str = "GoMoveShift"
+    brand_text: str = "gomoveshift.com"
     website_text: str = "gomoveshift.com"
 
 

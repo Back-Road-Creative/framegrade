@@ -479,7 +479,7 @@ def _draw_media_arrival(image: Image.Image, label: str, width: int, height: int)
 # The maker's mark burned on every delivered frame. Small and translucent on
 # purpose -- an unintrusive credit, not a second logo competing with the map
 # or the photo it sits over.
-DEFAULT_WATERMARK_TEXT = "Made with GoMoveShift"
+DEFAULT_WATERMARK_TEXT = "Made with gomoveshift.com"
 _WATERMARK_HEIGHT_FRACTION = 0.016
 _WATERMARK_OPACITY = 140  # ~55% of 255
 
