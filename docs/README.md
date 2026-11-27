@@ -21,7 +21,7 @@ to read them.
 - [unattended-cadence.md](unattended-cadence.md): where publish slots come from.
 - [w9c2-final-text-bind.md](w9c2-final-text-bind.md): the final-text byte-bind on publication.
 - [w9c3-short-tags.md](w9c3-short-tags.md): which tags a Short may carry.
-- [pipeline/](pipeline/): the numbered feature notes, from location labels (01) to the Shorts interactive family and per-short OST skip (181) to the dropped long-form title-segment burn (182), the queued-Shorts text sync (183), `health publish` (184), replacing scheduled uploads after a re-render (185), the weekly growth review (186), owner lines on posts (187), the licensed-music test on Facebook and Instagram Shorts (188), a heal resume taking the backlog row's GPX when the recipe's is gone (189) and `health backlog` (190). Each number is used once; the GPU grade chain spike (159) and the blur composite ablation (154) are the measured spikes.
+- [pipeline/](pipeline/): the numbered feature notes, from location labels (01) to the Shorts interactive family and per-short OST skip (181) to the dropped long-form title-segment burn (182), the queued-Shorts text sync (183), `health publish` (184), replacing scheduled uploads after a re-render (185), the weekly growth review (186), owner lines on posts (187), the licensed-music test on Facebook and Instagram Shorts (188), a heal resume taking the backlog row's GPX when the recipe's is gone (189), `health backlog` (190) and a running render holding back only what conflicts with it (191). Each number is used once; the GPU grade chain spike (159) and the blur composite ablation (154) are the measured spikes.
 
 ## Route Story
 

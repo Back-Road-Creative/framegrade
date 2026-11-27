@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from ...health import launch, run_check
-from ...health.heal import default_drive_running, register_recipe, run_heal
+from ...health.heal import register_recipe, run_heal
 from ...health.store import (
     code_sha,
     default_data_root,
@@ -141,7 +141,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
         project=args.project, region=args.region, store=store, cadence=cadence,
         stages_root=args.stages_root, code_root=Path(args.code_root) if args.code_root else root,
         jobs_dir=jobs_dir, now=datetime.now(timezone.utc), dry_run=args.dry_run,
-        drive_running=default_drive_running, lead_hours=args.lead_hours,
+        lead_hours=args.lead_hours,
         expect_sha=args.expect_sha,
     )  # fmt: skip
     if args.json:
@@ -177,7 +177,6 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         sources_root=args.sources_root or args.output_root / "_sources", code_root=code_root,
         jobs_dir=jobs_dir, mirror_sha=args.staging_sha or code_sha(code_root), now=now,
         dry_run=args.dry_run, lease_acquire=acquire, lease_release=release,
-        drive_running=lambda: default_drive_running(jobs_dir),
         preflight=launch.default_preflight, render_gate=launch.config_render_gate(config),
         launcher=launch.default_launcher, register=register, retire=launch.store_retire(config),
         supersede=(args.supersede, args.reason) if args.supersede else None,
@@ -195,7 +194,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         ),
         publish=publish.backlog_publisher(
             config, region=region, stages_root=args.stages_root, code_root=code_root,
-            jobs_dir=jobs_dir, now=now, drive_running=default_drive_running,
+            jobs_dir=jobs_dir, now=now,
         ),
     )  # fmt: skip
     if args.json:

@@ -11,7 +11,8 @@ Spool layout (``GMS_HOST_SPOOL_DIR``)::
     heartbeat.json             refreshed every few seconds while alive
 
 The worker adds no pipeline gates: it re-checks the argv allowlist, takes the
-shared GPU lock for commands that do not take it themselves, and runs the child.
+shared GPU lock for commands that do not take it themselves (a lock a render holds sends
+the request back to pending, never to failed), and runs the child.
 Drive owns its own whole-run GPU lock. It never falls back to the CPU.
 """
 
@@ -50,6 +51,10 @@ _DRIVE_MEDIA_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mxf
 
 #: never taken from a request: the worker's own spool and the shared GPU lock
 _PROTECTED_ENV = frozenset({SPOOL_ENV, "GMS_GPU_LOCK_PATH"})
+
+
+#: ``_process``'s answer for a request that goes back to pending to wait for the GPU lock
+_WAITING = object()
 
 
 class HostWorkerError(RuntimeError):
@@ -196,19 +201,26 @@ class HostWorker:
     def _finish(self, claimed: Path) -> None:
         shutil.move(str(claimed), str(self.spool / "done" / claimed.name))
 
+    def _requeue(self, claimed: Path) -> None:
+        """Back to pending, at the end of the line (a fresh mtime), so the jobs behind it run."""
+        os.utime(claimed, None)
+        os.rename(claimed, self.spool / "pending" / claimed.name)
+
     # -- run -----------------------------------------------------------------
     def run_once(self) -> bool:
-        """Process at most one request; False when nothing was pending."""
+        """Process at most one request; False when nothing was pending or it went back to wait
+        for the GPU lock (so the service loop polls instead of spinning on it)."""
         claimed = self.claim_next()
         if claimed is None:
             return False
+        waiting = False
         try:
-            self._process(claimed)
+            waiting = self._process(claimed) is _WAITING
         finally:
-            self._finish(claimed)
-        return True
+            (self._requeue if waiting else self._finish)(claimed)
+        return not waiting
 
-    def _process(self, claimed: Path) -> None:
+    def _process(self, claimed: Path) -> object:
         try:
             req = json.loads(claimed.read_text())
             job_id = req["job_id"]
@@ -231,11 +243,21 @@ class HostWorker:
         # The worker still serializes spool jobs while drive owns the lock.
         fd, lock = None, None
         if argv[3] != "drive":
+            cancel = self.spool / "cancel" / job_id
+            if cancel.exists():  # cancelled while it waited for the lock: it never ran
+                cancel.unlink(missing_ok=True)
+                self._write_status(job_id, "cancelled")
+                return None
             try:
                 fd, lock = acquire_gpu_lock(wait_s=self.lock_wait_s, path=self.lock_path)
-            except (GpuLockBusyError, OSError) as exc:
+            except GpuLockBusyError as exc:
+                # A render holds the card (for hours): the job stays queued and is tried again,
+                # never failed because a render is running.
+                self._write_status(job_id, "queued", waiting=f"waiting for the GPU lock: {exc}")
+                return _WAITING
+            except OSError as exc:
                 self._write_status(job_id, "failed", error=f"GPU lock unavailable: {exc}")
-                return
+                return None
         env = _request_env(req.get("env"))
         if argv[3] == "drive":  # set here, never taken from the request: the spool is untrusted
             env[run_origin.LAUNCHED_BY_ENV] = "hostworker"

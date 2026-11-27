@@ -60,6 +60,11 @@ def _cleanup(tmp_path: Path, **kw) -> PipelineCleanup:
     )
 
 
+def _live(name: str) -> str:
+    """A ``pgrep -af`` line of a live drive of project ``name``."""
+    return f"4242 /py -m gomoveshift drive /src/{name} --output-dir /out/{name} --region usa"
+
+
 def _lock(project: Path, pid: int) -> None:
     (project / "_stages" / "pipeline_state.lock").write_text(json.dumps({"pid": pid}))
 
@@ -75,7 +80,7 @@ def test_without_the_flag_the_skip_says_how_to_reclaim_an_abandoned_run(tmp_path
 
 def test_a_killed_run_is_planned_as_one_stage_dir_with_its_size(tmp_path):
     project = _killed_run(tmp_path / "cache")
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.files == [] and plan.skipped == []
@@ -89,7 +94,7 @@ def test_a_killed_run_is_planned_as_one_stage_dir_with_its_size(tmp_path):
 
 def test_a_complete_project_is_never_abandoned(tmp_path):
     project = _killed_run(tmp_path / "cache", phases=("phase_a", "phase_d"))
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
@@ -98,7 +103,7 @@ def test_a_complete_project_is_never_abandoned(tmp_path):
 def test_a_run_lock_held_by_a_live_pid_refuses(tmp_path):
     project = _killed_run(tmp_path / "cache")
     _lock(project, os.getpid())
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
@@ -110,26 +115,34 @@ def test_a_stale_run_lock_does_not_refuse(tmp_path):
     project = _killed_run(tmp_path / "cache")
     _lock(project, 1)  # pid 1 is init: alive, so stub the probe
     with patch("gomoveshift.pipeline.orchestrator_lock._pid_is_alive", return_value=False):
-        plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+        plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
             [project], min_age_days=0, abandoned=True
         )
     assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
 
 
-def test_a_live_drive_anywhere_refuses(tmp_path):
+def test_a_live_drive_naming_the_project_refuses(tmp_path):
     project = _killed_run(tmp_path / "cache")
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: True).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: [_live(project.name)]).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
     (skip,) = plan.skipped
-    assert "drive" in skip["reason"] and "running" in skip["reason"]
+    assert "live gomoveshift drive names" in skip["reason"] and project.name in skip["reason"]
+
+
+def test_a_live_drive_of_another_project_never_refuses(tmp_path):
+    project = _killed_run(tmp_path / "cache")
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: [_live("ireland-other")]).plan_cleanup(
+        [project], min_age_days=0, abandoned=True
+    )
+    assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
 
 
 def test_a_held_run_is_waiting_not_abandoned(tmp_path):
     project = _killed_run(tmp_path / "cache")
     (project / "_stages" / HOLD_NAME).write_text("operator hold")
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
@@ -141,7 +154,7 @@ def test_a_young_run_is_still_too_recent(tmp_path):
     project = _killed_run(tmp_path / "cache")
     now = int(__import__("time").time())
     os.utime(project / "_stages", (now, now))
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=7, abandoned=True
     )
     assert plan.abandoned == []
@@ -163,7 +176,7 @@ def test_a_young_run_the_backlog_superseded_clears_the_age_gate(tmp_path):
     now = int(__import__("time").time())
     os.utime(project / "_stages", (now, now))
     _supersede_record(moved, project.name)
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=7, abandoned=True
     )
     assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
@@ -175,22 +188,22 @@ def test_a_supersede_record_for_another_project_keeps_the_age_gate(tmp_path):
     now = int(__import__("time").time())
     os.utime(project / "_stages", (now, now))
     _supersede_record(moved, "some-other-drive")
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=7, abandoned=True
     )
     assert plan.abandoned == []
     assert any("Too recent" in s["reason"] for s in plan.skipped)
 
 
-def test_a_superseded_run_is_still_refused_while_a_drive_runs(tmp_path):
+def test_a_superseded_run_is_still_refused_while_its_drive_runs(tmp_path):
     moved = tmp_path / "cache" / "_superseded" / "nctopa-2026-03-05-rec0063-20261110T160126Z"
     project = _killed_run(moved)
     _supersede_record(moved, project.name)
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: True).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: [_live(project.name)]).plan_cleanup(
         [project], min_age_days=7, abandoned=True
     )
     assert plan.abandoned == []
-    assert any("running" in s["reason"] for s in plan.skipped)
+    assert any("live gomoveshift drive" in s["reason"] for s in plan.skipped)
 
 
 @pytest.mark.parametrize(
@@ -204,27 +217,27 @@ def test_a_young_run_health_backlog_gave_up_is_dead_by_record(tmp_path, reason):
     now = int(__import__("time").time())
     os.utime(project / "_stages", (now, now))
     assert launch._hold_recipes(tmp_path / "cache", project.name, reason, dry_run=False)
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=7, abandoned=True
     )
     assert plan.skipped == []
     assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
 
 
-def test_a_given_up_run_is_still_refused_while_a_drive_runs(tmp_path):
+def test_a_given_up_run_is_still_refused_while_its_drive_runs(tmp_path):
     project = _killed_run(tmp_path / "cache")
     launch._hold_recipes(tmp_path / "cache", project.name, launch.GAVE_UP_HOLD, dry_run=False)
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: True).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: [_live(project.name)]).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
-    assert any("running" in s["reason"] for s in plan.skipped)
+    assert any("live gomoveshift drive" in s["reason"] for s in plan.skipped)
 
 
 def test_an_operator_hold_mentioning_health_backlog_still_waits(tmp_path):
     project = _killed_run(tmp_path / "cache")
     (project / "_stages" / HOLD_NAME).write_text("hold: ask health backlog later\n")
-    plan = _cleanup(tmp_path, drive_running_fn=lambda: False).plan_cleanup(
+    plan = _cleanup(tmp_path, live_drives_fn=lambda: []).plan_cleanup(
         [project], min_age_days=0, abandoned=True
     )
     assert plan.abandoned == []
@@ -239,7 +252,7 @@ def test_execute_removes_the_stage_dir_only(tmp_path):
     out_project = tmp_path / "out" / project.name
     out_project.mkdir(parents=True)
     (out_project / "youtube_uploads.json").write_text("{}")
-    cleanup = _cleanup(tmp_path, drive_running_fn=lambda: False)
+    cleanup = _cleanup(tmp_path, live_drives_fn=lambda: [])
     plan = cleanup.plan_cleanup([project], min_age_days=0, abandoned=True)
     assert [e["path"] for e in plan.abandoned] == [str(project / "_stages")]
     assert cleanup.execute_plan(plan) == 1
@@ -254,7 +267,7 @@ def test_execute_never_follows_a_symlinked_stage_dir(tmp_path):
     real = tmp_path / "elsewhere"
     (project / "_stages").rename(real)
     (project / "_stages").symlink_to(real)
-    cleanup = _cleanup(tmp_path, drive_running_fn=lambda: False)
+    cleanup = _cleanup(tmp_path, live_drives_fn=lambda: [])
     plan = cleanup.plan_cleanup([project], min_age_days=0, abandoned=True)
     assert plan.abandoned == []
     assert any("symlink" in s["reason"] for s in plan.skipped)
@@ -278,7 +291,7 @@ def _cli(tmp_path: Path, project: Path, **flags):
         patch("gomoveshift.paths.gms_output_dir", return_value=out),
         patch("gomoveshift.paths.gms_staging_dir", return_value=stg),
         patch("gomoveshift.paths.gms_intermediate_base", return_value=tmp_path / "cache"),
-        patch("gomoveshift.health.heal._pgrep_drive", return_value=False),
+        patch("gomoveshift.health.heal.live_drive_cmdlines", return_value=[]),
     ):
         return cleanup_handler.cmd_cleanup(args, None)
 
@@ -326,13 +339,13 @@ def test_cli_parser_accepts_the_flag():
     assert _build_parser().parse_args(["cleanup"]).abandoned is False
 
 
-def test_default_drive_probe_is_the_heal_modules():
-    """The live-drive probe is ``health.heal._pgrep_drive`` — one pattern for the whole codebase,
-    looked up at call time so a patch on heal is honoured."""
+def test_default_drive_listing_is_the_heal_modules():
+    """The live-drive listing is ``health.heal.live_drive_cmdlines`` — one pattern for the whole
+    codebase, looked up at call time so a patch on heal is honoured."""
     from gomoveshift.pipeline import cleanup as cleanup_mod
 
-    with patch("gomoveshift.health.heal._pgrep_drive", return_value=True) as probe:
-        assert cleanup_mod._live_drive_probe() is True
+    with patch("gomoveshift.health.heal.live_drive_cmdlines", return_value=["1 x"]) as probe:
+        assert cleanup_mod._live_drive_cmdlines() == ["1 x"]
     probe.assert_called_once_with()
 
 
