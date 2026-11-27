@@ -4,11 +4,12 @@ The worker starts this in its own transient unit (``systemd-run --unit=gms-job-<
 where that is refused, in its own session. It outlives the worker: a worker restart,
 deploy or unit change never signals it. It reads ``jobs/<id>.launch.json`` (argv, env, log,
 whether to take the GPU lock), takes the shared GPU lock itself when asked, waiting as long
-as it takes (the job stays ``queued``, never failed), runs the child in its own process
-group and writes:
+as ``lock_wait_s`` allows (``queued``); a lock still held then (a render) is recorded as
+``waiting`` and the worker puts the request back in pending, never failed. It runs the
+child in its own process group and writes:
 
     jobs/<id>.proc.json   {pid, start, child_pid, child_start, waiting_gpu}  (identity)
-    jobs/<id>.exit.json   {exit_code, error}                                  (last write)
+    jobs/<id>.exit.json   {exit_code, error[, waiting]}                       (last write)
 
 The worker that is running at the time (the one that launched it, or a new one that
 re-adopted it) turns those into the job's status file. Nothing here relaunches anything.
@@ -25,7 +26,11 @@ from pathlib import Path
 from typing import Optional
 
 from gomoveshift._process_group import popen_kwargs, terminate_group
-from gomoveshift.pipeline.orchestrator_lock import acquire_gpu_lock, release_gpu_lock
+from gomoveshift.pipeline.orchestrator_lock import (
+    GpuLockBusyError,
+    acquire_gpu_lock,
+    release_gpu_lock,
+)
 
 
 def proc_start(pid: Optional[int]) -> Optional[str]:
@@ -75,9 +80,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     fd, lock = None, None
     rc: Optional[int] = None
     error: Optional[str] = None
+    waiting: Optional[str] = None
     try:
         if spec.get("take_lock"):
-            fd, lock = acquire_gpu_lock(wait_s=float("inf"), path=Path(spec["lock_path"]))
+            try:
+                fd, lock = acquire_gpu_lock(
+                    wait_s=spec.get("lock_wait_s"), path=Path(spec["lock_path"])
+                )
+            except GpuLockBusyError as exc:
+                waiting = f"waiting for the GPU lock: {exc}"
+                return 0
+            except OSError as exc:
+                error = f"GPU lock unavailable: {exc}"
+                return 0
         with open(spec["log"], "ab") as logf:
             child.append(
                 subprocess.Popen(
@@ -99,7 +114,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         error = "stopped before the job started"
     finally:
         release_gpu_lock(fd, lock)
-        _atomic_json(jobs / f"{job_id}.exit.json", {"exit_code": rc, "error": error})
+        record: dict = {"exit_code": rc, "error": error}
+        if waiting:  # never started: the worker puts it back in pending
+            record["waiting"] = waiting
+        _atomic_json(jobs / f"{job_id}.exit.json", record)
     return 0
 
 

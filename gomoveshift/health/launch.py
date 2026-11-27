@@ -917,6 +917,16 @@ def _failed_publish(jobs_dir: Path, project: str) -> bool:
     return state not in (None, "running", "succeeded")
 
 
+def _project_job_running(jobs_dir: Path, project: str) -> bool:
+    """A job of this drive itself is still running: its audit (or a heal of it) or its Phase D
+    publish. The one drive a relaunch, which moves its stage and output dirs, must wait for."""
+    pub = [r for r in _job_records(Path(jobs_dir)) if r.get("name") == PUBLISH_JOB_PREFIX + project]
+    newest = max(pub, key=lambda r: float(r.get("created_at") or 0)) if pub else {}
+    return (
+        _audit_running(jobs_dir, project) or (newest.get("result") or {}).get("state") == "running"
+    )
+
+
 def _audit_passed(jobs_dir: Path, project: str) -> bool:
     rec = _newest_audit(jobs_dir, project)
     return rec is not None and (rec.get("result") or {}).get("state") == "succeeded"
@@ -1047,7 +1057,6 @@ def run_backlog(
     dry_run: bool,
     lease_acquire: Callable[[], bool],
     lease_release: Callable[[], None],
-    drive_running: Callable[[], bool],
     preflight: Callable[..., Any],
     render_gate: Callable[[Path, Any], Optional[str]],
     launcher: Callable[[List[str], str, Dict[str, str]], Tuple[bool, str]],
@@ -1074,7 +1083,7 @@ def run_backlog(
     try:
         out = _run(res, region, rows, drives, free_slots, known_projects, stages_root,
                     output_root, sources_root, code_root, jobs_dir, mirror_sha, now, dry_run,
-                    drive_running, preflight, render_gate, launcher, register, retire, disk,
+                    preflight, render_gate, launcher, register, retire, disk,
                     installed_version, latest_version, supersede, publish, horizon_h,
                     failed_relaunch,
                     {"live": live_status, "now": now, "plan": None} if replace_scheduled else None,
@@ -1132,7 +1141,7 @@ def _storage_incident(incidents_dir, region, res, now, dry_run) -> None:
 
 
 def _run(res, region, rows, drives, free_slots, known, stages_root, output_root, sources_root,
-         code_root, jobs_dir, mirror_sha, now, dry_run, drive_running, preflight, render_gate,
+         code_root, jobs_dir, mirror_sha, now, dry_run, preflight, render_gate,
          launcher, register, retire, disk, installed_version, latest_version, supersede, publish,
          horizon_h, failed_relaunch=None, replace=None, replace_store=None,
          pinned_version=default_pinned_version):  # fmt: skip
@@ -1162,10 +1171,9 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         held = _hold_recipes(stages_root, project, GAVE_UP_HOLD, dry_run)
         if held:
             res.setdefault("held", []).extend(held)
-    # retiring and holding launch nothing, so they run even while a drive does: heal's own
-    # resume of a dead drive would otherwise land before every tick and keep it unheld forever
-    if drive_running():
-        return {**res, "reason": "a drive is running; one heavy drive at a time"}
+    # No "is any drive running" stop (renders run back to back for up to 45 h): a publish needs
+    # no GPU, a new render queues on the shared GPU lock, and a run on the same project dirs is
+    # refused by its own run lock. A running audit still holds its region (below).
     # a passed audit whose publish failed (``health check`` closed the claim ``failed``) is
     # published again, never abandoned: ``health publish`` reopens it (2026-11-19, Kerry-to-Cork).
     # A refused retry is recorded and the tick goes on, so one drive's standing refusal never
@@ -1226,8 +1234,10 @@ def _run(res, region, rows, drives, free_slots, known, stages_root, output_root,
         # a failed store row heal cannot resume (no readable resume.json) is set aside and
         # launched from source once ``FailedRelaunch`` says its failure fingerprint changed
         for proj in (r.project for r in rows if r.region == region):
-            if any(d.project == proj and d.status == "failed" for d in mine) and (
-                why := failed_relaunch.due(proj)
+            if (
+                any(d.project == proj and d.status == "failed" for d in mine)
+                and not _project_job_running(jobs_dir, proj)
+                and (why := failed_relaunch.due(proj))
             ):
                 supersede, target, auto = (proj, why), proj, True
                 relaunch, res["relaunch"] = proj, why

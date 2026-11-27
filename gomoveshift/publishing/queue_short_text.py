@@ -59,6 +59,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -304,6 +305,9 @@ def _generate(
     for pos, s in enumerate(shorts):
         lfs.setdefault((s["project_name"], int(s["lf_index"])), []).append(pos)
     ordinals = ordinal_basis(shorts)
+    # One title ledger across the sidecar's LFs, as Phase D keeps one per drive: a new title an
+    # earlier LF took is taken for the later ones (else every LF's Short could take one label).
+    taken: Set[str] = set()
     for (project, lf_index), positions in lfs.items():
         mine = [p for p in positions if p in active]
         if not mine:
@@ -339,6 +343,16 @@ def _generate(
                     for p in range(len(shorts))
                     if p not in which
                 }
+                | taken
+            }
+            # The generator only looks back, so the place a KEPT next Short names (a hand title,
+            # say) is taken too: a rewritten Short varies from it instead of being refused for it.
+            used["titles"] |= {
+                place.strip().lower()
+                for i, p in enumerate(positions[:-1])
+                if p in which and positions[i + 1] not in which
+                for place in [_stored_places(shorts[positions[i + 1]], location).get("title")]
+                if place
             }
             seeds = {
                 i: _stored_places(shorts[positions[i - 2]], location) if i > 1 else {}
@@ -371,8 +385,10 @@ def _generate(
                 try:
                     posts.update(run([pos]))
                     alone.add(pos)
+                    taken.add(posts[pos].youtube_title.strip().lower())
                 except Exception as one:  # the generator's own refusal is the reason
                     refused[pos] = f"generator: {one}"
+        taken |= {posts[p].youtube_title.strip().lower() for p in live if p in posts}
     for pos in list(posts):
         # A stored arm the text no longer carries would mislabel the experiment.
         carried = getattr(posts[pos], "experiment_arms", None) or {}
@@ -411,7 +427,14 @@ def _gate_refusals(
 
     out: Dict[int, str] = {}
     offset = len(earlier)
-    batch = check_batch([*earlier, *plan.shorts], per_location_cap=None, recent_texts=spooled)
+    queued = _QUEUED_YOUTUBE.get()
+    batch = check_batch(
+        [*earlier, *plan.shorts],
+        per_location_cap=None,
+        recent_texts=spooled,
+        queued_youtube=None if queued is None else queued[1],
+        now=None if queued is None else queued[0],
+    )
     if per_location_cap is not None:
         own = check_batch(
             list(plan.shorts), per_location_cap=per_location_cap, recent_texts=spooled
@@ -525,6 +548,26 @@ def _successor_clashes(
                     if (variety.get(k) or {}).get("reason") != "no_alternative"
                     or (seed is not None and _norm(seed.get(k, "")) != _norm(mine[k]))
                 ]
+            elif shared:
+                # b is kept as stored (a hand title, a published Short): the generator was steered
+                # off its places (``_generate``), so a repeat left is one a could not avoid: its
+                # own ``no_alternative``, or no other measured place. Refusing it would repeat
+                # every night, since b never changes.
+                variety = getattr((posts or {}).get(a), "place_variety", None) or {}
+                i = positions.index(a)  # a's own predecessor's final place is no way out either
+                before = (
+                    _stored_places(
+                        rewritten.get(positions[i - 1], shorts[positions[i - 1]]), location
+                    )
+                    if i
+                    else {}
+                )
+                shared = [
+                    k
+                    for k in shared
+                    if (variety.get(k) or {}).get("reason") != "no_alternative"
+                    and _has_other_place(shorts[a], {_norm(mine[k]), _norm(before.get(k, ""))})
+                ]
             if shared:
                 later = b in rewritten
                 out.setdefault(
@@ -532,6 +575,18 @@ def _successor_clashes(
                     f"its {shared[0]} place repeats the {'previous' if later else 'next'} Short's",
                 )
     return out
+
+
+def _has_other_place(short: dict, taken: Set[str]) -> bool:
+    """Whether the Short's clip measured a title place (a town or county) outside ``taken``."""
+    from gomoveshift.pipeline.social_generator import _norm, measured_places
+
+    found = measured_places(
+        short.get("sampled_regions") or [],
+        short.get("sampled_roads") or [],
+        short.get("route_record"),
+    )
+    return any(_norm(b) not in taken for k, b in found if k != "road")
 
 
 def _hash_refusal(conn: sqlite3.Connection, siblings, row, short: dict, new: dict) -> str:
@@ -660,6 +715,10 @@ def _sidecar_changes(
         rewritten, fields_of, unchanged = {}, {}, set()
         for pos, post in posts.items():
             new, fields = _rewrite(shorts[pos], _youtube_text(shorts[pos], post))
+            if fields:  # the place the new title names, for the neighbour-place rule
+                new.pop("place_variety", None)
+                if getattr(post, "place_variety", None):
+                    new["place_variety"] = {k: dict(v) for k, v in post.place_variety.items()}
             if fields:
                 rewritten[pos], fields_of[pos] = new, fields
             else:
@@ -840,6 +899,27 @@ def _title_inputs_once() -> Iterator[None]:
         title_input_cache.reset(token)
 
 
+#: ``(now, [(slot, record)])``: the queue's active YouTube Shorts as stored, read once per
+#: run by ``sync_short_text``, so ``check_batch``'s ``neighbour-place`` rule sees a Short's
+#: neighbours by slot from any long-form or project. Unset = the rule is not run.
+_QUEUED_YOUTUBE: ContextVar[Optional[Tuple[datetime, list]]] = ContextVar(
+    "queue_short_text_queued_youtube", default=None
+)
+
+
+@contextmanager
+def _queued_youtube_once(conn: sqlite3.Connection, now: datetime) -> Iterator[None]:
+    """Read the queue's active YouTube Shorts (as stored) once for the whole run, before any
+    apply, for the ``neighbour-place`` rule (``_QUEUED_YOUTUBE``); reset on exit."""
+    from .anti_spam_gate import queued_youtube_records
+
+    token = _QUEUED_YOUTUBE.set((now, queued_youtube_records(conn)))
+    try:
+        yield
+    finally:
+        _QUEUED_YOUTUBE.reset(token)
+
+
 def _with_texts(base: Dict[str, List[str]], records: Sequence) -> Dict[str, List[str]]:
     """``base`` (platform -> texts) plus every text of ``records``, no repeats; a new dict."""
     from .anti_spam_gate import _record_texts
@@ -944,7 +1024,7 @@ def sync_short_text(
 
     order = _slot_order(by_sidecar)
     sync_keys = {(r["project_name"], int(r["short_index"])) for r in rows}
-    with _title_inputs_once():
+    with _title_inputs_once(), _queued_youtube_once(conn, now):
         # ONE read of the queue's text per run, taken before any apply. A sidecar's view of it
         # leaves out its own projects and the Shorts this run rewrites for other sidecars (their
         # text comes from `earlier`, final): everything else, a published Short beside a queued

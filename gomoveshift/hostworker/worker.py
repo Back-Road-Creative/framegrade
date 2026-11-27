@@ -16,9 +16,12 @@ Each job runs in its own transient unit (``gms-job-<id>``) through
 ``gomoveshift.hostworker.launch``, or in its own session where transient units are
 refused, so a worker restart, deploy or unit change never signals it. On startup the
 worker re-adopts every ``running/`` entry and only watches it: nothing is relaunched.
-``GMS_HOST_WORKER_LANES`` (default 2) claim loops run side by side, so a short job
-never waits behind a long one; a job that needs the shared GPU lock waits for it inside
-its own launcher (``queued``), never failed. Drive takes its own whole-run GPU lock.
+``GMS_HOST_WORKER_LANES`` (default 2) claim loops run side by side: with two or more,
+the first runs only ``drive`` requests and the others everything else, so a render never
+holds up another job's claim and a short job never waits behind a render. The launcher
+takes the shared GPU lock for every command but drive (which takes its own whole-run
+lock); while a render holds it past ``GMS_GPU_LOCK_WAIT_S`` the request goes back to
+pending at the end of the line (``queued``, with a ``waiting`` note), never failed.
 The worker adds no pipeline gates and never falls back to the CPU.
 """
 
@@ -60,6 +63,9 @@ _DRIVE_MEDIA_SUFFIXES = frozenset({".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mxf
 
 #: never taken from a request: the worker's own spool and the shared GPU lock
 _PROTECTED_ENV = frozenset({SPOOL_ENV, "GMS_GPU_LOCK_PATH"})
+
+#: a job's answer when it goes back to pending to wait for the GPU lock (note 191)
+_WAITING = object()
 
 
 class HostWorkerError(RuntimeError):
@@ -161,6 +167,7 @@ class HostWorker:
         spawn: Callable[..., subprocess.Popen] = subprocess.Popen,
         runner: Optional[str] = None,
         lanes: Optional[int] = None,
+        lock_wait_s: Optional[float] = None,
         adopt_grace_s: float = 30.0,
         child_argv: Callable[[list[str]], list[str]] = lambda argv: argv,
     ) -> None:
@@ -177,6 +184,7 @@ class HostWorker:
         self.poll_s = poll_s
         self.runner = runner or os.environ.get(RUNNER_ENV) or "systemd-run"
         self.lanes = lanes if lanes is not None else _lanes()
+        self.lock_wait_s = lock_wait_s  # None: the launcher's GMS_GPU_LOCK_WAIT_S / default
         self.adopt_grace_s = adopt_grace_s
         self._spawn = spawn
         self._child_argv = child_argv
@@ -218,8 +226,17 @@ class HostWorker:
         self._atomic_json(self.spool / f"{job_id}.status.json", payload)
 
     # -- claim ---------------------------------------------------------------
-    def claim_next(self) -> Optional[Path]:
-        """Atomically move the oldest pending request to running/."""
+    @staticmethod
+    def _is_drive(path: Path) -> bool:
+        try:
+            argv = json.loads(path.read_text()).get("argv")
+        except (OSError, ValueError, AttributeError):
+            return False
+        return isinstance(argv, list) and len(argv) > 3 and argv[3] == "drive"
+
+    def claim_next(self, drive: Optional[bool] = None) -> Optional[Path]:
+        """Atomically move the oldest pending request to running/: any request, or with
+        ``drive`` only drive requests (True) or only the rest (False)."""
         pending = self.spool / "pending"
         entries = []
         for p in pending.glob("*.json"):
@@ -228,6 +245,8 @@ class HostWorker:
             except FileNotFoundError:
                 continue
         for _, name, p in sorted(entries):
+            if drive is not None and self._is_drive(p) is not drive:
+                continue
             target = self.spool / "running" / name
             try:
                 os.rename(p, target)
@@ -239,25 +258,34 @@ class HostWorker:
     def _finish(self, claimed: Path) -> None:
         shutil.move(str(claimed), str(self.spool / "done" / claimed.name))
 
+    def _requeue(self, claimed: Path) -> None:
+        """Back to pending, at the end of the line (a fresh mtime), so the jobs behind it run."""
+        os.utime(claimed, None)
+        os.rename(claimed, self.spool / "pending" / claimed.name)
+
     # -- run -----------------------------------------------------------------
-    def run_once(self) -> bool:
-        """Process at most one request; False when nothing was pending."""
-        claimed = self.claim_next()
+    def run_once(self, drive: Optional[bool] = None) -> bool:
+        """Process at most one request; False when nothing was pending or it went back to wait
+        for the GPU lock (so the lane polls instead of spinning on it)."""
+        claimed = self.claim_next(drive)
         if claimed is None:
             return False
-        self._handle(claimed, adopt=False)
-        return True
+        return self._handle(claimed, adopt=False) is not _WAITING
 
-    def _handle(self, claimed: Path, *, adopt: bool) -> None:
-        """Launch (or, adopting, only watch) one claimed job; done/ once it ended."""
-        ended = True
+    def _handle(self, claimed: Path, *, adopt: bool) -> object:
+        """Launch (or, adopting, only watch) one claimed job; done/ once it ended, pending/
+        when it waits for the GPU lock, left in running/ when the worker is stopping."""
+        result: object = True
         try:
-            ended = self._process(claimed, adopt=adopt)
+            result = self._process(claimed, adopt=adopt)
         finally:
-            if ended:
+            if result is _WAITING:
+                self._requeue(claimed)
+            elif result:
                 self._finish(claimed)
+        return result
 
-    def _process(self, claimed: Path, *, adopt: bool) -> bool:
+    def _process(self, claimed: Path, *, adopt: bool) -> object:
         try:
             req = json.loads(claimed.read_text())
             job_id = req["job_id"]
@@ -287,13 +315,17 @@ class HostWorker:
         if source_error:
             self._write_status(job_id, "failed", error=source_error)
             return True
+        cancel = self.spool / "cancel" / job_id
+        if argv[3] != "drive" and cancel.exists():  # cancelled while it waited: it never ran
+            cancel.unlink(missing_ok=True)
+            self._write_status(job_id, "cancelled")
+            return True
         env = _request_env(req.get("env"))
         if argv[3] == "drive":  # set here, never taken from the request: the spool is untrusted
             env[run_origin.LAUNCHED_BY_ENV] = "hostworker"
-        # A job waits for the GPU as long as it takes: queued, never failed. Drive takes
-        # the lock itself after its run locks (taking it in the launcher would make the
-        # child wait on its own parent); the launcher takes it for everything else.
-        env["GMS_GPU_LOCK_WAIT_S"] = "inf"
+        # Drive takes the lock itself after its run locks, queueing behind another render
+        # (taking it in the launcher would make the child wait on its own parent); the
+        # launcher takes it for everything else.
         if not self._launch(job_id, argv, env, take_lock=argv[3] != "drive"):
             return True
         return self._watch(job_id)
@@ -310,6 +342,7 @@ class HostWorker:
             "log": str(self.spool / "logs" / f"{job_id}.log"),
             "lock_path": str(self.lock_path),
             "take_lock": take_lock,
+            "lock_wait_s": self.lock_wait_s,
             "launched_at": time.time(),
         }
         spec_path = jobs / f"{job_id}.launch.json"
@@ -359,9 +392,10 @@ class HostWorker:
         self._launched[job_id] = proc
         return True
 
-    def _watch(self, job_id: str) -> bool:
+    def _watch(self, job_id: str) -> object:
         """Follow a launched job until its exit record; False when the worker is
-        stopping (the job keeps running and the next worker re-adopts it)."""
+        stopping (the job keeps running and the next worker re-adopts it), ``_WAITING``
+        when its launcher found the GPU lock held and never started it."""
         jobs = self.spool / "jobs"
         log = self.spool / "logs" / f"{job_id}.log"
         cancel = self.spool / "cancel" / job_id
@@ -412,6 +446,11 @@ class HostWorker:
         self._launched.pop(job_id, None)
         rc, error = done.get("exit_code"), done.get("error")
         fields = {"pid": pid, "exit_code": rc, "phase": phase, "progress": progress}
+        if done.get("waiting") and not cancelled:
+            # A render holds the card (for hours): queued and tried again, never failed
+            # because a render is running. A cancel meanwhile is seen before the next launch.
+            self._write_status(job_id, "queued", waiting=str(done["waiting"]))
+            return _WAITING
         if cancelled or cancel.exists():
             cancel.unlink(missing_ok=True)
             self._write_status(job_id, "cancelled", **fields)
@@ -456,8 +495,8 @@ class HostWorker:
 
     # -- service loop --------------------------------------------------------
     def serve(self, stop: Optional[threading.Event] = None) -> None:
-        """Re-adopt what is running, then run ``lanes`` claim loops until ``stop``.
-        Stopping never signals a job."""
+        """Re-adopt what is running, then run ``lanes`` claim loops until ``stop`` (with
+        two or more, the first takes only drive requests). Stopping never signals a job."""
         stop = stop or threading.Event()
         self.stop_event = stop
         adopt = sorted((self.spool / "running").glob("*.json"))
@@ -471,14 +510,14 @@ class HostWorker:
                     logger.exception("heartbeat write failed")
                 stop.wait(self.heartbeat_s)
 
-        def lane() -> None:
+        def lane(drive: Optional[bool]) -> None:
             while not stop.is_set():
                 with take:
                     claimed = adopt.pop(0) if adopt else None
                 try:
                     if claimed is not None:
                         self._handle(claimed, adopt=True)
-                    elif not self.run_once():
+                    elif not self.run_once(drive):
                         stop.wait(self.poll_s)
                 except Exception:  # noqa: BLE001 - one bad job never stops a lane
                     logger.exception("host worker lane error")
@@ -486,7 +525,12 @@ class HostWorker:
 
         threads = [threading.Thread(target=beat, name="gms-hostworker-heartbeat", daemon=True)]
         threads += [
-            threading.Thread(target=lane, name=f"gms-hostworker-lane-{i}", daemon=True)
+            threading.Thread(
+                target=lane,
+                args=(None if self.lanes == 1 else i == 0,),
+                name=f"gms-hostworker-lane-{i}",
+                daemon=True,
+            )
             for i in range(self.lanes)
         ]
         for t in threads:

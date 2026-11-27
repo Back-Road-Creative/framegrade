@@ -139,7 +139,7 @@ def test_backlog_republish_goes_through_the_same_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "open_schedule_store", lambda config: (rig.store, CAD))
     run = publish.backlog_publisher(
         None, region="usa", stages_root=rig.stages, code_root=tmp_path, jobs_dir=rig.jobs,
-        now=NOW, drive_running=lambda jobs: False,
+        now=NOW,
     )  # fmt: skip
     out = run("day-a", False)
     assert out["action"] == "refused" and "306385" in out["reason"]

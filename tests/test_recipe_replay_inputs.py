@@ -54,7 +54,7 @@ def _heal(tmp, gpx, row):
     out = heal.run_heal(
         incidents_dir=inc, jobs_dir=tmp / "jobs", code_root=tmp, mirror_sha="a" * 40, now=NOW,
         only_key=key, launcher=lambda argv, cwd: launches.append(argv) or (True, ""),
-        notify_fn=lambda *a: True, git_changed=lambda *a: [], drive_running=lambda j: False,
+        notify_fn=lambda *a: True, git_changed=lambda *a: [], conflict_fn=lambda j, rp, recipe: None,
         slot_fn=lambda r, rc: None, installed_version_fn=lambda p: None,
         pinned_version_fn=lambda c: None, sibling_versions_fn=lambda p: {},
         manifest_sha_fn=lambda r: None, manifest_row_fn=lambda r: row, config_sha_fn=lambda c: None,

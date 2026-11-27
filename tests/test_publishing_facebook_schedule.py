@@ -48,6 +48,9 @@ def _resp(status_code=200, body=None):
     return Mock(status_code=status_code, json=Mock(return_value=body or {}))
 
 
+PUBLISHED = {"status": "complete", "publish_status": "published"}
+
+
 def _session():
     return Mock(
         post=Mock(
@@ -57,7 +60,8 @@ def _session():
                 _resp(200, {"success": True, "post_id": "p-1"}),
             ]
         ),
-        get=Mock(),
+        # The read-back after finish: the reel exists and has published.
+        get=Mock(return_value=_resp(200, {"status": {"publishing_phase": PUBLISHED}})),
     )
 
 

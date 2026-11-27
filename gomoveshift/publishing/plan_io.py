@@ -150,6 +150,17 @@ def _experiment_arms(raw: Dict[str, Any], path: Path, ctx: str) -> Dict[str, str
     return dict(value)
 
 
+def _place_variety(raw: Dict[str, Any], path: Path, ctx: str) -> Dict[str, dict]:
+    """``place_variety``, absent-tolerant: sidecars written before it was recorded
+    carry none."""
+    value = raw.get("place_variety") or {}
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, dict) for k, v in value.items()
+    ):
+        raise _fail(path, f"'place_variety' must map surfaces to place choices ({ctx})")
+    return {k: dict(v) for k, v in value.items()}
+
+
 def _caption_templates(raw: Dict[str, Any], path: Path, ctx: str) -> Dict[str, str]:
     """``caption_templates``, absent-tolerant: sidecars written before caption
     opener ids were recorded carry none."""
@@ -257,6 +268,7 @@ def _record(raw: Any, path: Path, index: int) -> ShortPublishRecord:
             sampled_roads=_str_tuple_or_empty(raw, "sampled_roads", path, ctx),
             route_record=raw.get("route_record") or None,
             bracket_route=raw.get("bracket_route") or None,
+            place_variety=_place_variety(raw, path, ctx),
             parent_lf_video_id=raw["parent_lf_video_id"],
             parent_lf_publish_at=_dt(raw, "parent_lf_publish_at", path, ctx),
             payloads=_payloads(_obj(raw, "payloads", path, ctx), path, ctx),

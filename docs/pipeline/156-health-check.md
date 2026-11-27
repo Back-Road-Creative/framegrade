@@ -209,6 +209,13 @@ A relative `seo.storage_path` skips rules 2, 4, 7, 8, 9, 10, 13 and 15 (it would
    (`platform`, `date`), pushed once as `health_social_queue_gap`; it resolves when that day is
    filled or arrives, and the next empty day is a new incident. Read-only (queue opened `mode=ro`).
 
+16. **Platform paused: access token refused** (`platform_auth_blocked`). One incident per
+   platform in `platform_pauses` whose `reason` is `auth:blocked` (the dispatch handlers pause a
+   platform when Facebook, Instagram or TikTok refuses its access token, and leave its queued posts
+   queued). Key `platform_auth_blocked:<platform>`, fields `platform`, `paused_at`, `reason` (the
+   refusal); pushed once (`health_platform_auth_blocked`); resolves when the pause is lifted.
+   Read-only (queue opened `mode=ro`).
+
 ## Push and idempotency
 
 Each row carries a stable `key` and `pushed`. A push that returns `False` (attempted, failed) leaves
@@ -218,7 +225,7 @@ An open row found again keeps its `pushed` state and `resume_attempts`; only a `
 
 ## Incident row, schema `health-incident/1`
 
-Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `install_deferred` | `social_queue_gap`), `key`, `file`,
+Common: `schema`, `kind` (`drive_failed` | `lf_slot_unbooked` | `queue_stalled` | `placeless_label_unverifiable` | `failure_unattended` | `queued_short_refused` | `delivery_failed_permanent` | `short_bad_run` | `backlog_storage_refused` | `backlog_store_orphan` | `backlog_unlisted_footage` | `backlog_exclusion_invalid` | `seo_feedback_stale` | `install_deferred` | `social_queue_gap` | `platform_auth_blocked`), `key`, `file`,
 `detected_at`, `pushed` (bool), `pushed_at`, `resolved_at` (null while open).
 
 `drive_failed`: `drive`, `job_name`, `phase` (or null), `gate` (or null), `error`, `log_path`,
@@ -337,8 +344,9 @@ or version retries at once, and pre-flight failures do not count (after `HEAL_PR
 of them on one code the retry waits the 24 h max from the newest). A run killed by a host
 restart (job record left at `running`, nanny and worker gone per `_proc_alive`) gets attempt outcome
 `interrupted` and one `health_heal_outcome` push; it uses neither budget nor backoff for the first
-`HEAL_INTERRUPTED_RETRIES` (3) on a fingerprint, then counts like a failure; (b) a drive job is running
-(job/1 record with no result, or `pgrep`); (c) none: the publish slot (the recipe's
+`HEAL_INTERRUPTED_RETRIES` (3) on a fingerprint, then counts like a failure; (b) a live drive on the recipe's own stages or project dir
+(`heal.drive_conflict`: the run lock of either dir held by a live pid, or a live drive job with the
+same `--output-dir`); a drive of any other project is never a reason (note 191); (c) none: the publish slot (the recipe's
 `--lf-publish-date`, else the soonest free slot of `gomoveshift schedule`) is recorded as `slot`
 but never gates, since an audit-only drive keeps only the weekday check and `health backlog` /
 `health publish` claim a fresh slot after a passed audit; (d) a metadata-gate failure (gate

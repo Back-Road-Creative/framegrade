@@ -71,25 +71,36 @@ class CleanupPlan:
     abandoned: List[Dict] = field(default_factory=list)  # [{"path", "size", "reason"}]
 
 
-# The live-drive probe is heal's — one `pgrep` pattern for the whole codebase. Callers
-# that pass no probe get ``_live_drive_probe``, which imports heal at CALL time: a
+# The live-drive listing is heal's — one `pgrep` pattern for the whole codebase. Callers
+# that pass none get ``_live_drive_cmdlines``, which imports heal at CALL time: a
 # module-level import cycles (publishing.queue → pipeline/__init__ → this module →
 # health.heal → cadence → publishing.queue, CI #257), and the late lookup also honours
-# a test patching ``gomoveshift.health.heal._pgrep_drive``.
-def _live_drive_probe() -> bool:
+# a test patching ``gomoveshift.health.heal.live_drive_cmdlines``.
+def _live_drive_cmdlines() -> List[str]:
     from ..health import heal
 
-    return heal._pgrep_drive()
+    return heal.live_drive_cmdlines()
+
+
+def _names_project(cmdline: str, project: str) -> bool:
+    """A drive command line names ``project`` as a path component (its source or output dir),
+    compared the way the orchestrator names a project dir (spaces to ``_``, lower case)."""
+    norm = project.replace(" ", "_").lower()
+    return any(
+        part.replace(" ", "_").lower() == norm
+        for tok in cmdline.split()
+        for part in Path(tok.split("=", 1)[-1]).parts
+    )
 
 
 def abandoned_refusal(
-    stages_dir: Path, *, drive_running_fn: Optional[Callable[[], bool]] = None
+    stages_dir: Path, *, live_drives_fn: Optional[Callable[[], List[str]]] = None
 ) -> Optional[str]:
     """Why an incomplete ``stages_dir`` is NOT an abandoned run, or ``None`` when every rule holds.
 
     An abandoned run is one a relaunch or a kill left behind: nothing holds its run lock, no
-    drive is running anywhere (a live drive could be the one about to resume it), and no
-    operator hold says it is waiting (health backlog's own give-up hold says the opposite). The first failing rule is the reason, so the dry-run
+    live drive names its project (one that does could be about to resume it; a drive of any
+    other project never keeps it), and no operator hold says it is waiting (health backlog's own give-up hold says the opposite). The first failing rule is the reason, so the dry-run
     says what to clear. 2026-11-08: nctopa-2026-03-05-rec0063 relaunched under a different
     ``GMS_INTERMEDIATE_DIR`` left 139 GB that ``cleanup`` could only skip.
     """
@@ -104,8 +115,9 @@ def abandoned_refusal(
         pid = _read_lock_metadata(lock).get("pid")
         if isinstance(pid, int) and _pid_is_alive(pid):
             return f"run lock {lock.name} held by live pid {pid}"
-    if (drive_running_fn or _live_drive_probe)():
-        return "a gomoveshift drive is running — abandoned runs are reclaimed only when none is"
+    project = stages_dir.parent.name
+    if any(_names_project(c, project) for c in (live_drives_fn or _live_drive_cmdlines)()):
+        return f"a live gomoveshift drive names {project} — it may be resuming this run"
     return None
 
 
@@ -203,7 +215,7 @@ class PipelineCleanup:
         d_drive_base: Optional[Path] = None,
         stage_cache_base: Optional[Path] = None,
         *,
-        drive_running_fn: Optional[Callable[[], bool]] = None,
+        live_drives_fn: Optional[Callable[[], List[str]]] = None,
     ):
         from ..paths import gms_output_dir, gms_staging_dir
 
@@ -213,7 +225,7 @@ class PipelineCleanup:
         # Drive runs' ext4 stage cache (``paths.gms_intermediate_base``). Unset:
         # only ``output_base`` is scanned. The ``cleanup`` CLI always sets it.
         self.stage_cache_base = stage_cache_base
-        self._drive_running_fn = drive_running_fn or _live_drive_probe
+        self._live_drives_fn = live_drives_fn or _live_drive_cmdlines
 
     def discover_projects(self) -> List[Path]:
         """Find project directories in the output base and the stage cache: ``<base>/<project>``
@@ -361,7 +373,7 @@ class PipelineCleanup:
             # Pipeline completion check
             if not pipeline_complete and abandoned:
                 stages_dir = project_dir / "_stages"
-                why = abandoned_refusal(stages_dir, drive_running_fn=self._drive_running_fn)
+                why = abandoned_refusal(stages_dir, live_drives_fn=self._live_drives_fn)
                 if why:
                     plan.skipped.append({"path": str(stages_dir), "reason": why})
                 else:
@@ -369,7 +381,7 @@ class PipelineCleanup:
                         {
                             "path": str(stages_dir),
                             "size": _tree_size(stages_dir),
-                            "reason": "abandoned run (incomplete, unlocked, unheld or given up, no drive running)",
+                            "reason": "abandoned run (incomplete, unlocked, unheld or given up, no live drive names it)",
                         }
                     )
                 continue
@@ -635,7 +647,7 @@ class PipelineCleanup:
             if root.name != "_stages" or root.is_symlink() or not root.is_dir():
                 logger.warning("  Not an abandoned stage dir, left alone: %s", root)
                 continue
-            why = abandoned_refusal(root, drive_running_fn=self._drive_running_fn)
+            why = abandoned_refusal(root, live_drives_fn=self._live_drives_fn)
             if why:
                 logger.warning("  Abandoned stage dir kept: %s — %s", root, why)
                 continue

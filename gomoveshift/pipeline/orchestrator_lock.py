@@ -189,6 +189,14 @@ def _read_lock_metadata(lock_path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def live_run_lock_holder(lock_path: Path) -> Optional[dict]:
+    """The holder of a run lock file when its pid is alive, else ``None``. Read-only: never
+    takes the flock (a probe that took it could make a starting run read a stale holder)."""
+    holder = _read_lock_metadata(lock_path) if lock_path.is_file() else {}
+    pid = holder.get("pid")
+    return holder if isinstance(pid, int) and _pid_is_alive(pid) else None
+
+
 def _pid_is_alive(pid: int) -> bool:
     """Probe via ``os.kill(pid, 0)``. ``PermissionError`` → alive (different uid)."""
     if pid <= 0:
@@ -270,6 +278,8 @@ def _release_run_lock(fd: Optional[int], lock_path: Optional[Path]) -> None:
 
 GPU_LOCK_OWNER = "gomoveshift"
 DEFAULT_GPU_LOCK_WAIT_S = 120.0
+#: how often a render queued behind another render's GPU lock logs that it is still queued
+GPU_QUEUE_LOG_S = 600.0
 
 
 class GpuLockBusyError(RuntimeError):
@@ -314,6 +324,7 @@ def acquire_gpu_lock(
     *,
     wait_s: Optional[float] = None,
     path: Optional[Path] = None,
+    queue_behind_renders: bool = False,
 ) -> tuple[Optional[int], Optional[Path]]:
     """Take the shared GPU lock, waiting out a live holder.
 
@@ -322,6 +333,11 @@ def acquire_gpu_lock(
     afterwards rather than proceeding because the failure it prevents — an
     nvenc OOM partway through a day master — is worse than a clear refusal at
     the start. Returns ``(None, None)`` when the lock is disabled.
+
+    ``queue_behind_renders``: a holder that is this pipeline's own (owner
+    ``GPU_LOCK_OWNER``: another render) never times the wait out -- the caller
+    queues behind it, logging every ``GPU_QUEUE_LOG_S`` so a supervisor that
+    reads log growth sees it alive. ``wait_s`` still bounds a foreign holder.
 
     Raises
     ------
@@ -337,6 +353,7 @@ def acquire_gpu_lock(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     deadline = time.monotonic() + wait_s
+    next_note = time.monotonic() + GPU_QUEUE_LOG_S
     announced = False
     try:
         while True:
@@ -355,6 +372,15 @@ def acquire_gpu_lock(
                         holder.get("pid", "?"),
                     )
                     announced = True
+                ours = holder.get("owner") == GPU_LOCK_OWNER
+                if queue_behind_renders and ours:
+                    deadline = time.monotonic() + wait_s  # a render ahead: queue, never time out
+                    if time.monotonic() >= next_note:
+                        logger.info(
+                            "Queued behind the render holding the shared GPU lock (pid=%s).",
+                            holder.get("pid", "?"),
+                        )
+                        next_note = time.monotonic() + GPU_QUEUE_LOG_S
                 if time.monotonic() >= deadline:
                     raise GpuLockBusyError(
                         f"Shared GPU lock at {lock_path} is held by "

@@ -31,6 +31,7 @@ def _script(script: str):
 def _make(tmp_path, script="print('hi')", **kw):
     kw.setdefault("gpu_checker", _ok_gpu)
     kw.setdefault("lock_path", tmp_path / "gpu.lock")
+    kw.setdefault("lock_wait_s", 0.3)
     kw.setdefault("grace_s", 0.5)
     kw.setdefault("heartbeat_s", 0.1)
     kw.setdefault("runner", "detached")
@@ -278,26 +279,61 @@ def test_drive_child_refuses_foreign_gpu_lock(tmp_path):
         os.close(fd)
 
 
-def test_a_busy_gpu_lock_leaves_the_job_queued_never_failed(tmp_path):
-    """route-story-film failed after the 120 s lock wait (GPU lock unavailable): a GPU
-    job without the lock waits for it in its own launcher, queued, then runs."""
-    import threading
+_FILM = [sys.executable, "-m", "gomoveshift", "route-story-film", "x"]
 
-    _submit(tmp_path, argv=[sys.executable, "-m", "gomoveshift", "route-story-film", "x"])
+
+def _hold_gpu(tmp_path) -> int:
+    """A render holding the shared GPU lock (the caller closes the fd)."""
     fd = os.open(tmp_path / "gpu.lock", os.O_RDWR | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
-    w = _make(tmp_path, "print('RAN', flush=True)")
-    t = threading.Thread(target=w.run_once)
-    t.start()
+    os.write(fd, json.dumps({"owner": "gomoveshift", "pid": os.getpid()}).encode())
+    return fd
+
+
+# 2026-11-26: a route-story-film request was failed after 120 s whenever a drive held the card;
+# renders run back to back for up to 45 h, so it could never run. It now waits its turn.
+def test_a_busy_gpu_lock_keeps_the_request_queued_and_never_runs_it(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
     try:
-        assert _wait(lambda: _state(tmp_path) == "queued")
-        time.sleep(1.5)  # well past any short lock wait
-        st = _status(tmp_path)
-        assert st["state"] == "queued" and "GPU lock" in st["phase"] and st["error"] is None
+        w = _make(tmp_path, "print('RAN', flush=True)")
+        assert w.run_once() is False  # the lane polls instead of spinning on it
     finally:
         os.close(fd)
-    t.join(timeout=20)
-    assert _status(tmp_path)["state"] == "succeeded" and "RAN" in _log(tmp_path)
+    st = _status(tmp_path)
+    assert st["state"] == "queued" and "GPU lock" in st["waiting"] and st["error"] is None
+    assert (tmp_path / "spool" / "pending" / "j1.json").exists()
+    assert not (tmp_path / "spool" / "done" / "j1.json").exists()
+    assert "RAN" not in _log(tmp_path)
+
+
+def test_a_request_that_waited_for_the_lock_runs_once_it_is_free(tmp_path):
+    _submit(tmp_path, argv=_FILM)
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _make(tmp_path).run_once() is True
+    assert _status(tmp_path)["state"] == "succeeded"
+    assert (tmp_path / "spool" / "done" / "j1.json").exists()
+
+
+def test_a_waiting_request_goes_behind_the_next_one_and_can_be_cancelled(tmp_path):
+    _submit(tmp_path, "j1", argv=_FILM)
+    _submit(tmp_path, "j2")  # a drive request, which takes its own lock
+    os.utime(tmp_path / "spool" / "pending" / "j1.json", (1, 1))  # j1 was first in line
+    os.utime(tmp_path / "spool" / "pending" / "j2.json", (2, 2))
+    fd = _hold_gpu(tmp_path)
+    try:
+        _make(tmp_path).run_once()  # j1 waits: back of the line, so j2 is next
+        assert _make(tmp_path).claim_next().name == "j2.json"
+        _cancel(tmp_path, "j1")
+        _make(tmp_path).run_once()
+    finally:
+        os.close(fd)
+    assert _status(tmp_path, "j1")["state"] == "cancelled"
+    assert (tmp_path / "spool" / "done" / "j1.json").exists()
 
 
 def test_progress_lines_update_status(tmp_path):
@@ -518,17 +554,16 @@ def test_a_worker_restart_leaves_the_job_unsignalled_and_the_new_worker_re_adopt
     assert mark.read_text().split() == ["START"], "relaunched, or signalled"
 
 
-def test_two_lanes_run_a_short_job_while_a_long_one_holds(tmp_path):
+def test_drive_runs_in_its_own_lane_so_a_short_job_never_waits_behind_a_render(tmp_path):
     long_script, go, _ = _held_job(tmp_path, "long")
-    (tmp_path / "s").mkdir()
-    _submit(tmp_path, "long")
+    _submit(tmp_path, "long")  # a drive render, first in line
     time.sleep(0.02)
-    _submit(
-        tmp_path, "short", argv=[sys.executable, "-m", "gomoveshift", "drive", str(tmp_path / "s")]
-    )
+    _submit(tmp_path, "render2")  # a second drive: waits in the drive lane
+    time.sleep(0.02)
+    _submit(tmp_path, "short", argv=_FILM)
 
     def child(argv):
-        if argv[4].endswith("s"):
+        if argv[3] != "drive":
             return [sys.executable, "-c", "print('short done')"]
         return [sys.executable, "-c", long_script]
 
@@ -537,11 +572,23 @@ def test_two_lanes_run_a_short_job_while_a_long_one_holds(tmp_path):
     try:
         assert _wait(lambda: _state(tmp_path, "short") == "succeeded", timeout=15)
         assert _state(tmp_path, "long") == "running"
+        assert (tmp_path / "spool" / "pending" / "render2.json").exists()  # one render at a time
     finally:
         go.write_text("")
         assert _wait(lambda: _state(tmp_path, "long") == "succeeded")
+        assert _wait(lambda: _state(tmp_path, "render2") == "succeeded")
         stop.set()
         t.join(timeout=10)
+
+
+def test_a_lane_claims_only_its_own_kind(tmp_path):
+    _submit(tmp_path, "d1")
+    time.sleep(0.02)
+    _submit(tmp_path, "f1", argv=_FILM)
+    w = _make(tmp_path)
+    assert w.claim_next(drive=False).name == "f1.json"
+    assert w.claim_next(drive=False) is None
+    assert w.claim_next(drive=True).name == "d1.json"
 
 
 def test_the_lane_count_defaults_to_two(tmp_path, monkeypatch):
