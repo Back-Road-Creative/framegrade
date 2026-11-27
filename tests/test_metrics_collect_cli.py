@@ -136,6 +136,33 @@ def test_backfill_ids_is_idempotent_on_a_second_run(tmp_path) -> None:
     assert store.update_platform_id.call_count == 2
 
 
+def test_backfill_ids_skips_a_project_with_no_tracking_record(tmp_path, capsys) -> None:
+    # 2026-11-27: one published row of a project with no tracking record (an old split
+    # drive) raised FileNotFoundError and ended the run before the later rows registered.
+    conn = open_queue_db(tmp_path)
+    d1 = enqueue(conn, "gone", 1, "youtube", "hash-a")
+    transition(conn, d1, "queued", "published", platform_upload_id="yt_g", published_at_source=PLATFORM)  # fmt: skip
+    d2 = enqueue(conn, "proj", 1, "youtube", "hash-b")
+    transition(conn, d2, "queued", "published", platform_upload_id="yt_p", published_at_source=PLATFORM)  # fmt: skip
+    conn.close()
+
+    registered = []
+
+    def update(project, *a, **kw):
+        if project == "gone":
+            raise FileNotFoundError("No tracking record at /x/gone/tracking/gone.json")
+        registered.append(project)
+
+    with patch.object(metrics_handler, "TrackingStore") as mock_store_cls:
+        mock_store_cls.return_value.update_platform_id.side_effect = update
+        rc = metrics_handler.cmd_metrics(_args(metrics_command="backfill-ids"), _config(tmp_path))
+    assert rc == 0
+    assert registered == ["proj"]
+    out = capsys.readouterr()
+    assert "skip" in out.err and "gone" in out.err
+    assert "Backfilled 1 platform id(s) from 2 published row(s)" in out.out
+
+
 # ── Collect folds into slot_performance ─────────────────────────────
 
 

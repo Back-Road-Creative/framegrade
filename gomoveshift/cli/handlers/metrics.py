@@ -991,8 +991,10 @@ def _cmd_metrics_backfill_ids(config) -> int:
                 posted_at_source=posted_at_source,
             )
             registered += 1
-        except ValueError as exc:
-            print(f"  skip: {exc}", file=sys.stderr)
+        except (ValueError, FileNotFoundError) as exc:
+            # a project with no tracking record (an old split drive) is skipped, never the end
+            # of the run (2026-11-27: ireland-2025-09-17-mizen-s1 stopped every later row)
+            print(f"  skip {row['project_name']}: {exc}", file=sys.stderr)
 
     print(f"Backfilled {registered} platform id(s) from {len(rows)} published row(s)")
     return 0
