@@ -337,7 +337,8 @@ class DrainResult:
     #: previous worker, not about this one.
     reconciled_interrupted: int = 0
     #: Rows this pass parked at ``needs_operator``: their uncounted retries ran
-    #: past ``UNCOUNTED_RETRY_BOUND``. Not in ``retried``; each has an incident.
+    #: past ``UNCOUNTED_RETRY_BOUND``, whether the pass tried them or their worker
+    #: died holding them. Not in ``retried``; each has an incident.
     needs_operator: int = 0
     errors: List[str] = field(default_factory=list)
 
@@ -670,9 +671,12 @@ def reconcile_interrupted_attempts(
     backoff_base_seconds: int = _DEFAULT_BACKOFF_BASE_SECONDS,
     backoff_cap_seconds: int = _DEFAULT_BACKOFF_CAP_SECONDS,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    parked: Optional[List[Tuple[str, int]]] = None,
 ) -> int:
     """Charge an attempt to every delivery whose worker died holding it, and
-    return how many were reconciled.
+    return how many were reconciled. Every row this parks at
+    ``needs_operator`` is appended as ``(platform, id)`` to ``parked`` when given, so the drain's
+    summary counts it with the rows the pass itself parked.
 
     A worker killed between ``acquire_lease`` and any ``transition`` -- OOM,
     a host restart, SIGKILL -- leaves ``attempt_count`` untouched. The lease
@@ -754,7 +758,7 @@ def reconcile_interrupted_attempts(
             "as an attempt; an ambiguous Facebook upload remains read-only"
         )
         if _facebook_unknown(row):
-            _uncounted_retry(
+            outcome = _uncounted_retry(
                 conn,
                 row,
                 status,
@@ -770,6 +774,8 @@ def reconcile_interrupted_attempts(
                 error_class=_INTERRUPTED_ERROR_CLASS,
                 error_detail=detail,
             )
+            if outcome == "parked" and parked is not None:
+                parked.append((platform, delivery_id))
         elif attempt_count >= max_attempts:
             transition(
                 conn,
@@ -1226,13 +1232,24 @@ def drain_queue(
     # to record its attempt. Reconciling here rather than in a separate
     # startup hook means the CLI, the cron and any future worker all get it --
     # the same reason _select_due gates on the schedule instead of the loop.
+    parked_dead: List[Tuple[str, int]] = []
     result.reconciled_interrupted = reconcile_interrupted_attempts(
         conn,
         now=now,
         backoff_base_seconds=backoff_base_seconds,
         backoff_cap_seconds=backoff_cap_seconds,
         max_attempts=max_attempts,
+        parked=parked_dead,
     )
+    # A row parked off a dead worker's lease needs a person exactly like one the
+    # pass below parks, so the summary's needs_operator counts both.
+    for platform, delivery_id in parked_dead:
+        result.needs_operator += 1
+        result.errors.append(
+            f"{platform}#{delivery_id}: needs_operator: its worker died holding it and its "
+            f"uncounted retries ran past {UNCOUNTED_RETRY_BOUND} without an outcome; parked "
+            "with its platform ids for a person"
+        )
     if "youtube" in handlers:
         try:
             held = hold_near_duplicate_rows(conn, now=now)
