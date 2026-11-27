@@ -5,6 +5,18 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.174] - 2026-11-26
+
+### Changed
+
+- The brand line burned into reels, Shorts and long-forms now reads "gomoveshift.com" instead of "GoMoveShift", so viewers see where to find the website, and the route-story film's mark reads "Made with gomoveshift.com". Videos already rendered keep the old text.
+
+### Fixed
+
+- A YouTube Short drained at or after its slot was uploaded private with a `publishAt` already in the past; it now goes up public at once (a future slot is still scheduled), and a Short still not public an hour after its go-public time opens a `youtube_not_public_after_slot` health incident.
+- A YouTube retry more than two hours after a lost-response upload no longer re-uploads the Short: the channel scan looks back to the row's first submit (`first_submitted_at`, a new queue column), and never adopts a video another queue row already owns.
+- YouTube quota refusals, and the channel's daily upload limit (`uploadLimitExceeded`, now recognised), no longer fail a Short after eight tries: they wait as throttled deliveries, and so does a quota refusal on the adapter's `videos.list` checks. The daily upload budget now counts by upload time on YouTube's Pacific-midnight quota day.
+
 ## [0.3.173] - 2026-11-26
 
 ### Fixed
@@ -1971,7 +1983,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...HEAD
+[0.3.174]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.173...v0.3.174
 [0.3.173]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.172...v0.3.173
 [0.3.172]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.171...v0.3.172
 [0.3.171]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...v0.3.171
