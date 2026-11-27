@@ -5,6 +5,15 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.178] - 2026-11-27
+
+### Fixed
+
+- A refused Facebook Page token now pauses Facebook when the Page photo upload or its first comment, the Reel delivery's upload or reconcile read, or the read-back of a just-posted first comment meets it. Before, each held the post as an unknown outcome, or logged the refusal and went on. Held attempts stay held, and no write is repeated.
+- The publish gate's blur-mask frame check can count a finished day again. The encode deletes the raw concat and the master-drop deletes the master, so a day refused every publish as `mask_frame_count_unknown` (rec0060, Kerry-to-Cork). The day's recorded episode files now stand in for the raw, summed, but only when their fingerprints match the colour cache's record.
+- A master encoded at a different frame rate from the mask no longer reads as a mismatch. Old Head's half-rate master (184,421 frames) was compared with its 368,837-frame mask. Such a master is now not used as the source count, and the gate stays fail-closed.
+- No two YouTube posts on one channel carry near-identical titles or descriptions. Enqueue refuses a Short whose title or sent description is near-identical to a queued or recently published row (a `near_duplicate_text_refused` incident), the YouTube adapter re-checks right before each insert, and each drain pass holds the later of two colliding queued rows at `needs_operator` with the reason. A stamped Short's reviewed description now carries its stamp, so the Shorts of one drive that name one place no longer all send "Drive through <place>", and a Short title is never one a published title says in other words.
+
 ## [0.3.177] - 2026-11-27
 
 ### Fixed
@@ -2007,7 +2016,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.178...HEAD
+[0.3.178]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.177...v0.3.178
 [0.3.177]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.176...v0.3.177
 [0.3.176]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.175...v0.3.176
 [0.3.175]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.174...v0.3.175
