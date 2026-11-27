@@ -349,16 +349,16 @@ class TestSilentOstFailureWarning:
 
 
 class TestDriveUploaderChunksize:
-    """Verify Drive uploader uses explicit 256MB chunksize, not default -1."""
+    """Verify Drive uploader uses the shared explicit chunksize, not default -1."""
 
     def test_upload_file_uses_explicit_chunksize(self):
-        """_upload_file must create MediaFileUpload with chunksize=256*1024*1024."""
+        """_upload_file must create MediaFileUpload with chunksize=UPLOAD_CHUNKSIZE."""
         source_path = (
             Path(__file__).resolve().parent.parent / "gomoveshift" / "pipeline" / "uploader.py"
         )
         source = source_path.read_text()
         # Find the _upload_file method and verify chunksize is set
-        assert "chunksize=256 * 1024 * 1024" in source
+        assert "chunksize=UPLOAD_CHUNKSIZE" in source
         # Must NOT contain chunksize=-1
         assert "chunksize=-1" not in source
 

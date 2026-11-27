@@ -38,7 +38,6 @@ and passed directly to `google.oauth2.credentials.Credentials`.
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
 import random
 import re
@@ -55,6 +54,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from ...config import get_config
+from .._chunk_upload import UPLOAD_CHUNKSIZE, ChunkStillRunningError, next_chunk_with_timeout
 from .._yt_creds import DEFAULT_CREDENTIALS_DIR, load_youtube_credentials
 from ..endscreen_sidecar import format_endscreen_checklist_line
 from ..exceptions import YouTubeQuotaError
@@ -435,7 +435,7 @@ class YouTubeUploader:
 
         media = MediaFileUpload(
             str(video_path),
-            chunksize=256 * 1024 * 1024,
+            chunksize=UPLOAD_CHUNKSIZE,
             resumable=True,
             mimetype="video/*",
         )
@@ -592,6 +592,8 @@ class YouTubeUploader:
                     backoff *= 2
                     continue
                 raise
+            except ChunkStillRunningError:
+                raise  # a retry would upload beside the chunk still sending
             except TimeoutError:
                 if attempt >= MAX_RETRIES:
                     logger.error("YouTube chunk upload timed out after %d attempts", attempt)
@@ -625,28 +627,9 @@ class YouTubeUploader:
 
     @staticmethod
     def _next_chunk_with_timeout(request: Any) -> tuple:
-        """Call request.next_chunk() with a per-chunk timeout.
-
-        Uses an explicit (not ``with``-managed) pool: the ``with`` form's
-        ``__exit__`` calls ``shutdown(wait=True)``, which on TimeoutError
-        blocks the caller until the orphaned ``next_chunk()`` worker
-        returns — defeating the timeout entirely. On timeout we
-        ``shutdown(wait=False, cancel_futures=True)`` so the caller is
-        freed immediately; the daemon worker (if it had not started) is
-        cancelled, and any in-flight socket is abandoned. The success path
-        shuts the pool down normally so threads are not leaked.
-        """
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(request.next_chunk)
-        try:
-            result = future.result(timeout=CHUNK_TIMEOUT_SEC)
-        except concurrent.futures.TimeoutError:
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise TimeoutError(
-                f"YouTube chunk upload exceeded {CHUNK_TIMEOUT_SEC}s timeout"
-            ) from None
-        pool.shutdown(wait=True)
-        return result
+        """``request.next_chunk()`` bounded by ``CHUNK_TIMEOUT_SEC``; a timed-out
+        chunk is stopped before this returns (see ``_chunk_upload``)."""
+        return next_chunk_with_timeout(request, CHUNK_TIMEOUT_SEC, "YouTube")
 
     def _execute_with_retry(self, request: Any) -> Any:
         """Run ``request.execute()`` with the chunk-path 5xx retry policy.

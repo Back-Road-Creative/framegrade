@@ -207,12 +207,12 @@ class TestPhaseDUploadIdempotency:
         phase._save_state({"dummy": True})  # should not raise
 
 
-# ── chunksize is 256 MB, not -1 ────────────────────────────────
+# ── chunksize is the shared UPLOAD_CHUNKSIZE, not -1 ───────────
 
 
 class TestChunkSize:
-    def test_chunksize_is_256mb(self):
-        """MediaFileUpload should use 256 MB chunks, not -1 (entire file)."""
+    def test_chunksize_is_the_shared_chunk_size(self):
+        """MediaFileUpload uses ``UPLOAD_CHUNKSIZE`` chunks, not -1 (entire file)."""
         from unittest.mock import call
 
         from gomoveshift.pipeline.drive_phases import youtube_uploader as yu
@@ -236,10 +236,7 @@ class TestChunkSize:
                 up.upload_video(fake_path, title="t", description="d", tags=[])
             assert mfu.called
             mfu_kwargs = mfu.call_args
-            assert (
-                mfu_kwargs.kwargs.get("chunksize") == 256 * 1024 * 1024
-                or mfu_kwargs[1].get("chunksize") == 256 * 1024 * 1024
-            )
+            assert mfu_kwargs.kwargs.get("chunksize") == yu.UPLOAD_CHUNKSIZE
 
 
 # ── per-chunk timeout ───────────────────────────────────────────
