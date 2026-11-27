@@ -43,8 +43,26 @@ SHORTS_VIEWS_WINDOW_DAYS = 90
 UPLOADS_WINDOW_DAYS = 90
 
 #: ``creatorContentType`` values whose minutes count as long-form watch time.
+#: Spelled as developers.google.com/youtube/analytics/dimensions lists them
+#: (read 2026-11-27); every comparison goes through
+#: :func:`normalize_content_type`, so ``videoOnDemand`` or ``video_on_demand``
+#: match too.
 LONG_FORM_CONTENT_TYPES = frozenset({"VIDEO_ON_DEMAND", "LIVE_STREAM"})
 SHORTS_CONTENT_TYPE = "SHORTS"
+#: Every value the dimensions page lists. A row outside this set is logged.
+KNOWN_CONTENT_TYPES = LONG_FORM_CONTENT_TYPES | {SHORTS_CONTENT_TYPE, "STORY", "UNSPECIFIED"}
+
+
+def normalize_content_type(value: Any) -> str:
+    """One spelling for a ``creatorContentType`` value: lower case, no
+    underscores, hyphens or spaces (``VIDEO_ON_DEMAND`` and ``videoOnDemand``
+    both become ``videoondemand``)."""
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+_LONG_FORM_KEYS = frozenset(normalize_content_type(v) for v in LONG_FORM_CONTENT_TYPES)
+_SHORTS_KEY = normalize_content_type(SHORTS_CONTENT_TYPE)
+_KNOWN_KEYS = frozenset(normalize_content_type(v) for v in KNOWN_CONTENT_TYPES)
 
 
 @dataclass(frozen=True)
@@ -187,17 +205,41 @@ def count_public_uploads(records: List[Any], today: date) -> Optional[int]:
 
 def counts_from_rows(rows: List[List[Any]]) -> Dict[str, Optional[float]]:
     """``(creatorContentType, views, estimatedMinutesWatched)`` rows to totals.
-    An empty answer is unmeasured (None), never zero."""
+    An empty answer is unmeasured (None), never zero.
+
+    Content types are compared through :func:`normalize_content_type`, so the
+    case and underscores the API sends do not matter. Rows whose content type
+    is none the dimensions page lists are logged; when no row at all is a
+    known type, the answer is logged as an error and reported unmeasured
+    rather than as 0 hours and 0 views."""
     if not rows:
         return {"long_form_minutes": None, "shorts_views": None}
     minutes = 0.0
     shorts = 0
+    unknown: List[str] = []
     for row in rows:
-        kind, views, mins = str(row[0]), row[1], row[2]
-        if kind in LONG_FORM_CONTENT_TYPES and mins is not None:
+        raw, views, mins = row[0], row[1], row[2]
+        kind = normalize_content_type(raw)
+        if kind not in _KNOWN_KEYS:
+            unknown.append(str(raw))
+            continue
+        if kind in _LONG_FORM_KEYS and mins is not None:
             minutes += float(mins)
-        if kind == SHORTS_CONTENT_TYPE and views is not None:
+        if kind == _SHORTS_KEY and views is not None:
             shorts += int(views)
+    if len(unknown) == len(rows):
+        logger.error(
+            "PARTNER_PROGRESS_UNMAPPED rows=%d values=%s: no creatorContentType value "
+            "matched a known type; reporting watch hours and Shorts views as unmeasured",
+            len(rows),
+            sorted(set(unknown)),
+        )
+        return {"long_form_minutes": None, "shorts_views": None}
+    if unknown:
+        logger.warning(
+            "partner-progress: ignored rows with unknown creatorContentType values %s",
+            sorted(set(unknown)),
+        )
     return {"long_form_minutes": minutes, "shorts_views": shorts}
 
 
