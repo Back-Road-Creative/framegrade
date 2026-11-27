@@ -421,7 +421,8 @@ def test_a_retained_id_whose_upload_never_finished_starts_a_fresh_upload(queue_c
     seen = []
     session = Mock(
         post=Mock(side_effect=_fresh_upload_post(seen)),
-        get=Mock(return_value=_resp(200, UNSENT_STATUS_BODY)),
+        # The old id reads back unsent; the fresh upload reads back live.
+        get=Mock(side_effect=[_resp(200, UNSENT_STATUS_BODY), _resp(200, LIVE_STATUS_BODY)]),
     )
     adapter = facebook.FacebookShortsAdapter(facebook.FacebookReelsAdapter(CREDS, session=session))
     result = adapter.publish(record, conn=queue_conn, delivery_id=delivery, video_bytes=b"x")
@@ -430,7 +431,7 @@ def test_a_retained_id_whose_upload_never_finished_starts_a_fresh_upload(queue_c
     assert result.video_id == "v-2"
     assert state["status"] == "published" and state["platform_upload_id"] == "v-2"
     assert state["platform_post_id"] == "v-2"
-    assert session.get.call_count == 1
+    assert session.get.call_count == 2
 
 
 @pytest.mark.parametrize(

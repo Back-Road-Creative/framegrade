@@ -292,7 +292,11 @@ class FacebookReelsAdapter:
         published reel and never ``PUBLISHED`` — keying off that field
         (Graph v21.0) makes this check answer
         "not published" for every real reel, which is the one answer that
-        lets a retry publish a duplicate."""
+        lets a retry publish a duplicate.
+
+        ``processing_failed`` is present (True) only when Graph reports the
+        video itself failed: ``video_status`` or ``processing_phase.status``
+        reads ``error``. Such a reel never goes live."""
         body = self._get(
             f"{self._base}/{video_id}",
             params={"fields": "status,permalink_url", "access_token": self._access_token},
@@ -302,6 +306,8 @@ class FacebookReelsAdapter:
         publishing = publishing if isinstance(publishing, dict) else {}
         uploading = status.get("uploading_phase")
         uploading = uploading if isinstance(uploading, dict) else {}
+        processing = status.get("processing_phase")
+        processing = processing if isinstance(processing, dict) else {}
         phase = publishing.get("publish_status")
         result = {
             "published": str(phase).lower() == "published",
@@ -315,6 +321,8 @@ class FacebookReelsAdapter:
             and publishing.get("status") == "not_started"
         ):
             result["finish_never_ran"] = True
+        if "error" in (status.get("video_status"), processing.get("status")):
+            result["processing_failed"] = True
         return result
 
 
@@ -486,6 +494,26 @@ class FacebookShortsAdapter:
             raise FacebookFinishUnknownError(
                 "Facebook finish unconfirmed; reconcile retained video ID"
             )
+        scheduled = video_state == "SCHEDULED" and scheduled_publish_time is not None
+        # Finish returning success is Facebook taking the request, not the
+        # reel going live: it can still fail processing. Read it back. A
+        # reel not found, failed, or (asked to publish now) not yet
+        # published stays the unknown outcome ``_reconcile`` keeps reading,
+        # never a published receipt. A scheduled reel only has to exist and
+        # not have failed: it publishes at its slot.
+        try:
+            state = self._reels.check_video_status(video_id)
+        except Exception:
+            state = None
+        if (
+            not isinstance(state, dict)
+            or state.get("processing_failed")
+            or not (scheduled or state.get("published") is True)
+        ):
+            raise FacebookFinishUnknownError(
+                "Facebook finish returned but the reel does not read back published; "
+                "reconcile retained video ID"
+            )
         current_status = STATUS_AWAITING_FACEBOOK_RECONCILE
         post_id = video_id  # bare video id — see class docstring
         permalink = reel_permalink(video_id)
@@ -496,7 +524,6 @@ class FacebookShortsAdapter:
         # `finish_upload`, never re-derived, so the receipt and the API
         # request body cannot disagree. `published_at` is untouched: it
         # stays the moment THIS queue handed the delivery over.
-        scheduled = video_state == "SCHEDULED" and scheduled_publish_time is not None
         fields = {
             "platform_post_id": post_id,
             "permalink": permalink,
