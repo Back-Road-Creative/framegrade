@@ -592,6 +592,10 @@ def open_queue_db(storage_path: Union[str, Path]) -> sqlite3.Connection:
         ):
             if recovery_col not in cols:
                 conn.execute(f"ALTER TABLE deliveries ADD COLUMN {recovery_col} {recovery_type}")
+        if "remote_checked_at" not in cols:
+            # When ``youtube_adapter`` last saw this row's video in ``videos.list``;
+            # NULL until it first looks, so an older row is checked first.
+            conn.execute("ALTER TABLE deliveries ADD COLUMN remote_checked_at TEXT")
         if "uncounted_since" not in cols:
             # When the row's current run of retries that never count against
             # ``max_attempts`` began; NULL when it is not in one. Bounds that run
@@ -1517,6 +1521,23 @@ def mark_missing_remote(
             ),
         )
     return True
+
+
+def mark_remote_checked(conn: sqlite3.Connection, delivery_ids: Iterable[int], now: str) -> None:
+    """Stamp ``remote_checked_at`` on rows whose video ``videos.list`` just returned.
+
+    ``updated_at`` is deliberately left alone: for a legacy published row it is the
+    upper bound ``select_due_first_comments`` uses for the publish moment, so a daily
+    check moving it would keep pushing that row's first comment back."""
+    ids = [int(i) for i in delivery_ids]
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    with conn:
+        conn.execute(
+            f"UPDATE deliveries SET remote_checked_at=? WHERE id IN ({marks})",  # noqa: S608
+            (now, *ids),
+        )
 
 
 def find_delivery(
