@@ -304,7 +304,7 @@ def test_a_busy_gpu_lock_keeps_the_request_queued_and_never_runs_it(tmp_path):
     assert st["state"] == "queued" and "GPU lock" in st["waiting"] and st["error"] is None
     assert (tmp_path / "spool" / "pending" / "j1.json").exists()
     assert not (tmp_path / "spool" / "done" / "j1.json").exists()
-    assert "RAN" not in _log(tmp_path)
+    assert not (tmp_path / "spool" / "logs" / "j1.log").exists()  # the child never started
 
 
 def test_a_request_that_waited_for_the_lock_runs_once_it_is_free(tmp_path):
