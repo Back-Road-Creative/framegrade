@@ -1,7 +1,9 @@
-"""The TikTok upload needs its own H.264 rendition — no network, no real ffmpeg."""
+"""The TikTok upload needs its own H.264 rendition — no network; one test runs real ffmpeg when it is installed."""
 
 from __future__ import annotations
 
+import shutil
+import subprocess  # noqa: S404
 from pathlib import Path
 
 import pytest
@@ -173,3 +175,103 @@ def test_instagram_known_bitrate_skips_the_probe(tmp_path):
 
     assert ensure_instagram_rendition(src, bitrate_bps=21_900_000, probe=probe, run=run) == src
     assert calls == []
+
+
+# 2026-11-27: the Day 10 day reel's master is 2160x3840 at 60 fps. Its Instagram rendition kept
+# that frame (still tagged H.264 level 4.1, which cannot hold it; Meta's Reels spec caps width at
+# 1920 px), and both posts failed: the first container sat IN_PROGRESS until it expired, the
+# recovery's upload was refused ``ProcessingFailedError``. Pipeline shorts (1080x1920, 29.97 fps)
+# published. The rendition is capped at 1080x1920 and 30 fps, a master over that frame is never
+# uploaded as is, and a cached rendition over it is rebuilt.
+
+
+def test_instagram_rendition_caps_the_frame_at_1080x1920_and_30_fps(tmp_path):
+    src = _src(tmp_path)
+    run, calls = _recorder()
+    ensure_instagram_rendition(src, probe=lambda p: 58_000_000, frame=lambda p: None, run=run)
+    argv = calls[0]
+    vf = _arg(argv, "-vf")
+    assert "scale=" in vf and "1080" in vf and "1920" in vf, vf
+    assert "force_original_aspect_ratio=decrease" in vf, vf
+    assert vf.endswith("setsar=1"), vf
+    assert _arg(argv, "-fpsmax") == "30"
+
+
+def test_an_under_cap_master_over_the_frame_is_still_transcoded(tmp_path):
+    src = _src(tmp_path)
+    run, calls = _recorder()
+    out = ensure_instagram_rendition(
+        src, bitrate_bps=21_900_000, frame=lambda p: (2160, 3840, 60.0), run=run
+    )
+    assert out == instagram_rendition_path(src) and len(calls) == 1
+
+
+def test_an_under_cap_master_inside_the_frame_is_returned_untouched(tmp_path):
+    src = _src(tmp_path)
+    run, calls = _recorder()
+    out = ensure_instagram_rendition(
+        src, bitrate_bps=21_900_000, frame=lambda p: (1080, 1920, 30000 / 1001), run=run
+    )
+    assert out == src and calls == []
+
+
+def test_a_fresh_rendition_over_the_frame_is_rebuilt(tmp_path):
+    import os
+
+    src = _src(tmp_path)
+    target = instagram_rendition_path(src)
+    target.write_bytes(b"4k60 rendition from before the cap")
+    os.utime(src, (1000, 1000))
+    os.utime(target, (2000, 2000))
+    frames = {src: (2160, 3840, 60.0), target: (2160, 3840, 60.0)}
+    run, calls = _recorder()
+    out = ensure_instagram_rendition(src, probe=lambda p: 58_000_000, frame=frames.get, run=run)
+    assert out == target and len(calls) == 1
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"), reason="no ffmpeg")
+def test_a_real_4k60_master_comes_out_1080x1920_at_30_fps(tmp_path):
+    src = tmp_path / "short_01.mp4"
+    subprocess.run(  # noqa: S603
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=2160x3840:rate=60:duration=0.5",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-c:a",
+            "aac",
+            str(src),
+        ],  # fmt: skip
+        check=True,
+    )
+    out = ensure_instagram_rendition(src, bitrate_bps=58_000_000)
+    probe = subprocess.run(  # noqa: S603
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate",
+            "-of",
+            "csv=p=0",
+            str(out),
+        ],  # fmt: skip
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert probe == "1080,1920,30/1", probe
