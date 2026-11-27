@@ -11,6 +11,7 @@ decode, and the "status >= 400 OR an ``error`` object in a 200 body" gate.
 
 from __future__ import annotations
 
+import io
 from typing import Any, Callable, Dict, Optional
 
 from gomoveshift.publishing.meta_auth import DEFAULT_GRAPH_VERSION
@@ -22,8 +23,11 @@ GraphErrorHook = Callable[[int, dict], None]
 #: ``(connect, read)`` seconds for every Graph request that names none.
 #: requests waits forever by default: on 2026-11-11 one Graph read hung
 #: ``dispatch-queue --apply`` 21 h on a dead connection, holding the dispatch
-#: lock. The read bound covers a reel's byte upload, which sends in chunks
-#: that each have to make progress within it.
+#: lock. While a body is SENT, urllib3 applies the connect bound, not the
+#: read one, and a ``bytes`` body goes out in one ``sendall`` whose deadline
+#: covers all of it: a reel had to finish uploading within 10 s or fail with
+#: "The write operation timed out". ``graph_post`` therefore sends a bytes
+#: body as a file, in 16 KB blocks that each get the full bound.
 GRAPH_TIMEOUT = (10, 120)
 
 
@@ -51,8 +55,13 @@ def _graph_json(response: Any, raise_for_error: GraphErrorHook) -> Dict[str, Any
 def graph_post(session: Any, url: str, raise_for_error: GraphErrorHook, **kwargs) -> Dict[str, Any]:
     """POST through ``session`` and return the decoded body, or let
     ``raise_for_error`` raise the platform error. ``GRAPH_TIMEOUT`` applies
-    unless the caller passes its own ``timeout``."""
+    unless the caller passes its own ``timeout``. A bytes body (a byte
+    upload) is streamed in blocks; see ``GRAPH_TIMEOUT``."""
     kwargs.setdefault("timeout", GRAPH_TIMEOUT)
+    if isinstance(kwargs.get("data"), (bytes, bytearray, memoryview)):
+        # requests still sends Content-Length (no chunked encoding): rupload
+        # reads the length, and the file_size header must match it.
+        kwargs["data"] = io.BytesIO(kwargs["data"])
     return _graph_json(session.post(url, **kwargs), raise_for_error)
 
 

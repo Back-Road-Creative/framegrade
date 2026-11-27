@@ -1,12 +1,19 @@
 """Tests for ``publishing/meta_graph.py``, the one Graph request helper the
 Facebook, Instagram and photo clients share.
 
-No network call ever happens here: every test injects a fake session.
+No network call ever happens here: every test injects a fake session, or
+talks to a loopback server it starts itself.
 """
 
 from __future__ import annotations
 
+import io
+import socket
+import threading
+import time
+
 import pytest
+import requests
 
 from gomoveshift.publishing import meta_graph
 from gomoveshift.publishing.facebook_adapter import (
@@ -173,3 +180,79 @@ def test_each_client_request_carries_a_timeout(make, verb):
     session = _Session(_Response(200, {"id": "9"}))
     getattr(make(session), verb)("https://x/y")
     assert session.calls[0][2]["timeout"] == meta_graph.GRAPH_TIMEOUT
+
+
+# --- a byte upload's write is bounded per block, not as a whole ---------------
+
+
+def _slow_reader_server(read_block: int, pause_s: float):
+    """Loopback HTTP server that reads the request body slowly but steadily,
+    like an uplink that keeps making progress, then answers ``{"ok": true}``.
+    Returns ``(url, thread)``."""
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, read_block)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(10)
+
+    def serve():
+        with srv:
+            conn, _ = srv.accept()
+            with conn:
+                conn.settimeout(10)
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    head += conn.recv(read_block)
+                header, _, body = head.partition(b"\r\n\r\n")
+                length = next(
+                    int(line.split(b":")[1])
+                    for line in header.split(b"\r\n")
+                    if line.lower().startswith(b"content-length:")
+                )
+                got = len(body)
+                while got < length:
+                    chunk = conn.recv(read_block)
+                    if not chunk:
+                        return
+                    got += len(chunk)
+                    time.sleep(pause_s)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 12\r\n\r\n" + b'{"ok": true}'
+                )
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return f"http://127.0.0.1:{srv.getsockname()[1]}/upload", thread
+
+
+def test_a_byte_upload_that_keeps_progressing_is_not_cut_off_by_its_bound():
+    # 22 and 27 Nov 2026: reel uploads failed with "The write operation timed
+    # out". urllib3 sends a body under the CONNECT bound, and a bytes body
+    # went out in one sendall whose deadline covered all of it, so a steady
+    # upload that took longer than that bound was cut off. Here the body
+    # takes well over a second to drain at ~6 MB/s against a 0.3 s bound.
+    url, thread = _slow_reader_server(read_block=64 * 1024, pause_s=0.01)
+    session = requests.Session()
+    session.trust_env = False  # never through a proxy
+    body = meta_graph.graph_post(
+        session,
+        url,
+        _hook,
+        data=b"x" * (8 * 1024 * 1024),
+        headers={"offset": "0"},
+        timeout=(0.3, 10),
+    )
+    thread.join(10)
+    assert body == {"ok": True}
+
+
+def test_a_byte_upload_still_sends_its_exact_length():
+    # rupload reads Content-Length and checks it against ``file_size``: the
+    # streamed body must not switch to chunked encoding.
+    session = _Session(_Response(200, {"ok": True}))
+    meta_graph.graph_post(session, "https://rupload.facebook.com/x", _hook, data=b"abc")
+    sent = session.calls[0][2]["data"]
+    assert sent.read() == b"abc"
+    headers = requests.Request("POST", "https://x/", data=io.BytesIO(b"abc")).prepare().headers
+    assert headers["Content-Length"] == "3" and "Transfer-Encoding" not in headers
