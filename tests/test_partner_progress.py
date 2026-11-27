@@ -97,6 +97,41 @@ def test_counts_from_rows_splits_long_form_and_shorts():
     assert pp.counts_from_rows([]) == {"long_form_minutes": None, "shorts_views": None}
 
 
+def test_counts_from_rows_matches_content_types_in_any_case():
+    # The dimensions page spells VIDEO_ON_DEMAND; a live answer reported as
+    # videoOnDemand / shorts must count the same, not as 0 hours.
+    rows = [
+        ["videoOnDemand", 900, 6_000.0],
+        ["shorts", 12_000, 300.0],
+        ["liveStream", 10, 60.0],
+        ["story", 5, 1.0],
+    ]
+    assert pp.counts_from_rows(rows) == {"long_form_minutes": 6_060.0, "shorts_views": 12_000}
+    assert pp.counts_from_rows([["video_on_demand", 1, 60.0]])["long_form_minutes"] == 60.0
+
+
+def test_counts_from_rows_with_no_known_type_is_unmeasured_and_logged(caplog):
+    rows = [["PODCAST_EPISODE", 50, 600.0], ["SOMETHING_NEW", 7, 10.0]]
+    with caplog.at_level("ERROR", logger=pp.__name__):
+        assert pp.counts_from_rows(rows) == {"long_form_minutes": None, "shorts_views": None}
+    assert "PARTNER_PROGRESS_UNMAPPED rows=2" in caplog.text
+    assert "PODCAST_EPISODE" in caplog.text
+
+
+def test_counts_from_rows_ignores_and_warns_on_one_unknown_type(caplog):
+    rows = [["VIDEO_ON_DEMAND", 1, 120.0], ["NEW_KIND", 9, 999.0]]
+    with caplog.at_level("WARNING", logger=pp.__name__):
+        assert pp.counts_from_rows(rows) == {"long_form_minutes": 120.0, "shorts_views": 0}
+    assert "NEW_KIND" in caplog.text
+
+
+def test_counts_from_rows_known_types_without_long_form_are_a_real_zero():
+    assert pp.counts_from_rows([["STORY", 3, 2.0], ["UNSPECIFIED", 1, 1.0]]) == {
+        "long_form_minutes": 0.0,
+        "shorts_views": 0,
+    }
+
+
 def _short(yt_id, posted):
     return SimpleNamespace(platform_ids={"youtube": yt_id} if yt_id else {}, posted_at=posted)
 

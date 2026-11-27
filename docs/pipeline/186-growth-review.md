@@ -19,8 +19,10 @@ gives the days left. The numbers are YouTube's published ones (sources in the mo
 docstring), not tuned here. Subscribers come from `channels.list(mine=True)`; the two
 windows from one Analytics `reports.query` each, by `creatorContentType`
 (`VIDEO_ON_DEMAND` and `LIVE_STREAM` minutes are long-form watch time, `SHORTS` views
-are Shorts views), through `YouTubeCollector`'s own clients; uploads from the tracking
-store. Every count is approximate (the API counts private and unlisted minutes and
+are Shorts views; values are matched ignoring case and underscores, so `videoOnDemand`
+counts too, and an answer with rows but no known type logs `PARTNER_PROGRESS_UNMAPPED`
+and is `unmeasured`, not 0), through `YouTubeCollector`'s own clients; uploads from the
+tracking store. Every count is approximate (the API counts private and unlisted minutes and
 cannot leave out ad-campaign views) and every line says `approximate=yes`; Studio's Earn
 tab is the authoritative number. A count that could not be read is `unmeasured`, and
 the verdict is `met=unknown` unless a measured count already falls short. `--offline`
