@@ -5,6 +5,17 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.170] - 2026-11-26
+
+### Fixed
+
+- The anti-spam shared-prefix check no longer refuses a Short for sharing its opening with its own stored copy: a Short is now told apart by project and Short number, not by its place in the list, and a refusal names the other Short. Two different Shorts with the same opening are still refused.
+- The nightly title sync no longer feeds a sidecar's other Shorts (ones queued under another spelling of the same file path) into the gates when that sidecar cannot be planned or written, so a Short is never checked against its own old text.
+- A delivery whose retries never counted against the 8-try limit (an unknown Facebook outcome, an Instagram container still processing, unreadable media, a platform throttle) no longer retries silently for good: after 24 h it parks at `needs_operator` with its upload ids kept and raises a `delivery_needs_operator` incident.
+- An upload that starts over (an expired Instagram container, a Facebook reel whose finish never ran) now gets a fresh attempt count, and an Instagram container still processing is polled again instead of spending the row's ordinary tries (delivery #391 failed for good this way).
+- `health check` now raises one `social_queue_gap` incident per platform naming the first day within the next 42 days with nothing scheduled in the social queue, so a thin stretch weeks ahead alarms while there is still time to render and enqueue Shorts for it, instead of days before.
+- Every replay of a drive's saved `resume.json` (`health heal`, a confirmed `health backlog` resume, `health publish`, `drive --from-recipe`) now re-resolves its input files first: a gone `--day-gpx` / `--bracket-gpx` takes the `drive_backlog.yaml` row's file and is written back into the recipe, and a gone input with no replacement (GPX, source directory, `--map-inset-bundle`, `--trail-profile`) is refused with the file named instead of launching a drive that dies in pre-flight. Before, `health publish` and `drive --from-recipe` replayed a renamed GPX as written.
+
 ## [0.3.169] - 2026-11-26
 
 ### Fixed
@@ -1929,7 +1940,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.170...HEAD
+[0.3.170]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.169...v0.3.170
 [0.3.169]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.168...v0.3.169
 [0.3.168]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.167...v0.3.168
 [0.3.167]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.166...v0.3.167
