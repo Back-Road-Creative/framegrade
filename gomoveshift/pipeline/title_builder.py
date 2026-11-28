@@ -1893,7 +1893,9 @@ def _cross_drive_dated(title, lf_dates, lf_idx, drive_project, video_id, video_p
     """``title`` + `` (Mon D, YYYY)`` when the live video is a different drive's, else None."""
     import datetime as _dt
 
-    raw = str((lf_dates or {}).get(lf_idx) or "").strip()
+    # a resumed run reloads ``per_lf_recording_date`` from pipeline_state.json with string keys
+    dates = lf_dates or {}
+    raw = str(dates.get(lf_idx) or dates.get(str(lf_idx)) or "").strip()
     if not (drive_project and video_id and raw):
         return None
     try:

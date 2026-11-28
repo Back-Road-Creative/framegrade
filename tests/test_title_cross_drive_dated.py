@@ -52,3 +52,13 @@ def test_dated_title_that_also_collides_raises():
     dated = "county cork, ireland (sep 19, 2025) in 4k"
     with pytest.raises(PhaseBCExitContractError):
         _run(published_titles={_LIVE, dated})
+
+
+# 2026-11-27: Kerry-to-Cork's resumed Phase D refused "Ireland" as a duplicate of Early
+# Clonakilty's live video every hour. A resume reloads ``per_lf_recording_date`` from
+# pipeline_state.json, whose keys are strings ({"1": "2025-09-16"}), and the date lookup by the
+# LF's int index found nothing. A fresh run (int keys) got the dated title.
+
+
+def test_a_resumed_runs_string_keyed_lf_dates_still_give_the_dated_title():
+    assert _run(lf_dates={"1": "2025-09-19"}) == {1: "County Cork, Ireland (Sep 19, 2025)"}
