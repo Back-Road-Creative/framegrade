@@ -233,6 +233,7 @@ def _render_private_video(source: Path, output: Path, mask: Path) -> dict:
         vehicle_conf=drive.blur_vehicle_conf,
         vehicle_min_height_frac=drive.blur_vehicle_min_height_frac,
         vehicle_ignore_bottom_frac=drive.blur_vehicle_ignore_bottom_frac,
+        plate_vehicle_conf=drive.blur_plate_vehicle_conf,
         track_person=person_on and person_model is not None,
         person_model_path=person_model,
         person_conf=getattr(drive, "blur_person_conf", 0.35),
