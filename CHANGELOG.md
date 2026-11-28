@@ -5,6 +5,23 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.184] - 2026-11-27
+
+### Added
+
+- Every day reel shows `gomoveshift.com` small at the bottom right for the whole reel, clear of the Instagram and YouTube button column. It is burned in by the day reel renderer, so the Drive requests and any direct enqueue both get it. The Day 12 reels went out without it.
+- Every day reel gets its journal day link as the first comment on YouTube and Facebook. The route writes it on the sidecar record (`first_comment_by_platform`), and the queue's existing comment step posts it. Instagram gets no comment, because links there are not clickable. Before, a day reel had no full drive to link, so it got no first comment at all.
+
+### Fixed
+
+- The privacy blur no longer blurs signs, logos and lettering that the plate
+  model boxes at plate shape and size (a SPAR logo on a fuel sign, a yield sign).
+  A plate now blurs only once its center sits inside a vehicle box, from the
+  vehicle model at `blur_plate_vehicle_conf` (0.6) or a tracked vehicle. Set it
+  to 0 to blur every plate box as before. redactcam is pinned to the commit
+  that adds `plate_vehicle_conf`. Renders and cached masks made before this keep
+  the old blur until they are re-rendered.
+
 ## [0.3.183] - 2026-11-27
 
 ### Fixed
@@ -2052,7 +2069,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.183...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.184...HEAD
+[0.3.184]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.183...v0.3.184
 [0.3.183]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.182...v0.3.183
 [0.3.182]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.181...v0.3.182
 [0.3.181]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.180...v0.3.181
