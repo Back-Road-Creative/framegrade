@@ -5,6 +5,12 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.186] - 2026-11-27
+
+### Fixed
+
+- `--fresh` no longer deletes the prior run's plan, checkpoint and OST confirmations before pre-flight has accepted the run. A run that pre-flight refuses (for example for staging disk space) now leaves them in place; a run that passes still clears them before any phase reads them.
+
 ## [0.3.185] - 2026-11-27
 
 ### Fixed
@@ -2080,7 +2086,8 @@ All notable changes to this project are recorded here. The format follows
   `../install.md`. `tests/test_docs_relative_links.py` fails any relative
   Markdown link in the repo root or `docs/` that does not resolve.
 
-[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.185...HEAD
+[Unreleased]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.186...HEAD
+[0.3.186]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.185...v0.3.186
 [0.3.185]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.184...v0.3.185
 [0.3.184]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.183...v0.3.184
 [0.3.183]: https://github.com/Back-Road-Creative/framegrade/compare/v0.3.182...v0.3.183
