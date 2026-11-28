@@ -28,7 +28,6 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +35,7 @@ from typing import Dict, List, Optional
 
 from gomoveshift.paths import gms_secret_path
 from gomoveshift.pipeline._atomic_write import atomic_write_json
+from gomoveshift.pipeline._chunk_upload import UPLOAD_CHUNKSIZE, next_chunk_with_timeout
 from gomoveshift.pipeline._file_lock import lock_exclusive, unlock
 from gomoveshift.pipeline._yt_creds import _sanitize_sops_stderr, sops_age_recipients
 
@@ -1117,30 +1117,10 @@ class PipelineUploader:
 
     @staticmethod
     def _next_chunk_with_timeout(request, timeout=600):
-        """Call request.next_chunk() with a per-chunk timeout.
-
-        Prevents indefinite hangs on stalled Google Drive API connections.
-        Uses a thread pool to enforce the timeout since httplib2 does not
-        support per-request timeouts natively.
-
-        Uses an explicit (not ``with``-managed) pool: the ``with`` form's
-        ``__exit__`` calls ``shutdown(wait=True)``, which on a timeout blocks
-        the caller until the orphaned ``next_chunk()`` worker returns — and on
-        the documented Drive SSL-stall class it never does, so the timeout
-        could never propagate. On timeout we ``shutdown(wait=False,
-        cancel_futures=True)`` so the caller is freed immediately and the
-        in-flight socket is abandoned; the success path shuts down normally so
-        threads are not leaked.
-        """
-        pool = ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(request.next_chunk)
-        try:
-            result = future.result(timeout=timeout)
-        except FuturesTimeoutError:
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise TimeoutError(f"Drive chunk upload exceeded {timeout}s timeout") from None
-        pool.shutdown(wait=True)
-        return result
+        """``request.next_chunk()`` with a per-chunk timeout: httplib2 has no
+        per-request one. A timed-out chunk is stopped before this returns
+        (see ``_chunk_upload``)."""
+        return next_chunk_with_timeout(request, timeout, "Drive")
 
     def _find_existing_drive_file(
         self, drive, name: str, folder_id: str
@@ -1229,7 +1209,7 @@ class PipelineUploader:
                 str(file_path),
                 mimetype=mimetype,
                 resumable=True,
-                chunksize=256 * 1024 * 1024,
+                chunksize=UPLOAD_CHUNKSIZE,
             )
 
             if existing is not None:
