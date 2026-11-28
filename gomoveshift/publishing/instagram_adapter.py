@@ -555,11 +555,13 @@ class InstagramShortsAdapter:
     ) -> str:
         """Lease, create a container, persist it, upload; returns its id.
         A failed upload starts over on a fresh container, ``UPLOAD_ATTEMPTS``
-        tries in all; the last failure is raised. A container that never got
-        its bytes cannot publish, so starting over never risks a duplicate.
-        The in-spec file is made, and gated, before the first container; every
-        try uploads those same bytes."""
+        tries in all; the last failure is raised naming the earlier ones, which
+        the row's error_detail otherwise never saw (delivery 373, 2026-11-27).
+        A container that never got its bytes cannot publish, so starting over
+        never risks a duplicate. The in-spec file is made, and gated, before
+        the first container; every try uploads those same bytes."""
         video_bytes = self._in_spec_bytes(delivery_id, video_bytes)
+        earlier: list[str] = []
         for attempt in range(1, UPLOAD_ATTEMPTS + 1):
             self._take_lease(conn, delivery_id)
             transition(conn, delivery_id, from_status, STATUS_SUBMITTING)
@@ -577,9 +579,13 @@ class InstagramShortsAdapter:
             from_status = STATUS_UPLOADED
             try:
                 self._reels.upload_video(handle.upload_url, video_bytes)
-            except InstagramUploadError:
+            except InstagramUploadError as exc:
                 if attempt == UPLOAD_ATTEMPTS:
-                    raise
+                    tries = "; ".join(f"{i}) {e}" for i, e in enumerate(earlier, 1))
+                    raise InstagramUploadError(
+                        f"{exc} [try {attempt} of {attempt}; earlier tries: {tries or 'none'}]"
+                    ) from exc
+                earlier.append(str(exc)[:_RUPLOAD_MESSAGE_MAX])
                 self._sleep(UPLOAD_RETRY_BACKOFF_S * attempt)
                 continue
             return handle.container_id

@@ -903,6 +903,26 @@ def test_an_upload_failing_every_attempt_is_permanent_and_bounded(queue_conn):
     assert row()["platform_upload_id"] == f"c-{UPLOAD_ATTEMPTS}"
 
 
+def test_the_last_upload_failure_names_every_earlier_try(queue_conn):
+    # Delivery 373 (2026-11-27) kept only its last try's error, so whether
+    # all three fresh containers failed the same way could not be told.
+    class _EachTryDiffers(_FlakyUploadReels):
+        def upload_video(self, upload_url, video_bytes):
+            self.uploads.append(upload_url)
+            raise InstagramUploadError(
+                f"[rupload transport=ConnectionError] try-{len(self.uploads)}"
+            )
+
+    reels = _EachTryDiffers(99, "FINISHED")
+    publish, _, _ = _run(queue_conn, reels)
+    with pytest.raises(InstagramUploadError) as exc_info:
+        publish()
+    message = str(exc_info.value)
+    assert message.startswith(f"[rupload transport=ConnectionError] try-{UPLOAD_ATTEMPTS}")
+    for n in range(1, UPLOAD_ATTEMPTS):
+        assert f"{n}) [rupload transport=ConnectionError] try-{n}" in message
+
+
 def test_a_failure_other_than_the_byte_upload_is_not_retried(queue_conn):
     class _CreateRefused(_FlakyUploadReels):
         def create_container(self, payload):
