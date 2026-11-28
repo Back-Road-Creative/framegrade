@@ -50,6 +50,13 @@ def inspect(root, base, head):
         git(root, "cat-file", "-e", f"{commit}^{{commit}}")
     if git(root, "rev-parse", "HEAD").decode().strip() != head:
         raise ValueError("candidate checkout HEAD does not equal the requested head SHA")
+    # Diff from where the candidate left the base, not from the base's tip: a
+    # candidate merely behind a base that has since changed enforcement read as
+    # changing it itself, and waited on a maintenance approval it did not need.
+    # No common ancestor fails closed (git merge-base exits non-zero).
+    fork = git(root, "merge-base", base, head).decode().strip()
+    if not SHA.fullmatch(fork):
+        raise ValueError("no single merge base between base and head")
     changed = git(
         root,
         "diff",
@@ -58,7 +65,7 @@ def inspect(root, base, head):
         "--no-renames",
         "--name-only",
         "-z",
-        base,
+        fork,
         head,
         "--",
     ).split(b"\0")

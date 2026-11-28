@@ -99,6 +99,34 @@ class CleanlinessCITests(unittest.TestCase):
                 result = self.inspect(base=previous)
                 self.assertEqual(json.loads(result.stdout)["maintenance_changed"], "true")
 
+    def test_a_candidate_behind_an_enforcement_change_needs_no_approval(self):
+        fork = self.base
+        self.git("checkout", "--quiet", "-b", "base-moves")
+        self.write("tools/public-tree-policy.json", '{"moved": true}\n')
+        self.commit()
+        moved_base = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "--quiet", "-b", "candidate", fork)
+        self.write("src/app.py", "changed product source\n")
+        self.commit()
+        result = self.inspect(base=moved_base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["maintenance_changed"], "false")
+        self.git("merge", "--quiet", "--no-edit", "base-moves")
+        result = self.inspect(base=moved_base)
+        self.assertEqual(json.loads(result.stdout)["maintenance_changed"], "false")
+
+    def test_a_candidate_behind_the_base_that_changes_enforcement_is_still_protected(self):
+        fork = self.base
+        self.git("checkout", "--quiet", "-b", "base-moves")
+        self.write("src/other.py", "product moved on\n")
+        self.commit()
+        moved_base = self.git("rev-parse", "HEAD").strip()
+        self.git("checkout", "--quiet", "-b", "candidate", fork)
+        self.write("ci/new-helper.sh", "echo\n")
+        self.commit()
+        result = self.inspect(base=moved_base)
+        self.assertEqual(json.loads(result.stdout)["maintenance_changed"], "true")
+
     def test_renaming_enforcement_to_unprotected_path_is_detected(self):
         self.git("mv", "tools/check_public_tree.py", "src/old_guard.py")
         self.commit()
