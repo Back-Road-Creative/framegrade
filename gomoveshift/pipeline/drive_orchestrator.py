@@ -1367,6 +1367,10 @@ class DrivePipelineOrchestrator:
             self._phases["phase_bc_day_first"]._save_callback = lambda s: self._save_state(
                 state_file, s
             )
+            # ``--fresh`` clears the prior checkpoint only AFTER pre-flight passes
+            # (below): a run pre-flight refuses renders nothing and must not
+            # cost the operator the prior plan + state.
+            self._defer_fresh_purge = True
             resumed_phases = self._try_resume(
                 state, state_file, stages_dir, stages_completed, fresh
             )
@@ -1534,9 +1538,12 @@ class DrivePipelineOrchestrator:
                 resume_invariants(state, self.config)
             # On first run, persist run_start so resumed runs use the original
             # timestamp for freshness checks (metricool/youtube mtime >= run_start).
+            # A fresh run defers this save: it would overwrite the prior
+            # pipeline_state.json before pre-flight has accepted the run.
             if not getattr(state, "run_start", None):
                 state.run_start = self._run_start_iso
-                self._save_state(state_file, state)
+                if not fresh:
+                    self._save_state(state_file, state)
             # Load the durable youtube_uploads sidecar and merge any records the
             # pipeline state doesn't already know about. The sidecar
             # survives state resets and fresh=True, preventing phantom duplicate
@@ -1595,6 +1602,11 @@ class DrivePipelineOrchestrator:
             )
             if early is not None:
                 return early
+            if fresh:
+                # Pre-flight accepted the run: now clear the prior run's plan,
+                # checkpoint and confirmations, before any phase reads them.
+                self._purge_stale_stage_artifacts(state, stages_dir)
+                self._save_state(state_file, state)
             phase_defs = self._select_phase_manifest(state_file)
             if phase:
                 prereqs = self._get_prereqs()
@@ -1817,7 +1829,9 @@ class DrivePipelineOrchestrator:
     def _try_resume(self, state, state_file, stages_dir, stages_completed, fresh):
         resumed_phases = []
         if fresh:
-            self._purge_stale_stage_artifacts(state, stages_dir)
+            # ``run()`` sets ``_defer_fresh_purge`` and purges after pre-flight.
+            if not getattr(self, "_defer_fresh_purge", False):
+                self._purge_stale_stage_artifacts(state, stages_dir)
             return resumed_phases
         saved = self._load_state(state_file)
         if not saved or "phases_completed" not in saved:
