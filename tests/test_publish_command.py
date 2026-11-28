@@ -501,3 +501,78 @@ def test_publish_launches_on_an_equal_or_unknown_version(tmp_path, installed):
     rig = Rig(tmp_path)
     rig.audit()
     assert _publish(rig, installed)["action"] == "launched"
+
+
+# Old Head to Courtmacsherry, 2026-11-27: 0.3.185 moved phase_bc_day_first's code version, so
+# every hourly publish refused its passed audit as stale and told an operator to run
+# ``health heal`` -- which only re-audits a drive that has a ``drive_failed`` row, and Old Head
+# had none. The refusal now files that row itself, so the next heal re-audits the drive.
+def _stale(rig):
+    from gomoveshift.pipeline.orchestrator_fingerprint import PHASE_CODE_VERSIONS
+
+    rig.audit()
+    stale = {"phase_a": PHASE_CODE_VERSIONS["phase_a"], "phase_bc_day_first": PHASE_CODE_VERSIONS["phase_bc_day_first"] - 1}  # fmt: skip
+    state = rig.stages / "day-a" / "day-a" / "_stages" / "pipeline_state.json"
+    state.write_text(json.dumps({"phases_completed": ["phase_a", "phase_bc_day_first"], "phase_code_versions": stale}))  # fmt: skip
+    return state.parent / "resume.json"
+
+
+def _run_with_incidents(rig, incidents, *, dry_run=False):
+    return publish.run_publish(
+        project="day-a", region="usa", store=rig.store, cadence=CAD, stages_root=rig.stages,
+        code_root=rig.tmp, jobs_dir=rig.jobs, now=NOW, dry_run=dry_run,
+        conflict_fn=lambda jobs, recipe_path, recipe: None, launcher=rig.launcher,
+        manifest_row_fn=lambda row: None, incidents_dir=incidents,
+    )  # fmt: skip
+
+
+def _rows(incidents):
+    return [json.loads(p.read_text()) for p in sorted(incidents.glob("*.json"))]
+
+
+def test_a_stale_checkpoint_refusal_files_the_row_health_heal_re_audits(tmp_path):
+    rig = Rig(tmp_path)
+    recipe = _stale(rig)
+    incidents = tmp_path / "incidents"
+    incidents.mkdir()
+    before = rig.snapshot()
+    res = _run_with_incidents(rig, incidents)
+    assert res["action"] == "refused" and "re-audit" in res["reason"], res
+    assert res["heal_registered"] == "drive_failed:day-a:recipe"
+    assert "drive_failed:day-a:recipe" in res["reason"]
+    rows = _rows(incidents)
+    assert [(r["kind"], r["key"], r["drive"]) for r in rows] == [("drive_failed", "drive_failed:day-a:recipe", "day-a")]  # fmt: skip
+    assert Path(rows[0]["resume_recipe"]) == recipe.resolve()
+    assert "stale" in rows[0]["error"] and not rows[0].get("resolved_at")
+    assert rig.snapshot() == before and not rig.launches  # still refused before any store write
+
+
+def test_a_second_stale_refusal_keeps_the_one_row_and_its_history(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    incidents = tmp_path / "incidents"
+    incidents.mkdir()
+    _run_with_incidents(rig, incidents)
+    row = _rows(incidents)[0]
+    row["resume_attempts"] = [{"action": "launched"}]
+    (incidents / next(p.name for p in incidents.glob("*.json"))).write_text(json.dumps(row))
+    _run_with_incidents(rig, incidents)
+    rows = _rows(incidents)
+    assert len(rows) == 1 and rows[0]["resume_attempts"] == [{"action": "launched"}]
+
+
+def test_a_dry_run_stale_refusal_files_nothing(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    incidents = tmp_path / "incidents"
+    incidents.mkdir()
+    res = _run_with_incidents(rig, incidents, dry_run=True)
+    assert res["action"] == "refused" and "heal_registered" not in res
+    assert _rows(incidents) == []
+
+
+def test_a_caller_with_no_incidents_dir_still_only_refuses(tmp_path):
+    rig = Rig(tmp_path)
+    _stale(rig)
+    res = rig.run()
+    assert res["action"] == "refused" and "heal_registered" not in res

@@ -43,6 +43,7 @@ from .heal import (
     install_pending,
     job_runner,
     refresh_recipe,
+    register_recipe,
     stale_phases,
 )
 from .launch import (
@@ -53,6 +54,7 @@ from .launch import (
     read_replace_plan,
     upload_receipts,
 )
+from .store import utc_iso
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -158,8 +160,17 @@ def run_publish(
         return _refuse(res, pending)  # before any store write: the drive stays as it was
     stale = stale_phases(recipe_path)
     if stale:
-        return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
-                       "re-run); re-audit it (health heal) before publishing")  # fmt: skip
+        why = (f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
+               "re-run); re-audit it (health heal) before publishing")  # fmt: skip
+        if incidents_dir is not None and not dry_run:
+            # heal re-audits only a drive with a drive_failed row, and a passed audit has none:
+            # file it here, or the tick refuses this drive every hour and nothing re-audits it.
+            key = register_recipe(Path(incidents_dir), recipe_path, now_iso=utc_iso(now.timestamp()),
+                                  error=f"health publish refused: {why}")  # fmt: skip
+            if key:
+                res["heal_registered"] = key
+                why += f"; filed {key} so the next health heal re-audits it"
+        return _refuse(res, why)
     # The caller's incidents dir: the gate's own default is its module's checkout (the staging
     # mirror), where ``health backlog`` never looks for the row it re-renders on (#662).
     masks = mask_frame_refusal(

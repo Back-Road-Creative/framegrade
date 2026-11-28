@@ -1398,3 +1398,17 @@ def test_heal_refuses_through_the_shared_install_pending_helper(tmp_path):
     assert heal.install_pending("0.3.167", "0.3.167") is None
     assert heal.install_pending(None, "0.3.167") is None
     assert heal.install_pending("0.3.163", None) is None
+
+
+def test_the_row_a_stale_publish_refusal_files_is_re_audited_by_the_hourly_heal(tmp_path):
+    # Old Head to Courtmacsherry, 2026-11-27: ``health publish`` files this row when it refuses a
+    # passed audit as stale. The hourly heal (no ``--recipe``) must launch it, not refuse it as
+    # publish-only or deterministic from the refusal's own text.
+    rig = Rig(tmp_path)
+    why = ("health publish refused: demo-drive-b's checkpoint is stale under the current code "
+           "(phase_bc_day_first, phase_d re-run); re-audit it (health heal) before publishing")  # fmt: skip
+    key = heal.register_recipe(rig.inc, _second_recipe(tmp_path), now_iso="t", error=why)
+    row = next(r for r in load_all(rig.inc)[0] if r["key"] == key)
+    assert row["error"] == why
+    out = rig.run()
+    assert key in out["launched"], out
