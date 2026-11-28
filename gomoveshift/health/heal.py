@@ -224,10 +224,13 @@ def refresh_recipe(
     return argv, refreshed, why
 
 
-def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> Optional[str]:
+def register_recipe(
+    incidents_dir: Path, recipe_path: Path, *, now_iso: str,
+    error: str = "registered by health heal --recipe",
+) -> Optional[str]:  # fmt: skip
     """Register one drive's ``resume.json`` as a ``drive_failed`` row so ``run_heal`` can target
     it (``only_key``) -- for a drive no ``health check`` saw fail, e.g. an evidence run launched
-    outside the job runner. Re-registering keeps the row and its attempt history, and reopens a
+    outside the job runner, or a passed audit ``health publish`` refuses as stale. Re-registering keeps the row and its attempt history, and reopens a
     resolved row (``reopened_at``): an operator's ``--recipe`` is never a silent no-op. ``None``
     when the recipe is unreadable."""
     recipe_path = Path(recipe_path).resolve()
@@ -248,7 +251,7 @@ def register_recipe(incidents_dir: Path, recipe_path: Path, *, now_iso: str) -> 
         new_incident(
             "drive_failed", key, f"{safe_name(drive)}-recipe.json", now_iso,
             drive=drive, phase=recipe.get("phase_reached"), gate=None,
-            error="registered by health heal --recipe", log_path=None, job_name=None,
+            error=error, log_path=None, job_name=None,
             job_run_id=None, failed_at=None, staging_sha=recipe.get("sha"),
             resume_recipe=str(recipe_path), resume_attempts=[],
         ),

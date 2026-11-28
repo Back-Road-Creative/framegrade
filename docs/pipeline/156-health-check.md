@@ -285,7 +285,12 @@ because B-D never ran. The plain resume runs every phase the checkpoint does not
 failure in any phase heals, and a failed phase that cannot be mapped no longer refuses. When the
 checkpoint beside the recipe (`pipeline_state.json`) holds a phase whose stamped code version is
 no longer current (see `PHASE_CODE_VERSIONS`), that plain resume re-runs the stale phases and the
-phases built from them, reusing renders by fingerprint. That attempt records `stale_phases`. No
+phases built from them, reusing renders by fingerprint. That attempt records `stale_phases`.
+A passed audit has no such row, so when `health publish` (or the backlog's republish) refuses
+one as stale it files `drive_failed:<drive>:recipe` itself (`heal.register_recipe`, error
+`health publish refused: ...`; not on a dry run, not without an incidents dir) and the next
+hourly heal re-audits it: before this, Old Head to Courtmacsherry was refused every hour and
+nothing re-audited it. No
 readable recipe is `refused` (argv is never guessed), except for an incident whose job is a publish
 (`gms-publish-<project>`) or heal (`gms-heal-...`) job: those never have a recipe, so heal closes
 the row (`resolved_at`, `resolution_reason: no resume recipe: ...`, one `closed` attempt) instead
@@ -401,4 +406,6 @@ fail closed), and nothing is asked while the renderer's version cannot be read. 
 first: a re-render the supersede would refuse (an upload record, a sibling run) leaves the tick
 exactly as it would have been, with the refusal under `mask_rerender.refused`. The incident still
 resolves only when the gate passes the re-rendered day. A `--dry-run` reports `mask_rerender`
-and writes nothing.
+and writes nothing. The publish gate writes its rows into the tick's own incidents dir (from
+`--data-root`, or `GMS_HEALTH_INCIDENTS_DIR`), the same one the tick reads; `backlog_publisher`
+takes it with no default, so the rows never land under the code checkout instead.

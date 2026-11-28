@@ -54,6 +54,18 @@ def test_dry_run_passes_layout_and_prints_json(tmp_path, capsys, wired):
     assert callable(wired["render_gate"])
 
 
+def test_the_publish_gate_writes_where_the_backlog_reads(tmp_path, monkeypatch, wired):
+    """One incidents dir for the tick: the mask gate's rows land where ``run_backlog`` looks for
+    them to decide a re-render (#662)."""
+    from gomoveshift.health import publish
+
+    made = {}
+    monkeypatch.setattr(publish, "backlog_publisher", lambda config, **kw: made.update(kw))
+    wired["_result"] = {"action": "noop", "reason": "r", "skipped": []}
+    health.cmd_health(_args(tmp_path, "--dry-run"), SimpleNamespace())
+    assert made["incidents_dir"] == wired["incidents_dir"]
+
+
 def test_refusal_prints_storage_and_exits_2(tmp_path, capsys, wired):
     wired["_result"] = {
         "action": "refused", "reason": "storage short", "skipped": [

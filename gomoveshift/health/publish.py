@@ -43,6 +43,7 @@ from .heal import (
     install_pending,
     job_runner,
     refresh_recipe,
+    register_recipe,
     stale_phases,
 )
 from .launch import (
@@ -53,6 +54,7 @@ from .launch import (
     read_replace_plan,
     upload_receipts,
 )
+from .store import utc_iso
 
 JOB_PREFIX = "gms-publish-"
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -127,6 +129,7 @@ def run_publish(
     installed_version: Callable[[Path], Optional[str]] = default_installed_version,
     pinned_version: Callable[[Path], Optional[str]] = default_pinned_version,
     manifest_row_fn: Callable[[Dict[str, Any]], Any] = retry_policy.default_manifest_row,
+    incidents_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     res: Dict[str, Any] = {"project": project, "region": region, "action": "noop", "steps": []}
     d = store.drive(project)
@@ -157,9 +160,22 @@ def run_publish(
         return _refuse(res, pending)  # before any store write: the drive stays as it was
     stale = stale_phases(recipe_path)
     if stale:
-        return _refuse(res, f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
-                       "re-run); re-audit it (health heal) before publishing")  # fmt: skip
-    masks = mask_frame_refusal(recipe_path.parent, drive=project, record=not dry_run)
+        why = (f"{project}'s checkpoint is stale under the current code ({', '.join(stale)} "
+               "re-run); re-audit it (health heal) before publishing")  # fmt: skip
+        if incidents_dir is not None and not dry_run:
+            # heal re-audits only a drive with a drive_failed row, and a passed audit has none:
+            # file it here, or the tick refuses this drive every hour and nothing re-audits it.
+            key = register_recipe(Path(incidents_dir), recipe_path, now_iso=utc_iso(now.timestamp()),
+                                  error=f"health publish refused: {why}")  # fmt: skip
+            if key:
+                res["heal_registered"] = key
+                why += f"; filed {key} so the next health heal re-audits it"
+        return _refuse(res, why)
+    # The caller's incidents dir: the gate's own default is its module's checkout (the staging
+    # mirror), where ``health backlog`` never looks for the row it re-renders on (#662).
+    masks = mask_frame_refusal(
+        recipe_path.parent, drive=project, incidents_dir=incidents_dir, record=not dry_run
+    )
     if masks:
         return _refuse(res, f"{project} blur mask does not match its source: {masks}")
     lf_count = rendered_lf_count(recipe_path)
@@ -302,9 +318,11 @@ def backlog_publisher(
     code_root: Path,
     jobs_dir: Path,
     now: datetime,
+    incidents_dir: Path,
 ) -> Callable[[str, bool], Dict[str, Any]]:
     """``publish(project, dry_run)`` for ``health backlog``: ``run_publish`` with the tick's own
-    roots and Waypost's default lead window; the store is opened only when a drive is due."""
+    roots, incidents dir included, and Waypost's default lead window; the store is opened only
+    when a drive is due. ``incidents_dir`` has no default: the backlog reads its mask rows there."""
 
     def publish(project: str, dry_run: bool) -> Dict[str, Any]:
         store, cadence = open_schedule_store(config)
@@ -314,6 +332,7 @@ def backlog_publisher(
         return run_publish(
             project=project, region=region, store=store, cadence=cadence, stages_root=stages_root,
             code_root=code_root, jobs_dir=jobs_dir, now=now, dry_run=dry_run,
+            incidents_dir=incidents_dir,
         )  # fmt: skip
 
     return publish

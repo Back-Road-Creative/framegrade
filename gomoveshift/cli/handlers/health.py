@@ -33,7 +33,7 @@ def cmd_health(args, config) -> int:
     if args.health_command == "backlog":
         return _cmd_backlog(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "publish":
-        return _cmd_publish(args, config, root, jobs_dir)
+        return _cmd_publish(args, config, root, jobs_dir, incidents_dir)
     if args.health_command == "sync-short-text":
         return _cmd_sync_short_text(config, incidents_dir)
     result = run_check(
@@ -128,7 +128,7 @@ def _run_heal(args, config, root, jobs_dir, incidents_dir, only_key) -> int:
     return 0
 
 
-def _cmd_publish(args, config, root, jobs_dir) -> int:
+def _cmd_publish(args, config, root, jobs_dir, incidents_dir) -> int:
     from datetime import datetime, timezone
 
     from ...health import publish
@@ -143,6 +143,7 @@ def _cmd_publish(args, config, root, jobs_dir) -> int:
         jobs_dir=jobs_dir, now=datetime.now(timezone.utc), dry_run=args.dry_run,
         lead_hours=args.lead_hours,
         expect_sha=args.expect_sha,
+        incidents_dir=incidents_dir,
     )  # fmt: skip
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -194,7 +195,7 @@ def _cmd_backlog(args, config, root, jobs_dir, incidents_dir) -> int:
         ),
         publish=publish.backlog_publisher(
             config, region=region, stages_root=args.stages_root, code_root=code_root,
-            jobs_dir=jobs_dir, now=now,
+            jobs_dir=jobs_dir, now=now, incidents_dir=incidents_dir,
         ),
     )  # fmt: skip
     if args.json:
